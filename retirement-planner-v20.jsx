@@ -984,7 +984,7 @@ const calculateNIIT = (investmentIncome, magi, filingStatus) => {
 };
 
 // Load data from localStorage
-const loadFromStorage = () => {
+function loadFromStorage() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
@@ -994,10 +994,10 @@ const loadFromStorage = () => {
     console.error('Error loading from localStorage:', e);
   }
   return null;
-};
+}
 
 // Save data to localStorage
-const saveToStorage = (data) => {
+function saveToStorage(data) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   } catch (e) {
