@@ -1,5 +1,6 @@
-import React, { useState, useMemo, useEffect, useCallback, memo } from 'react';
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area, ReferenceLine } from 'recharts';
+// Browser globals provided by CDN scripts in index.html
+const { useState, useMemo, useEffect, useCallback, memo } = React;
+const { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area, ReferenceLine } = Recharts;
 
 // ============================================
 // CONSTANTS - Extracted magic numbers and repeated arrays
@@ -1125,7 +1126,7 @@ const InfoCard = memo(({ title, sections, isOpen, onToggle }) => {
 });
 InfoCard.displayName = 'InfoCard';
 
-export default function RetirementPlanner() {
+function RetirementPlanner() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [currentYear] = useState(new Date().getFullYear());
   const [saveStatus, setSaveStatus] = useState('');

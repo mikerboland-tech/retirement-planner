@@ -13,48 +13,68 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   
-  <!-- Babel (for JSX transformation in browser) -->
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  
-  <!-- Recharts (for charts) -->
+  <!-- Recharts -->
   <script src="https://unpkg.com/recharts@2.15.0/umd/Recharts.js"></script>
+  
+  <!-- Babel standalone for in-browser JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
   <style>
-    /* Prevent flash of unstyled content */
     body { background: #0f172a; margin: 0; }
     #loading {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      height: 100vh;
-      color: #94a3b8;
+      display: flex; flex-direction: column;
+      justify-content: center; align-items: center;
+      height: 100vh; color: #94a3b8;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      font-size: 1.1rem;
     }
-    #loading .spinner {
+    .spinner {
       width: 40px; height: 40px;
-      border: 3px solid #334155;
-      border-top-color: #3b82f6;
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-      margin-right: 12px;
+      border: 3px solid #334155; border-top-color: #3b82f6;
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+      margin-bottom: 16px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .status { font-size: 0.85rem; margin-top: 8px; color: #64748b; }
+    #error-display {
+      display: none; max-width: 700px; margin: 60px auto; padding: 24px;
+      background: #1e293b; border: 1px solid #ef4444; border-radius: 12px;
+      color: #fca5a5; font-family: monospace; font-size: 0.85rem;
+      white-space: pre-wrap; word-break: break-all;
+    }
   </style>
 </head>
 <body>
   <div id="root">
     <div id="loading">
       <div class="spinner"></div>
-      Loading Retirement Planner...
+      <div style="font-size:1.1rem">Loading Retirement Planner...</div>
+      <div class="status" id="load-status">Loading libraries...</div>
     </div>
   </div>
+  <div id="error-display"></div>
 
-  <!-- Load the app JSX (Babel transforms it in-browser) -->
-  <script type="text/babel" src="retirement-planner-v20.jsx"></script>
-  <script type="text/babel">
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(React.createElement(RetirementPlanner));
+  <script>
+    window.onerror = function(msg, url, line, col, error) {
+      var el = document.getElementById('error-display');
+      el.style.display = 'block';
+      el.textContent = 'Error: ' + msg + '\nFile: ' + (url||'').split('/').pop() + ' line ' + line;
+      document.getElementById('loading').style.display = 'none';
+    };
+  </script>
+
+  <!-- App JSX - Babel transforms this in-browser -->
+  <script type="text/babel" src="retirement-planner-v20.jsx" data-presets="react"></script>
+  
+  <script type="text/babel" data-presets="react">
+    document.getElementById('load-status').textContent = 'Rendering...';
+    try {
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(React.createElement(RetirementPlanner));
+    } catch(e) {
+      document.getElementById('error-display').style.display = 'block';
+      document.getElementById('error-display').textContent = 'Render error: ' + e.message;
+      document.getElementById('loading').style.display = 'none';
+    }
   </script>
 </body>
 </html>
