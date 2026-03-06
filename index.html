@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Retirement Planner</title>
+  <meta name="description" content="Comprehensive retirement planning tool with tax-aware projections, Monte Carlo simulation, Social Security optimization, Roth conversion analysis, and healthcare expense modeling.">
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- React 18 -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  
+  <!-- Babel (for JSX transformation in browser) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <!-- Recharts (for charts) -->
+  <script src="https://unpkg.com/recharts@2.15.0/umd/Recharts.js"></script>
+
+  <style>
+    /* Prevent flash of unstyled content */
+    body { background: #0f172a; margin: 0; }
+    #loading {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      color: #94a3b8;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 1.1rem;
+    }
+    #loading .spinner {
+      width: 40px; height: 40px;
+      border: 3px solid #334155;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-right: 12px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div id="loading">
+      <div class="spinner"></div>
+      Loading Retirement Planner...
+    </div>
+  </div>
+
+  <!-- Load the app JSX (Babel transforms it in-browser) -->
+  <script type="text/babel" src="retirement-planner-v20.jsx"></script>
+  <script type="text/babel">
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(RetirementPlanner));
+  </script>
+</body>
+</html>
