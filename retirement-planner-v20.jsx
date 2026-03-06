@@ -1,5 +1,5 @@
 // React and Recharts globals are provided by index.html
-// Do not add import statements — this file runs in browser via Babel transform
+// Do not add import statements - this file runs in browser via Babel transform
 
 // ============================================
 // CONSTANTS - Extracted magic numbers and repeated arrays
@@ -993,7 +993,7 @@ function loadFromStorage() {
     console.error('Error loading from localStorage:', e);
   }
   return null;
-}
+};
 
 // Save data to localStorage
 function saveToStorage(data) {
@@ -4703,8 +4703,8 @@ function RetirementPlanner() {
                   <div>
                     <label className={compactLabelStyle}>Medical Inflation Rate</label>
                     <PercentCell
-                      value={(localInfo.medicalInflation || 0.05) * 100}
-                      onChange={e => handleChange('medicalInflation', (Number(e.target.value) || 5) / 100)}
+                      value={localInfo.medicalInflation || 0.05}
+                      onValueChange={v => handleChange('medicalInflation', v)}
                       className={compactInputStyle}
                     />
                     <span className="text-xs text-slate-500">Typically 5-7% (above general CPI)</span>
@@ -4851,8 +4851,8 @@ function RetirementPlanner() {
                     </div>
                     <div className="col-span-1">
                       <PercentCell
-                        value={(exp.inflationRate || 0) * 100}
-                        onChange={e => setRecurringExpenses(prev => prev.map(ex => ex.id === exp.id ? { ...ex, inflationRate: (Number(e.target.value) || 0) / 100 } : ex))}
+                        value={exp.inflationRate || 0}
+                        onValueChange={v => setRecurringExpenses(prev => prev.map(ex => ex.id === exp.id ? { ...ex, inflationRate: v } : ex))}
                         className="w-full bg-slate-700 border border-slate-600 rounded px-1 py-1 text-xs text-slate-200 text-center"
                         title="Inflation %"
                       />
