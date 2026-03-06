@@ -7,7 +7,9 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/recharts@2.15.0/umd/Recharts.js"></script>
+  <script crossorigin src="https://unpkg.com/react-is/umd/react-is.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/prop-types/prop-types.min.js"></script>
+  <script src="https://unpkg.com/recharts/umd/Recharts.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>
     body { background: #0f172a; margin: 0; }
@@ -35,57 +37,57 @@
       document.getElementById('loading').style.display = 'none';
     }
 
+    // Verify libraries loaded
+    if (typeof React === 'undefined') { showError('React failed to load'); }
+    else if (typeof ReactDOM === 'undefined') { showError('ReactDOM failed to load'); }
+    else if (typeof Recharts === 'undefined') { showError('Recharts failed to load. Check console for details.'); }
+    else {
+
     (async function() {
       try {
-        // Step 1: Fetch the JSX source
         document.getElementById('load-status').textContent = 'Fetching app code...';
-        const resp = await fetch('retirement-planner-v20.jsx');
-        if (!resp.ok) throw new Error('Failed to load JSX file: ' + resp.status);
-        const jsxSource = await resp.text();
+        var resp = await fetch('retirement-planner-v20.jsx');
+        if (!resp.ok) throw new Error('Failed to load retirement-planner-v20.jsx: HTTP ' + resp.status);
+        var jsxSource = await resp.text();
 
-        // Step 2: Transform JSX to JS using Babel
-        document.getElementById('load-status').textContent = 'Compiling JSX...';
-        const transformed = Babel.transform(jsxSource, {
+        document.getElementById('load-status').textContent = 'Compiling JSX (' + Math.round(jsxSource.length/1024) + ' KB)...';
+        var transformed = Babel.transform(jsxSource, {
           presets: ['react'],
-          filename: 'retirement-planner-v20.jsx'
+          filename: 'app.jsx'
         });
 
-        // Step 3: Execute in global scope with all dependencies available
         document.getElementById('load-status').textContent = 'Initializing app...';
-        
-        // Make React hooks and Recharts components available as globals
-        const setupGlobals = `
-          var useState = React.useState;
-          var useMemo = React.useMemo;
-          var useEffect = React.useEffect;
-          var useCallback = React.useCallback;
-          var memo = React.memo;
-          var LineChart = Recharts.LineChart;
-          var Line = Recharts.Line;
-          var BarChart = Recharts.BarChart;
-          var Bar = Recharts.Bar;
-          var XAxis = Recharts.XAxis;
-          var YAxis = Recharts.YAxis;
-          var CartesianGrid = Recharts.CartesianGrid;
-          var Tooltip = Recharts.Tooltip;
-          var Legend = Recharts.Legend;
-          var ResponsiveContainer = Recharts.ResponsiveContainer;
-          var ComposedChart = Recharts.ComposedChart;
-          var Area = Recharts.Area;
-          var ReferenceLine = Recharts.ReferenceLine;
-        `;
 
-        // Strip the const destructuring lines from the transformed code
-        // (we're providing them as var globals above)
-        let code = transformed.code;
+        // Provide all dependencies as var globals (hoisted, no TDZ issues)
+        var setupCode = [
+          'var useState = React.useState;',
+          'var useMemo = React.useMemo;',
+          'var useEffect = React.useEffect;',
+          'var useCallback = React.useCallback;',
+          'var memo = React.memo;',
+          'var LineChart = Recharts.LineChart;',
+          'var Line = Recharts.Line;',
+          'var BarChart = Recharts.BarChart;',
+          'var Bar = Recharts.Bar;',
+          'var XAxis = Recharts.XAxis;',
+          'var YAxis = Recharts.YAxis;',
+          'var CartesianGrid = Recharts.CartesianGrid;',
+          'var Tooltip = Recharts.Tooltip;',
+          'var Legend = Recharts.Legend;',
+          'var ResponsiveContainer = Recharts.ResponsiveContainer;',
+          'var ComposedChart = Recharts.ComposedChart;',
+          'var Area = Recharts.Area;',
+          'var ReferenceLine = Recharts.ReferenceLine;',
+        ].join('\n');
+
+        // Strip the const destructuring lines from compiled code
+        var code = transformed.code;
         code = code.replace(/^.*useState.*useMemo.*useEffect.*=\s*React;?\s*$/m, '');
         code = code.replace(/^.*LineChart.*BarChart.*=\s*Recharts;?\s*$/m, '');
 
-        // Execute everything together in global scope using indirect eval
-        const fullCode = setupGlobals + '\n' + code;
-        (0, eval)(fullCode);
+        // Execute in global scope
+        (0, eval)(setupCode + '\n' + code);
 
-        // Step 4: Render
         document.getElementById('load-status').textContent = 'Rendering...';
         var root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(React.createElement(RetirementPlanner));
@@ -94,6 +96,8 @@
         showError('Error loading app:\n\n' + err.message + '\n\n' + (err.stack || ''));
       }
     })();
+
+    } // end library check
   </script>
 </body>
 </html>
