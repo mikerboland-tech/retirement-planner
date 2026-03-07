@@ -7268,6 +7268,7 @@ function RetirementPlanner() {
       inflationStdDev: 0.01
     });
     const [simResults, setSimResults] = useState(null);
+    const [simError, setSimError] = useState(null);
     const [isRunning, setIsRunning] = useState(false);
     
     const endAge = 95;
@@ -7285,14 +7286,23 @@ function RetirementPlanner() {
       return mean + stdDev * z;
     };
     
+    const [simProgress, setSimProgress] = useState(0);
+    
     const runSimulation = () => {
       setIsRunning(true);
+      setSimProgress(0);
+      setSimResults(null);
+      setSimError(null);
       
-      // Use setTimeout to allow UI to update
+      // Run in batches to avoid sandbox timeout / UI freeze
+      const BATCH_SIZE = 50;
+      const results = [];
+      const portfolioPathsToStore = [];
+      const numPathsToStore = 100;
+      
+      // Defer to let React render the "Running" state
       setTimeout(() => {
-        const results = [];
-        const portfolioPathsToStore = [];
-        const numPathsToStore = 100; // Store subset for visualization
+        try {
         
         // Calculate account balances at start age using deterministic projection.
         // IMPORTANT: mirrors the main engine's order — contributions first, then RMDs deducted,
@@ -7338,7 +7348,14 @@ function RetirementPlanner() {
         
         const initialBalances = getStartingBalances();
         
-        for (let sim = 0; sim < simSettings.numSimulations; sim++) {
+        // Run simulations in batches to prevent sandbox timeout
+        let simIndex = 0;
+        
+        const runBatch = () => {
+          try {
+            const batchEnd = Math.min(simIndex + BATCH_SIZE, simSettings.numSimulations);
+            
+            for (let sim = simIndex; sim < batchEnd; sim++) {
           // Initialize account balances for this simulation at the start age
           const accountBalances = { ...initialBalances };
           
@@ -7405,11 +7422,6 @@ function RetirementPlanner() {
               personalInfo.filingStatus
             );
             
-            // Now calculate total taxable income including properly-taxed SS
-            // Subtract pre-tax contributions (above-the-line deduction), capped at earned income
-            const mcPreTaxDeduction = Math.min(mcPreTaxContributions, earnedIncome);
-            const totalTaxableIncome = nonSSIncome + taxableSS - mcPreTaxDeduction;
-            
             // Add contributions and calculate totals/RMDs (before growth)
             let totalPreTax = 0, totalRoth = 0, totalBrokerage = 0, totalRMD = 0;
             let mcPreTaxContributions = 0;
@@ -7443,6 +7455,11 @@ function RetirementPlanner() {
                 totalBrokerage += accountBalances[account.id];
               }
             });
+            
+            // Now calculate total taxable income including properly-taxed SS
+            // Subtract pre-tax contributions (above-the-line deduction), capped at earned income
+            const mcPreTaxDeduction = Math.min(mcPreTaxContributions, earnedIncome);
+            const totalTaxableIncome = nonSSIncome + taxableSS - mcPreTaxDeduction;
             
             const totalPortfolio = totalPreTax + totalRoth + totalBrokerage;
             const totalGuaranteedIncome = totalSocialSecurity + totalPension + totalOtherIncome;
@@ -7619,50 +7636,68 @@ function RetirementPlanner() {
           if (sim < numPathsToStore) {
             portfolioPathsToStore.push(portfolioPath);
           }
+            } // end for loop
+        
+            // Update progress and schedule next batch
+            simIndex = batchEnd;
+            setSimProgress(Math.round((simIndex / simSettings.numSimulations) * 100));
+            
+            if (simIndex < simSettings.numSimulations) {
+              setTimeout(runBatch, 0);
+            } else {
+              // All simulations complete — compute results
+              const successCount = results.filter(r => r.survived).length;
+              const successRate = successCount / simSettings.numSimulations;
+              const finalPortfolios = results.map(r => r.finalPortfolio).sort((a, b) => a - b);
+              const percentile = (arr, p) => arr[Math.floor(arr.length * p)];
+              const failureAges = results.filter(r => !r.survived).map(r => r.failureAge);
+              const avgFailureAge = failureAges.length > 0 ? failureAges.reduce((a, b) => a + b, 0) / failureAges.length : null;
+              
+              const percentileBands = [];
+              for (let year = 0; year < yearsToSimulate; year++) {
+                const age = simSettings.startAge + year;
+                const portfoliosAtYear = portfolioPathsToStore.map(path => path[year]?.portfolio || 0).sort((a, b) => a - b);
+                percentileBands.push({
+                  age,
+                  p10: percentile(portfoliosAtYear, 0.10),
+                  p25: percentile(portfoliosAtYear, 0.25),
+                  p50: percentile(portfoliosAtYear, 0.50),
+                  p75: percentile(portfoliosAtYear, 0.75),
+                  p90: percentile(portfoliosAtYear, 0.90)
+                });
+              }
+              
+              setSimResults({
+                successRate,
+                successCount,
+                totalSimulations: simSettings.numSimulations,
+                startAge: simSettings.startAge,
+                startingPortfolio: Object.values(initialBalances).reduce((sum, bal) => sum + bal, 0),
+                percentile5: percentile(finalPortfolios, 0.05),
+                percentile25: percentile(finalPortfolios, 0.25),
+                percentile50: percentile(finalPortfolios, 0.50),
+                percentile75: percentile(finalPortfolios, 0.75),
+                percentile95: percentile(finalPortfolios, 0.95),
+                avgFailureAge,
+                percentileBands,
+                portfolioPaths: portfolioPathsToStore.slice(0, 50)
+              });
+              setIsRunning(false);
+            }
+          } catch (err) {
+            console.error('Monte Carlo batch error:', err);
+            setIsRunning(false);
+            setSimError('Simulation error: ' + err.message + '\n' + err.stack);
+          }
+        }; // end runBatch
+        
+        runBatch();
+        
+        } catch (err) {
+          console.error('Monte Carlo setup error:', err);
+          setIsRunning(false);
+          setSimError('Setup error: ' + err.message + '\n' + err.stack);
         }
-        
-        // Calculate statistics
-        const successCount = results.filter(r => r.survived).length;
-        const successRate = successCount / simSettings.numSimulations;
-        
-        const finalPortfolios = results.map(r => r.finalPortfolio).sort((a, b) => a - b);
-        const percentile = (arr, p) => arr[Math.floor(arr.length * p)];
-        
-        const failureAges = results.filter(r => !r.survived).map(r => r.failureAge);
-        const avgFailureAge = failureAges.length > 0 ? failureAges.reduce((a, b) => a + b, 0) / failureAges.length : null;
-        
-        // Create percentile bands for chart
-        const percentileBands = [];
-        for (let year = 0; year < yearsToSimulate; year++) {
-          const age = simSettings.startAge + year;
-          const portfoliosAtYear = portfolioPathsToStore.map(path => path[year]?.portfolio || 0).sort((a, b) => a - b);
-          percentileBands.push({
-            age,
-            p10: percentile(portfoliosAtYear, 0.10),
-            p25: percentile(portfoliosAtYear, 0.25),
-            p50: percentile(portfoliosAtYear, 0.50),
-            p75: percentile(portfoliosAtYear, 0.75),
-            p90: percentile(portfoliosAtYear, 0.90)
-          });
-        }
-        
-        setSimResults({
-          successRate,
-          successCount,
-          totalSimulations: simSettings.numSimulations,
-          startAge: simSettings.startAge,
-          startingPortfolio: Object.values(initialBalances).reduce((sum, bal) => sum + bal, 0),
-          percentile5: percentile(finalPortfolios, 0.05),
-          percentile25: percentile(finalPortfolios, 0.25),
-          percentile50: percentile(finalPortfolios, 0.50),
-          percentile75: percentile(finalPortfolios, 0.75),
-          percentile95: percentile(finalPortfolios, 0.95),
-          avgFailureAge,
-          percentileBands,
-          portfolioPaths: portfolioPathsToStore.slice(0, 20) // Store 20 paths for spaghetti chart
-        });
-        
-        setIsRunning(false);
       }, 50);
     };
     
@@ -7795,7 +7830,7 @@ function RetirementPlanner() {
               disabled={isRunning}
               className={`${buttonPrimary} ${isRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
-              {isRunning ? '⏳ Running...' : '▶️ Run Simulation'}
+              {isRunning ? `⏳ Running... ${simProgress}%` : '▶️ Run Simulation'}
             </button>
             <p className="text-xs text-slate-500">
               Historical reference: S&P 500 has ~10% mean return with ~15% standard deviation. After inflation, real returns are ~7%.
@@ -7967,7 +8002,7 @@ function RetirementPlanner() {
             
             {/* Sample Paths (Spaghetti Chart) */}
             <div className={cardStyle}>
-              <h4 className="text-lg font-semibold text-slate-100 mb-4">Sample Simulation Paths (20 scenarios)</h4>
+              <h4 className="text-lg font-semibold text-slate-100 mb-4">Sample Simulation Paths ({simResults.portfolioPaths.length} of {simResults.totalSimulations} scenarios)</h4>
               <div className="h-72">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart>
@@ -7981,11 +8016,6 @@ function RetirementPlanner() {
                       allowDataOverflow
                     />
                     <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8' }} tickFormatter={v => `$${(v/1e6).toFixed(1)}M`} />
-                    <Tooltip 
-                      contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }} 
-                      formatter={(v) => formatCurrency(v)}
-                      labelFormatter={l => `Age ${l}`}
-                    />
                     {simResults.portfolioPaths.map((path, idx) => (
                       <Line 
                         key={idx}
@@ -8023,7 +8053,14 @@ function RetirementPlanner() {
           </>
         )}
         
-        {!simResults && !isRunning && (
+        {simError && (
+          <div className="p-4 bg-red-900/30 border border-red-500/50 rounded-lg mb-4">
+            <h4 className="text-red-400 font-semibold mb-2">Monte Carlo Error</h4>
+            <pre className="text-xs text-red-300 whitespace-pre-wrap">{simError}</pre>
+          </div>
+        )}
+        
+        {!simResults && !isRunning && !simError && (
           <div className="text-center py-12 text-slate-500">
             <p className="text-lg mb-2">Click "Run Simulation" to analyze your retirement plan</p>
             <p className="text-sm">The simulation will test {simSettings.numSimulations.toLocaleString()} random scenarios</p>
