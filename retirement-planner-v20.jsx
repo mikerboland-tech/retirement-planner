@@ -1137,16 +1137,16 @@ function RetirementPlanner() {
     return !saved;
   });
   
-  // Logo Component - Bitcoin B logo
+  // Logo Component - MB makers mark on blue circle
   const Logo = ({ size = 'large' }) => {
     const dimensions = size === 'large' ? 'w-14 h-14' : 'w-10 h-10';
     
     return (
       <div className={`${dimensions} flex items-center justify-center`}>
         <svg viewBox="0 0 32 32" className="w-full h-full">
-          <g fill="none" fillRule="evenodd">
-            <circle cx="16" cy="16" r="16" fill="#F7931A"/>
-            <path fill="#FFF" fillRule="nonzero" d="M23.189 14.02c.314-2.096-1.283-3.223-3.465-3.975l.708-2.84-1.728-.43-.69 2.765c-.454-.114-.92-.22-1.385-.326l.695-2.783L15.596 6l-.708 2.839c-.376-.086-.746-.17-1.104-.26l.002-.009-2.384-.595-.46 1.846s1.283.294 1.256.312c.7.175.826.638.805 1.006l-.806 3.235c.048.012.11.03.18.057l-.183-.045-1.13 4.532c-.086.212-.303.531-.793.41.018.025-1.256-.313-1.256-.313l-.858 1.978 2.25.561c.418.105.828.215 1.231.318l-.715 2.872 1.727.43.708-2.84c.472.127.93.245 1.378.357l-.706 2.828 1.728.43.715-2.866c2.948.558 5.164.333 6.097-2.333.752-2.146-.037-3.385-1.588-4.192 1.13-.26 1.98-1.003 2.207-2.538zm-3.95 5.538c-.533 2.147-4.148.986-5.32.695l.95-3.805c1.172.293 4.929.872 4.37 3.11zm.535-5.569c-.487 1.953-3.495.96-4.47.717l.86-3.45c.975.243 4.118.696 3.61 2.733z"/>
+          <circle cx="16" cy="16" r="16" fill="#3b82f6"/>
+          <g transform="translate(2.5, 4.1) scale(0.165)" fill="#FFFFFF" stroke="none">
+            <path d="M50.82 136.87 c-0.55 -0.51 -0.55 -0.52 -0.55 -1.71 0 -1.32 0.19 -1.77 1.08 -2.35 0.37 -0.25 3.81 -1.51 14.56 -5.32 l1.54 -0.55 0.34 -1.33 c0.70 -2.71 1.56 -4.81 3.64 -9 4.72 -9.50 11.81 -20.99 19.58 -31.72 0.52 -0.75 0.94 -1.36 0.93 -1.38 -0.01 -0.01 -0.70 0.10 -1.53 0.25 -3.94 0.72 -5.24 0.16 -5.24 -2.26 0 -0.91 0.06 -1.23 0.34 -1.68 0.61 -0.99 1.15 -1.20 3.67 -1.42 2.47 -0.21 7.40 -1.03 7.72 -1.29 0.12 -0.09 0.96 -1.14 1.86 -2.34 2.83 -3.72 9.12 -11.52 17.80 -22.08 2.02 -2.46 3.78 -4.61 3.90 -4.79 0.19 -0.30 0.19 -0.31 0 -0.16 -0.81 0.58 -5.26 3.73 -7.19 5.08 -2.56 1.78 -2.50 1.75 -9.44 6.52 -18.65 12.82 -23.97 16.67 -34.91 25.24 -10.74 8.43 -14.31 10.88 -17.51 12.08 -1.08 0.40 -1.50 0.49 -2.64 0.49 -1.57 0.01 -2.32 -0.27 -2.89 -1.12 -0.31 -0.46 -0.34 -0.64 -0.30 -1.86 0.04 -1.24 0.10 -1.48 0.78 -2.97 0.93 -2.04 4.31 -8.40 6.02 -11.31 0.72 -1.21 3.04 -4.82 5.15 -8.05 2.11 -3.21 4.37 -6.68 5.03 -7.72 0.64 -1.03 1.89 -3.01 2.77 -4.42 0.88 -1.39 1.59 -2.56 1.56 -2.59 -0.03 -0.04 -1.66 1.12 -7.19 5.11 -2.34 1.69 -5.65 4.05 -8.33 5.92 -0.85 0.60 -3.10 2.17 -5 3.51 -1.89 1.32 -4.66 3.25 -6.14 4.28 -9.09 6.31 -15.55 10.98 -21.39 15.49 -2.13 1.65 -4.19 3.15 -4.60 3.36 -1.51 0.76 -3.51 0.36 -4.31 -0.88 -0.36 -0.54 -0.40 -0.75 -0.40 -1.83 0 -1.08 0.04 -1.30 0.37 -1.77 0.21 -0.30 1.63 -1.60 3.15 -2.91 4.24 -3.63 9.24 -8.64 20.38 -20.42 6.26 -6.62 12.46 -13.86 16.66 -19.40 2.37 -3.13 4.03 -6.07 4.60 -8.16 0.61 -2.19 0.40 -2.55 -1.30 -2.25 -3.51 0.60 -9.30 2.35 -20.03 6.07 -12.45 4.30 -21.80 7.75 -24.18 8.87 -0.97 0.48 -1.20 0.52 -1.98 0.45 -1.60 -0.13 -2.23 -0.90 -2.23 -2.67 0 -1.44 0.30 -1.93 1.54 -2.52 2.17 -1.03 6.44 -2.62 16.73 -6.26 10.07 -3.55 13.42 -4.69 18.95 -6.41 7.87 -2.44 10.56 -3.07 13.29 -3.07 2.73 0 3.91 0.57 4.76 2.31 0.42 0.84 0.49 1.17 0.55 2.53 0.13 2.59 -0.36 4.97 -1.56 7.34 -1.98 3.96 -11.18 15.45 -20.33 25.41 -4.05 4.40 -3.87 4.12 -1.65 2.58 1.06 -0.73 3.39 -2.34 5.15 -3.55 6.28 -4.31 14.05 -9.87 23.45 -16.76 7.61 -5.57 6.82 -5.08 8.24 -5.15 1.47 -0.06 2.02 0.18 2.47 1.11 0.66 1.35 0.27 3.15 -1.36 6.41 -1.30 2.59 -2.74 4.91 -6.49 10.52 -9.57 14.29 -11.52 17.38 -13.84 22.05 -0.78 1.59 -1.39 2.92 -1.35 2.97 0.10 0.10 5.11 -3.22 8.14 -5.42 1.48 -1.08 4.85 -3.55 7.49 -5.50 10.77 -7.96 13.95 -10.22 25.09 -17.92 10.16 -7.01 12.11 -8.36 13.93 -9.65 15.16 -10.61 19.46 -14.08 33.18 -26.85 4.25 -3.94 7.85 -7.57 9.57 -9.62 0.72 -0.87 1.36 -1.48 1.68 -1.62 0.63 -0.27 1.87 -0.27 2.50 0 1.38 0.57 2.02 2.67 1.30 4.25 -0.46 1.02 -0.57 1.12 -10.26 10.05 -3.69 3.40 -7.21 6.82 -8.70 8.42 -0.57 0.63 -2.46 2.82 -4.18 4.87 -1.72 2.05 -3.99 4.70 -5.02 5.90 -2.41 2.77 -5.18 6.04 -9.60 11.31 -1.93 2.31 -5.11 6.08 -7.04 8.39 -3.79 4.51 -7.97 9.66 -7.90 9.74 0.03 0.03 1.36 -0.18 2.97 -0.46 11.96 -2.10 22.71 -3.66 25.21 -3.66 2.47 0 3.72 1.32 3.51 3.70 -0.06 0.51 -0.22 1.20 -0.39 1.53 -0.70 1.35 -3.06 3.67 -6.23 6.13 -1.30 1 -6.01 4.24 -7.01 4.81 -0.25 0.15 -1.39 0.82 -2.50 1.47 -1.98 1.17 -4.36 2.47 -14.61 8.02 -5.72 3.10 -6.88 3.79 -6.73 4.05 0.15 0.22 4.57 2.35 8.52 4.09 7.34 3.22 7.82 3.48 8.25 4.28 0.31 0.63 0.43 2.01 0.22 2.77 -0.24 0.88 -0.93 1.75 -1.93 2.44 -3.34 2.26 -15.12 7.33 -25.35 10.91 -2.68 0.94 -4.25 1.48 -11.91 4.09 -1.98 0.67 -3.66 1.29 -3.73 1.35 -0.19 0.19 0.28 0.85 0.85 1.21 0.39 0.25 0.64 0.28 1.38 0.21 0.49 -0.04 1.48 -0.12 2.19 -0.16 1.23 -0.09 1.30 -0.07 1.54 0.25 0.27 0.40 0.33 1.78 0.09 2.23 -0.24 0.45 -0.60 0.58 -2.79 0.99 -1.57 0.30 -2.40 0.37 -3.60 0.33 -1.42 -0.04 -1.57 -0.07 -2.17 -0.49 -0.75 -0.54 -1.56 -1.66 -1.81 -2.52 -0.09 -0.34 -0.18 -0.64 -0.21 -0.67 -0.01 -0.03 -0.72 0.22 -1.57 0.55 -4.39 1.66 -10.20 3.76 -11.01 3.97 -0.51 0.13 -1.51 0.24 -2.22 0.24 -1.26 0 -1.30 -0.01 -1.86 -0.51z m27.70 -13.71 c10.80 -3.73 15.04 -5.32 20.43 -7.61 3.58 -1.53 7.42 -3.55 7.16 -3.79 -0.06 -0.06 -2.28 -1.03 -4.91 -2.17 -5.75 -2.47 -10.26 -4.57 -11.09 -5.14 -0.87 -0.61 -1.27 -1.39 -1.27 -2.52 0 -1.39 0.54 -2.32 1.87 -3.22 1.20 -0.79 9.75 -5.50 17.06 -9.38 7.54 -4 9.95 -5.41 13.12 -7.67 1.69 -1.20 4.28 -3.25 4.63 -3.67 0.21 -0.24 0.18 -0.25 -0.30 -0.18 -0.28 0.04 -2.19 0.33 -4.25 0.61 -4.13 0.58 -11.66 1.81 -17.30 2.83 -2.02 0.36 -4.02 0.70 -4.45 0.76 l-0.78 0.10 -1.53 2.11 c-2.80 3.88 -5.83 8.22 -8.36 12.02 -7.30 10.95 -11.13 18.13 -15.25 28.51 -0.04 0.09 -0.04 0.18 -0.01 0.18 0.04 0 2.40 -0.81 5.23 -1.78z"/>
           </g>
         </svg>
       </div>
@@ -6431,133 +6431,136 @@ function RetirementPlanner() {
     );
   };
   
-  const RothConversionSimulator = ({ projections, personalInfo, accounts, retirementAge, cardStyle, formatCurrency }) => {
+  const RothConversionSimulator = ({ projections, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, retirementAge, cardStyle, formatCurrency, computeProjections }) => {
     const [conversionSettings, setConversionSettings] = useState({
       startAge: retirementAge,
       endAge: 74, // Before RMDs start at 75
       targetBracket: '22%',
-      futureWithdrawalBracket: '24%' // Assumed bracket when withdrawing in retirement
+      fixedAmount: 0,
+      mode: 'bracket' // 'bracket' or 'fixed'
     });
     
     const bracketOptions = [
-      { value: '12%', label: '12% Bracket', rate: 0.12 },
-      { value: '22%', label: '22% Bracket', rate: 0.22 },
-      { value: '24%', label: '24% Bracket', rate: 0.24 },
-      { value: '32%', label: '32% Bracket', rate: 0.32 }
+      { value: '12%', label: '12% Bracket' },
+      { value: '22%', label: '22% Bracket' },
+      { value: '24%', label: '24% Bracket' },
+      { value: '32%', label: '32% Bracket' }
     ];
     
-    const futureRateOptions = [
-      { value: '22%', label: '22%', rate: 0.22 },
-      { value: '24%', label: '24%', rate: 0.24 },
-      { value: '32%', label: '32%', rate: 0.32 },
-      { value: '35%', label: '35%', rate: 0.35 }
-    ];
-    
-    // Calculate conversion opportunities for each year
-    const conversionAnalysis = useMemo(() => {
-      const results = [];
-      let cumulativeConversion = 0;
-      let cumulativeTaxPaid = 0;
-      let cumulativeTaxSaved = 0;
+    // Run two full projections through the unified engine:
+    // 1. "With conversions" — using the simulator's conversion settings
+    // 2. "Without conversions" — no Roth conversions at all
+    // The difference between them IS the impact of conversions.
+    const { conversionProj, baselineProj, conversionAnalysis, totals } = useMemo(() => {
+      // Projection WITH the simulator's conversion settings
+      const withPI = {
+        ...personalInfo,
+        rothConversionAmount: conversionSettings.mode === 'fixed' ? conversionSettings.fixedAmount : 0,
+        rothConversionStartAge: conversionSettings.startAge,
+        rothConversionEndAge: conversionSettings.endAge,
+        rothConversionBracket: conversionSettings.mode === 'bracket' ? conversionSettings.targetBracket : ''
+      };
+      const withProj = computeProjections(withPI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
       
-      const targetRate = bracketOptions.find(b => b.value === conversionSettings.targetBracket)?.rate || 0.22;
-      const futureRate = futureRateOptions.find(b => b.value === conversionSettings.futureWithdrawalBracket)?.rate || 0.24;
+      // Projection WITHOUT any conversions (baseline)
+      const withoutPI = {
+        ...personalInfo,
+        rothConversionAmount: 0,
+        rothConversionBracket: ''
+      };
+      const withoutProj = computeProjections(withoutPI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
+      
+      // Build year-by-year comparison for the conversion window
+      const analysis = [];
+      let cumulativeConversion = 0;
+      let cumulativeTaxDelta = 0;
       
       for (let age = conversionSettings.startAge; age <= conversionSettings.endAge; age++) {
-        const projection = projections.find(p => p.myAge === age);
-        if (!projection) continue;
+        const withYear = withProj.find(p => p.myAge === age);
+        const withoutYear = withoutProj.find(p => p.myAge === age);
+        if (!withYear || !withoutYear) continue;
         
-        const yearsFromNow = age - personalInfo.myAge;
-        const inflationFactor = Math.pow(1 + personalInfo.inflationRate, yearsFromNow);
-        const baseBrackets = FEDERAL_TAX_BRACKETS_2026[personalInfo.filingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
-        const baseDeduction = STANDARD_DEDUCTION_2026[personalInfo.filingStatus] || STANDARD_DEDUCTION_2026.married_joint;
-        const adjustedDeduction = baseDeduction * inflationFactor;
-        
-        // Use the projection engine's actual taxableIncome — this already reflects the real
-        // taxable SS, all withdrawals, RMDs, and any planned Roth conversion already executed.
-        // The simulator shows room *above* the planned conversion amount.
-        const taxableIncome = projection.taxableIncome;
-        
-        // Gross income (pre-deduction) for tax delta calculations
-        const grossIncome = projection.earnedIncome + projection.socialSecurity + projection.pension
-          + projection.otherIncome + projection.portfolioWithdrawal + (projection.rothConversion || 0);
-        
-        // Find the target bracket threshold
-        let targetThreshold = 0;
-        if (conversionSettings.targetBracket === '12%') {
-          targetThreshold = baseBrackets[1].max * inflationFactor;
-        } else if (conversionSettings.targetBracket === '22%') {
-          targetThreshold = baseBrackets[2].max * inflationFactor;
-        } else if (conversionSettings.targetBracket === '24%') {
-          targetThreshold = baseBrackets[3].max * inflationFactor;
-        } else if (conversionSettings.targetBracket === '32%') {
-          targetThreshold = baseBrackets[4].max * inflationFactor;
-        }
-        
-        // Room available for conversion (to fill up to target bracket)
-        const roomInBracket = Math.max(0, targetThreshold - taxableIncome);
-        
-        // Use this year's projected pre-tax balance, reduced by cumulative conversions done so far
-        // We assume conversions reduce the balance and that money doesn't grow further in pre-tax
-        // A more accurate model would account for growth, but this gives a reasonable approximation
-        const availablePreTax = Math.max(0, projection.preTaxBalance - cumulativeConversion);
-        const conversionAmount = Math.min(roomInBracket, availablePreTax);
-        
-        // Calculate tax on conversion (simplified - uses marginal rate)
-        // In reality, would need to calculate actual marginal rates
-        const taxOnConversion = conversionAmount * targetRate;
-        
-        // Tax saved = what you would have paid later minus what you pay now
-        const futureTaxAvoided = conversionAmount * futureRate;
-        const taxSavings = futureTaxAvoided - taxOnConversion;
-        
+        const conversionAmount = withYear.rothConversion || 0;
+        const taxDelta = withYear.totalTax - withoutYear.totalTax; // Additional tax from conversion
         cumulativeConversion += conversionAmount;
-        cumulativeTaxPaid += taxOnConversion;
-        cumulativeTaxSaved += taxSavings;
+        cumulativeTaxDelta += taxDelta;
         
-        // Calculate new total income with conversion
-        const newGrossIncome = grossIncome + conversionAmount;
-        const newTaxableIncome = Math.max(0, newGrossIncome - adjustedDeduction);
-        const newFederalTax = calculateFederalTax(newGrossIncome, personalInfo.filingStatus, yearsFromNow, personalInfo.inflationRate);
-        const baseFederalTax = calculateFederalTax(grossIncome, personalInfo.filingStatus, yearsFromNow, personalInfo.inflationRate);
-        const actualTaxOnConversion = newFederalTax - baseFederalTax;
+        const effectiveRate = conversionAmount > 0 ? taxDelta / conversionAmount : 0;
         
-        results.push({
+        analysis.push({
           age,
-          year: projection.year,
-          baseIncome: Math.round(grossIncome),
-          taxableIncome: Math.round(taxableIncome),
-          targetThreshold: Math.round(targetThreshold),
-          roomInBracket: Math.round(roomInBracket),
-          conversionAmount: Math.round(conversionAmount),
-          taxOnConversion: Math.round(actualTaxOnConversion),
-          effectiveRate: conversionAmount > 0 ? (actualTaxOnConversion / conversionAmount) : 0,
-          futureTaxAvoided: Math.round(conversionAmount * futureRate),
-          taxSavings: Math.round(conversionAmount * futureRate - actualTaxOnConversion),
-          cumulativeConversion: Math.round(cumulativeConversion),
-          cumulativeTaxPaid: Math.round(cumulativeTaxPaid),
-          newTotalIncome: Math.round(newGrossIncome),
-          remainingPreTax: Math.round(availablePreTax - conversionAmount)
+          year: withYear.year,
+          // Without conversions (baseline)
+          baseIncome: withoutYear.totalIncome,
+          baseTaxableIncome: withoutYear.taxableIncome,
+          baseTotalTax: withoutYear.totalTax,
+          basePreTax: withoutYear.preTaxBalance,
+          baseRoth: withoutYear.rothBalance,
+          basePortfolio: withoutYear.totalPortfolio,
+          // With conversions
+          conversionAmount,
+          withTaxableIncome: withYear.taxableIncome,
+          withTotalTax: withYear.totalTax,
+          withPreTax: withYear.preTaxBalance,
+          withRoth: withYear.rothBalance,
+          withPortfolio: withYear.totalPortfolio,
+          withMagi: withYear.magi,
+          withIrmaa: withYear.irmaaSurcharge,
+          baseIrmaa: withoutYear.irmaaSurcharge,
+          // Deltas
+          taxDelta,
+          effectiveRate,
+          irmaaDelta: (withYear.irmaaSurcharge || 0) - (withoutYear.irmaaSurcharge || 0),
+          cumulativeConversion,
+          cumulativeTaxDelta,
+          remainingPreTax: withYear.preTaxBalance
         });
       }
       
-      return results;
-    }, [projections, personalInfo, conversionSettings]);
-    
-    const totalConversion = conversionAnalysis.reduce((sum, r) => sum + r.conversionAmount, 0);
-    const totalTaxPaid = conversionAnalysis.reduce((sum, r) => sum + r.taxOnConversion, 0);
-    const totalTaxSaved = conversionAnalysis.reduce((sum, r) => sum + r.taxSavings, 0);
-    const avgEffectiveRate = totalConversion > 0 ? totalTaxPaid / totalConversion : 0;
+      // Compute lifetime totals (all years, not just conversion window)
+      const allWithTax = withProj.reduce((s, p) => s + p.totalTax, 0);
+      const allWithoutTax = withoutProj.reduce((s, p) => s + p.totalTax, 0);
+      const endWithPortfolio = withProj[withProj.length - 1]?.totalPortfolio || 0;
+      const endWithoutPortfolio = withoutProj[withoutProj.length - 1]?.totalPortfolio || 0;
+      
+      return {
+        conversionProj: withProj,
+        baselineProj: withoutProj,
+        conversionAnalysis: analysis,
+        totals: {
+          totalConverted: cumulativeConversion,
+          conversionWindowTax: cumulativeTaxDelta,
+          lifetimeTaxWith: allWithTax,
+          lifetimeTaxWithout: allWithoutTax,
+          lifetimeTaxSavings: allWithoutTax - allWithTax,
+          endPortfolioWith: endWithPortfolio,
+          endPortfolioWithout: endWithoutPortfolio,
+          portfolioBenefit: endWithPortfolio - endWithoutPortfolio,
+          avgEffRate: cumulativeConversion > 0 ? cumulativeTaxDelta / cumulativeConversion : 0
+        }
+      };
+    }, [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, conversionSettings]);
     
     return (
       <div className={cardStyle}>
         <h4 className="text-lg font-semibold text-slate-100 mb-2">🔄 Roth Conversion Simulator</h4>
         <p className="text-sm text-slate-400 mb-4">
-          Simulate filling a tax bracket with Roth conversions during your "tax valley" years (typically between retirement and RMDs at age 75).
+          Compare your plan WITH vs. WITHOUT Roth conversions. Uses the full projection engine — same tax calculations, SS re-taxation, IRMAA, and withdrawal solver as your main plan.
         </p>
         
         {/* Settings */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6 p-4 bg-slate-800/50 rounded-lg">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6 p-4 bg-slate-800/50 rounded-lg">
+          <div>
+            <label className="block text-sm text-slate-400 mb-1">Mode</label>
+            <select
+              value={conversionSettings.mode}
+              onChange={e => setConversionSettings({...conversionSettings, mode: e.target.value})}
+              className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
+            >
+              <option value="bracket">Fill to Bracket</option>
+              <option value="fixed">Fixed Amount</option>
+            </select>
+          </div>
           <div>
             <label className="block text-sm text-slate-400 mb-1">Start Age</label>
             <input
@@ -6568,7 +6571,7 @@ function RetirementPlanner() {
             />
           </div>
           <div>
-            <label className="block text-sm text-slate-400 mb-1">End Age (before RMDs)</label>
+            <label className="block text-sm text-slate-400 mb-1">End Age</label>
             <input
               type="number"
               value={conversionSettings.endAge}
@@ -6576,63 +6579,72 @@ function RetirementPlanner() {
               className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
             />
           </div>
-          <div>
-            <label className="block text-sm text-slate-400 mb-1">Fill Up To Bracket</label>
-            <select
-              value={conversionSettings.targetBracket}
-              onChange={e => setConversionSettings({...conversionSettings, targetBracket: e.target.value})}
-              className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
-            >
-              {bracketOptions.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm text-slate-400 mb-1">Future Withdrawal Rate</label>
-            <select
-              value={conversionSettings.futureWithdrawalBracket}
-              onChange={e => setConversionSettings({...conversionSettings, futureWithdrawalBracket: e.target.value})}
-              className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
-            >
-              {futureRateOptions.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
-            </select>
-            <p className="text-xs text-slate-500 mt-1">Expected rate if NOT converted</p>
+          {conversionSettings.mode === 'bracket' ? (
+            <div>
+              <label className="block text-sm text-slate-400 mb-1">Fill Up To</label>
+              <select
+                value={conversionSettings.targetBracket}
+                onChange={e => setConversionSettings({...conversionSettings, targetBracket: e.target.value})}
+                className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
+              >
+                {bracketOptions.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
+              </select>
+            </div>
+          ) : (
+            <div>
+              <label className="block text-sm text-slate-400 mb-1">Annual Amount</label>
+              <CurrencyCell
+                value={conversionSettings.fixedAmount}
+                onValueChange={v => setConversionSettings({...conversionSettings, fixedAmount: v})}
+                className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
+              />
+            </div>
+          )}
+          <div className="flex items-end">
+            <div className="text-xs text-slate-500">
+              {conversionSettings.mode === 'bracket' 
+                ? `Converts enough each year to fill the ${conversionSettings.targetBracket} bracket`
+                : `Converts ${formatCurrency(conversionSettings.fixedAmount)}/yr (inflation-adjusted)`}
+            </div>
           </div>
         </div>
         
-        {/* Summary Results */}
+        {/* Summary: With vs Without */}
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
           <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
-            <div className="text-slate-500 text-xs mb-0.5">Starting Pre-Tax Balance</div>
-            <div className="text-xl font-bold text-sky-400">{formatCurrency(conversionAnalysis[0]?.remainingPreTax + conversionAnalysis[0]?.conversionAmount || 0)}</div>
-            <div className="text-xs text-slate-500">Age {conversionSettings.startAge}</div>
-          </div>
-          <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
             <div className="text-slate-500 text-xs mb-0.5">Total Converted</div>
-            <div className="text-xl font-bold text-emerald-400">{formatCurrency(totalConversion)}</div>
+            <div className="text-xl font-bold text-emerald-400">{formatCurrency(totals.totalConverted)}</div>
             <div className="text-xs text-slate-500">{conversionAnalysis.length} years</div>
           </div>
           <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
-            <div className="text-slate-500 text-xs mb-0.5">Remaining Pre-Tax</div>
-            <div className="text-xl font-bold text-amber-400">{formatCurrency(conversionAnalysis[conversionAnalysis.length - 1]?.remainingPreTax || 0)}</div>
-            <div className="text-xs text-slate-500">Age {conversionSettings.endAge}</div>
-          </div>
-          <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
-            <div className="text-slate-500 text-xs mb-0.5">Tax Paid on Conversions</div>
-            <div className="text-xl font-bold text-red-400">{formatCurrency(totalTaxPaid)}</div>
-            <div className="text-xs text-slate-500">Avg rate: {(avgEffectiveRate * 100).toFixed(1)}%</div>
+            <div className="text-slate-500 text-xs mb-0.5">Tax During Conversions</div>
+            <div className="text-xl font-bold text-red-400">+{formatCurrency(totals.conversionWindowTax)}</div>
+            <div className="text-xs text-slate-500">Avg rate: {(totals.avgEffRate * 100).toFixed(1)}%</div>
           </div>
           <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
             <div className="text-slate-500 text-xs mb-0.5">Lifetime Tax Savings</div>
-            <div className={`text-xl font-bold ${totalTaxSaved >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {formatCurrency(totalTaxSaved)}
+            <div className={`text-xl font-bold ${totals.lifetimeTaxSavings >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {totals.lifetimeTaxSavings >= 0 ? '' : '−'}{formatCurrency(Math.abs(totals.lifetimeTaxSavings))}
             </div>
-            <div className="text-xs text-slate-500">{totalTaxSaved >= 0 ? 'Net benefit' : 'Net cost'}</div>
+            <div className="text-xs text-slate-500">Without: {formatCurrency(totals.lifetimeTaxWithout)} → With: {formatCurrency(totals.lifetimeTaxWith)}</div>
+          </div>
+          <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
+            <div className="text-slate-500 text-xs mb-0.5">Portfolio at End</div>
+            <div className={`text-xl font-bold ${totals.portfolioBenefit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {totals.portfolioBenefit >= 0 ? '+' : '−'}{formatCurrency(Math.abs(totals.portfolioBenefit))}
+            </div>
+            <div className="text-xs text-slate-500">{formatCurrency(totals.endPortfolioWith)} vs {formatCurrency(totals.endPortfolioWithout)}</div>
+          </div>
+          <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
+            <div className="text-slate-500 text-xs mb-0.5">Pre-Tax Remaining</div>
+            <div className="text-xl font-bold text-amber-400">{formatCurrency(conversionAnalysis[conversionAnalysis.length - 1]?.remainingPreTax || 0)}</div>
+            <div className="text-xs text-slate-500">Age {conversionSettings.endAge}</div>
           </div>
         </div>
         
-        {/* Income vs Bracket Thresholds Chart - With Conversions */}
+        {/* Chart */}
         <div className="mb-6">
-          <h5 className="text-md font-semibold text-slate-200 mb-3">Income + Conversions vs. Tax Bracket Thresholds</h5>
+          <h5 className="text-md font-semibold text-slate-200 mb-3">Income + Conversions vs. Baseline</h5>
           <div className="h-80">
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={conversionAnalysis} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
@@ -6645,19 +6657,13 @@ function RetirementPlanner() {
                   labelFormatter={l => `Age ${l}`}
                 />
                 <Legend />
-                
-                {/* Stacked bars: base income + conversion */}
                 <Bar dataKey="baseIncome" stackId="income" fill="#3b82f6" name="Base Income" />
                 <Bar dataKey="conversionAmount" stackId="income" fill="#10b981" name="Roth Conversion" />
-                
-                {/* Target bracket threshold line */}
-                <Line type="monotone" dataKey="targetThreshold" stroke="#eab308" strokeWidth={3} dot={false} name={`Top of ${conversionSettings.targetBracket} Bracket`} strokeDasharray="5 5" />
+                <Line type="monotone" dataKey="baseTotalTax" stroke="#ef4444" strokeWidth={2} dot={false} name="Tax Without Conv." strokeDasharray="5 5" />
+                <Line type="monotone" dataKey="withTotalTax" stroke="#f97316" strokeWidth={2} dot={false} name="Tax With Conv." />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
-          <p className="text-xs text-slate-500 mt-2">
-            * Blue bars show your base income. Green bars show Roth conversions filling up to the {conversionSettings.targetBracket} bracket threshold (yellow dashed line).
-          </p>
         </div>
         
         {/* Year-by-Year Table */}
@@ -6667,12 +6673,12 @@ function RetirementPlanner() {
               <tr className="border-b border-slate-700">
                 <th className="text-left py-2 px-2 text-slate-400 font-medium">Age</th>
                 <th className="text-right py-2 px-2 text-slate-400 font-medium">Base Income</th>
-                <th className="text-right py-2 px-2 text-slate-400 font-medium">Bracket Cap</th>
-                <th className="text-right py-2 px-2 text-slate-400 font-medium">Room</th>
                 <th className="text-right py-2 px-2 text-slate-400 font-medium">Conversion</th>
-                <th className="text-right py-2 px-2 text-slate-400 font-medium">Tax Paid</th>
+                <th className="text-right py-2 px-2 text-slate-400 font-medium">Tax (no conv)</th>
+                <th className="text-right py-2 px-2 text-slate-400 font-medium">Tax (w/ conv)</th>
+                <th className="text-right py-2 px-2 text-slate-400 font-medium">Tax Delta</th>
                 <th className="text-right py-2 px-2 text-slate-400 font-medium">Eff. Rate</th>
-                <th className="text-right py-2 px-2 text-slate-400 font-medium">Tax Saved</th>
+                <th className="text-right py-2 px-2 text-slate-400 font-medium">IRMAA Δ</th>
                 <th className="text-right py-2 px-2 text-slate-400 font-medium">Cumulative</th>
                 <th className="text-right py-2 px-2 text-slate-400 font-medium">Pre-Tax Left</th>
               </tr>
@@ -6682,19 +6688,19 @@ function RetirementPlanner() {
                 <tr key={row.age} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''}`}>
                   <td className="py-2 px-2 text-slate-300 font-medium">{row.age}</td>
                   <td className="py-2 px-2 text-right text-slate-400">{formatCurrency(row.baseIncome)}</td>
-                  <td className="py-2 px-2 text-right text-slate-400">{formatCurrency(row.targetThreshold)}</td>
-                  <td className="py-2 px-2 text-right text-sky-400">{formatCurrency(row.roomInBracket)}</td>
                   <td className="py-2 px-2 text-right text-emerald-400 font-semibold">
                     {row.conversionAmount > 0 ? formatCurrency(row.conversionAmount) : '—'}
                   </td>
+                  <td className="py-2 px-2 text-right text-slate-400">{formatCurrency(row.baseTotalTax)}</td>
+                  <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.withTotalTax)}</td>
                   <td className="py-2 px-2 text-right text-red-400">
-                    {row.taxOnConversion > 0 ? formatCurrency(row.taxOnConversion) : '—'}
+                    {row.taxDelta > 0 ? '+' : ''}{formatCurrency(row.taxDelta)}
                   </td>
                   <td className="py-2 px-2 text-right text-amber-400">
                     {row.conversionAmount > 0 ? `${(row.effectiveRate * 100).toFixed(1)}%` : '—'}
                   </td>
-                  <td className={`py-2 px-2 text-right font-medium ${row.taxSavings >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {row.conversionAmount > 0 ? formatCurrency(row.taxSavings) : '—'}
+                  <td className={`py-2 px-2 text-right ${row.irmaaDelta > 0 ? 'text-pink-400' : 'text-slate-500'}`}>
+                    {row.irmaaDelta > 0 ? '+' + formatCurrency(row.irmaaDelta) : '—'}
                   </td>
                   <td className="py-2 px-2 text-right text-purple-400">{formatCurrency(row.cumulativeConversion)}</td>
                   <td className="py-2 px-2 text-right text-sky-400">{formatCurrency(row.remainingPreTax)}</td>
@@ -6705,14 +6711,12 @@ function RetirementPlanner() {
               <tr className="border-t-2 border-slate-600 bg-slate-800/50">
                 <td className="py-3 px-2 text-slate-300 font-semibold">Total</td>
                 <td></td>
+                <td className="py-3 px-2 text-right text-emerald-400 font-bold">{formatCurrency(totals.totalConverted)}</td>
                 <td></td>
                 <td></td>
-                <td className="py-3 px-2 text-right text-emerald-400 font-bold">{formatCurrency(totalConversion)}</td>
-                <td className="py-3 px-2 text-right text-red-400 font-bold">{formatCurrency(totalTaxPaid)}</td>
-                <td className="py-3 px-2 text-right text-amber-400 font-bold">{(avgEffectiveRate * 100).toFixed(1)}%</td>
-                <td className={`py-3 px-2 text-right font-bold ${totalTaxSaved >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {formatCurrency(totalTaxSaved)}
-                </td>
+                <td className="py-3 px-2 text-right text-red-400 font-bold">+{formatCurrency(totals.conversionWindowTax)}</td>
+                <td className="py-3 px-2 text-right text-amber-400 font-bold">{(totals.avgEffRate * 100).toFixed(1)}%</td>
+                <td></td>
                 <td></td>
                 <td className="py-3 px-2 text-right text-sky-400 font-bold">{formatCurrency(conversionAnalysis[conversionAnalysis.length - 1]?.remainingPreTax || 0)}</td>
               </tr>
@@ -6720,12 +6724,12 @@ function RetirementPlanner() {
           </table>
         </div>
         
-        <div className="mt-4 p-3 bg-slate-800/50 border border-slate-700/50 rounded-lg">
-          <p className="text-xs text-slate-400">
-            <strong>💡 How to read this:</strong> Each year shows the room available to fill the {conversionSettings.targetBracket} bracket. 
-            "Tax Paid" is what you pay now on the conversion. "Tax Saved" compares this to what you'd pay later at {conversionSettings.futureWithdrawalBracket}. 
-            Positive savings means converting now is beneficial. "Pre-Tax Left" shows your remaining traditional IRA/401k balance after conversions.
-            This assumes your future withdrawals would be taxed at the higher rate — adjust the "Future Withdrawal Rate" based on your expected RMD situation.
+        <div className="mt-4 p-3 bg-blue-900/20 border border-blue-800/30 rounded-lg">
+          <p className="text-xs text-blue-300">
+            <strong>How this works:</strong> The simulator runs your complete financial plan twice through the projection engine — once with the conversion settings above, once without any conversions. 
+            Every number reflects the full tax model: SS re-taxation, IRMAA surcharges, state taxes, withdrawal solver adjustments, and portfolio growth differences. 
+            "Lifetime Tax Savings" is the total tax difference across ALL years (not just the conversion window) — conversions pay more tax now but reduce RMDs and taxes later.
+            "Portfolio at End" shows the total portfolio difference at age {personalInfo.legacyAge || 95}, reflecting tax-free Roth growth vs. taxable pre-tax growth.
           </p>
         </div>
       </div>
@@ -7034,9 +7038,14 @@ function RetirementPlanner() {
           projections={projections}
           personalInfo={personalInfo}
           accounts={accounts}
+          incomeStreams={incomeStreams}
+          assets={assets}
+          oneTimeEvents={oneTimeEvents}
+          recurringExpenses={recurringExpenses}
           retirementAge={retirementAge}
           cardStyle={cardStyle}
           formatCurrency={formatCurrency}
+          computeProjections={computeProjections}
         />
       </div>
     );
