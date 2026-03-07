@@ -1627,8 +1627,10 @@ function RetirementPlanner() {
       let totalRMD = 0;
       const accountRMDs = {}; // Track RMD per account
       let preTaxContributions = 0; // Track pre-tax (401k/403b/457b/IRA) contributions for tax deduction
+      const accountContributions = {}; // Track contribution per account for display
       
       accts.forEach(account => {
+        accountContributions[account.id] = 0; // Initialize
         const ownerAge = account.owner === 'me' ? myAge : account.owner === 'spouse' ? spouseAge : Math.max(myAge, spouseAge);
         const yearsContributing = ownerAge - account.startAge;
         const contributionGrowth = account.contributionGrowth || 0;
@@ -1638,6 +1640,7 @@ function RetirementPlanner() {
         if (ownerAlive && ownerAge >= account.startAge && ownerAge < account.stopAge) {
           const adjustedContribution = account.contribution * Math.pow(1 + contributionGrowth, Math.max(0, yearsContributing));
           accountBalances[account.id] += adjustedContribution;
+          accountContributions[account.id] = Math.round(adjustedContribution);
           
           // Pre-tax contributions reduce AGI (above-the-line deduction)
           // 401k, 403b, 457b, Traditional IRA contributions are tax-deductible
@@ -2225,6 +2228,8 @@ function RetirementPlanner() {
           obj[a.id] = Math.round(accountBalances[a.id] || 0);
           return obj;
         }, {}),
+        // Per-account contributions snapshot (used by contribution view in Accounts tab)
+        perAccountContributions: { ...accountContributions },
         // One-time events that occurred this year
         oneTimeEvents: yearEvents.length > 0 ? yearEvents : undefined,
         oneTimeExpense: Math.round(oneTimeExpenseTotal),
@@ -4989,6 +4994,7 @@ function RetirementPlanner() {
   const AccountsTab = () => {
     const [acctInfoOpen, setAcctInfoOpen] = useState(null);
     const [showIndividualAccounts, setShowIndividualAccounts] = useState(false);
+    const [showIndividualContribs, setShowIndividualContribs] = useState(false);
     const [localAccounts, setLocalAccounts] = useState(accounts);
     const [dirty, setDirty] = useState(false);
     
@@ -5473,6 +5479,202 @@ function RetirementPlanner() {
                   The "Withdrawal" column shows total portfolio withdrawals needed to meet your desired income.
                   When RMD &gt; Withdrawal needed, the difference becomes "Excess → Brok".
                 </p>
+              </div>
+            </>
+          )}
+        </div>
+        
+        {/* Year-by-Year Contributions Table */}
+        <div className={cardStyle}>
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <div className="flex items-center gap-2">
+              <h4 className="text-lg font-semibold text-slate-100">Year-by-Year Contributions</h4>
+              <InfoCard
+                title="Year-by-Year Contributions"
+                isOpen={acctInfoOpen === 'yearByYearContribs'}
+                onToggle={() => setAcctInfoOpen(prev => prev === 'yearByYearContribs' ? null : 'yearByYearContribs')}
+                sections={[
+                  {
+                    heading: 'What This Table Shows',
+                    body: 'Annual contributions flowing into each account from the projection engine. Contributions are calculated based on the base amount, growth rate, and active contribution period (start age to stop age) you defined for each account.'
+                  },
+                  {
+                    heading: 'By Type View',
+                    items: [
+                      { color: '#10b981', label: 'Pre-Tax (Green)', desc: 'Combined contributions to all pre-tax accounts (401k, Traditional IRA, 403b, 457b). These reduce your taxable income in the year contributed.' },
+                      { color: '#a855f7', label: 'Roth (Purple)', desc: 'Combined contributions to all Roth accounts. These are made with after-tax dollars but grow and withdraw tax-free.' },
+                      { color: '#38bdf8', label: 'Brokerage (Sky Blue)', desc: 'Combined contributions to taxable brokerage and HSA accounts.' },
+                      { color: '#f59e0b', label: 'Total (Gold)', desc: 'Sum of all contributions for the year across all account types.' }
+                    ]
+                  },
+                  {
+                    heading: 'By Account View',
+                    body: 'Shows each individual account as its own column so you can see exactly how much goes into each account each year. Contributions grow annually by the contribution growth rate you set, and stop at the stop age.'
+                  },
+                  {
+                    heading: 'How to Use This',
+                    body: 'Verify your contribution assumptions look correct year by year. Watch for the transition when contributions stop at retirement — this is when your accounts shift from accumulation to drawdown. If you see zeros where you expect contributions, check the start/stop ages on your accounts.',
+                    tip: 'The contribution growth rate compounds each year. A $10,000 contribution growing at 3% becomes $10,300 next year, then $10,609, etc. This models annual raise-based increases to retirement savings.'
+                  }
+                ]}
+              />
+            </div>
+            {/* Aggregated / Individual toggle */}
+            <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 gap-0.5">
+              <button
+                onClick={() => setShowIndividualContribs(false)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  !showIndividualContribs
+                    ? 'bg-slate-600 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                By Type
+              </button>
+              <button
+                onClick={() => setShowIndividualContribs(true)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  showIndividualContribs
+                    ? 'bg-slate-600 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                By Account
+              </button>
+            </div>
+          </div>
+          <p className="text-sm text-slate-400 mb-4">
+            {showIndividualContribs
+              ? 'Individual account contributions year-by-year — each column is one account.'
+              : 'Contributions aggregated by account type (pre-tax, Roth, brokerage). Shows annual amounts including contribution growth.'}
+          </p>
+          
+          {showIndividualContribs ? (() => {
+            const acctColors = [
+              '#34d399','#a78bfa','#38bdf8','#fb923c','#f472b6',
+              '#facc15','#818cf8','#4ade80','#f87171','#22d3ee'
+            ];
+            const colorFor = (idx) => acctColors[idx % acctColors.length];
+            const contribYears = projections.filter(p => {
+              const contribs = p.perAccountContributions || {};
+              return Object.values(contribs).some(v => v > 0);
+            });
+            // Show all years up to last contribution year + 2 for context, max 50
+            const lastContribAge = contribYears.length > 0 ? contribYears[contribYears.length - 1].myAge : personalInfo.myAge;
+            const displayYears = projections.filter(p => p.myAge <= Math.min(lastContribAge + 2, personalInfo.myAge + 50));
+            
+            return (
+              <div className="overflow-x-auto max-h-[500px]">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-slate-900 z-10">
+                    <tr className="border-b border-slate-700">
+                      <th className="text-left py-2 px-2 text-slate-400 font-medium">Year</th>
+                      <th className="text-center py-2 px-2 text-slate-400 font-medium">Age</th>
+                      {accounts.map((acct, i) => (
+                        <th key={acct.id} className="text-right py-2 px-2 font-medium" style={{ color: colorFor(i) }}>
+                          {acct.name.length > 12 ? acct.name.substring(0, 12) + '…' : acct.name}
+                        </th>
+                      ))}
+                      <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {displayYears.map((p, idx) => {
+                      const contribs = p.perAccountContributions || {};
+                      const total = Object.values(contribs).reduce((s, v) => s + v, 0);
+                      return (
+                        <tr key={p.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${total === 0 ? 'opacity-40' : ''}`}>
+                          <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
+                          <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
+                          {accounts.map((acct, i) => {
+                            const c = contribs[acct.id] || 0;
+                            return (
+                              <td key={acct.id} className="py-1.5 px-2 text-right font-mono" style={{ color: c > 0 ? colorFor(i) : '#475569' }}>
+                                {c > 0 ? formatCurrency(c) : '—'}
+                              </td>
+                            );
+                          })}
+                          <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">
+                            {total > 0 ? formatCurrency(total) : '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })() : (
+            <>
+              {(() => {
+                const contribYears = projections.filter(p => {
+                  const contribs = p.perAccountContributions || {};
+                  return Object.values(contribs).some(v => v > 0);
+                });
+                const lastContribAge = contribYears.length > 0 ? contribYears[contribYears.length - 1].myAge : personalInfo.myAge;
+                const displayYears = projections.filter(p => p.myAge <= Math.min(lastContribAge + 2, personalInfo.myAge + 50));
+                
+                return (
+                  <div className="overflow-x-auto max-h-[500px]">
+                    <table className="w-full text-sm">
+                      <thead className="sticky top-0 bg-slate-900 z-10">
+                        <tr className="border-b border-slate-700">
+                          <th className="text-left py-2 px-2 text-slate-400 font-medium">Year</th>
+                          <th className="text-center py-2 px-2 text-slate-400 font-medium">Age</th>
+                          <th className="text-right py-2 px-2 text-emerald-400 font-medium">Pre-Tax</th>
+                          <th className="text-right py-2 px-2 text-purple-400 font-medium">Roth</th>
+                          <th className="text-right py-2 px-2 text-sky-400 font-medium">Brokerage/HSA</th>
+                          <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {displayYears.map((p, idx) => {
+                          const contribs = p.perAccountContributions || {};
+                          let preTaxC = 0, rothC = 0, brokerageC = 0;
+                          accounts.forEach(a => {
+                            const c = contribs[a.id] || 0;
+                            if (isPreTaxAccount(a.type)) preTaxC += c;
+                            else if (isRothAccount(a.type)) rothC += c;
+                            else brokerageC += c;
+                          });
+                          const total = preTaxC + rothC + brokerageC;
+                          return (
+                            <tr key={p.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${total === 0 ? 'opacity-40' : ''}`}>
+                              <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
+                              <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
+                              <td className={`py-1.5 px-2 text-right font-mono ${preTaxC > 0 ? 'text-emerald-400' : 'text-slate-600'}`}>
+                                {preTaxC > 0 ? formatCurrency(preTaxC) : '—'}
+                              </td>
+                              <td className={`py-1.5 px-2 text-right font-mono ${rothC > 0 ? 'text-purple-400' : 'text-slate-600'}`}>
+                                {rothC > 0 ? formatCurrency(rothC) : '—'}
+                              </td>
+                              <td className={`py-1.5 px-2 text-right font-mono ${brokerageC > 0 ? 'text-sky-400' : 'text-slate-600'}`}>
+                                {brokerageC > 0 ? formatCurrency(brokerageC) : '—'}
+                              </td>
+                              <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">
+                                {total > 0 ? formatCurrency(total) : '—'}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+              <div className="mt-4 flex flex-wrap gap-4 text-xs">
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded bg-emerald-400"></div>
+                  <span className="text-slate-400">Pre-Tax (401k, Trad IRA, 457b, 403b)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded bg-purple-400"></div>
+                  <span className="text-slate-400">Roth Accounts</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded bg-sky-400"></div>
+                  <span className="text-slate-400">Brokerage / HSA</span>
+                </div>
               </div>
             </>
           )}
