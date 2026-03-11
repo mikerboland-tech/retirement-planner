@@ -1233,7 +1233,7 @@ function RetirementPlanner() {
   const loadScenario = (id) => {
     const scenario = scenarios.find(s => s.id === id);
     if (scenario) {
-      setPersonalInfo(scenario.personalInfo);
+      setPersonalInfo({ ...DEFAULT_PERSONAL_INFO, ...scenario.personalInfo });
       setAccounts(scenario.accounts);
       setIncomeStreams(scenario.incomeStreams);
       if (scenario.assets) setAssets(scenario.assets);
@@ -1295,7 +1295,15 @@ function RetirementPlanner() {
     reader.onload = (e) => {
       try {
         const data = JSON.parse(e.target?.result);
-        if (data.personalInfo) setPersonalInfo(data.personalInfo);
+        // Merge imported personalInfo with defaults to ensure new fields are present
+        // This handles imports from older versions that may be missing newer fields
+        if (data.personalInfo) {
+          const currentYear = new Date().getFullYear();
+          const merged = { ...DEFAULT_PERSONAL_INFO, ...data.personalInfo };
+          if (!merged.myBirthYear) merged.myBirthYear = currentYear - merged.myAge;
+          if (!merged.spouseBirthYear) merged.spouseBirthYear = currentYear - merged.spouseAge;
+          setPersonalInfo(merged);
+        }
         if (data.accounts) setAccounts(data.accounts);
         if (data.incomeStreams) setIncomeStreams(data.incomeStreams);
         if (data.assets) setAssets(data.assets);
@@ -2556,9 +2564,9 @@ function RetirementPlanner() {
       setVisibilitySettings(prev => ({ ...prev, [key]: !prev[key] }));
     };
     
-    // Find retirement age (first year with no earned income)
-    const retirementProjection = projections.find(p => p.earnedIncome === 0);
-    const retirementAge = retirementProjection?.myAge || 65;
+    // Retirement age: always use personalInfo as source of truth
+    const retirementAge = personalInfo.myRetirementAge;
+    const retirementProjection = projections.find(p => p.myAge === retirementAge);
     
     // Savings rate for dashboard card (pre-retirement only)
     const dashEarnedIncome = incomeStreams
@@ -6940,9 +6948,9 @@ function RetirementPlanner() {
   const TaxPlanningTab = () => {
     const [ageRange, setAgeRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || 95 });
     
-    // Find retirement age (first year with no earned income)
-    const retirementProjection = projections.find(p => p.earnedIncome === 0);
-    const retirementAge = retirementProjection?.myAge || 65;
+    // Retirement age: always use personalInfo as source of truth
+    const retirementAge = personalInfo.myRetirementAge;
+    const retirementProjection = projections.find(p => p.myAge === retirementAge);
     
     // Calculate inflation-adjusted bracket thresholds for each year
     const taxPlanningData = projections
@@ -7255,9 +7263,9 @@ function RetirementPlanner() {
   
 
   const MonteCarloTab = () => {
-    // Find retirement age
-    const retirementProjection = projections.find(p => p.earnedIncome === 0);
-    const defaultRetirementAge = retirementProjection?.myAge || 65;
+    // Retirement age: always use personalInfo as source of truth
+    const retirementProjection = projections.find(p => p.myAge === personalInfo.myRetirementAge);
+    const defaultRetirementAge = personalInfo.myRetirementAge;
     
     const [simSettings, setSimSettings] = useState({
       numSimulations: 1000,
@@ -8072,9 +8080,9 @@ function RetirementPlanner() {
 
 
   const WithdrawalStrategiesTab = () => {
-    // Find retirement info
-    const retirementProjection = projections.find(p => p.earnedIncome === 0);
-    const retirementAge = retirementProjection?.myAge || 65;
+    // Retirement age: always use personalInfo as source of truth
+    const retirementAge = personalInfo.myRetirementAge;
+    const retirementProjection = projections.find(p => p.myAge === retirementAge);
     const retirementPortfolio = retirementProjection?.totalPortfolio || 0;
     
     const [settings, setSettings] = useState({
