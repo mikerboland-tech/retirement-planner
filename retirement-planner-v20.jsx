@@ -2144,7 +2144,8 @@ function RetirementPlanner() {
         // Store IRMAA detail for display components (avoids independent recalculation)
         const irmaaDetail = calculateIRMAA(magi, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
         irmaaInfo = { tier: irmaaDetail.tier, totalAnnual: irmaaDetail.totalAnnual, 
-          partBAnnual: irmaaDetail.partBAnnual, partDAnnual: irmaaDetail.partDAnnual };
+          partBAnnual: irmaaDetail.partBAnnual, partDAnnual: irmaaDetail.partDAnnual,
+          partBMonthly: irmaaDetail.partBMonthly, partDMonthly: irmaaDetail.partDMonthly };
         // Calculate distance to next IRMAA tier
         const lookupStatus = effectiveFilingStatus === 'head_of_household' ? 'single' : effectiveFilingStatus;
         const tiers = IRMAA_THRESHOLDS_2025[lookupStatus] || IRMAA_THRESHOLDS_2025.married_joint;
