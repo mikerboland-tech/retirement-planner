@@ -2134,12 +2134,28 @@ function RetirementPlanner() {
       // Based on MAGI (uses 2-year lookback in reality; we use current year as approximation).
       // Each Medicare-eligible person (age 65+) pays their own surcharge.
       let irmaaSurcharge = 0;
+      let irmaaInfo = null; // IRMAA tier detail for display components
       let numMedicareEligible = 0;
       if (primaryAlive && myAge >= 65) numMedicareEligible++;
       if (effectiveFilingStatus === 'married_joint' && spouseAlive && spouseAge >= 65) numMedicareEligible++;
       if (numMedicareEligible > 0) {
         const irmaaResult = calculateIRMAASurcharge(magi, effectiveFilingStatus, yearsFromNow, pi.inflationRate, numMedicareEligible);
         irmaaSurcharge = irmaaResult.totalSurcharge;
+        // Store IRMAA detail for display components (avoids independent recalculation)
+        const irmaaDetail = calculateIRMAA(magi, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
+        irmaaInfo = { tier: irmaaDetail.tier, totalAnnual: irmaaDetail.totalAnnual, 
+          partBAnnual: irmaaDetail.partBAnnual, partDAnnual: irmaaDetail.partDAnnual };
+        // Calculate distance to next IRMAA tier
+        const lookupStatus = effectiveFilingStatus === 'head_of_household' ? 'single' : effectiveFilingStatus;
+        const tiers = IRMAA_THRESHOLDS_2025[lookupStatus] || IRMAA_THRESHOLDS_2025.married_joint;
+        const inflFactor = Math.pow(1 + pi.inflationRate, yearsFromNow);
+        for (const tier of tiers) {
+          const adjMax = tier.maxIncome === Infinity ? Infinity : tier.maxIncome * inflFactor;
+          if (magi < adjMax) {
+            irmaaInfo.distToNextTier = Math.round(adjMax - magi);
+            break;
+          }
+        }
       }
       
       // Update total taxes for downstream calculations
@@ -2198,6 +2214,15 @@ function RetirementPlanner() {
       // Include reinvested excess RMDs in brokerage balance
       finalBrokerageBalance += Math.round(excessReinvestmentPool);
       
+      // Weighted average growth rate across all accounts (for CoastFIRE, Withdrawal Strategies)
+      const totalPortfolioForWeighting = finalPreTaxBalance + finalRothBalance + finalBrokerageBalance;
+      let weightedCAGR = 0.07; // fallback
+      if (totalPortfolioForWeighting > 0) {
+        let weightedSum = 0;
+        accts.forEach(a => { weightedSum += (accountBalances[a.id] || 0) * a.cagr; });
+        weightedCAGR = weightedSum / totalPortfolioForWeighting;
+      }
+      
       // Calculate non-liquid assetList (for legacy planning)
       let totalAssetValue = 0;
       let totalAssetDebt = 0;
@@ -2244,6 +2269,7 @@ function RetirementPlanner() {
         stateTax: Math.round(stateTax),
         ficaTax: Math.round(totalFICA), // Employee FICA (SS + Medicare) on earned income
         irmaaSurcharge: Math.round(irmaaSurcharge), // Medicare IRMAA surcharge (Part B + Part D above standard)
+        irmaaInfo, // IRMAA tier detail { tier, totalAnnual, partBAnnual, partDAnnual, distToNextTier }
         ssEarningsTestReduction: Math.round(ssEarningsTestReduction), // SS benefits withheld due to earnings test
         // Healthcare and recurring expense data (from unified model)
         healthcareExpense: healthcareExpense, // Total healthcare costs this year
@@ -2259,6 +2285,7 @@ function RetirementPlanner() {
         rothBalance: Math.round(finalRothBalance),
         brokerageBalance: Math.round(finalBrokerageBalance),
         totalPortfolio: Math.round(finalPreTaxBalance + finalRothBalance + finalBrokerageBalance),
+        weightedCAGR, // Balance-weighted average growth rate across all accounts
         assetValue: Math.round(totalAssetValue),
         assetDebt: Math.round(totalAssetDebt),
         netAssetValue: Math.round(netAssetValue),
@@ -3418,9 +3445,21 @@ function RetirementPlanner() {
           const lifetimeQCD = retirementYears.reduce((sum, p) => sum + (p.qcd || 0), 0);
           const charitablePercent = personalInfo.charitableGivingPercent || 0;
           
-          // Estimate tax savings from QCD (QCD amount * marginal rate)
-          // Use a rough estimate of 22% marginal rate for the savings calculation
-          const estimatedQCDTaxSavings = lifetimeQCD * 0.22;
+          // QCD tax savings: for each year with QCD, estimate the marginal tax rate
+          // by looking at the ratio of federal tax to taxable income (effective rate on that income slice).
+          // More accurate than a hardcoded 22% — uses actual projected tax brackets.
+          let estimatedQCDTaxSavings = 0;
+          retirementYears.forEach(p => {
+            if ((p.qcd || 0) > 0 && p.taxableIncome > 0) {
+              // Marginal rate approximation: federal tax / taxable income gives avg rate,
+              // but QCD comes off the top, so use a slightly higher estimate
+              const avgFedRate = p.federalTax / Math.max(1, p.taxableIncome);
+              const avgStateRate = p.stateTax / Math.max(1, p.taxableIncome);
+              const marginalEstimate = Math.min(0.40, (avgFedRate + avgStateRate) * 1.15); // Bump 15% above avg to approximate marginal
+              estimatedQCDTaxSavings += p.qcd * marginalEstimate;
+            }
+          });
+          estimatedQCDTaxSavings = Math.round(estimatedQCDTaxSavings);
           
           return (
             <div className={cardStyle}>
@@ -3901,10 +3940,11 @@ function RetirementPlanner() {
     const useTestData = selectedScenario !== null;
     const scenario = useTestData ? testScenarios.find(s => s.id === selectedScenario) : null;
     
-    // Calculate Coast FIRE values
+    // Calculate Coast FIRE values — use engine data for current portfolio and growth rate
+    const currentYearData = projections[0]; // Current year from unified engine
     const currentPortfolio = useTestData && scenario?.currentPortfolio 
       ? scenario.currentPortfolio 
-      : accounts.reduce((sum, a) => sum + a.balance, 0);
+      : (currentYearData?.totalPortfolio || 0);
     
     const yearsToRetirement = useTestData && scenario?.yearsToRetirement
       ? scenario.yearsToRetirement
@@ -3918,9 +3958,7 @@ function RetirementPlanner() {
     
     const weightedCAGR = useTestData && scenario?.returnRate
       ? scenario.returnRate
-      : (currentPortfolio > 0 
-          ? accounts.reduce((sum, a) => sum + (a.balance * a.cagr), 0) / currentPortfolio 
-          : 0.07);
+      : (currentYearData?.weightedCAGR || 0.07);
     
     // Core calculations
     const targetPortfolioAtRetirement = spendingFromPortfolio / 0.04; // 4% rule (25x)
@@ -6497,9 +6535,9 @@ function RetirementPlanner() {
     const stateExemptRetirement = STATES_EXEMPT_RETIREMENT_INCOME.has(personalInfo.state);
     const retirementIncomeForExemption = p.pension;
     
-    // IRMAA display (use engine data, show tier info for detail)
+    // IRMAA display (read from unified engine data)
     const isMedicareAge = selectedAge >= 65;
-    const irmaa = isMedicareAge ? calculateIRMAA(magi, filingStatus, yearsFromNow, personalInfo.inflationRate) : null;
+    const irmaa = p.irmaaInfo; // Engine-computed IRMAA tier detail
     
     const totalTax = p.totalTax;
     const effectiveRate = grossTaxableIncome > 0 ? (totalTax / grossTaxableIncome * 100) : 0;
@@ -7281,23 +7319,11 @@ function RetirementPlanner() {
           roomInBracket = 0;
         }
         
-        // Distance to next IRMAA tier (retained for RothConversionSimulator use)
-        let distToNextIRMAA = null;
-        const isMedicareAge = p.myAge >= 65;
-        const currentMAGI = p.earnedIncome + p.socialSecurity + p.pension + p.otherIncome + p.portfolioWithdrawal + (p.rothConversion || 0);
-        let currentIRMAA = null;
-        if (isMedicareAge) {
-          currentIRMAA = calculateIRMAA(currentMAGI, personalInfo.filingStatus, yearsFromNow, personalInfo.inflationRate);
-          const lookupStatus = personalInfo.filingStatus === 'head_of_household' ? 'single' : personalInfo.filingStatus;
-          const tiers = IRMAA_THRESHOLDS_2025[lookupStatus] || IRMAA_THRESHOLDS_2025.married_joint;
-          for (const tier of tiers) {
-            const adjMax = tier.maxIncome === Infinity ? Infinity : tier.maxIncome * inflationFactor;
-            if (currentMAGI < adjMax) {
-              distToNextIRMAA = Math.round(adjMax - currentMAGI);
-              break;
-            }
-          }
-        }
+        // IRMAA data from unified engine (avoids independent recalculation)
+        const distToNextIRMAA = p.irmaaInfo?.distToNextTier || null;
+        const currentIRMAATier = p.irmaaInfo?.tier || 0;
+        const currentIRMAAannual = p.irmaaInfo?.totalAnnual || 0;
+        const currentMAGI = Math.round(p.magi || 0);
 
         return {
           myAge: p.myAge,
@@ -7322,10 +7348,10 @@ function RetirementPlanner() {
           roomTo22: Math.round(Math.max(0, roomTo22)),
           roomTo24: Math.round(Math.max(0, roomTo24)),
           // IRMAA fields (used by RothConversionSimulator)
-          currentIRMAATier: currentIRMAA?.tier || 0,
-          currentIRMAAannual: currentIRMAA?.totalAnnual || 0,
+          currentIRMAATier,
+          currentIRMAAannual,
           distToNextIRMAA,
-          currentMAGI: Math.round(currentMAGI),
+          currentMAGI,
         };
       });
     
@@ -8399,8 +8425,9 @@ function RetirementPlanner() {
     const strategies = useMemo(() => {
       const results = {};
       const years = settings.endAge - settings.retirementAge + 1;
-      const startPortfolio = projections.find(p => p.myAge === settings.retirementAge)?.totalPortfolio || retirementPortfolio;
-      const avgReturn = accounts.reduce((sum, a) => sum + a.cagr * a.balance, 0) / accounts.reduce((sum, a) => sum + a.balance, 0) || 0.07;
+      const startProjectionData = projections.find(p => p.myAge === settings.retirementAge);
+      const startPortfolio = startProjectionData?.totalPortfolio || retirementPortfolio;
+      const avgReturn = startProjectionData?.weightedCAGR || 0.07;
       
       // 1. FIXED PERCENTAGE (e.g., 4% Rule)
       const fixedPercent = [];
