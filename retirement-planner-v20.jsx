@@ -752,6 +752,7 @@ const DEFAULT_PERSONAL_INFO = {
   rothConversionStartAge: 65,    // Age to begin converting
   rothConversionEndAge: 74,      // Age to stop converting (typically just before RMDs dominate)
   rothConversionBracket: '',     // If set ('22%','24%','32%'), fill to this bracket instead of fixed amount
+  rothConversionTaxSource: 'withdrawal', // 'withdrawal' = tax paid via normal withdrawal priority, 'brokerage' = tax paid from brokerage account
   legacyAge: 95,                 // Planning horizon / legacy target age
   // Survivor modeling: when enabled, models the financial impact of a spouse dying
   // before the planning horizon ends. Changes filing status, stops income streams,
@@ -1131,6 +1132,7 @@ function RetirementPlanner() {
   const [saveStatus, setSaveStatus] = useState('');
   const [showImportExport, setShowImportExport] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [dataWarnings, setDataWarnings] = useState([]);
   const [showSetupWizard, setShowSetupWizard] = useState(() => {
     // Show wizard automatically on first visit (no saved data)
     const saved = loadFromStorage();
@@ -1998,6 +2000,36 @@ function RetirementPlanner() {
             accountBalances[destAccount.id] = (accountBalances[destAccount.id] || 0) + rothConversionThisYear;
             // The converted amount is ordinary income — add to pre-tax withdrawals for tax calculation
             preTaxWithdrawals += rothConversionThisYear;
+            
+            // If user chose to pay conversion tax from brokerage, estimate the marginal tax
+            // on the conversion and withdraw that amount from the largest brokerage account.
+            // This prevents the withdrawal solver from pulling more pre-tax to cover the tax,
+            // which would defeat the purpose of the conversion.
+            if (pi.rothConversionTaxSource === 'brokerage' && rothConversionThisYear > 0) {
+              // Estimate marginal tax on the conversion amount
+              // At this point, totalTaxableIncome_adjusted is the base income before withdrawals
+              const preConvGross = totalTaxableIncome_adjusted;
+              const postConvGross = preConvGross + rothConversionThisYear;
+              const preConvFed = calculateFederalTax(preConvGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
+              const postConvFed = calculateFederalTax(postConvGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
+              const preConvState = calculateStateTax(preConvGross, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, taxableSS, totalPension);
+              const postConvState = calculateStateTax(postConvGross, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, taxableSS, totalPension);
+              const estimatedConversionTax = (postConvFed - preConvFed) + (postConvState - preConvState);
+              
+              if (estimatedConversionTax > 0) {
+                // Find the largest brokerage account
+                const brokerageAccts = accts.filter(a => isBrokerageAccount(a.type) || isHSAAccount(a.type));
+                if (brokerageAccts.length > 0) {
+                  const brokerageSource = brokerageAccts.reduce((best, a) =>
+                    (accountBalances[a.id] || 0) > (accountBalances[best.id] || 0) ? a : best,
+                    brokerageAccts[0]);
+                  const taxPayment = Math.min(estimatedConversionTax, accountBalances[brokerageSource.id] || 0);
+                  accountBalances[brokerageSource.id] -= taxPayment;
+                  // This withdrawal is a brokerage withdrawal — track for capital gains
+                  brokerageWithdrawals += taxPayment;
+                }
+              }
+            }
           }
         }
       }
@@ -4319,11 +4351,108 @@ function RetirementPlanner() {
       setDirtyPI(true);
     };
     
+    // Check for data inconsistencies that need user attention
+    const getDataWarnings = (info) => {
+      const warnings = [];
+      
+      // Check accounts with stopAge that don't match retirement age
+      const accountsWithOldStopAge = accounts.filter(a => {
+        const ownerRetAge = a.owner === 'spouse' ? info.spouseRetirementAge : info.myRetirementAge;
+        return a.contribution > 0 && a.stopAge !== ownerRetAge && a.stopAge > info.myAge;
+      });
+      if (accountsWithOldStopAge.length > 0) {
+        warnings.push({
+          type: 'retirement_age_accounts',
+          severity: 'warning',
+          message: `${accountsWithOldStopAge.length} account(s) have contribution stop ages that don't match your retirement age (${info.myRetirementAge}):`,
+          details: accountsWithOldStopAge.map(a => `"${a.name}" stops contributions at age ${a.stopAge}`),
+          action: 'Update stop ages on the Accounts tab, or this may be intentional (e.g., employer match ending early).'
+        });
+      }
+      
+      // Check earned income streams that extend past retirement age
+      const incomeStreamsPastRetirement = incomeStreams.filter(s => {
+        const ownerRetAge = s.owner === 'spouse' ? info.spouseRetirementAge : info.myRetirementAge;
+        return s.type === 'earned_income' && s.endAge > ownerRetAge;
+      });
+      if (incomeStreamsPastRetirement.length > 0) {
+        warnings.push({
+          type: 'retirement_age_income',
+          severity: 'warning',
+          message: `${incomeStreamsPastRetirement.length} earned income stream(s) extend past your retirement age (${info.myRetirementAge}):`,
+          details: incomeStreamsPastRetirement.map(s => `"${s.name}" runs to age ${s.endAge}`),
+          action: 'Update end ages on the Income tab. Earned income during retirement affects SS taxation and earnings test.'
+        });
+      }
+      
+      // Check earned income streams that end before retirement age
+      const incomeStreamsBeforeRetirement = incomeStreams.filter(s => {
+        const ownerRetAge = s.owner === 'spouse' ? info.spouseRetirementAge : info.myRetirementAge;
+        return s.type === 'earned_income' && s.endAge < ownerRetAge && s.endAge > info.myAge;
+      });
+      if (incomeStreamsBeforeRetirement.length > 0) {
+        warnings.push({
+          type: 'retirement_age_income_gap',
+          severity: 'info',
+          message: `${incomeStreamsBeforeRetirement.length} earned income stream(s) end before your retirement age (${info.myRetirementAge}):`,
+          details: incomeStreamsBeforeRetirement.map(s => `"${s.name}" ends at age ${s.endAge}`),
+          action: 'You\'ll have no earned income from that age until retirement. If this is intentional (career change, sabbatical), no action needed.'
+        });
+      }
+      
+      // Check if SS claiming ages are before 62
+      const ssStreams = incomeStreams.filter(s => s.type === 'social_security');
+      const earlySSClaims = ssStreams.filter(s => s.startAge < 62);
+      if (earlySSClaims.length > 0) {
+        warnings.push({
+          type: 'ss_too_early',
+          severity: 'error',
+          message: 'Social Security cannot be claimed before age 62:',
+          details: earlySSClaims.map(s => `"${s.name}" starts at age ${s.startAge}`),
+          action: 'Update the start age on the Income tab to 62 or later.'
+        });
+      }
+      
+      // Check if Roth conversion window starts before retirement
+      if ((info.rothConversionAmount > 0 || info.rothConversionBracket) && info.rothConversionStartAge < info.myRetirementAge) {
+        warnings.push({
+          type: 'roth_before_retirement',
+          severity: 'info',
+          message: `Roth conversions start at age ${info.rothConversionStartAge}, before retirement at ${info.myRetirementAge}.`,
+          details: ['Conversions during working years add to already-high income, potentially pushing you into higher brackets.'],
+          action: 'Consider starting conversions at retirement age when income drops.'
+        });
+      }
+      
+      // Check if myAge > myRetirementAge (already retired)
+      if (info.myAge >= info.myRetirementAge) {
+        const activeEarned = incomeStreams.filter(s => s.type === 'earned_income' && s.endAge > info.myAge && s.owner === 'me');
+        if (activeEarned.length > 0) {
+          warnings.push({
+            type: 'already_retired_but_earning',
+            severity: 'info',
+            message: `You're at or past your retirement age (${info.myRetirementAge}) but still have active earned income:`,
+            details: activeEarned.map(s => `"${s.name}" runs to age ${s.endAge}`),
+            action: 'The engine treats you as retired (withdrawing from portfolio). Earned income will supplement but not prevent withdrawals. This is fine for part-time work in retirement.'
+          });
+        }
+      }
+      
+      return warnings;
+    };
+    
+    // dataWarnings state is in parent RetirementPlanner scope (survives re-renders)
+    
     const savePersonalInfo = () => {
       const currentYear = new Date().getFullYear();
       const updates = { ...localInfo };
       updates.myBirthYear = currentYear - localInfo.myAge;
       if (localInfo.spouseAge) updates.spouseBirthYear = currentYear - localInfo.spouseAge;
+      
+      // Check for data inconsistencies and warn user
+      const warnings = getDataWarnings(updates);
+      setDataWarnings(warnings);
+      
       setPersonalInfo(updates);
       setDirtyPI(false);
     };
@@ -4336,6 +4465,47 @@ function RetirementPlanner() {
         {dirtyPI && (
           <div className="flex justify-end">
             <button onClick={savePersonalInfo} className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-sm font-medium transition-colors">💾 Save Changes</button>
+          </div>
+        )}
+        
+        {/* Data consistency warnings — shown after saving when mismatches detected */}
+        {dataWarnings.length > 0 && (
+          <div className="space-y-2">
+            {dataWarnings.map((w, i) => (
+              <div key={i} className={`p-3 rounded-lg border ${
+                w.severity === 'error' ? 'bg-red-900/30 border-red-500/50' :
+                w.severity === 'warning' ? 'bg-amber-900/30 border-amber-500/50' :
+                'bg-blue-900/30 border-blue-500/50'
+              }`}>
+                <div className="flex items-start gap-2">
+                  <span className="text-lg">{w.severity === 'error' ? '🚫' : w.severity === 'warning' ? '⚠️' : 'ℹ️'}</span>
+                  <div className="flex-1">
+                    <p className={`text-sm font-medium ${
+                      w.severity === 'error' ? 'text-red-300' :
+                      w.severity === 'warning' ? 'text-amber-300' :
+                      'text-blue-300'
+                    }`}>{w.message}</p>
+                    {w.details && (
+                      <ul className="mt-1 space-y-0.5">
+                        {w.details.map((d, j) => (
+                          <li key={j} className="text-xs text-slate-400">• {d}</li>
+                        ))}
+                      </ul>
+                    )}
+                    <p className="text-xs text-slate-500 mt-1 italic">{w.action}</p>
+                  </div>
+                  <button 
+                    onClick={() => setDataWarnings(prev => prev.filter((_, idx) => idx !== i))}
+                    className="text-slate-500 hover:text-slate-300 text-sm"
+                    title="Dismiss"
+                  >✕</button>
+                </div>
+              </div>
+            ))}
+            <button 
+              onClick={() => setDataWarnings([])}
+              className="text-xs text-slate-500 hover:text-slate-300"
+            >Dismiss all warnings</button>
           </div>
         )}
         <div className={cardStyle}>
@@ -4546,6 +4716,17 @@ function RetirementPlanner() {
                   className={compactInputStyle}
                 />
               </div>
+              <div>
+                <label className={compactLabelStyle}>Tax Payment Source</label>
+                <select
+                  value={localInfo.rothConversionTaxSource || 'withdrawal'}
+                  onChange={e => handleChange('rothConversionTaxSource', e.target.value)}
+                  className={compactInputStyle}
+                >
+                  <option value="withdrawal">Normal Withdrawal Priority</option>
+                  <option value="brokerage">Pay from Brokerage</option>
+                </select>
+              </div>
             </div>
             <div className="mt-3 p-3 bg-purple-900/20 border border-purple-700/30 rounded-lg">
               <p className="text-xs text-purple-300 font-medium mb-1">&#128161; Roth Conversion Strategy</p>
@@ -4554,6 +4735,9 @@ function RetirementPlanner() {
                 The conversion is added to your taxable income for that year. 
                 Roth conversions appear as <strong className="text-purple-400">purple-highlighted rows</strong> in the Detailed Table.
                 {localInfo.rothConversionBracket ? ` Fill-to-bracket mode converts enough each year to fully utilize the ${localInfo.rothConversionBracket} bracket (based on other income).` : ''}
+                {localInfo.rothConversionTaxSource === 'brokerage' 
+                  ? ' Tax on conversions is paid by withdrawing from your brokerage account, preserving pre-tax and Roth balances.'
+                  : ' Tax on conversions is covered by the normal withdrawal solver (using your withdrawal priority order), which may pull additional pre-tax funds.'}
               </p>
             </div>
           </div>
