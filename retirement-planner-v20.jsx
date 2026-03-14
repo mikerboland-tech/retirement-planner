@@ -2600,19 +2600,21 @@ function RetirementPlanner() {
     const retirementAge = personalInfo.myRetirementAge;
     const retirementProjection = projections.find(p => p.myAge === retirementAge);
     
-    // Savings rate for dashboard card (pre-retirement only)
-    const dashEarnedIncome = incomeStreams
-      .filter(s => {
-        if (s.type !== 'earned_income' && s.type !== 'business') return false;
-        const ownerAge = s.owner === 'me' ? personalInfo.myAge : personalInfo.spouseAge;
-        return ownerAge >= s.startAge && ownerAge <= s.endAge;
-      })
-      .reduce((sum, s) => sum + s.amount, 0);
-    const dashMyContributions = accounts
-      .filter(a => (a.contributor || 'me') === 'me' || (a.contributor || 'me') === 'both')
-      .reduce((sum, a) => sum + a.contribution, 0);
-    const dashTotalContributions = accounts.reduce((sum, a) => sum + a.contribution, 0);
+    // Savings rate for dashboard card — read from unified engine (same as Accounts tab)
+    const dashEarnedIncome = current?.earnedIncome || 0;
+    const dashContribs = current?.perAccountContributions || {};
+    let dashMyContributions = 0;
+    let dashTotalContributions = 0;
+    accounts.forEach(a => {
+      const c = dashContribs[a.id] || 0;
+      const contributor = a.contributor || 'me';
+      if (contributor === 'me') dashMyContributions += c;
+      dashTotalContributions += c;
+    });
     const dashSavingsRate = dashEarnedIncome > 0 ? (dashMyContributions / dashEarnedIncome) * 100 : null;
+    const dashTotalTax = current ? (current.federalTax + current.stateTax + current.ficaTax) : 0;
+    const dashAfterTaxIncome = dashEarnedIncome - dashTotalTax;
+    const dashAfterTaxSavingsRate = dashAfterTaxIncome > 0 ? (dashMyContributions / dashAfterTaxIncome) * 100 : null;
     const isPreRetirement = current?.earnedIncome > 0;
     
     const [netWorthRange, setNetWorthRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || MAX_AGE });
@@ -2745,10 +2747,22 @@ function RetirementPlanner() {
           {isPreRetirement && dashSavingsRate !== null && (
             <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
               <div className="text-slate-500 text-xs mb-0.5">Savings Rate</div>
-              <div className="flex items-center gap-2">
-                <span className="text-xl font-bold text-amber-400">{dashSavingsRate.toFixed(1)}%</span>
+              <div className="flex items-center gap-3">
+                <div>
+                  <span className="text-xl font-bold text-amber-400">{dashSavingsRate.toFixed(1)}%</span>
+                  <span className="text-xs text-slate-500 ml-1">gross</span>
+                </div>
+                {dashAfterTaxSavingsRate !== null && (
+                  <div>
+                    <span className="text-xl font-bold text-emerald-400">{dashAfterTaxSavingsRate.toFixed(1)}%</span>
+                    <span className="text-xs text-slate-500 ml-1">net</span>
+                  </div>
+                )}
               </div>
-              <div className="text-xs text-slate-500">{formatCurrency(dashMyContributions)} mine{dashTotalContributions > dashMyContributions ? ` · ${formatCurrency(dashTotalContributions)} total` : ''}</div>
+              <div className="text-xs text-slate-500">
+                {formatCurrency(dashMyContributions)}/yr (your contributions)
+                {dashTotalContributions > dashMyContributions ? ` · ${formatCurrency(dashTotalContributions)} with employer` : ''}
+              </div>
             </div>
           )}
         </div>
@@ -5216,28 +5230,27 @@ function RetirementPlanner() {
     };
     
     const totalBalance = localAccounts.reduce((sum, a) => sum + a.balance, 0);
-    const totalContributions = localAccounts.reduce((sum, a) => sum + a.contribution, 0);
-    // Split contributions by contributor type
-    const myContributions = localAccounts
-      .filter(a => (a.contributor || 'me') === 'me' || (a.contributor || 'me') === 'both')
-      .reduce((sum, a) => sum + a.contribution, 0);
-    const employerContributions = localAccounts
-      .filter(a => a.contributor === 'employer' || a.contributor === 'both')
-      .reduce((sum, a) => sum + a.contribution, 0);
+    // Savings rate: use projection engine data for current year (same source as the table)
+    const currentYearProjection = projections.find(p => p.myAge === personalInfo.myAge);
+    const currentEarnedIncome = currentYearProjection?.earnedIncome || 0;
     
-    // Savings rate: my contributions / current earned + business income (only meaningful pre-retirement)
-    const currentEarnedIncome = incomeStreams
-      .filter(s => {
-        if (s.type !== 'earned_income' && s.type !== 'business') return false;
-        const ownerAge = s.owner === 'me' ? personalInfo.myAge : personalInfo.spouseAge;
-        return ownerAge >= s.startAge && ownerAge <= s.endAge;
-      })
-      .reduce((sum, s) => sum + s.amount, 0);
+    // My contributions from the engine's per-account data (includes contribution growth)
+    const currentContribs = currentYearProjection?.perAccountContributions || {};
+    let myContributions = 0;
+    let employerContributions = 0;
+    localAccounts.forEach(a => {
+      const c = currentContribs[a.id] || 0;
+      const contributor = a.contributor || 'me';
+      if (contributor === 'me') myContributions += c;
+      else if (contributor === 'employer') employerContributions += c;
+      // 'both' — can't split, so excluded from personal savings rate
+      // (users should separate into two rows for accurate tracking)
+    });
+    const totalContributions = myContributions + employerContributions;
+    
     const savingsRate = currentEarnedIncome > 0 ? (myContributions / currentEarnedIncome) * 100 : null;
     
-    // After-tax savings rate: contributions / (earned income - taxes on earned income)
-    // Use current year projection data for actual tax figures
-    const currentYearProjection = projections.find(p => p.myAge === personalInfo.myAge);
+    // After-tax savings rate using engine tax data
     const currentTotalTax = currentYearProjection ? (currentYearProjection.federalTax + currentYearProjection.stateTax + currentYearProjection.ficaTax) : 0;
     const afterTaxIncome = currentEarnedIncome - currentTotalTax;
     const afterTaxSavingsRate = afterTaxIncome > 0 ? (myContributions / afterTaxIncome) * 100 : null;
@@ -5455,7 +5468,7 @@ function RetirementPlanner() {
                         ></div>
                       </div>
                     </div>
-                    <div className="text-xs text-slate-500">of gross income</div>
+                    <div className="text-xs text-slate-500">your contributions / gross income</div>
                   </div>
                 </>
               )}
@@ -5473,7 +5486,7 @@ function RetirementPlanner() {
                         ></div>
                       </div>
                     </div>
-                    <div className="text-xs text-slate-500">of after-tax income ({formatCurrency(afterTaxIncome)})</div>
+                    <div className="text-xs text-slate-500">your contributions / after-tax ({formatCurrency(afterTaxIncome)})</div>
                   </div>
                 </>
               )}
