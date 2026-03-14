@@ -4370,10 +4370,10 @@ function RetirementPlanner() {
         });
       }
       
-      // Check earned income streams that extend past retirement age
+      // Check earned income streams that extend into or past retirement age
       const incomeStreamsPastRetirement = incomeStreams.filter(s => {
         const ownerRetAge = s.owner === 'spouse' ? info.spouseRetirementAge : info.myRetirementAge;
-        return s.type === 'earned_income' && s.endAge > ownerRetAge;
+        return s.type === 'earned_income' && s.endAge >= ownerRetAge;
       });
       if (incomeStreamsPastRetirement.length > 0) {
         warnings.push({
@@ -4388,15 +4388,21 @@ function RetirementPlanner() {
       // Check earned income streams that end before retirement age
       const incomeStreamsBeforeRetirement = incomeStreams.filter(s => {
         const ownerRetAge = s.owner === 'spouse' ? info.spouseRetirementAge : info.myRetirementAge;
-        return s.type === 'earned_income' && s.endAge < ownerRetAge && s.endAge > info.myAge;
+        // Only warn if there's an actual gap — endAge of (retirementAge - 1) is the normal case
+        // (income through age 59, retire at 60 = no gap). Warn if gap is 2+ years.
+        return s.type === 'earned_income' && s.endAge < (ownerRetAge - 1) && s.endAge > info.myAge;
       });
       if (incomeStreamsBeforeRetirement.length > 0) {
         warnings.push({
           type: 'retirement_age_income_gap',
           severity: 'info',
-          message: `${incomeStreamsBeforeRetirement.length} earned income stream(s) end before your retirement age (${info.myRetirementAge}):`,
-          details: incomeStreamsBeforeRetirement.map(s => `"${s.name}" ends at age ${s.endAge}`),
-          action: 'You\'ll have no earned income from that age until retirement. If this is intentional (career change, sabbatical), no action needed.'
+          message: `${incomeStreamsBeforeRetirement.length} earned income stream(s) end well before your retirement age (${info.myRetirementAge}):`,
+          details: incomeStreamsBeforeRetirement.map(s => {
+            const ownerRetAge = s.owner === 'spouse' ? info.spouseRetirementAge : info.myRetirementAge;
+            const gapYears = ownerRetAge - 1 - s.endAge;
+            return `"${s.name}" ends at age ${s.endAge} — ${gapYears} year gap with no earned income before retirement`;
+          }),
+          action: 'You\'ll have no earned income during this gap. The portfolio won\'t be drawn down (you\'re not yet retired), but contributions will stop. If this is intentional (career change, sabbatical), no action needed.'
         });
       }
       
@@ -5229,6 +5235,13 @@ function RetirementPlanner() {
       .reduce((sum, s) => sum + s.amount, 0);
     const savingsRate = currentEarnedIncome > 0 ? (myContributions / currentEarnedIncome) * 100 : null;
     
+    // After-tax savings rate: contributions / (earned income - taxes on earned income)
+    // Use current year projection data for actual tax figures
+    const currentYearProjection = projections.find(p => p.myAge === personalInfo.myAge);
+    const currentTotalTax = currentYearProjection ? (currentYearProjection.federalTax + currentYearProjection.stateTax + currentYearProjection.ficaTax) : 0;
+    const afterTaxIncome = currentEarnedIncome - currentTotalTax;
+    const afterTaxSavingsRate = afterTaxIncome > 0 ? (myContributions / afterTaxIncome) * 100 : null;
+    
     const maxNameWidth = Math.max(8, ...localAccounts.map(a => a.name.length + 2));
     
     return (
@@ -5432,7 +5445,7 @@ function RetirementPlanner() {
                 <>
                   <div className="w-px h-10 bg-slate-700"></div>
                   <div>
-                    <div className="text-slate-500 text-xs mb-0.5">Savings Rate</div>
+                    <div className="text-slate-500 text-xs mb-0.5">Savings Rate (Gross)</div>
                     <div className="flex items-center gap-2">
                       <span className="text-xl font-bold text-amber-400">{savingsRate.toFixed(1)}%</span>
                       <div className="w-24 h-2.5 bg-slate-700 rounded-full overflow-hidden">
@@ -5442,7 +5455,25 @@ function RetirementPlanner() {
                         ></div>
                       </div>
                     </div>
-                    <div className="text-xs text-slate-500">Your savings only</div>
+                    <div className="text-xs text-slate-500">of gross income</div>
+                  </div>
+                </>
+              )}
+              {afterTaxSavingsRate !== null && (
+                <>
+                  <div className="w-px h-10 bg-slate-700"></div>
+                  <div>
+                    <div className="text-slate-500 text-xs mb-0.5">Savings Rate (Net)</div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl font-bold text-emerald-400">{afterTaxSavingsRate.toFixed(1)}%</span>
+                      <div className="w-24 h-2.5 bg-slate-700 rounded-full overflow-hidden">
+                        <div 
+                          className={`h-full rounded-full ${afterTaxSavingsRate >= 50 ? 'bg-emerald-400' : afterTaxSavingsRate >= 25 ? 'bg-amber-400' : 'bg-sky-400'}`}
+                          style={{ width: `${Math.min(afterTaxSavingsRate, 100)}%` }}
+                        ></div>
+                      </div>
+                    </div>
+                    <div className="text-xs text-slate-500">of after-tax income ({formatCurrency(afterTaxIncome)})</div>
                   </div>
                 </>
               )}
@@ -5768,12 +5799,21 @@ function RetirementPlanner() {
                         </th>
                       ))}
                       <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
+                      <th className="text-right py-2 px-2 text-amber-400 font-medium">Gross %</th>
+                      <th className="text-right py-2 px-2 text-emerald-400 font-medium">Net %</th>
                     </tr>
                   </thead>
                   <tbody>
                     {displayYears.map((p, idx) => {
                       const contribs = p.perAccountContributions || {};
                       const total = Object.values(contribs).reduce((s, v) => s + v, 0);
+                      let myTotal = 0;
+                      accounts.forEach(a => {
+                        if ((a.contributor || 'me') === 'me') myTotal += (contribs[a.id] || 0);
+                      });
+                      const grossRate = p.earnedIncome > 0 ? (myTotal / p.earnedIncome) * 100 : null;
+                      const afterTax = p.earnedIncome - (p.federalTax || 0) - (p.stateTax || 0) - (p.ficaTax || 0);
+                      const netRate = afterTax > 0 ? (myTotal / afterTax) * 100 : null;
                       return (
                         <tr key={p.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${total === 0 ? 'opacity-40' : ''}`}>
                           <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
@@ -5788,6 +5828,12 @@ function RetirementPlanner() {
                           })}
                           <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">
                             {total > 0 ? formatCurrency(total) : '—'}
+                          </td>
+                          <td className={`py-1.5 px-2 text-right font-mono ${grossRate !== null && grossRate > 0 ? 'text-amber-400' : 'text-slate-600'}`}>
+                            {grossRate !== null && grossRate > 0 ? `${grossRate.toFixed(1)}%` : '—'}
+                          </td>
+                          <td className={`py-1.5 px-2 text-right font-mono ${netRate !== null && netRate > 0 ? 'text-emerald-400' : 'text-slate-600'}`}>
+                            {netRate !== null && netRate > 0 ? `${netRate.toFixed(1)}%` : '—'}
                           </td>
                         </tr>
                       );
@@ -5817,6 +5863,8 @@ function RetirementPlanner() {
                           <th className="text-right py-2 px-2 text-purple-400 font-medium">Roth</th>
                           <th className="text-right py-2 px-2 text-sky-400 font-medium">Brokerage/HSA</th>
                           <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
+                          <th className="text-right py-2 px-2 text-amber-400 font-medium">Gross %</th>
+                          <th className="text-right py-2 px-2 text-emerald-400 font-medium">Net %</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -5830,6 +5878,14 @@ function RetirementPlanner() {
                             else brokerageC += c;
                           });
                           const total = preTaxC + rothC + brokerageC;
+                          // Only count "me" contributions for savings rate (exclude employer)
+                          let myTotal = 0;
+                          accounts.forEach(a => {
+                            if ((a.contributor || 'me') === 'me') myTotal += (contribs[a.id] || 0);
+                          });
+                          const grossRate = p.earnedIncome > 0 ? (myTotal / p.earnedIncome) * 100 : null;
+                          const afterTax = p.earnedIncome - (p.federalTax || 0) - (p.stateTax || 0) - (p.ficaTax || 0);
+                          const netRate = afterTax > 0 ? (myTotal / afterTax) * 100 : null;
                           return (
                             <tr key={p.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${total === 0 ? 'opacity-40' : ''}`}>
                               <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
@@ -5845,6 +5901,12 @@ function RetirementPlanner() {
                               </td>
                               <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">
                                 {total > 0 ? formatCurrency(total) : '—'}
+                              </td>
+                              <td className={`py-1.5 px-2 text-right font-mono ${grossRate !== null && grossRate > 0 ? 'text-amber-400' : 'text-slate-600'}`}>
+                                {grossRate !== null && grossRate > 0 ? `${grossRate.toFixed(1)}%` : '—'}
+                              </td>
+                              <td className={`py-1.5 px-2 text-right font-mono ${netRate !== null && netRate > 0 ? 'text-emerald-400' : 'text-slate-600'}`}>
+                                {netRate !== null && netRate > 0 ? `${netRate.toFixed(1)}%` : '—'}
                               </td>
                             </tr>
                           );
