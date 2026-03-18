@@ -1,7 +1,5 @@
 // React and Recharts globals are provided by index.html
 // Do not add import statements - this file runs in browser via Babel transform
-const { useState, useMemo, useEffect, useCallback, memo } = React;
-const { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area, ReferenceLine } = Recharts;
 
 // ============================================
 // CONSTANTS - Extracted magic numbers and repeated arrays
