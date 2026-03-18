@@ -54,8 +54,8 @@
     (async function() {
       try {
         document.getElementById('load-status').textContent = 'Fetching app code...';
-        var resp = await fetch('retirement-planner-v20.jsx');
-        if (!resp.ok) throw new Error('Failed to load retirement-planner-v20.jsx: HTTP ' + resp.status);
+        var resp = await fetch('retirement-planner-v21.jsx');
+        if (!resp.ok) throw new Error('Failed to load retirement-planner-v21.jsx: HTTP ' + resp.status);
         var jsxSource = await resp.text();
 
         document.getElementById('load-status').textContent = 'Compiling (' + Math.round(jsxSource.length/1024) + ' KB)...';
