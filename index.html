@@ -54,7 +54,7 @@
     (async function() {
       try {
         document.getElementById('load-status').textContent = 'Fetching app code...';
-        var resp = await fetch('retirement-planner-v20.jsx');
+        var resp = await fetch('retirement-planner-v20.jsx'); // filename kept as v20 for compatibility — replace file contents only
         if (!resp.ok) throw new Error('Failed to load retirement-planner-v20.jsx: HTTP ' + resp.status);
         var jsxSource = await resp.text();
 
@@ -70,10 +70,10 @@
           + 'Tooltip=Recharts.Tooltip,Legend=Recharts.Legend,ResponsiveContainer=Recharts.ResponsiveContainer,'
           + 'ComposedChart=Recharts.ComposedChart,Area=Recharts.Area,ReferenceLine=Recharts.ReferenceLine;';
 
-        // Strip any const destructuring of React/Recharts from compiled code
+        // Strip any const/var destructuring of React/Recharts from compiled code
         var code = transformed.code;
-        code = code.replace(/^.*useState.*useMemo.*useEffect.*=\s*React;?\s*$/m, '');
-        code = code.replace(/^.*LineChart.*BarChart.*=\s*Recharts;?\s*$/m, '');
+        code = code.replace(/^(const|var)\s*\{[^}]*useState[^}]*\}\s*=\s*React;?\s*$/m, '');
+        code = code.replace(/^(const|var)\s*\{[^}]*LineChart[^}]*\}\s*=\s*Recharts;?\s*$/m, '');
 
         // Execute in global scope
         (0, eval)(globals + '\n' + code);
