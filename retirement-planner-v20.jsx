@@ -1,6 +1,9 @@
 // React and Recharts globals are provided by index.html
 // Do not add import statements - this file runs in browser via Babel transform
 
+// Destructure React hooks and utilities from the React global
+const { useState, useEffect, useMemo, useCallback, useRef, memo } = React;
+
 // ============================================
 // CONSTANTS - Extracted magic numbers and repeated arrays
 // ============================================
@@ -752,7 +755,6 @@ const DEFAULT_PERSONAL_INFO = {
   rothConversionStartAge: 65,    // Age to begin converting
   rothConversionEndAge: 74,      // Age to stop converting (typically just before RMDs dominate)
   rothConversionBracket: '',     // If set ('22%','24%','32%'), fill to this bracket instead of fixed amount
-  rothConversionTaxSource: 'withdrawal', // 'withdrawal' = normal withdrawal priority, 'brokerage' = pay from brokerage
   rothConversionTaxSource: 'withdrawal', // 'withdrawal' = tax paid via normal withdrawal priority, 'brokerage' = tax paid from brokerage account
   legacyAge: 95,                 // Planning horizon / legacy target age
   // Survivor modeling: when enabled, models the financial impact of a spouse dying
@@ -1271,10 +1273,11 @@ function RetirementPlanner() {
       incomeStreams,
       assets,
       oneTimeEvents,
+      recurringExpenses,
       dashboardVisibility,
       scenarios,
       exportDate: new Date().toISOString(),
-      version: '1.7'  // v19 - P1 fixes + one-time events + survivor modeling
+      version: '2.1'  // v21 - recurring expenses + Roth conversion improvements
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -10696,7 +10699,7 @@ function RetirementPlanner() {
               </div>
               <h1 className="text-base font-bold text-slate-100">Retirement</h1>
               <h1 className="text-base font-bold text-slate-100 -mt-1">Planner</h1>
-              <p className="text-xs text-slate-500 mt-1">v1.7</p>
+              <p className="text-xs text-slate-500 mt-1">v2.1</p>
             </div>
           )}
         </div>
