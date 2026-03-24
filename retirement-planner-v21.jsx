@@ -2576,7 +2576,8 @@ function RetirementPlanner() {
         { id: 'taxplanning', label: 'Tax Planning', icon: '📋' },
         { id: 'withdrawal', label: 'Withdrawals', icon: '📤' },
         { id: 'montecarlo', label: 'Monte Carlo', icon: '🎲' },
-        { id: 'stresstest', label: 'Stress Test', icon: '⚡' }
+        { id: 'stresstest', label: 'Stress Test', icon: '⚡' },
+        { id: 'sensitivity', label: 'Sensitivity', icon: '🔬' }
       ]
     },
     {
@@ -4732,6 +4733,57 @@ function RetirementPlanner() {
             details: activeEarned.map(s => `"${s.name}" runs to age ${s.endAge}`),
             action: 'The engine treats you as retired (withdrawing from portfolio). Earned income will supplement but not prevent withdrawals. This is fine for part-time work in retirement.'
           });
+        }
+      }
+      
+      // Check if spouse earned income endAge doesn't match spouseRetirementAge
+      // The engine uses myRetirementAge to trigger portfolio withdrawals, but spouse income
+      // streams have their own endAge. If spouse earned income ends at a different age than
+      // spouseRetirementAge, the user may have a modeling gap they're not aware of.
+      if (info.hasSpouse || info.filingStatus === 'married_joint' || info.filingStatus === 'married_separate') {
+        const spouseEarned = incomeStreams.filter(s => s.type === 'earned_income' && s.owner === 'spouse');
+        const spouseRetAge = info.spouseRetirementAge || 65;
+        
+        // Spouse earned income that doesn't end at spouseRetirementAge - 1 (normal case)
+        const spouseMismatched = spouseEarned.filter(s => {
+          // Normal: endAge = retirementAge - 1 (earns through age 64, retires at 65)
+          // Also OK: endAge = retirementAge (earns through retirement year)
+          return Math.abs(s.endAge - (spouseRetAge - 1)) > 1 && s.endAge > info.spouseAge;
+        });
+        
+        if (spouseMismatched.length > 0) {
+          const isEarly = spouseMismatched.some(s => s.endAge < spouseRetAge - 1);
+          const isLate = spouseMismatched.some(s => s.endAge > spouseRetAge);
+          
+          warnings.push({
+            type: 'spouse_income_retirement_mismatch',
+            severity: 'warning',
+            message: `Spouse earned income end age doesn't match spouse retirement age (${spouseRetAge}):`,
+            details: spouseMismatched.map(s => {
+              const diff = s.endAge - (spouseRetAge - 1);
+              const direction = diff > 0 ? `continues ${diff} year(s) past retirement` : `ends ${Math.abs(diff)} year(s) before retirement`;
+              return `"${s.name}" ends at age ${s.endAge} — ${direction}`;
+            }),
+            action: isEarly 
+              ? 'The spouse will have no earned income before their retirement age. Contributions to spouse accounts will stop but no portfolio withdrawals occur until YOUR retirement age. Update the income end age or spouse retirement age if this is unintentional.'
+              : isLate 
+              ? 'Spouse earned income continuing past retirement age is fine (part-time work). The spouseRetirementAge field is informational — the engine uses each income stream\'s end age directly.'
+              : 'Update the income end age on the Income tab or the spouse retirement age in Personal Info to align them.'
+          });
+        }
+        
+        // Warn if spouse has no earned income streams at all but has a retirement age set
+        if (spouseEarned.length === 0 && info.spouseAge && info.spouseAge < spouseRetAge) {
+          const spouseAcctsWithContributions = accounts.filter(a => a.owner === 'spouse' && a.contribution > 0);
+          if (spouseAcctsWithContributions.length > 0) {
+            warnings.push({
+              type: 'spouse_no_income_but_contributing',
+              severity: 'info',
+              message: 'Spouse has account contributions but no earned income stream:',
+              details: spouseAcctsWithContributions.map(a => `"${a.name}" contributes ${formatCurrency(a.contribution)}/year`),
+              action: 'Spouse contributions are being modeled but there\'s no earned income to fund them. Add a spouse earned income stream on the Income tab, or this may be intentional (e.g., funded by your income in a community property state).'
+            });
+          }
         }
       }
       
@@ -10168,8 +10220,15 @@ function RetirementPlanner() {
             survivor SS benefits, state taxes, FICA, and one-time events.
             ═══════════════════════════════════════════════════════════════════ */}
         {(() => {
-          const legacyAge = personalInfo.legacyAge || 95;
+          // Use the life expectancy from the top of this tab (not personalInfo.legacyAge)
+          // so that both the simple breakeven analysis and the full-plan analysis 
+          // use the same planning horizon. This eliminates the confusing discrepancy
+          // where the two sections recommend different claiming ages.
+          const legacyAge = lifeExpectancy; // From the slider at top of this tab
           const isMarried = personalInfo.filingStatus === 'married_joint' && spouseSSStream;
+          
+          // Override legacyAge in personalInfo for the projections run below
+          const piWithLifeExp = { ...personalInfo, legacyAge: legacyAge };
           
           // For married: build grid of my × spouse claiming ages
           // For single: just vary my age
@@ -10191,7 +10250,7 @@ function RetirementPlanner() {
                 return s;
               });
               
-              const proj = computeProjections(personalInfo, accounts, modifiedStreams, assets, oneTimeEvents, recurringExpenses);
+              const proj = computeProjections(piWithLifeExp, accounts, modifiedStreams, assets, oneTimeEvents, recurringExpenses);
               
               const retirementYears = proj.filter(p => p.myAge >= personalInfo.myRetirementAge);
               const lifetimeTax = retirementYears.reduce((sum, p) => sum + p.totalTax, 0);
@@ -10261,10 +10320,13 @@ function RetirementPlanner() {
               {/* Winner Summary */}
               <div className={`${cardStyle} border-l-4 border-l-emerald-500`}>
                 <h4 className="text-lg font-semibold text-emerald-400 mb-3">📊 Full Plan Impact Analysis</h4>
-                <p className="text-slate-400 text-sm mb-4">
+                <p className="text-slate-400 text-sm mb-2">
                   {isMarried 
                     ? `Runs your complete retirement plan for ${myAges.length * spouseAges.length} combinations of your and your spouse's claiming ages — including taxes, withdrawals, RMDs, growth, and survivor benefits — to show the true financial impact.`
                     : 'Runs your complete retirement plan for each claiming age — including taxes, portfolio withdrawals, RMDs, and growth — to show the true financial impact beyond simple breakeven math.'}
+                </p>
+                <p className="text-slate-500 text-xs mb-4">
+                  Using life expectancy of {legacyAge} from the controls above. Both the breakeven analysis and this full-plan analysis use the same planning horizon so their recommendations align. Adjust the life expectancy slider above to see how longevity affects the optimal strategy.
                 </p>
                 {isMarried && personalInfo.survivorModelEnabled && (
                   <div className="mb-4 p-3 bg-sky-900/30 border border-sky-700/50 rounded-lg text-sm">
@@ -10635,6 +10697,493 @@ function RetirementPlanner() {
     );
   };
 
+  // ============================================
+  // Sensitivity Analysis Tab
+  // ============================================
+  // Shows how the plan changes when you vary one input at a time.
+  // More intuitive than Monte Carlo — answers "what if returns are 1% lower?"
+  // or "what if I spend $10K more?" with a single clear comparison.
+  const SensitivityTab = () => {
+    const retirementAge = personalInfo.myRetirementAge;
+    const endAge = personalInfo.legacyAge || 95;
+    const baseRetirementProj = projections.find(p => p.myAge === retirementAge);
+    const baseEndProj = projections.find(p => p.myAge === endAge);
+    
+    const [results, setResults] = useState(null);
+    const [isRunning, setIsRunning] = useState(false);
+    
+    // Define the sensitivity variables and their ranges
+    const sensitivityVars = [
+      {
+        id: 'returns',
+        label: 'Investment Returns (CAGR)',
+        baseLabel: 'Current CAGR',
+        baseValue: accounts.length > 0 
+          ? (accounts.reduce((sum, a) => sum + a.cagr * a.balance, 0) / Math.max(1, accounts.reduce((sum, a) => sum + a.balance, 0)))
+          : 0.07,
+        steps: [-0.02, -0.01, 0, 0.01, 0.02],
+        formatStep: (base, delta) => `${((base + delta) * 100).toFixed(1)}%`,
+        formatDelta: (delta) => `${delta > 0 ? '+' : ''}${(delta * 100).toFixed(0)}%`,
+        apply: (delta) => {
+          const modifiedAccounts = accounts.map(a => ({ ...a, cagr: Math.max(0, a.cagr + delta) }));
+          return computeProjections(personalInfo, modifiedAccounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
+        }
+      },
+      {
+        id: 'retirement_age',
+        label: 'Retirement Age',
+        baseLabel: 'Current age',
+        baseValue: personalInfo.myRetirementAge,
+        steps: [-2, -1, 0, 1, 2],
+        formatStep: (base, delta) => `Age ${base + delta}`,
+        formatDelta: (delta) => `${delta > 0 ? '+' : ''}${delta} yr`,
+        apply: (delta) => {
+          const newRetAge = personalInfo.myRetirementAge + delta;
+          const modifiedPI = { ...personalInfo, myRetirementAge: newRetAge };
+          
+          // Adjust earned income streams: shift endAge by the same delta
+          // Only adjust streams whose endAge currently aligns with retirement age
+          // (within 1 year), so we don't break intentionally early/late income
+          const modifiedStreams = incomeStreams.map(s => {
+            if (s.type === 'earned_income') {
+              const ownerRetAge = s.owner === 'spouse' 
+                ? personalInfo.spouseRetirementAge 
+                : personalInfo.myRetirementAge;
+              // If this stream's endAge is close to the owner's retirement age,
+              // shift it in lockstep (e.g., salary ending at 64 when retiring at 65)
+              if (Math.abs(s.endAge - (ownerRetAge - 1)) <= 1 || Math.abs(s.endAge - ownerRetAge) <= 1) {
+                return { ...s, endAge: s.endAge + (s.owner === 'me' ? delta : 0) };
+              }
+            }
+            return s;
+          });
+          
+          // Adjust account contribution stop ages similarly
+          const modifiedAccounts = accounts.map(a => {
+            const ownerRetAge = a.owner === 'spouse' 
+              ? personalInfo.spouseRetirementAge 
+              : personalInfo.myRetirementAge;
+            // If stopAge aligns with retirement age, shift it
+            if (Math.abs(a.stopAge - ownerRetAge) <= 1 && a.owner !== 'spouse') {
+              return { ...a, stopAge: a.stopAge + delta };
+            }
+            return a;
+          });
+          
+          return computeProjections(modifiedPI, modifiedAccounts, modifiedStreams, assets, oneTimeEvents, recurringExpenses);
+        }
+      },
+      {
+        id: 'spending',
+        label: 'Annual Spending Goal',
+        baseLabel: 'Current goal',
+        baseValue: personalInfo.desiredRetirementIncome,
+        steps: [-20000, -10000, 0, 10000, 20000],
+        formatStep: (base, delta) => formatCurrency(base + delta),
+        formatDelta: (delta) => `${delta > 0 ? '+' : ''}${formatCurrency(delta)}`,
+        apply: (delta) => {
+          const modifiedPI = { ...personalInfo, desiredRetirementIncome: Math.max(0, personalInfo.desiredRetirementIncome + delta) };
+          return computeProjections(modifiedPI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
+        }
+      },
+      {
+        id: 'inflation',
+        label: 'Inflation Rate',
+        baseLabel: 'Current rate',
+        baseValue: personalInfo.inflationRate,
+        steps: [-0.01, -0.005, 0, 0.005, 0.01],
+        formatStep: (base, delta) => `${((base + delta) * 100).toFixed(1)}%`,
+        formatDelta: (delta) => `${delta > 0 ? '+' : ''}${(delta * 100).toFixed(1)}%`,
+        apply: (delta) => {
+          const modifiedPI = { ...personalInfo, inflationRate: Math.max(0, personalInfo.inflationRate + delta) };
+          return computeProjections(modifiedPI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
+        }
+      },
+      {
+        id: 'ss_age',
+        label: 'Social Security Claiming Age',
+        baseLabel: 'Current claim age',
+        baseValue: (() => {
+          const mySSStream = incomeStreams.find(s => s.type === 'social_security' && s.owner === 'me');
+          return mySSStream ? mySSStream.startAge : 67;
+        })(),
+        // Test every claiming age from 62 to 70 — steps are absolute ages, not deltas
+        steps: [62, 63, 64, 65, 66, 67, 68, 69, 70],
+        isAbsolute: true, // Flag: steps are absolute values, not deltas from base
+        formatStep: (base, step) => `Age ${step}`,
+        formatDelta: (step) => {
+          const mySSStream = incomeStreams.find(s => s.type === 'social_security' && s.owner === 'me');
+          const baseAge = mySSStream ? mySSStream.startAge : 67;
+          const diff = step - baseAge;
+          return diff === 0 ? 'current' : `${diff > 0 ? '+' : ''}${diff} yr`;
+        },
+        apply: (claimAge) => {
+          const modifiedStreams = incomeStreams.map(s => {
+            if (s.type === 'social_security' && s.owner === 'me') {
+              // Recalculate benefit amount based on new claiming age
+              const pia = s.pia || Math.round(s.amount / 12);
+              const birthYear = personalInfo.myBirthYear || (new Date().getFullYear() - personalInfo.myAge);
+              const newAnnualBenefit = calculateSSBenefit(pia, claimAge, birthYear) * 12;
+              return { ...s, startAge: claimAge, amount: newAnnualBenefit };
+            }
+            return s;
+          });
+          return computeProjections(personalInfo, accounts, modifiedStreams, assets, oneTimeEvents, recurringExpenses);
+        }
+      },
+      {
+        id: 'contributions',
+        label: 'Annual Contributions',
+        baseLabel: 'Current total',
+        baseValue: accounts.reduce((sum, a) => sum + (a.contribution || 0), 0),
+        steps: [-10000, -5000, 0, 5000, 10000],
+        formatStep: (base, delta) => formatCurrency(base + delta),
+        formatDelta: (delta) => `${delta > 0 ? '+' : ''}${formatCurrency(delta)}`,
+        apply: (delta) => {
+          // IRS annual contribution limits (2025/2026)
+          // These are EMPLOYEE limits — employer match is separate and not capped here.
+          // Accounts with contributor='employer' or 'both' may exceed these limits because
+          // the combined amount includes employer match. We only cap 'me' contributions.
+          const CONTRIBUTION_LIMITS = {
+            '401k':           { base: 23500, catchUp50: 7500, superCatchUp60: 11250 },
+            'roth_401k':      { base: 23500, catchUp50: 7500, superCatchUp60: 11250 },
+            '403b':           { base: 23500, catchUp50: 7500, superCatchUp60: 11250 },
+            'roth_403b':      { base: 23500, catchUp50: 7500, superCatchUp60: 11250 },
+            '457b':           { base: 23500, catchUp50: 7500, superCatchUp60: 0 },
+            'roth_457b':      { base: 23500, catchUp50: 7500, superCatchUp60: 0 },
+            'traditional_ira':{ base: 7000,  catchUp50: 1000, superCatchUp60: 0 },
+            'roth_ira':       { base: 7000,  catchUp50: 1000, superCatchUp60: 0 },
+            'hsa':            { base: 4300,  catchUp55: 1000 },  // Single; family is $8,550
+            'brokerage':      { base: Infinity } // No limit
+          };
+          
+          const getLimit = (accountType, ownerAge, filingStatus) => {
+            const limits = CONTRIBUTION_LIMITS[accountType];
+            if (!limits) return Infinity;
+            if (accountType === 'hsa') {
+              let limit = filingStatus === 'married_joint' ? 8550 : limits.base;
+              if (ownerAge >= 55) limit += (limits.catchUp55 || 0);
+              return limit;
+            }
+            let limit = limits.base;
+            if (ownerAge >= 50) limit += (limits.catchUp50 || 0);
+            // SECURE 2.0 super catch-up for ages 60-63 (replaces regular catch-up)
+            if (ownerAge >= 60 && ownerAge <= 63 && limits.superCatchUp60) {
+              limit = limits.base + limits.superCatchUp60;
+            }
+            return limit;
+          };
+          
+          // Distribute delta proportionally across accounts with contributions,
+          // capped at IRS limits for employee contributions
+          const totalContrib = accounts.reduce((sum, a) => sum + (a.contribution || 0), 0);
+          const modifiedAccounts = accounts.map(a => {
+            if (a.contribution > 0 && totalContrib > 0) {
+              const share = a.contribution / totalContrib;
+              let newContrib = Math.max(0, a.contribution + delta * share);
+              
+              // Only enforce limits on employee contributions (contributor = 'me')
+              // 'employer' and 'both' include match which has its own 415(c) total limit
+              if ((a.contributor || 'me') === 'me') {
+                const ownerAge = a.owner === 'spouse' ? personalInfo.spouseAge : personalInfo.myAge;
+                const limit = getLimit(a.type, ownerAge, personalInfo.filingStatus);
+                newContrib = Math.min(newContrib, limit);
+              }
+              
+              return { ...a, contribution: newContrib };
+            }
+            return a;
+          });
+          return computeProjections(personalInfo, modifiedAccounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
+        }
+      }
+    ];
+    
+    const runAnalysis = () => {
+      setIsRunning(true);
+      
+      // Use setTimeout to let the UI update before heavy computation
+      setTimeout(() => {
+        try {
+          const analysisResults = sensitivityVars.map(variable => {
+            const stepResults = variable.steps.map(step => {
+              // For absolute-step variables (like SS age 62-70), step IS the value.
+              // For delta-step variables, step is added to the base.
+              const isBase = variable.isAbsolute 
+                ? step === variable.baseValue 
+                : step === 0;
+              const delta = variable.isAbsolute ? step - variable.baseValue : step;
+              
+              const proj = isBase ? projections : variable.apply(step);
+              
+              // For retirement age variations, use the modified retirement age
+              const scenarioRetAge = variable.id === 'retirement_age' 
+                ? retirementAge + delta 
+                : retirementAge;
+              
+              const atRetirement = proj.find(p => p.myAge === scenarioRetAge);
+              const atEnd = proj.find(p => p.myAge === endAge);
+              const failureAge = proj.find(p => p.myAge >= scenarioRetAge && p.totalPortfolio <= 0);
+              
+              // Calculate lifetime taxes over the full projection (not just post-retirement)
+              // This captures how retirement age shifts affect total tax burden
+              const lifetimeTax = proj.reduce((sum, p) => sum + (p.totalTax || 0), 0);
+              const lifetimeWithdrawals = proj.filter(p => p.myAge >= scenarioRetAge)
+                .reduce((sum, p) => sum + (p.portfolioWithdrawal || 0), 0);
+              
+              return {
+                delta,
+                step,
+                label: variable.formatStep(variable.baseValue, step),
+                deltaLabel: variable.formatDelta(step),
+                isBase,
+                portfolioAtRetirement: atRetirement?.totalPortfolio || 0,
+                portfolioAtEnd: atEnd?.totalPortfolio || 0,
+                survives: !failureAge,
+                failureAge: failureAge?.myAge || null,
+                lifetimeTax,
+                lifetimeWithdrawals,
+                netIncomeAtRetirement: atRetirement?.netIncome || 0
+              };
+            });
+            
+            return {
+              ...variable,
+              stepResults
+            };
+          });
+          
+          setResults(analysisResults);
+        } catch (err) {
+          console.error('Sensitivity analysis error:', err);
+        }
+        setIsRunning(false);
+      }, 50);
+    };
+    
+    // Color scale for impact cells
+    const getImpactColor = (value, baseValue) => {
+      if (baseValue === 0) return '';
+      const pctChange = (value - baseValue) / Math.abs(baseValue);
+      if (pctChange > 0.1) return 'text-emerald-400';
+      if (pctChange > 0.02) return 'text-emerald-400/70';
+      if (pctChange < -0.1) return 'text-red-400';
+      if (pctChange < -0.02) return 'text-red-400/70';
+      return 'text-slate-300';
+    };
+    
+    const getImpactBg = (value, baseValue) => {
+      if (baseValue === 0) return '';
+      const pctChange = (value - baseValue) / Math.abs(baseValue);
+      if (pctChange > 0.1) return 'bg-emerald-500/10';
+      if (pctChange < -0.1) return 'bg-red-500/10';
+      return '';
+    };
+    
+    const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine, Cell } = window.Recharts || {};
+    
+    return (
+      <div className="space-y-6">
+        <div>
+          <h3 className="text-xl font-semibold text-slate-100 mb-2">Sensitivity Analysis</h3>
+          <p className="text-slate-400 text-sm">
+            See how your retirement plan changes when you adjust one variable at a time. 
+            This answers questions like "what if returns are 1% lower?" or "what if I spend $10K more per year?" 
+            — making it easy to identify which assumptions your plan is most sensitive to.
+          </p>
+        </div>
+        
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-200 mb-3">Your Current Baseline</h4>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+            <div>
+              <div className="text-xs text-slate-500">Portfolio at Retirement</div>
+              <div className="text-lg font-bold text-emerald-400">{formatCurrency(baseRetirementProj?.totalPortfolio)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Portfolio at Age {endAge}</div>
+              <div className="text-lg font-bold text-amber-400">{formatCurrency(baseEndProj?.totalPortfolio)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Spending Goal</div>
+              <div className="text-lg font-bold text-slate-200">{formatCurrency(personalInfo.desiredRetirementIncome)}/yr</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Retire at / Plan to</div>
+              <div className="text-lg font-bold text-slate-200">Age {retirementAge} → {endAge}</div>
+            </div>
+          </div>
+          <button 
+            onClick={runAnalysis} 
+            disabled={isRunning}
+            className="px-6 py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 font-semibold rounded-lg transition-all shadow-lg disabled:opacity-50"
+          >
+            {isRunning ? '⏳ Analyzing...' : '🔬 Run Sensitivity Analysis'}
+          </button>
+          <p className="text-xs text-slate-500 mt-2">
+            Runs your full projection engine {sensitivityVars.reduce((sum, v) => sum + v.steps.length, 0)} times (one per variable × step combination). May take a few seconds.
+          </p>
+        </div>
+        
+        {results && (
+          <>
+            {/* Tornado chart: which variables matter most */}
+            <div className={cardStyle}>
+              <h4 className="text-lg font-semibold text-slate-200 mb-2">Impact Ranking: Which Variables Matter Most?</h4>
+              <p className="text-xs text-slate-500 mb-4">Shows the range of ending portfolio values when each variable is adjusted to its minimum and maximum test values. Wider bars = your plan is more sensitive to that variable.</p>
+              
+              {(() => {
+                // Build tornado data: for each variable, get the min and max portfolio-at-end
+                const basePortfolio = results[0]?.stepResults.find(s => s.isBase)?.portfolioAtEnd || 0;
+                const tornadoData = results.map(variable => {
+                  const portfolios = variable.stepResults.map(s => s.portfolioAtEnd);
+                  const minPortfolio = Math.min(...portfolios);
+                  const maxPortfolio = Math.max(...portfolios);
+                  return {
+                    name: variable.label,
+                    downside: minPortfolio - basePortfolio,
+                    upside: maxPortfolio - basePortfolio,
+                    range: maxPortfolio - minPortfolio
+                  };
+                }).sort((a, b) => b.range - a.range);
+                
+                return (
+                  <div className="space-y-3">
+                    {tornadoData.map((item, idx) => {
+                      const maxRange = Math.max(...tornadoData.map(d => d.range));
+                      const barScale = maxRange > 0 ? 100 / maxRange : 1;
+                      const downsideWidth = Math.abs(item.downside) * barScale;
+                      const upsideWidth = Math.abs(item.upside) * barScale;
+                      
+                      return (
+                        <div key={idx} className="flex items-center gap-3">
+                          <div className="w-40 text-sm text-slate-300 text-right flex-shrink-0 truncate">{item.name}</div>
+                          <div className="flex-1 flex items-center h-8">
+                            {/* Downside bar (left, red) */}
+                            <div className="flex-1 flex justify-end">
+                              <div 
+                                className="h-6 bg-red-500/60 rounded-l flex items-center justify-start pl-1"
+                                style={{ width: `${Math.max(2, downsideWidth)}%` }}
+                              >
+                                {downsideWidth > 15 && (
+                                  <span className="text-[10px] text-red-200 whitespace-nowrap">{formatCurrency(item.downside)}</span>
+                                )}
+                              </div>
+                            </div>
+                            {/* Center line */}
+                            <div className="w-px h-8 bg-slate-500 flex-shrink-0" />
+                            {/* Upside bar (right, green) */}
+                            <div className="flex-1">
+                              <div 
+                                className="h-6 bg-emerald-500/60 rounded-r flex items-center justify-end pr-1"
+                                style={{ width: `${Math.max(2, upsideWidth)}%` }}
+                              >
+                                {upsideWidth > 15 && (
+                                  <span className="text-[10px] text-emerald-200 whitespace-nowrap">+{formatCurrency(item.upside)}</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="w-24 text-xs text-slate-500 flex-shrink-0">
+                            Range: {formatCurrency(item.range)}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <div className="flex items-center gap-3 mt-1">
+                      <div className="w-40" />
+                      <div className="flex-1 flex text-[10px] text-slate-600">
+                        <div className="flex-1 text-right pr-1">← Worse</div>
+                        <div className="w-px" />
+                        <div className="flex-1 pl-1">Better →</div>
+                      </div>
+                      <div className="w-24" />
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+            
+            {/* Detailed results per variable */}
+            {results.map((variable, varIdx) => (
+              <div key={variable.id} className={cardStyle}>
+                <h4 className="text-lg font-semibold text-slate-200 mb-1">{variable.label}</h4>
+                <p className="text-xs text-slate-500 mb-3">
+                  Base: {variable.formatStep(variable.baseValue, 0)}
+                </p>
+                
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-700/50">
+                        <th className="text-left py-2 px-3 text-slate-400 font-medium">Scenario</th>
+                        <th className="text-right py-2 px-3 text-slate-400 font-medium">Portfolio at {retirementAge}</th>
+                        <th className="text-right py-2 px-3 text-slate-400 font-medium">Portfolio at {endAge}</th>
+                        <th className="text-right py-2 px-3 text-slate-400 font-medium">vs Base</th>
+                        <th className="text-center py-2 px-3 text-slate-400 font-medium">Survives?</th>
+                        <th className="text-right py-2 px-3 text-slate-400 font-medium">Lifetime Tax</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {variable.stepResults.map((step, stepIdx) => {
+                        const baseEnd = variable.stepResults.find(s => s.isBase)?.portfolioAtEnd || 0;
+                        const diff = step.portfolioAtEnd - baseEnd;
+                        
+                        return (
+                          <tr key={stepIdx} className={`border-b border-slate-800/50 ${step.isBase ? 'bg-amber-500/10' : ''} ${getImpactBg(step.portfolioAtEnd, baseEnd)}`}>
+                            <td className="py-2 px-3">
+                              <span className={`font-medium ${step.isBase ? 'text-amber-400' : 'text-slate-200'}`}>
+                                {step.label}
+                              </span>
+                              {step.isBase && <span className="text-amber-500 text-xs ml-2">◆ Current</span>}
+                              {!step.isBase && <span className="text-slate-600 text-xs ml-2">({step.deltaLabel})</span>}
+                            </td>
+                            <td className="py-2 px-3 text-right text-slate-300">{formatCurrency(step.portfolioAtRetirement)}</td>
+                            <td className={`py-2 px-3 text-right font-medium ${getImpactColor(step.portfolioAtEnd, baseEnd)}`}>
+                              {formatCurrency(step.portfolioAtEnd)}
+                            </td>
+                            <td className={`py-2 px-3 text-right ${diff > 0 ? 'text-emerald-400' : diff < 0 ? 'text-red-400' : 'text-slate-500'}`}>
+                              {step.isBase ? '—' : `${diff > 0 ? '+' : ''}${formatCurrency(diff)}`}
+                            </td>
+                            <td className="py-2 px-3 text-center">
+                              {step.survives 
+                                ? <span className="text-emerald-400">✓</span>
+                                : <span className="text-red-400">✗ {step.failureAge}</span>
+                              }
+                            </td>
+                            <td className="py-2 px-3 text-right text-slate-400">{formatCurrency(step.lifetimeTax)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+            
+            {/* Key insight */}
+            <div className="p-4 bg-amber-900/20 border border-amber-700/50 rounded-lg">
+              <p className="text-amber-300 text-sm font-medium mb-1">💡 How to Use This</p>
+              <p className="text-slate-400 text-sm">
+                The tornado chart at the top shows which variables have the biggest impact on your ending portfolio. 
+                Focus your planning effort on the variables with the widest bars — those are where small changes 
+                in assumptions create the largest swings in outcomes. Variables with narrow bars are ones where 
+                your plan is resilient even if your assumptions are off.
+              </p>
+            </div>
+          </>
+        )}
+        
+        {!results && !isRunning && (
+          <div className="text-center py-12 text-slate-500">
+            <p className="text-lg mb-2">Click "Run Sensitivity Analysis" to see what matters most</p>
+            <p className="text-sm">Tests how your plan responds to changes in returns, spending, retirement age, inflation, SS timing, and contributions</p>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const FAQTab = () => {
     const [openSection, setOpenSection] = useState(null);
     
@@ -10939,7 +11488,27 @@ function RetirementPlanner() {
         ]
       },
       {
-        category: "Data & Privacy",
+        category: "Sensitivity Analysis",
+        items: [
+          {
+            q: "What does the sensitivity analysis show?",
+            a: "The sensitivity analysis varies one input at a time while holding everything else constant, then runs your full projection engine for each variation. This tells you exactly how much your ending portfolio changes for each unit of change in returns, spending, retirement age, inflation, SS claiming age, and contributions. It answers 'what if?' questions with precision."
+          },
+          {
+            q: "What is the tornado chart?",
+            a: "The tornado chart ranks all variables by their impact on your ending portfolio. The widest bar = the variable your plan is most sensitive to. Red bars show the downside (what happens if that variable goes against you), green bars show the upside. If your plan has a massive red bar for 'Investment Returns', that means your outcome is highly dependent on market performance — you may want to build more buffers."
+          },
+          {
+            q: "How is this different from Monte Carlo?",
+            a: "Monte Carlo randomizes ALL variables simultaneously across thousands of runs to produce a probability of success. Sensitivity analysis changes ONE variable at a time to show exactly how much each input matters. They're complementary: Monte Carlo tells you 'how likely is success?', sensitivity tells you 'which assumption should I worry about most?'"
+          },
+          {
+            q: "What should I do with the results?",
+            a: "Focus on the variables with the widest bars in the tornado chart. If your plan is extremely sensitive to investment returns, consider a more conservative spending level or a cash buffer. If it's sensitive to retirement age, even one extra working year might dramatically improve outcomes. Variables with narrow bars are ones where your plan is resilient — being off by a bit won't matter much."
+          }
+        ]
+      },
+      {
         items: [
           {
             q: "Where is my data stored?",
@@ -11537,6 +12106,7 @@ function RetirementPlanner() {
             {activeTab === 'withdrawal' && <WithdrawalStrategiesTab />}
             {activeTab === 'montecarlo' && <MonteCarloTab />}
             {activeTab === 'stresstest' && <StressTestTab />}
+            {activeTab === 'sensitivity' && <SensitivityTab />}
             {activeTab === 'faq' && <FAQTab />}
           </div>
         </main>
