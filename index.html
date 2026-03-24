@@ -5,14 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Retirement Planner</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- React 18 + required peer deps for Recharts UMD -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-is@18/umd/react-is.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/prop-types@15/prop-types.min.js"></script>
-  <!-- Recharts UMD - pinned to 2.10.3 (known working UMD build) -->
-  <script crossorigin src="https://unpkg.com/recharts@2.10.3/umd/Recharts.js"></script>
-  <!-- Babel for in-browser JSX -->
+  <script src="https://unpkg.com/recharts@2.10.3/umd/Recharts.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>
     body { background: #0f172a; margin: 0; }
@@ -40,22 +37,20 @@
       document.getElementById('loading').style.display = 'none';
     }
 
-    // Verify all libraries loaded before proceeding
-    var missing = [];
-    if (typeof React === 'undefined') missing.push('React');
-    if (typeof ReactDOM === 'undefined') missing.push('ReactDOM');
-    if (typeof Recharts === 'undefined') missing.push('Recharts');
-    if (typeof Babel === 'undefined') missing.push('Babel');
-    
-    if (missing.length > 0) {
-      showError('Failed to load: ' + missing.join(', ') + '\n\nCheck browser console (F12) for blocked scripts or network errors.');
+    // Verify all libraries loaded
+    if (typeof React === 'undefined' || typeof ReactDOM === 'undefined') {
+      showError('Failed to load React. Check your internet connection and try again.');
+    } else if (typeof Recharts === 'undefined') {
+      showError('Failed to load Recharts charting library. Check your internet connection and try again.');
+    } else if (typeof Babel === 'undefined') {
+      showError('Failed to load Babel compiler. Check your internet connection and try again.');
     } else {
 
     (async function() {
       try {
         document.getElementById('load-status').textContent = 'Fetching app code...';
-        var resp = await fetch('retirement-planner-v20.jsx'); // filename kept as v20 for compatibility — replace file contents only
-        if (!resp.ok) throw new Error('Failed to load retirement-planner-v20.jsx: HTTP ' + resp.status);
+        var resp = await fetch('retirement-planner-v21.jsx');
+        if (!resp.ok) throw new Error('Failed to load retirement-planner-v21.jsx: HTTP ' + resp.status);
         var jsxSource = await resp.text();
 
         document.getElementById('load-status').textContent = 'Compiling (' + Math.round(jsxSource.length/1024) + ' KB)...';
@@ -64,16 +59,17 @@
         document.getElementById('load-status').textContent = 'Initializing...';
 
         // Provide React hooks and Recharts components as var globals (hoisted)
-        var globals = 'var useState=React.useState,useMemo=React.useMemo,useEffect=React.useEffect,useCallback=React.useCallback,memo=React.memo;'
+        var globals = 'var useState=React.useState,useMemo=React.useMemo,useEffect=React.useEffect,useCallback=React.useCallback,useRef=React.useRef,memo=React.memo;'
           + 'var LineChart=Recharts.LineChart,Line=Recharts.Line,BarChart=Recharts.BarChart,Bar=Recharts.Bar,'
           + 'XAxis=Recharts.XAxis,YAxis=Recharts.YAxis,CartesianGrid=Recharts.CartesianGrid,'
           + 'Tooltip=Recharts.Tooltip,Legend=Recharts.Legend,ResponsiveContainer=Recharts.ResponsiveContainer,'
-          + 'ComposedChart=Recharts.ComposedChart,Area=Recharts.Area,ReferenceLine=Recharts.ReferenceLine;';
+          + 'ComposedChart=Recharts.ComposedChart,Area=Recharts.Area,AreaChart=Recharts.AreaChart,'
+          + 'ReferenceLine=Recharts.ReferenceLine,Cell=Recharts.Cell,PieChart=Recharts.PieChart,Pie=Recharts.Pie;';
 
-        // Strip any const/var destructuring of React/Recharts from compiled code
+        // Strip any const destructuring of React/Recharts from compiled code
         var code = transformed.code;
-        code = code.replace(/^(const|var)\s*\{[^}]*useState[^}]*\}\s*=\s*React;?\s*$/m, '');
-        code = code.replace(/^(const|var)\s*\{[^}]*LineChart[^}]*\}\s*=\s*Recharts;?\s*$/m, '');
+        code = code.replace(/^.*useState.*useMemo.*useEffect.*=\s*React;?\s*$/m, '');
+        code = code.replace(/^.*LineChart.*BarChart.*=\s*Recharts;?\s*$/m, '');
 
         // Execute in global scope
         (0, eval)(globals + '\n' + code);
