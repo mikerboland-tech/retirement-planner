@@ -56,7 +56,7 @@
   <div id="root">
     <div class="loading">Loading…</div>
   </div>
-  
+
   <script type="text/babel" data-type="module" data-presets="env,react" data-plugins="">
     // Provide React globals so the JSX file (which has no imports) can find them.
     const { useState, useEffect, useMemo, useCallback, useRef, memo, Fragment } = React;
@@ -68,21 +68,25 @@
     window.memo = memo;
     window.Fragment = Fragment;
   </script>
-  
+
   <script>
+    // Stable, version-less app filename. Bump the code inside this file when you publish a new
+    // version — you never need to edit this line again.
+    const MOBILE_APP_FILE = 'retirement-planner-mobile.jsx';
+
     // Fetch the mobile JSX, transform it with Babel, and mount it.
     // This mirrors the desktop's index.html pattern but for the mobile entry point.
     (async () => {
       try {
-        const response = await fetch('retirement-planner-mobile-v2.jsx');
-        if (!response.ok) throw new Error('Failed to load mobile script: ' + response.status);
+        const response = await fetch(MOBILE_APP_FILE);
+        if (!response.ok) throw new Error('Failed to load ' + MOBILE_APP_FILE + ': ' + response.status);
         const source = await response.text();
-        
+
         // Transform JSX → JS using Babel
         const transformed = Babel.transform(source, {
           presets: ['env', 'react']
         }).code;
-        
+
         // Evaluate the transformed code — it defines MobilePlanner at the top scope.
         // We use new Function to keep it out of strict mode and avoid eval restrictions.
         const factory = new Function('React', 'useState', 'useEffect', 'useMemo', 'useCallback', 'useRef', 'memo', 'Fragment', transformed + '\n; return MobilePlanner;');
@@ -90,7 +94,7 @@
           React, React.useState, React.useEffect, React.useMemo,
           React.useCallback, React.useRef, React.memo, React.Fragment
         );
-        
+
         // Mount
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(React.createElement(MobilePlanner));

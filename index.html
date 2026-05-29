@@ -3,7 +3,6 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
   <!-- ============================================================
        MOBILE REDIRECT
        Runs synchronously before any other scripts so phones don't
@@ -20,7 +19,7 @@
         var params = new URLSearchParams(window.location.search);
         if (params.get('desktop') === '1') return;
         var isPhone = window.matchMedia('(max-width: 768px)').matches
-                      || /Android|iPhone|iPod|Mobile/i.test(navigator.userAgent);
+          || /Android|iPhone|iPod|Mobile/i.test(navigator.userAgent);
         if (isPhone) {
           window.location.replace('mobile.html');
         }
@@ -29,7 +28,6 @@
       }
     })();
   </script>
-
   <title>Retirement Planner</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -56,14 +54,16 @@
     </div>
   </div>
   <div id="error-display"></div>
-
   <script>
+    // Stable, version-less app filename. Bump the code inside this file when you publish a new
+    // version — you never need to edit this line again. (Keep the version label inside the .jsx.)
+    var APP_FILE = 'retirement-planner.jsx';
+
     function showError(msg) {
       document.getElementById('error-display').style.display = 'block';
       document.getElementById('error-display').textContent = msg;
       document.getElementById('loading').style.display = 'none';
     }
-
     // Verify all libraries loaded
     if (typeof React === 'undefined' || typeof ReactDOM === 'undefined') {
       showError('Failed to load React. Check your internet connection and try again.');
@@ -72,44 +72,35 @@
     } else if (typeof Babel === 'undefined') {
       showError('Failed to load Babel compiler. Check your internet connection and try again.');
     } else {
-
-    (async function() {
-      try {
-        document.getElementById('load-status').textContent = 'Fetching app code...';
-        var resp = await fetch('retirement-planner-v45.jsx');
-        if (!resp.ok) throw new Error('Failed to load retirement-planner-v45.jsx: HTTP ' + resp.status);
-        var jsxSource = await resp.text();
-
-        document.getElementById('load-status').textContent = 'Compiling (' + Math.round(jsxSource.length/1024) + ' KB)...';
-        var transformed = Babel.transform(jsxSource, { presets: ['react'] });
-
-        document.getElementById('load-status').textContent = 'Initializing...';
-
-        // Provide React hooks and Recharts components as var globals (hoisted)
-        var globals = 'var useState=React.useState,useMemo=React.useMemo,useEffect=React.useEffect,useCallback=React.useCallback,useRef=React.useRef,memo=React.memo;'
-          + 'var LineChart=Recharts.LineChart,Line=Recharts.Line,BarChart=Recharts.BarChart,Bar=Recharts.Bar,'
-          + 'XAxis=Recharts.XAxis,YAxis=Recharts.YAxis,CartesianGrid=Recharts.CartesianGrid,'
-          + 'Tooltip=Recharts.Tooltip,Legend=Recharts.Legend,ResponsiveContainer=Recharts.ResponsiveContainer,'
-          + 'ComposedChart=Recharts.ComposedChart,Area=Recharts.Area,AreaChart=Recharts.AreaChart,'
-          + 'ReferenceLine=Recharts.ReferenceLine,Cell=Recharts.Cell,PieChart=Recharts.PieChart,Pie=Recharts.Pie;';
-
-        // Strip any const destructuring of React/Recharts from compiled code
-        var code = transformed.code;
-        code = code.replace(/^.*useState.*useMemo.*useEffect.*=\s*React;?\s*$/m, '');
-        code = code.replace(/^.*LineChart.*BarChart.*=\s*Recharts;?\s*$/m, '');
-
-        // Execute in global scope
-        (0, eval)(globals + '\n' + code);
-
-        document.getElementById('load-status').textContent = 'Rendering...';
-        var root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(React.createElement(RetirementPlanner));
-
-      } catch (err) {
-        showError('Error loading app:\n\n' + err.message + '\n\n' + (err.stack || ''));
-      }
-    })();
-
+      (async function() {
+        try {
+          document.getElementById('load-status').textContent = 'Fetching app code...';
+          var resp = await fetch(APP_FILE);
+          if (!resp.ok) throw new Error('Failed to load ' + APP_FILE + ': HTTP ' + resp.status);
+          var jsxSource = await resp.text();
+          document.getElementById('load-status').textContent = 'Compiling (' + Math.round(jsxSource.length/1024) + ' KB)...';
+          var transformed = Babel.transform(jsxSource, { presets: ['react'] });
+          document.getElementById('load-status').textContent = 'Initializing...';
+          // Provide React hooks and Recharts components as var globals (hoisted)
+          var globals = 'var useState=React.useState,useMemo=React.useMemo,useEffect=React.useEffect,useCallback=React.useCallback,useRef=React.useRef,memo=React.memo;'
+            + 'var LineChart=Recharts.LineChart,Line=Recharts.Line,BarChart=Recharts.BarChart,Bar=Recharts.Bar,'
+            + 'XAxis=Recharts.XAxis,YAxis=Recharts.YAxis,CartesianGrid=Recharts.CartesianGrid,'
+            + 'Tooltip=Recharts.Tooltip,Legend=Recharts.Legend,ResponsiveContainer=Recharts.ResponsiveContainer,'
+            + 'ComposedChart=Recharts.ComposedChart,Area=Recharts.Area,AreaChart=Recharts.AreaChart,'
+            + 'ReferenceLine=Recharts.ReferenceLine,Cell=Recharts.Cell,PieChart=Recharts.PieChart,Pie=Recharts.Pie;';
+          // Strip any const destructuring of React/Recharts from compiled code
+          var code = transformed.code;
+          code = code.replace(/^.*useState.*useMemo.*useEffect.*=\s*React;?\s*$/m, '');
+          code = code.replace(/^.*LineChart.*BarChart.*=\s*Recharts;?\s*$/m, '');
+          // Execute in global scope
+          (0, eval)(globals + '\n' + code);
+          document.getElementById('load-status').textContent = 'Rendering...';
+          var root = ReactDOM.createRoot(document.getElementById('root'));
+          root.render(React.createElement(RetirementPlanner));
+        } catch (err) {
+          showError('Error loading app:\n\n' + err.message + '\n\n' + (err.stack || ''));
+        }
+      })();
     } // end library check
   </script>
 </body>
