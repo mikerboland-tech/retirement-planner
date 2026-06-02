@@ -8,13 +8,17 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Retirement What-If</title>
-  <!-- Tailwind via CDN — same setup as desktop -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <!-- React 18 (production) -->
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <!-- Babel standalone for JSX transform in browser -->
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Vendored libraries (see vendor/README.md for source URLs). Served locally
+       so the app works offline and isn't affected by CDN cert/network issues. -->
+  <script src="vendor/tailwind.js"></script>
+  <script src="vendor/react.min.js"></script>
+  <script src="vendor/react-dom.min.js"></script>
+  <script src="vendor/babel.min.js"></script>
+  <!-- APP_VERSION — single source of truth. Keep this value in sync with
+       index.html so desktop and mobile cache-bust to the same version. The body
+       IIFE below loads engine.js dynamically using this value (and awaits it
+       before touching window.PlannerEngine), so there is no second place to edit. -->
+  <script>window.APP_VERSION = '1.9.0';</script>
   <style>
     /* Reset + dark base. The body matches the slate-950 dark theme. */
     html, body, #root { height: 100%; margin: 0; padding: 0; background: #020617; }
@@ -76,8 +80,25 @@
 
     // Fetch the mobile JSX, transform it with Babel, and mount it.
     // This mirrors the desktop's index.html pattern but for the mobile entry point.
+    // Load engine.js dynamically so the ?v= cache-buster comes from APP_VERSION
+    // without having to hardcode it in a <script> tag. The await blocks the IIFE
+    // until the engine has executed, so window.PlannerEngine is guaranteed below.
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('Failed to load ' + src));
+        document.head.appendChild(s);
+      });
+    }
+
     (async () => {
       try {
+        await loadScript('engine.js?v=' + window.APP_VERSION);
+        if (typeof window.PlannerEngine === 'undefined') {
+          throw new Error('engine.js loaded but window.PlannerEngine is undefined.');
+        }
         const response = await fetch(MOBILE_APP_FILE);
         if (!response.ok) throw new Error('Failed to load ' + MOBILE_APP_FILE + ': ' + response.status);
         const source = await response.text();
@@ -95,9 +116,28 @@
           React.useCallback, React.useRef, React.memo, React.Fragment
         );
 
+        // Top-level error boundary. Without this, any render error in any tab
+        // whitescreens the whole app. Catches render/lifecycle errors only —
+        // async/event-handler errors bypass it (React limitation).
+        class ErrorBoundary extends React.Component {
+          constructor(props) { super(props); this.state = { error: null }; }
+          static getDerivedStateFromError(error) { return { error: error }; }
+          componentDidCatch(error, info) { console.error('App crashed:', error, info); }
+          render() {
+            if (!this.state.error) return this.props.children;
+            const msg = (this.state.error && this.state.error.message) || String(this.state.error);
+            return React.createElement('div', { style: { padding: 24, color: '#fca5a5', fontFamily: '-apple-system, sans-serif' } },
+              React.createElement('div', { style: { fontSize: 18, fontWeight: 600, color: '#fee2e2', marginBottom: 8 } }, 'Something went wrong'),
+              React.createElement('div', { style: { fontSize: 14, marginBottom: 12, color: '#fecaca' } }, 'Try reloading the page.'),
+              React.createElement('pre', { style: { fontSize: 11, background: '#0f172a', padding: 10, borderRadius: 6, overflow: 'auto', maxHeight: 200, color: '#fda4af', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, msg),
+              React.createElement('button', { onClick: function() { window.location.reload(); }, style: { marginTop: 12, padding: '10px 20px', background: '#dc2626', color: 'white', border: 'none', borderRadius: 6, fontSize: 14, fontWeight: 500 } }, 'Reload')
+            );
+          }
+        }
+
         // Mount
         const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(React.createElement(MobilePlanner));
+        root.render(React.createElement(ErrorBoundary, null, React.createElement(MobilePlanner)));
       } catch (e) {
         document.getElementById('root').innerHTML = '<div style="padding:2rem; color:#f87171; font-family:monospace; white-space:pre-wrap;">Error loading planner:\n' + (e.message || e) + '</div>';
         console.error(e);

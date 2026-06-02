@@ -868,6 +868,10 @@ const calculateRecurringExpenses = (expenses, myAge, spouseAge, yearsFromNow, ge
 };
 
 const STORAGE_KEY = 'retirement_planner_data';
+// Bump this whenever the persisted data shape changes in a way an older build
+// could not safely consume. loadFromStorage refuses to read anything with a
+// future schemaVersion so a downgrade doesn't silently shred the user's data (B8).
+const SCHEMA_VERSION = 1;
 
 const DEFAULT_DASHBOARD_VISIBILITY = {
   summaryCards: true,
@@ -916,15 +920,15 @@ const EXPENSE_CATEGORIES = [
 ];
 
 const DEFAULT_PERSONAL_INFO = {
-  myAge: 45, 
-  spouseAge: 43, 
-  myRetirementAge: 65, 
+  myAge: 35,
+  spouseAge: 33,
+  myRetirementAge: 65,
   spouseRetirementAge: 65,
-  myBirthYear: 1980,  // For accurate RMD age calculation
-  spouseBirthYear: 1982, // For accurate RMD age calculation
-  filingStatus: 'married_joint', 
-  state: 'Alabama', 
-  desiredRetirementIncome: 60000, 
+  myBirthYear: 1991,  // For accurate RMD age calculation
+  spouseBirthYear: 1993, // For accurate RMD age calculation
+  filingStatus: 'married_joint',
+  state: 'Alabama',
+  desiredRetirementIncome: 95000,  // ~70% of $135K household income (conventional replacement-rate guidance)
   inflationRate: 0.03,
   withdrawalPriority: ['pretax', 'brokerage', 'roth'], // Order: first to last
   charitableGivingPercent: 0, // Percentage of retirement spending donated to charity (enables QCD strategy)
@@ -943,28 +947,34 @@ const DEFAULT_PERSONAL_INFO = {
   myLifeExpectancy: 85,          // Expected age at death (primary)
   spouseLifeExpectancy: 87,      // Expected age at death (spouse)
   // Healthcare expense modeling
-  healthcareModel: 'none',       // 'none','basic','moderate','comprehensive','custom'
+  healthcareModel: 'moderate',   // 'none','basic','moderate','comprehensive','custom' — 'moderate' is the realistic default so first-time projections aren't artificially rosy
   pre65HealthcareAnnual: 12000,  // Annual healthcare cost per person before Medicare (ACA/employer)
   post65OOPAnnual: 2000,         // Annual out-of-pocket after Medicare (copays, dental, vision)
   includeMedigap: true,          // Include supplemental/Medigap insurance
-  ltcModel: 'default',           // 'none','default','custom' — long-term care expense modeling
+  ltcModel: 'none',              // 'none','default','custom' — LTC off by default so the starter scenario doesn't show two large spike clusters at ages 82–84 (my LTC window) and 86–88 (spouse's). Real risk, but a probabilistic/insurance concern that confuses first-time users looking at point-estimate cash flow. Enable on the Personal tab when ready.
   ltcMonthlyAmount: 5900,        // Custom LTC monthly cost
   ltcDurationMonths: 28,         // How many months of LTC to plan for before death
   medicalInflation: 0.05         // Healthcare-specific inflation rate
 };
 
+// contributionGrowth is set to match inflationRate (3%) so real contributions stay
+// constant over the 30-year accumulation. 2% growth vs 3% inflation silently erodes
+// real contributions ~1%/yr (~26% by year 30) and produces an unsustainable scenario.
 const DEFAULT_ACCOUNTS = [
-  { id: 1, name: 'My 401(k)', type: '401k', balance: 100000, contribution: 10000, contributionGrowth: 0.02, cagr: 0.07, startAge: 45, stopAge: 65, owner: 'me', contributor: 'both' },
-  { id: 2, name: 'Spouse 401(k)', type: '401k', balance: 45000, contribution: 4500, contributionGrowth: 0.02, cagr: 0.07, startAge: 43, stopAge: 65, owner: 'spouse', contributor: 'both' },
-  { id: 3, name: 'My Roth IRA', type: 'roth_ira', balance: 25000, contribution: 5000, contributionGrowth: 0.02, cagr: 0.07, startAge: 45, stopAge: 65, owner: 'me', contributor: 'me' },
-  { id: 4, name: 'Savings', type: 'brokerage', balance: 15000, contribution: 2400, contributionGrowth: 0.02, cagr: 0.04, startAge: 45, stopAge: 65, owner: 'joint', contributor: 'me' }
+  { id: 1, name: 'My 401(k)', type: '401k', balance: 60000, contribution: 20000, contributionGrowth: 0.03, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'both' },
+  { id: 2, name: 'Spouse 401(k)', type: '401k', balance: 30000, contribution: 8000, contributionGrowth: 0.03, cagr: 0.07, startAge: 33, stopAge: 65, owner: 'spouse', contributor: 'both' },
+  { id: 3, name: 'My Roth IRA', type: 'roth_ira', balance: 15000, contribution: 6000, contributionGrowth: 0.03, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'me' },
+  { id: 4, name: 'Savings', type: 'brokerage', balance: 15000, contribution: 2400, contributionGrowth: 0.03, cagr: 0.04, startAge: 35, stopAge: 65, owner: 'joint', contributor: 'me' }
 ];
 
+// Salary COLA and SS COLA set to 3% to match inflation. Lower values silently erode
+// the real purchasing power of every income stream — SS benefits set at 2% COLA
+// lose ~25% of their value by age 95 vs. real-world SS which tracks CPI.
 const DEFAULT_INCOME_STREAMS = [
-  { id: 1, name: 'My Salary', type: 'earned_income', amount: 75000, startAge: 45, endAge: 65, cola: 0.02, owner: 'me' },
-  { id: 2, name: 'Spouse Salary', type: 'earned_income', amount: 60000, startAge: 43, endAge: 65, cola: 0.02, owner: 'spouse' },
-  { id: 3, name: 'My Social Security', type: 'social_security', amount: 30000, startAge: 67, endAge: 95, cola: 0.02, owner: 'me', pia: 2000 },
-  { id: 4, name: 'Spouse Social Security', type: 'social_security', amount: 25000, startAge: 67, endAge: 95, cola: 0.02, owner: 'spouse', pia: 1500 }
+  { id: 1, name: 'My Salary', type: 'earned_income', amount: 105000, startAge: 35, endAge: 65, cola: 0.03, owner: 'me' },
+  { id: 2, name: 'Spouse Salary', type: 'earned_income', amount: 75000, startAge: 33, endAge: 65, cola: 0.03, owner: 'spouse' },
+  { id: 3, name: 'My Social Security', type: 'social_security', amount: 36000, startAge: 67, endAge: 95, cola: 0.03, owner: 'me', pia: 2400 },
+  { id: 4, name: 'Spouse Social Security', type: 'social_security', amount: 30000, startAge: 67, endAge: 95, cola: 0.03, owner: 'spouse', pia: 2000 }
 ];
 
 const DEFAULT_ASSETS = [
@@ -975,7 +985,11 @@ const DEFAULT_ASSETS = [
 // Recurring expenses: modeled separately from desiredRetirementIncome for granularity.
 // Each expense has its own start/end age, inflation rate, and category.
 // When recurringExpenses has entries, they ADD to the flat desiredRetirementIncome.
-const DEFAULT_RECURRING_EXPENSES = [];
+// The single placeholder below exists so the cash-flow tab isn't empty for first-time
+// users — they can edit/delete it once they understand the feature.
+const DEFAULT_RECURRING_EXPENSES = [
+  { id: 1, name: 'Property Tax', category: 'housing', amount: 4000, startAge: 35, endAge: 95, inflationRate: 0.03, owner: 'me' }
+];
 
 
 // ============================================
@@ -1348,25 +1362,41 @@ const calculateNIIT = (investmentIncome, magi, filingStatus) => {
   return taxableAmount * 0.038;
 };
 
-// Load data from localStorage
+// Load data from localStorage. Returns null when there is nothing usable —
+// missing key, parse error, OR a saved schemaVersion from a future build (B8).
+// Missing schemaVersion is treated as v0 (pre-versioning) and accepted; future
+// migrations can branch on saved.schemaVersion here.
 function loadFromStorage() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      return JSON.parse(saved);
+    if (!saved) return null;
+    const parsed = JSON.parse(saved);
+    if (parsed && typeof parsed.schemaVersion === 'number' && parsed.schemaVersion > SCHEMA_VERSION) {
+      console.warn(`Saved data is from a newer schema (v${parsed.schemaVersion}); this build only understands v${SCHEMA_VERSION}. Ignoring to avoid corruption.`);
+      return null;
     }
+    return parsed;
   } catch (e) {
     console.error('Error loading from localStorage:', e);
   }
   return null;
 };
 
-// Save data to localStorage
+// Save data to localStorage. Returns { ok: true } or { ok: false, reason } so
+// the caller can surface quota / private-mode failures instead of silently
+// losing the user's edits (B7).
 function saveToStorage(data) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    const payload = { ...data, schemaVersion: SCHEMA_VERSION };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    return { ok: true };
   } catch (e) {
     console.error('Error saving to localStorage:', e);
+    // QuotaExceededError is the common failure (large scenarios + big monte-carlo
+    // history can push us past the ~5 MB origin cap). DOMException.name covers
+    // both standard and Firefox's NS_ERROR_DOM_QUOTA_REACHED variant.
+    const quota = e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22);
+    return { ok: false, reason: quota ? 'quota' : 'unknown', error: e };
   }
 };
 
@@ -3625,7 +3655,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
 // ============================================
 // MonteCarloTab — Lifted to module scope
 // ============================================
-function MonteCarloTab({ accounts, incomeStreams, personalInfo, projections, recurringExpenses }) {
+function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses }) {
   // Retirement age: always use personalInfo as source of truth
   const retirementProjection = projections.find(p => p.myAge === personalInfo.myRetirementAge);
   const defaultRetirementAge = personalInfo.myRetirementAge;
@@ -3652,521 +3682,59 @@ function MonteCarloTab({ accounts, incomeStreams, personalInfo, projections, rec
   const startProjection = projections.find(p => p.myAge === simSettings.startAge);
   const startingPortfolio = startProjection?.totalPortfolio || 0;
   
-  // Box-Muller transform for normal distribution
-  const randomNormal = (mean, stdDev) => {
-    const u1 = Math.random();
-    const u2 = Math.random();
-    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-    return mean + stdDev * z;
-  };
-  
   const [simProgress, setSimProgress] = useState(0);
   
+  const activeJobRef = useRef(null);
+
+  // R6: cancel any in-flight worker job on unmount so we don't leak the worker
+  // across remount cycles.
+  useEffect(() => {
+    return () => {
+      if (activeJobRef.current && window.PlannerWorker) {
+        window.PlannerWorker.cancel();
+        activeJobRef.current = null;
+      }
+    };
+  }, []);
+
   const runSimulation = () => {
+    if (!window.PlannerWorker) {
+      setSimError('Worker not available — reload the page.');
+      return;
+    }
     setIsRunning(true);
     setSimProgress(0);
     setSimResults(null);
     setSimError(null);
-    
-    // Run in batches to avoid sandbox timeout / UI freeze
-    const BATCH_SIZE = 50;
-    const results = [];
-    const portfolioPathsToStore = [];
-    const numPathsToStore = 100;
-    
-    // Defer to let React render the "Running" state
-    setTimeout(() => {
-      try {
-      
-      // Calculate account balances at start age using deterministic projection.
-      // IMPORTANT: mirrors the main engine's order — contributions first, then RMDs deducted,
-      // then growth applied — so pre-tax balances aren't overstated by skipped RMDs.
-      const getStartingBalances = () => {
-        const balances = {};
-        const accountBalancesCopy = {};
-        accounts.forEach(a => { accountBalancesCopy[a.id] = a.balance; });
-        
-        // Run deterministic projection to start age
-        for (let year = 0; year < (simSettings.startAge - personalInfo.myAge); year++) {
-          const myAge = personalInfo.myAge + year;
-          const spouseAge = personalInfo.spouseAge + year;
-          
-          accounts.forEach(account => {
-            const ownerAge = account.owner === 'me' ? myAge : account.owner === 'spouse' ? spouseAge : Math.max(myAge, spouseAge);
-            const yearsContributing = ownerAge - account.startAge;
-            const contributionGrowth = account.contributionGrowth || 0;
-            
-            if (ownerAge >= account.startAge && ownerAge < account.stopAge) {
-              const adjustedContribution = account.contribution * Math.pow(1 + contributionGrowth, Math.max(0, yearsContributing));
-              accountBalancesCopy[account.id] += adjustedContribution;
-            }
-
-            // Deduct RMDs before growth (matches main engine: withdraw then grow)
-            if (isPreTaxAccount(account.type)) {
-              const ownerBirthYear = account.owner === 'me'
-                ? personalInfo.myBirthYear
-                : account.owner === 'spouse'
-                ? personalInfo.spouseBirthYear
-                : personalInfo.myBirthYear;
-              const rmd = calculateRMD(accountBalancesCopy[account.id], ownerAge, ownerBirthYear);
-              accountBalancesCopy[account.id] = Math.max(0, accountBalancesCopy[account.id] - rmd);
-            }
-
-            accountBalancesCopy[account.id] *= (1 + account.cagr);
-          });
-        }
-        
-        accounts.forEach(a => { balances[a.id] = accountBalancesCopy[a.id]; });
-        return balances;
-      };
-      
-      const initialBalances = getStartingBalances();
-      
-      // For historical mode: pre-compute valid starting years.
-      // When the user picks a specific year, we use only that one (all simulations get same start).
-      // When set to 'all', we cycle through all valid years and then resample if numSimulations > count.
-      const isHistorical = simSettings.method === 'historical';
-      let historicalStartYears = [];
-      if (isHistorical) {
-        if (simSettings.historicalStartYear === 'all') {
-          historicalStartYears = getValidStartYears(yearsToSimulate);
-          if (historicalStartYears.length === 0) {
-            // Fallback: dataset isn't long enough for this horizon; allow wrap
-            historicalStartYears = HISTORICAL_RETURNS.map(r => r.year);
-          }
-        } else {
-          historicalStartYears = [Number(simSettings.historicalStartYear)];
-        }
-      }
-      
-      // Run simulations in batches to prevent sandbox timeout
-      let simIndex = 0;
-      
-      const runBatch = () => {
-        try {
-          const batchEnd = Math.min(simIndex + BATCH_SIZE, simSettings.numSimulations);
-          
-          for (let sim = simIndex; sim < batchEnd; sim++) {
-        // For historical mode, pick this simulation's start year by cycling through
-        // the valid years. If we have more sims than years, we resample (deterministic
-        // cycle so all years are equally represented).
-        const histStartYear = isHistorical 
-          ? historicalStartYears[sim % historicalStartYears.length] 
-          : null;
-        const histSequence = isHistorical 
-          ? getHistoricalSequence(histStartYear, yearsToSimulate, simSettings.assetMix) 
-          : null;
-        
-        // Initialize account balances for this simulation at the start age
-        const accountBalances = { ...initialBalances };
-        
-        const portfolioPath = [];
-        let portfolioSurvived = true;
-        let failureAge = null;
-        
-        // Track cumulative inflation as a running product of each year's random inflation
-        const yearsBeforeSim = simSettings.startAge - personalInfo.myAge;
-        const inflationBeforeSim = Math.pow(1 + simSettings.inflationMean, yearsBeforeSim);
-        let cumulativeInflationDuringSim = 1;
-        
-        for (let year = 0; year < yearsToSimulate; year++) {
-          const myAge = simSettings.startAge + year;
-          const spouseAge = personalInfo.spouseAge + (simSettings.startAge - personalInfo.myAge) + year;
-          const yearsFromToday = (simSettings.startAge - personalInfo.myAge) + year;
-          
-          // Returns for this year — historical lookup or random sampling
-          let marketReturn, inflation;
-          if (isHistorical) {
-            // Historical: use the actual return from the chosen sequence year
-            marketReturn = histSequence[year].blendedReturn;
-            inflation = histSequence[year].cpi;
-          } else {
-            // Random: sample from normal distribution
-            marketReturn = randomNormal(simSettings.meanReturn, simSettings.stdDev);
-            inflation = randomNormal(simSettings.inflationMean, simSettings.inflationStdDev);
-          }
-          
-          // Compound this year's random inflation into the running cumulative factor
-          // Each year's inflation is independent, properly compounded year-over-year
-          if (year > 0) {
-            cumulativeInflationDuringSim *= (1 + inflation);
-          }
-          const desiredIncome = personalInfo.desiredRetirementIncome * inflationBeforeSim * cumulativeInflationDuringSim;
-          
-          // Healthcare and recurring expenses (unified model — same as main engine)
-          const mcHealthcare = calculateHealthcareExpenses(personalInfo, myAge, spouseAge, yearsFromToday, true, personalInfo.filingStatus === 'married_joint');
-          const mcRecurring = calculateRecurringExpenses(recurringExpenses, myAge, spouseAge, yearsFromToday, personalInfo.inflationRate);
-          const mcAdjustedDesired = desiredIncome + mcHealthcare.total + mcRecurring.total;
-          
-          // Calculate income streams
-          let totalSocialSecurity = 0, totalPension = 0, totalOtherIncome = 0, earnedIncome = 0;
-          let nonSSIncome = 0; // Track non-SS income for calculating SS taxation
-          
-          incomeStreams.forEach(stream => {
-            const ownerAge = stream.owner === 'me' ? myAge : spouseAge;
-            if (ownerAge >= stream.startAge && ownerAge <= stream.endAge) {
-              const yearsFromStart = ownerAge - stream.startAge;
-              const adjustedAmount = stream.amount * Math.pow(1 + (stream.cola || 0), yearsFromStart);
-              
-              if (stream.type === 'earned_income') {
-                earnedIncome += adjustedAmount;
-                nonSSIncome += adjustedAmount;
-              } else if (stream.type === 'social_security') {
-                totalSocialSecurity += adjustedAmount;
-                // SS taxation calculated separately below
-              } else if (stream.type === 'pension') {
-                totalPension += adjustedAmount;
-                nonSSIncome += adjustedAmount;
-              } else {
-                totalOtherIncome += adjustedAmount;
-                nonSSIncome += adjustedAmount;
-              }
-            }
-          });
-          
-          // Calculate the taxable portion of Social Security benefits
-          const taxableSS = calculateSocialSecurityTaxableAmount(
-            totalSocialSecurity, 
-            nonSSIncome, 
-            personalInfo.filingStatus
-          );
-          
-          // Add contributions and calculate totals/RMDs (before growth)
-          let totalPreTax = 0, totalRoth = 0, totalBrokerage = 0, totalRMD = 0;
-          let mcPreTaxContributions = 0;
-          
-          accounts.forEach(account => {
-            const ownerAge = account.owner === 'me' ? myAge : account.owner === 'spouse' ? spouseAge : Math.max(myAge, spouseAge);
-            const yearsContributing = ownerAge - account.startAge;
-            const contributionGrowth = account.contributionGrowth || 0;
-            
-            if (ownerAge >= account.startAge && ownerAge < account.stopAge) {
-              const adjustedContribution = account.contribution * Math.pow(1 + contributionGrowth, Math.max(0, yearsContributing));
-              accountBalances[account.id] += adjustedContribution;
-              if (isPreTaxAccount(account.type) && adjustedContribution > 0 && (account.contributor || 'me') === 'me') {
-                mcPreTaxContributions += adjustedContribution;
-              }
-            }
-            
-            if (isPreTaxAccount(account.type)) {
-              // Get birth year based on account owner
-              const ownerBirthYear = account.owner === 'me' 
-                ? personalInfo.myBirthYear 
-                : account.owner === 'spouse' 
-                ? personalInfo.spouseBirthYear 
-                : personalInfo.myBirthYear;
-              
-              totalRMD += calculateRMD(accountBalances[account.id], ownerAge, ownerBirthYear);
-              totalPreTax += accountBalances[account.id];
-            } else if (isRothAccount(account.type)) {
-              totalRoth += accountBalances[account.id];
-            } else {
-              totalBrokerage += accountBalances[account.id];
-            }
-          });
-          
-          // Now calculate total taxable income including properly-taxed SS
-          // Subtract pre-tax contributions (above-the-line deduction), capped at earned income
-          const mcPreTaxDeduction = Math.min(mcPreTaxContributions, earnedIncome);
-          const totalTaxableIncome = nonSSIncome + taxableSS - mcPreTaxDeduction;
-          
-          const totalPortfolio = totalPreTax + totalRoth + totalBrokerage;
-          const totalGuaranteedIncome = totalSocialSecurity + totalPension + totalOtherIncome;
-          
-          // Calculate withdrawal need using the same iterative tax solver as the deterministic engine.
-          // This replaces the old flat MONTE_CARLO_TAX_ESTIMATE constant (15%) which was inaccurate
-          // for high-bracket retirees and ignored filing status, state, and withdrawal composition.
-          // FIX v21: Run the solver whenever retired (myAge >= retirementAge), not only when
-          // earnedIncome === 0.  The deterministic engine has no such restriction — part-time
-          // earned income during retirement still allows portfolio withdrawals to fill the gap.
-          let portfolioWithdrawal = 0;
-          const mcIsRetired = myAge >= personalInfo.myRetirementAge;
-          if (mcIsRetired) {
-            // Calculate FICA on any earned income during retirement (same as deterministic engine)
-            const mcFICA = earnedIncome > 0 ? calculateFICA(earnedIncome, personalInfo.filingStatus, yearsFromToday, simSettings.inflationMean).total : 0;
-            
-            const baseFedTax = calculateFederalTax(totalTaxableIncome, personalInfo.filingStatus, yearsFromToday, simSettings.inflationMean);
-            const mcBaseRetIncome = totalPension; // Pension only (no withdrawals yet in base)
-            const baseStateTax = calculateStateTax(totalTaxableIncome, personalInfo.state, personalInfo.filingStatus, yearsFromToday, simSettings.inflationMean, taxableSS, mcBaseRetIncome, { federalTaxPaid: baseFedTax, primaryAge: myAge, spouseAge: spouseAge });
-            const netGuaranteed = totalGuaranteedIncome + earnedIncome - baseFedTax - baseStateTax - mcFICA;
-            const afterTaxGap = Math.max(0, mcAdjustedDesired - netGuaranteed);
-
-            if (afterTaxGap > 0) {
-              let testWithdrawal = afterTaxGap;
-              const mcPriority = personalInfo.withdrawalPriority || ['pretax', 'brokerage', 'roth'];
-
-              for (let i = 0; i < 8; i++) {
-                // Estimate pre-tax portion of this withdrawal (bounded by test amount and available balance)
-                const estimatedPreTax = mcPriority[0] === 'pretax'
-                  ? Math.min(testWithdrawal, totalPreTax)
-                  : Math.min(testWithdrawal * 0.7, totalPreTax);
-
-                // Max of RMD and spending-driven pre-tax draw (RMD is subsumed by spending draw if larger)
-                const totalPreTaxFromWithdrawals = Math.max(totalRMD, estimatedPreTax);
-
-                // Brokerage portion of withdrawal: anything beyond what pre-tax covers
-                const brokerageEstimate = Math.max(0, testWithdrawal - totalPreTaxFromWithdrawals);
-                // Compute balance-weighted blended cost basis from user's brokerage accounts
-                // (more accurate than a single global default).
-                let mcWeightedCostBasis = BROKERAGE_COST_BASIS_ESTIMATE;
-                let mcBrokTotal = 0, mcBrokBasisSum = 0;
-                accounts.forEach(a => {
-                  if (isBrokerageAccount(a.type)) {
-                    const bal = accountBalances[a.id] || 0;
-                    const basis = (a.costBasisPercent !== undefined && a.costBasisPercent !== null)
-                      ? a.costBasisPercent : BROKERAGE_COST_BASIS_ESTIMATE;
-                    mcBrokTotal += bal;
-                    mcBrokBasisSum += bal * basis;
-                  }
-                });
-                if (mcBrokTotal > 0) mcWeightedCostBasis = mcBrokBasisSum / mcBrokTotal;
-                const capitalGainsEstimate = brokerageEstimate * (1 - mcWeightedCostBasis);
-
-                // Recalculate SS taxation with new ordinary income (pre-tax withdrawals add to combined income)
-                const adjustedNonSS = nonSSIncome + totalPreTaxFromWithdrawals + capitalGainsEstimate;
-                const adjustedTaxableSS = calculateSocialSecurityTaxableAmount(
-                  totalSocialSecurity, adjustedNonSS, personalInfo.filingStatus
-                );
-                const adjustedGross = adjustedNonSS + adjustedTaxableSS;
-
-                // Full federal + state on the combined ordinary income
-                const totalFed = calculateFederalTax(adjustedGross, personalInfo.filingStatus, yearsFromToday, simSettings.inflationMean);
-                // Retirement income for state exemption: pension only
-                const mcIterRetIncome = totalPension;
-                const totalState = calculateStateTax(adjustedGross, personalInfo.state, personalInfo.filingStatus, yearsFromToday, simSettings.inflationMean, adjustedTaxableSS, mcIterRetIncome, { federalTaxPaid: totalFed, primaryAge: myAge, spouseAge: spouseAge });
-
-                // Capital gains tax on brokerage portion (tiered 0/15/20%)
-                const baseDeduction = STANDARD_DEDUCTION_2026[personalInfo.filingStatus] || STANDARD_DEDUCTION_2026.married_joint;
-                const adjustedDeduction = baseDeduction * Math.pow(1 + simSettings.inflationMean, yearsFromToday);
-                const taxableOrdinary = Math.max(0, adjustedGross - adjustedDeduction);
-                const cgTax = calculateCapitalGainsTax(capitalGainsEstimate, taxableOrdinary + capitalGainsEstimate, personalInfo.filingStatus, yearsFromToday, simSettings.inflationMean);
-
-                const withdrawalTax = (totalFed + totalState + cgTax) - (baseFedTax + baseStateTax);
-                const netFromWithdrawal = testWithdrawal - Math.max(0, withdrawalTax);
-                const shortfall = afterTaxGap - netFromWithdrawal;
-
-                if (Math.abs(shortfall) < 10) break;
-                testWithdrawal = Math.max(0, testWithdrawal + shortfall);
-              }
-              portfolioWithdrawal = Math.max(totalRMD, testWithdrawal);
-            } else {
-              portfolioWithdrawal = totalRMD;
-            }
-          }
-          
-          // Step 1: Withdraw RMDs from pre-tax accounts first (mandatory)
-          // Then withdraw remaining need based on user's priority order
-          // (matches main projection engine's priority-based withdrawal logic)
-          if (portfolioWithdrawal > 0 && totalPortfolio > 0) {
-            let remaining = portfolioWithdrawal;
-            
-            // Step 1a: RMDs from pre-tax (mandatory, regardless of priority)
-            if (totalRMD > 0) {
-              const rmdRatio = totalPreTax > 0 ? Math.min(1, totalRMD / totalPreTax) : 0;
-              accounts.forEach(account => {
-                if (isPreTaxAccount(account.type)) {
-                  const rmdDraw = accountBalances[account.id] * rmdRatio;
-                  accountBalances[account.id] -= rmdDraw;
-                }
-              });
-              remaining = Math.max(0, remaining - totalRMD);
-            }
-            
-            // Step 1b: Additional withdrawals by priority order
-            const mcPriority = personalInfo.withdrawalPriority || ['pretax', 'brokerage', 'roth'];
-            const mcGetTypes = (cat) => {
-              switch(cat) {
-                case 'pretax': return PRE_TAX_TYPES;
-                case 'roth': return ROTH_TYPES;
-                case 'brokerage': return [...BROKERAGE_TYPES, ...HSA_TYPES];
-                default: return [];
-              }
-            };
-            
-            for (const category of mcPriority) {
-              if (remaining <= 0) break;
-              const catTypes = mcGetTypes(category);
-              accounts.forEach(account => {
-                if (catTypes.includes(account.type) && remaining > 0) {
-                  const draw = Math.min(accountBalances[account.id], remaining);
-                  accountBalances[account.id] -= draw;
-                  remaining -= draw;
-                }
-              });
-            }
-          }
-          
-          // Step 1.5: Execute Roth conversions (if configured)
-          // Mirrors main engine: move money from largest pre-tax to largest Roth
-          const mcConversionAmount = personalInfo.rothConversionAmount || 0;
-          const mcDefaultWindow = getDefaultRothConversionWindow(personalInfo);
-          const mcConversionStartAge = personalInfo.rothConversionStartAge || mcDefaultWindow.startAge;
-          const mcConversionEndAge = personalInfo.rothConversionEndAge || mcDefaultWindow.endAge;
-          const mcConversionBracket = personalInfo.rothConversionBracket || '';
-          
-          if (myAge >= mcConversionStartAge && myAge <= mcConversionEndAge) {
-            let mcTargetConversion = 0;
-            const mcInflationFactor = inflationBeforeSim * cumulativeInflationDuringSim;
-            
-            if (mcConversionBracket) {
-              // Bracket-fill mode (simplified for MC — uses mean inflation, not random)
-              const baseBrackets = FEDERAL_TAX_BRACKETS_2026[personalInfo.filingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
-              const baseDeduction = STANDARD_DEDUCTION_2026[personalInfo.filingStatus] || STANDARD_DEDUCTION_2026.married_joint;
-              const adjDed = baseDeduction * mcInflationFactor;
-              const fullNonSS = nonSSIncome + totalRMD;
-              const adjSS = calculateSocialSecurityTaxableAmount(totalSocialSecurity, fullNonSS, personalInfo.filingStatus);
-              const currTaxable = Math.max(0, fullNonSS + adjSS - adjDed);
-              const bracketIdx = mcConversionBracket === '12%' ? 1 : mcConversionBracket === '22%' ? 2 : mcConversionBracket === '24%' ? 3 : mcConversionBracket === '32%' ? 4 : 2;
-              const bracketCap = baseBrackets[bracketIdx].max * mcInflationFactor;
-              mcTargetConversion = Math.max(0, bracketCap - currTaxable);
-            } else if (mcConversionAmount > 0) {
-              mcTargetConversion = mcConversionAmount * mcInflationFactor;
-            }
-            
-            if (mcTargetConversion > 0) {
-              const mcPreTaxAccts = accounts.filter(a => isPreTaxAccount(a.type));
-              const mcSource = mcPreTaxAccts.length > 0
-                ? mcPreTaxAccts.reduce((best, a) => (accountBalances[a.id] || 0) > (accountBalances[best.id] || 0) ? a : best, mcPreTaxAccts[0])
-                : null;
-              const mcRothAccts = accounts.filter(a => isRothAccount(a.type));
-              const mcDest = mcRothAccts.length > 0
-                ? mcRothAccts.reduce((best, a) => (accountBalances[a.id] || 0) > (accountBalances[best.id] || 0) ? a : best, mcRothAccts[0])
-                : null;
-              
-              if (mcSource && mcDest && (accountBalances[mcSource.id] || 0) > 0) {
-                const convAmt = Math.min(mcTargetConversion, accountBalances[mcSource.id]);
-                accountBalances[mcSource.id] -= convAmt;
-                accountBalances[mcDest.id] = (accountBalances[mcDest.id] || 0) + convAmt;
-              }
-            }
-          }
-          
-          // Step 2: Apply random market return AFTER withdrawals and conversions
-          accounts.forEach(account => {
-            accountBalances[account.id] = Math.max(0, accountBalances[account.id]) * (1 + marketReturn);
-          });
-          
-          const endingPortfolio = Object.values(accountBalances).reduce((sum, bal) => sum + Math.max(0, bal), 0);
-          portfolioPath.push({ age: myAge, portfolio: endingPortfolio });
-          
-          // Check for portfolio failure
-          if (endingPortfolio <= 0 && portfolioSurvived) {
-            portfolioSurvived = false;
-            failureAge = myAge;
-          }
-        }
-        
-        results.push({
-          finalPortfolio: portfolioPath[portfolioPath.length - 1].portfolio,
-          survived: portfolioSurvived,
-          failureAge: failureAge,
-          portfolioAt75: portfolioPath.find(p => p.age === 75)?.portfolio || 0,
-          portfolioAt85: portfolioPath.find(p => p.age === 85)?.portfolio || 0,
-          historicalStartYear: histStartYear,  // null in random mode; calendar year in historical
-        });
-        
-        if (sim < numPathsToStore) {
-          portfolioPathsToStore.push(portfolioPath);
-        }
-          } // end for loop
-      
-          // Update progress and schedule next batch
-          simIndex = batchEnd;
-          setSimProgress(Math.round((simIndex / simSettings.numSimulations) * 100));
-          
-          if (simIndex < simSettings.numSimulations) {
-            setTimeout(runBatch, 0);
-          } else {
-            // All simulations complete — compute results
-            const successCount = results.filter(r => r.survived).length;
-            const successRate = successCount / simSettings.numSimulations;
-            const finalPortfolios = results.map(r => r.finalPortfolio).sort((a, b) => a - b);
-            const percentile = (arr, p) => arr[Math.floor(arr.length * p)];
-            const failureAges = results.filter(r => !r.survived).map(r => r.failureAge);
-            const avgFailureAge = failureAges.length > 0 ? failureAges.reduce((a, b) => a + b, 0) / failureAges.length : null;
-            
-            const percentileBands = [];
-            for (let year = 0; year < yearsToSimulate; year++) {
-              const age = simSettings.startAge + year;
-              const portfoliosAtYear = portfolioPathsToStore.map(path => path[year]?.portfolio || 0).sort((a, b) => a - b);
-              percentileBands.push({
-                age,
-                p10: percentile(portfoliosAtYear, 0.10),
-                p25: percentile(portfoliosAtYear, 0.25),
-                p50: percentile(portfoliosAtYear, 0.50),
-                p75: percentile(portfoliosAtYear, 0.75),
-                p90: percentile(portfoliosAtYear, 0.90)
-              });
-            }
-            
-            // Historical-mode: aggregate stats per starting year (which historical
-            // sequences passed/failed, ranked from worst to best final portfolio).
-            let historicalSummary = null;
-            if (isHistorical && simSettings.historicalStartYear === 'all') {
-              const byYear = new Map();
-              results.forEach(r => {
-                if (r.historicalStartYear === null || r.historicalStartYear === undefined) return;
-                if (!byYear.has(r.historicalStartYear)) byYear.set(r.historicalStartYear, []);
-                byYear.get(r.historicalStartYear).push(r);
-              });
-              historicalSummary = [];
-              byYear.forEach((runs, year) => {
-                const survived = runs.filter(r => r.survived).length;
-                const avgFinal = runs.reduce((s, r) => s + r.finalPortfolio, 0) / runs.length;
-                const failures = runs.filter(r => !r.survived).map(r => r.failureAge);
-                const minFailureAge = failures.length > 0 ? Math.min(...failures) : null;
-                historicalSummary.push({
-                  startYear: year,
-                  runs: runs.length,
-                  survived,
-                  successRate: survived / runs.length,
-                  avgFinalPortfolio: avgFinal,
-                  earliestFailureAge: minFailureAge,
-                });
-              });
-              // Sort worst-first by success rate, then by avg final portfolio
-              historicalSummary.sort((a, b) => {
-                if (a.successRate !== b.successRate) return a.successRate - b.successRate;
-                return a.avgFinalPortfolio - b.avgFinalPortfolio;
-              });
-            }
-            
-            setSimResults({
-              successRate,
-              successCount,
-              totalSimulations: simSettings.numSimulations,
-              startAge: simSettings.startAge,
-              startingPortfolio: Object.values(initialBalances).reduce((sum, bal) => sum + bal, 0),
-              percentile5: percentile(finalPortfolios, 0.05),
-              percentile25: percentile(finalPortfolios, 0.25),
-              percentile50: percentile(finalPortfolios, 0.50),
-              percentile75: percentile(finalPortfolios, 0.75),
-              percentile95: percentile(finalPortfolios, 0.95),
-              avgFailureAge,
-              percentileBands,
-              portfolioPaths: portfolioPathsToStore.slice(0, 50),
-              method: simSettings.method,
-              historicalSummary,
-              historicalStartYearSetting: simSettings.historicalStartYear,
-            });
-            setIsRunning(false);
-          }
-        } catch (err) {
-          console.error('Monte Carlo batch error:', err);
-          setIsRunning(false);
-          setSimError('Simulation error: ' + err.message + '\n' + err.stack);
-        }
-      }; // end runBatch
-      
-      runBatch();
-      
-      } catch (err) {
-        console.error('Monte Carlo setup error:', err);
+    const handle = window.PlannerWorker.run({
+      type: 'monteCarlo',
+      payload: { simSettings, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses },
+      onProgress: (pct) => setSimProgress(pct),
+    });
+    activeJobRef.current = handle;
+    handle.promise
+      .then((result) => {
+        if (activeJobRef.current !== handle) return;  // superseded by another run
+        activeJobRef.current = null;
+        setSimResults(result);
         setIsRunning(false);
-        setSimError('Setup error: ' + err.message + '\n' + err.stack);
-      }
-    }, 50);
+      })
+      .catch((err) => {
+        if (activeJobRef.current !== handle) return;
+        activeJobRef.current = null;
+        setIsRunning(false);
+        if (err.message !== 'Cancelled') setSimError(err.message);
+      });
   };
+
+  const cancelSimulation = () => {
+    if (!window.PlannerWorker) return;
+    window.PlannerWorker.cancel();
+    activeJobRef.current = null;
+    setIsRunning(false);
+    setSimProgress(0);
+  };
+
   
   const getSuccessColor = (rate) => {
     if (rate >= 0.9) return 'text-emerald-400';
@@ -4380,13 +3948,21 @@ function MonteCarloTab({ accounts, incomeStreams, personalInfo, projections, rec
           </div>
         </div>
         <div className="flex items-center gap-4">
-          <button 
-            onClick={runSimulation} 
-            disabled={isRunning}
-            className={`${buttonPrimary} ${isRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
-          >
-            {isRunning ? `⏳ Running... ${simProgress}%` : '▶️ Run Simulation'}
-          </button>
+          {isRunning ? (
+            <button
+              onClick={cancelSimulation}
+              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded font-medium transition-colors"
+            >
+              ⏹ Cancel ({simProgress}%)
+            </button>
+          ) : (
+            <button
+              onClick={runSimulation}
+              className={buttonPrimary}
+            >
+              ▶️ Run Simulation
+            </button>
+          )}
           <p className="text-xs text-slate-500">
             Historical reference: S&P 500 has ~10% mean return with ~15% standard deviation. After inflation, real returns are ~7%.
           </p>
@@ -6227,7 +5803,15 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
   const [mcRunsPerScenario, setMcRunsPerScenario] = useState(100);
   const [mcVolatility, setMcVolatility] = useState(0.15);  // 15% std dev = typical 60/40
   const [mcAnalysisStatus, setMcAnalysisStatus] = useState('idle');  // idle | running | done
-  
+
+  // R6: heavy SS-grid computation runs in a Web Worker. Status: 'idle' | 'running' | 'error'.
+  // gridResult.allScenarios is read by the JSX below; null while a job is in flight.
+  const [gridResult, setGridResult] = useState(null);
+  const [gridStatus, setGridStatus] = useState('idle');
+  const [gridProgress, setGridProgress] = useState(0);
+  const [gridError, setGridError] = useState(null);
+  const gridJobRef = useRef(null);
+
   const myCurrentClaimAge = mySSStream?.startAge || 67;
   const spouseCurrentClaimAge = spouseSSStream?.startAge || 67;
   
@@ -6259,12 +5843,96 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
   const updateSpouseClaimAge = (newAge) => {
     if (spouseSSStream) {
       const newBenefit = calculateSSBenefit(spousePIA, newAge, spouseBirthYear) * 12;
-      setIncomeStreams(incomeStreams.map(s => 
+      setIncomeStreams(incomeStreams.map(s =>
         s.id === spouseSSStream.id ? { ...s, startAge: newAge, amount: newBenefit, pia: spousePIA } : s
       ));
     }
   };
-  
+
+  // R6: dispatch the 6x6 (married) or 6x1 (single) claiming-age grid to the worker.
+  // Re-runs on any input that affects the analysis. Cancels any in-flight job when
+  // inputs change so the user always sees results for the latest inputs.
+  const ssIsMarried = personalInfo.filingStatus === 'married_joint' && !!spouseSSStream;
+  useEffect(() => {
+    if (!window.PlannerWorker) {
+      setGridError('Worker not available — reload the page.');
+      setGridStatus('error');
+      return;
+    }
+
+    // Debounce: object-ref deps (personalInfo, accounts, ...) get a new identity
+    // on every parent state update, so unthrottled this fires on every keystroke
+    // and slider tick — kicking off (then immediately cancelling) a worker job per
+    // pointer event. 350 ms is short enough to feel snappy but long enough that a
+    // typical typing burst or slider drag collapses to a single worker run.
+    const DEBOUNCE_MS = 350;
+    let dispatchHandle = null;
+    const timer = setTimeout(() => {
+      if (gridJobRef.current) {
+        window.PlannerWorker.cancel();
+        gridJobRef.current = null;
+      }
+      setGridStatus('running');
+      setGridProgress(0);
+      setGridError(null);
+
+      dispatchHandle = window.PlannerWorker.run({
+        type: useMcStressTest ? 'ssMonteCarlo' : 'ssGrid',
+        payload: {
+          personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
+          legacyAge: lifeExpectancy, cagrDelta,
+          myPIA, spousePIA, myBirthYear, spouseBirthYear,
+          isMarried: ssIsMarried,
+          mcRunsPerScenario, mcVolatility,
+        },
+        onProgress: (pct) => setGridProgress(pct),
+      });
+      gridJobRef.current = dispatchHandle;
+      dispatchHandle.promise
+        .then((data) => {
+          if (gridJobRef.current !== dispatchHandle) return;
+          gridJobRef.current = null;
+          setGridResult(data);
+          setGridStatus('idle');
+          setGridProgress(100);
+        })
+        .catch((err) => {
+          if (gridJobRef.current !== dispatchHandle) return;
+          gridJobRef.current = null;
+          if (err.message === 'Cancelled') return;  // expected on supersession
+          setGridError(err.message);
+          setGridStatus('error');
+        });
+    }, DEBOUNCE_MS);
+
+    return () => {
+      // Cleanup on dep change / unmount: clear the pending debounce timer AND
+      // cancel any worker job that already dispatched.
+      clearTimeout(timer);
+      if (gridJobRef.current === dispatchHandle && dispatchHandle && window.PlannerWorker) {
+        window.PlannerWorker.cancel();
+        gridJobRef.current = null;
+      }
+    };
+  }, [
+    personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
+    lifeExpectancy, cagrDelta, myPIA, spousePIA, myBirthYear, spouseBirthYear,
+    ssIsMarried, useMcStressTest,
+    // MC knobs are only consumed when the stress test is on. Going inert when it's
+    // off prevents adjusting the slider from re-firing the deterministic grid for
+    // no reason (R4).
+    useMcStressTest ? mcRunsPerScenario : null,
+    useMcStressTest ? mcVolatility : null,
+  ]);
+
+  const cancelGridJob = () => {
+    if (!window.PlannerWorker) return;
+    window.PlannerWorker.cancel();
+    gridJobRef.current = null;
+    setGridStatus('idle');
+    setGridProgress(0);
+  };
+
   return (
     <div className="space-y-6">
       <div>
@@ -6495,161 +6163,48 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
           survivor SS benefits, state taxes, FICA, and one-time events.
           ═══════════════════════════════════════════════════════════════════ */}
       {(() => {
-        // Use the life expectancy from the top of this tab (not personalInfo.legacyAge)
-        // so that both the simple breakeven analysis and the full-plan analysis 
-        // use the same planning horizon. This eliminates the confusing discrepancy
-        // where the two sections recommend different claiming ages.
-        const legacyAge = lifeExpectancy; // From the slider at top of this tab
-        const isMarried = personalInfo.filingStatus === 'married_joint' && spouseSSStream;
-        
-        // Override legacyAge in personalInfo for the projections run below
-        const piWithLifeExp = { ...personalInfo, legacyAge: legacyAge };
-        
-        // Apply CAGR delta to every account. cagrDelta is in percentage points
-        // (e.g., 0.02 = +2%), added to each account's configured cagr. A negative
-        // delta tests pessimistic markets; positive tests bullish.
-        // We never let the resulting CAGR go below 0 (would imply guaranteed loss).
-        const adjustedAccounts = cagrDelta === 0 
-          ? accounts 
-          : accounts.map(a => ({
-              ...a,
-              cagr: Math.max(0, (a.cagr || 0) + cagrDelta)
-            }));
-        
-        // For married: build grid of my × spouse claiming ages
-        // For single: just vary my age
+        // R6: heavy compute runs in the worker (see useEffect above). Here we just
+        // consume the result. Show loading / error states when results aren't ready.
+        const legacyAge = lifeExpectancy;
+        const isMarried = ssIsMarried;
         const myAges = [62, 64, 66, 67, 68, 70];
         const spouseAges = isMarried ? [62, 64, 66, 67, 68, 70] : [null];
-        
-        // Helper: build the modified income streams for a given (myClaimAge, spClaimAge)
-        // Used by both deterministic and Monte Carlo paths.
-        const buildStreams = (myClaimAge, spClaimAge) => incomeStreams.map(s => {
-          if (s.type === 'social_security' && s.owner === 'me') {
-            const newBenefit = calculateSSBenefit(myPIA, myClaimAge, myBirthYear) * 12;
-            return { ...s, startAge: myClaimAge, amount: newBenefit, pia: myPIA };
-          }
-          if (s.type === 'social_security' && s.owner === 'spouse' && spClaimAge !== null) {
-            const newBenefit = calculateSSBenefit(spousePIA, spClaimAge, spouseBirthYear) * 12;
-            return { ...s, startAge: spClaimAge, amount: newBenefit, pia: spousePIA };
-          }
-          return s;
-        });
-        
-        // Helper: standard-normal sample (Box-Muller transform).
-        // Used to generate random CAGR perturbations for Monte Carlo.
-        const randomNormal = () => {
-          let u = 0, v = 0;
-          while (u === 0) u = Math.random();
-          while (v === 0) v = Math.random();
-          return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
-        };
-        
-        // Helper: run a single MC simulation for a given scenario by perturbing
-        // each account's CAGR with a Normal(0, mcVolatility) shock. This is a
-        // simplified MC — each sim uses a single shock applied across all years
-        // rather than year-by-year variation. It captures the right distribution
-        // of outcomes for whether your portfolio survives in adverse scenarios,
-        // while keeping the full tax engine in play.
-        const runMcSimulation = (claimingScenario, sharedShock) => {
-          // Use a single shock for all accounts in this sim (correlated returns)
-          // since real markets correlate. Different sims get different shocks.
-          const mcAccounts = adjustedAccounts.map(a => ({
-            ...a,
-            cagr: Math.max(0, (a.cagr || 0) + sharedShock)
-          }));
-          const proj = computeProjections(piWithLifeExp, mcAccounts, claimingScenario.streams, assets, oneTimeEvents, recurringExpenses);
-          const atLegacy = proj.find(p => p.myAge === legacyAge);
-          const survived = atLegacy && atLegacy.totalPortfolio > 0;
-          // Find first year portfolio went to zero (if any)
-          let failureAge = null;
-          for (const p of proj) {
-            if (p.myAge >= personalInfo.myRetirementAge && p.totalPortfolio <= 0) {
-              failureAge = p.myAge;
-              break;
-            }
-          }
-          return {
-            survived,
-            failureAge,
-            portfolioAtLegacy: atLegacy?.totalPortfolio || 0
-          };
-        };
-        
-        const allScenarios = [];
-        myAges.forEach(myClaimAge => {
-          spouseAges.forEach(spClaimAge => {
-            const modifiedStreams = buildStreams(myClaimAge, spClaimAge);
-            
-            // Always run the deterministic projection — we need it for the
-            // headline numbers (lifetime SS, taxes, withdrawals).
-            const proj = computeProjections(piWithLifeExp, adjustedAccounts, modifiedStreams, assets, oneTimeEvents, recurringExpenses);
-            
-            const retirementYears = proj.filter(p => p.myAge >= personalInfo.myRetirementAge);
-            const lifetimeTax = retirementYears.reduce((sum, p) => sum + p.totalTax, 0);
-            const lifetimeWithdrawals = retirementYears.reduce((sum, p) => sum + p.portfolioWithdrawal, 0);
-            const lifetimeSS = retirementYears.reduce((sum, p) => sum + p.socialSecurity, 0);
-            // Track total Roth conversions executed in this scenario. This responds to
-            // SS claim age: claiming earlier means more SS income filling your tax brackets,
-            // leaving less room for cheap conversions. Claiming later opens a wider
-            // bridge-year window for conversions at lower brackets. Surfacing this
-            // makes the second-order interaction visible to the user.
-            const lifetimeRothConversions = retirementYears.reduce((sum, p) => sum + (p.rothConversion || 0), 0);
-            const atLegacy = proj.find(p => p.myAge === legacyAge);
-            const at75 = proj.find(p => p.myAge === 75);
-            const at80 = proj.find(p => p.myAge === 80);
-            const at85 = proj.find(p => p.myAge === 85);
-            
-            // If Monte Carlo is enabled, additionally run N simulations and
-            // compute success rate + percentile outcomes.
-            let mcResults = null;
-            if (useMcStressTest) {
-              const claimingScenario = { streams: modifiedStreams };
-              const survivedCount = { value: 0 };
-              const finalPortfolios = [];
-              const failureAges = [];
-              for (let sim = 0; sim < mcRunsPerScenario; sim++) {
-                const shock = randomNormal() * mcVolatility;
-                const result = runMcSimulation(claimingScenario, shock);
-                if (result.survived) survivedCount.value++;
-                else if (result.failureAge !== null) failureAges.push(result.failureAge);
-                finalPortfolios.push(result.portfolioAtLegacy);
-              }
-              finalPortfolios.sort((a, b) => a - b);
-              const p10 = finalPortfolios[Math.floor(finalPortfolios.length * 0.1)] || 0;
-              const p50 = finalPortfolios[Math.floor(finalPortfolios.length * 0.5)] || 0;
-              const p90 = finalPortfolios[Math.floor(finalPortfolios.length * 0.9)] || 0;
-              const avgFailureAge = failureAges.length > 0 
-                ? failureAges.reduce((s, a) => s + a, 0) / failureAges.length 
-                : null;
-              mcResults = {
-                runs: mcRunsPerScenario,
-                survived: survivedCount.value,
-                successRate: survivedCount.value / mcRunsPerScenario,
-                p10, p50, p90,
-                avgFailureAge,
-              };
-            }
-            
-            allScenarios.push({
-              myClaimAge, spClaimAge,
-              label: isMarried ? `Me ${myClaimAge} / Spouse ${spClaimAge}` : `Claim at ${myClaimAge}`,
-              myAnnualSS: calculateSSBenefit(myPIA, myClaimAge, myBirthYear) * 12,
-              spAnnualSS: spClaimAge !== null ? calculateSSBenefit(spousePIA, spClaimAge, spouseBirthYear) * 12 : 0,
-              portfolioAt75: at75?.totalPortfolio || 0,
-              portfolioAt80: at80?.totalPortfolio || 0,
-              portfolioAt85: at85?.totalPortfolio || 0,
-              portfolioAtLegacy: atLegacy?.totalPortfolio || 0,
-              lifetimeTax,
-              lifetimeWithdrawals,
-              lifetimeSS,
-              lifetimeRothConversions,
-              netLifetimeWealth: (atLegacy?.totalPortfolio || 0) + lifetimeSS,
-              projections: proj,
-              mcResults
-            });
-          });
-        });
-        
+
+        if (gridStatus === 'error') {
+          return (
+            <div className={`${cardStyle} border-l-4 border-l-red-500`}>
+              <h4 className="text-lg font-semibold text-red-400 mb-2">Analysis failed</h4>
+              <p className="text-slate-300 text-sm">{gridError || 'Unknown error.'}</p>
+            </div>
+          );
+        }
+        const allScenarios = gridResult?.allScenarios;
+        if (!allScenarios) {
+          return (
+            <div className={`${cardStyle} border-l-4 border-l-sky-500`}>
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <h4 className="text-lg font-semibold text-sky-400 mb-1">Computing scenarios…</h4>
+                  <p className="text-slate-400 text-sm">
+                    {useMcStressTest
+                      ? `Running ${myAges.length * spouseAges.length} scenarios × ${mcRunsPerScenario} Monte Carlo runs`
+                      : `Running ${myAges.length * spouseAges.length} deterministic scenarios`}
+                    {' '}— {gridProgress}%
+                  </p>
+                </div>
+                {gridStatus === 'running' && (
+                  <button
+                    onClick={cancelGridJob}
+                    className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded text-sm font-medium"
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        }
+
         // Find winners
         const bestByWealth = allScenarios.reduce((b, c) => c.netLifetimeWealth > b.netLifetimeWealth ? c : b);
         const bestByPortfolio = allScenarios.reduce((b, c) => c.portfolioAtLegacy > b.portfolioAtLegacy ? c : b);
@@ -6711,6 +6266,30 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
         
         return (
           <>
+            {/* R6: in-flight banner — visible whenever the worker is recomputing,
+                even when stale results are still on screen. Gives the user a cancel
+                affordance during the (potentially multi-second) MC stress test. */}
+            {gridStatus === 'running' && (
+              <div className={`${cardStyle} border-l-4 border-l-sky-500`}>
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sky-300 font-medium">⏳ Recomputing scenarios… {gridProgress}%</p>
+                    <p className="text-slate-400 text-xs mt-1">
+                      {useMcStressTest
+                        ? `${myAges.length * spouseAges.length} scenarios × ${mcRunsPerScenario} Monte Carlo runs`
+                        : `${myAges.length * spouseAges.length} deterministic scenarios`}
+                      {' '}— results below reflect previous inputs until this finishes.
+                    </p>
+                  </div>
+                  <button
+                    onClick={cancelGridJob}
+                    className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded text-sm font-medium"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
             {/* Winner Summary */}
             <div className={`${cardStyle} border-l-4 border-l-emerald-500`}>
               <h4 className="text-lg font-semibold text-emerald-400 mb-3">📊 Full Plan Impact Analysis</h4>
@@ -8252,55 +7831,65 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
                 </div>
               )}
               
-              {localInfo.healthcareModel === 'comprehensive' && (
-                <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-medium text-slate-300">Long-Term Care Modeling</span>
-                    <select
-                      value={localInfo.ltcModel || 'default'}
-                      onChange={e => handleChange('ltcModel', e.target.value)}
-                      className="bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200"
-                    >
-                      <option value="none">None</option>
-                      <option value="default">Default (28 months, median cost)</option>
-                      <option value="custom">Custom</option>
-                    </select>
-                  </div>
-                  {(localInfo.ltcModel === 'custom') && (
-                    <div className="grid grid-cols-2 gap-3 mt-2">
-                      <div>
-                        <label className={compactLabelStyle}>Monthly LTC Cost</label>
-                        <CurrencyCell
-                          value={localInfo.ltcMonthlyAmount || 5900}
-                          onValueChange={v => handleChange('ltcMonthlyAmount', v)}
-                          className={compactInputStyle}
-                        />
-                      </div>
-                      <div>
-                        <label className={compactLabelStyle}>Duration (months)</label>
-                        <input
-                          type="number"
-                          value={localInfo.ltcDurationMonths || 28}
-                          onChange={e => handleChange('ltcDurationMonths', Number(e.target.value) || 28)}
-                          className={compactInputStyle}
-                        />
-                      </div>
-                    </div>
-                  )}
-                  <p className="text-xs text-slate-500 mt-2">
-                    Default models ${LTC_MONTHLY_ASSISTED_LIVING_2025.toLocaleString()}/mo assisted living for {LTC_DEFAULT_DURATION_MONTHS} months before death (Genworth 2024 median).
-                  </p>
-                </div>
-              )}
-              
               <div className="p-2 bg-blue-900/20 border border-blue-800/30 rounded text-xs text-blue-300">
-                Healthcare costs are added to your retirement spending target and flow through the tax-aware withdrawal solver. 
+                Healthcare costs are added to your retirement spending target and flow through the tax-aware withdrawal solver.
                 IRMAA surcharges are calculated separately based on MAGI. Medicare Part B/D base premiums are included here; IRMAA adds on top.
               </div>
             </div>
           )}
         </div>
-        
+
+        {/* Long-Term Care — separate from Healthcare because the engine bills LTC
+            whenever ltcModel !== 'none' regardless of healthcareModel. Keeping
+            this control always-visible prevents the bug where users turned off
+            healthcare but LTC kept spiking their projection at ages 82–88. */}
+        <div className="border-t border-slate-700/50 mt-5 pt-5">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-300 uppercase tracking-wide">Long-Term Care</h4>
+              <p className="text-xs text-slate-500 mt-1">Bills assisted-living cost over the final months of life expectancy (one window per spouse)</p>
+            </div>
+          </div>
+          <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-medium text-slate-300">LTC Model</span>
+              <select
+                value={localInfo.ltcModel || 'none'}
+                onChange={e => handleChange('ltcModel', e.target.value)}
+                className="bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200"
+              >
+                <option value="none">None</option>
+                <option value="default">Default (28 months, median cost)</option>
+                <option value="custom">Custom</option>
+              </select>
+            </div>
+            {(localInfo.ltcModel === 'custom') && (
+              <div className="grid grid-cols-2 gap-3 mt-2">
+                <div>
+                  <label className={compactLabelStyle}>Monthly LTC Cost</label>
+                  <CurrencyCell
+                    value={localInfo.ltcMonthlyAmount || 5900}
+                    onValueChange={v => handleChange('ltcMonthlyAmount', v)}
+                    className={compactInputStyle}
+                  />
+                </div>
+                <div>
+                  <label className={compactLabelStyle}>Duration (months)</label>
+                  <input
+                    type="number"
+                    value={localInfo.ltcDurationMonths || 28}
+                    onChange={e => handleChange('ltcDurationMonths', Number(e.target.value) || 28)}
+                    className={compactInputStyle}
+                  />
+                </div>
+              </div>
+            )}
+            <p className="text-xs text-slate-500 mt-2">
+              Default models ${LTC_MONTHLY_ASSISTED_LIVING_2025.toLocaleString()}/mo assisted living for {LTC_DEFAULT_DURATION_MONTHS} months before death (Genworth 2024 median). Cost compounds at the medical inflation rate and appears as a spike in the final years before each spouse's life expectancy.
+            </p>
+          </div>
+        </div>
+
         {/* Recurring Expenses (Categorized) */}
         <div className="border-t border-slate-700/50 mt-5 pt-5">
           <div className="flex items-center justify-between mb-3">
@@ -12228,11 +11817,11 @@ function RetirementPlanner() {
   const [showImportExport, setShowImportExport] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [dataWarnings, setDataWarnings] = useState([]);
-  const [showSetupWizard, setShowSetupWizard] = useState(() => {
-    // Show wizard automatically on first visit (no saved data)
-    const saved = loadFromStorage();
-    return !saved;
-  });
+  // Single localStorage read for the whole component — savedData feeds both
+  // the wizard check below and every state slice's initializer further down (B9).
+  const [savedData] = useState(() => loadFromStorage());
+
+  const [showSetupWizard, setShowSetupWizard] = useState(() => !savedData);
   
   // Logo Component - MB makers mark on blue circle
   const Logo = ({ size = 'large' }) => {
@@ -12250,9 +11839,8 @@ function RetirementPlanner() {
     );
   };
   
-  // Initialize state from localStorage or defaults - load once for all state slices
-  const [savedData] = useState(() => loadFromStorage());
-  
+  // savedData was hoisted above the wizard check (B9). State initializers below
+  // re-use the same snapshot — one localStorage read per mount, not two.
   const [personalInfo, setPersonalInfo] = useState(() => {
     const currentYear = new Date().getFullYear();
     // Merge saved data with defaults to ensure new fields are present
@@ -12331,11 +11919,14 @@ function RetirementPlanner() {
     const scenario = scenarios.find(s => s.id === id);
     if (scenario) {
       setPersonalInfo({ ...DEFAULT_PERSONAL_INFO, ...scenario.personalInfo });
-      setAccounts(scenario.accounts);
-      setIncomeStreams(scenario.incomeStreams);
-      if (scenario.assets) setAssets(scenario.assets);
-      if (scenario.oneTimeEvents) setOneTimeEvents(scenario.oneTimeEvents);
-      if (scenario.recurringExpenses) setRecurringExpenses(scenario.recurringExpenses);
+      // Always overwrite list fields — defaulting to [] so loading an older
+      // scenario that predates a field (or that explicitly cleared it) wipes
+      // the current values instead of leaving stale entries in place (B6).
+      setAccounts(scenario.accounts || []);
+      setIncomeStreams(scenario.incomeStreams || []);
+      setAssets(scenario.assets || []);
+      setOneTimeEvents(scenario.oneTimeEvents || []);
+      setRecurringExpenses(scenario.recurringExpenses || []);
       setActiveScenarioId(id);
     }
   };
@@ -12344,8 +11935,16 @@ function RetirementPlanner() {
   useEffect(() => {
     const saveTimer = setTimeout(() => {
       const data = { personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, scenarios, lastSaved: new Date().toISOString() };
-      saveToStorage(data);
-      setSaveStatus('Saved');
+      const result = saveToStorage(data);
+      if (result.ok) {
+        setSaveStatus('Saved');
+      } else if (result.reason === 'quota') {
+        // Surface the failure rather than letting users keep editing under the
+        // impression their work is being persisted (B7).
+        setSaveStatus('Save failed: browser storage full. Export your data.');
+      } else {
+        setSaveStatus('Save failed — see console for details.');
+      }
     }, SAVE_DEBOUNCE_MS);
     
     // Clear the save status after showing it
@@ -13245,7 +12844,7 @@ function RetirementPlanner() {
               </div>
               <h1 className="text-base font-bold text-slate-100">Retirement</h1>
               <h1 className="text-base font-bold text-slate-100 -mt-1">Planner</h1>
-              <p className="text-xs text-slate-500 mt-1">v1.8</p>
+              <p className="text-xs text-slate-500 mt-1">v{typeof window !== 'undefined' && window.APP_VERSION ? window.APP_VERSION : 'dev'}</p>
             </div>
           )}
         </div>
@@ -13315,7 +12914,7 @@ function RetirementPlanner() {
             {activeTab === 'scenarios' && <ScenarioComparisonTab activeScenarioId={activeScenarioId} assets={assets} computeProjections={computeProjections} createScenario={createScenario} deleteScenario={deleteScenario} loadScenario={loadScenario} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} scenarios={scenarios} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'withdrawal' && <WithdrawalStrategiesTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} />}
-            {activeTab === 'montecarlo' && <MonteCarloTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'montecarlo' && <MonteCarloTab accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'stresstest' && <StressTestTab accounts={accounts} currentYear={currentYear} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'sensitivity' && <SensitivityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'faq' && <FAQTab />}

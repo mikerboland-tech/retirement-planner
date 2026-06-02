@@ -7,20 +7,27 @@
        MOBILE REDIRECT
        Runs synchronously before any other scripts so phones don't
        waste bandwidth downloading the desktop bundle.
-       Detection: viewport width up to 768px OR a mobile user agent.
        Escape hatch: append ?desktop=1 to force the desktop version
-       on a phone (useful for testing).
-       location.replace() avoids polluting browser history so the
-       Back button works correctly.
+       (useful for testing on a small device). location.replace()
+       avoids polluting browser history so Back works correctly.
        ============================================================ -->
   <script>
     (function () {
       try {
         var params = new URLSearchParams(window.location.search);
         if (params.get('desktop') === '1') return;
-        var isPhone = window.matchMedia('(max-width: 768px)').matches
-          || /Android|iPhone|iPod|Mobile/i.test(navigator.userAgent);
-        if (isPhone) {
+        var ua = navigator.userAgent;
+        // Modern iPads identify as Macintosh; the giveaway is that they support
+        // multi-touch, which no real Mac does. Caught here so iPad users land on
+        // the mobile UI like every other tablet.
+        var isIPadOS = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+        var isPhoneUA = /Android|iPhone|iPod|iPad|Mobile/i.test(ua);
+        // pointer:coarse means primary input is touch — true for phones and tablets,
+        // false for desktops with a mouse even if the window is narrow. Combined
+        // with the viewport check this avoids redirecting desktop users who just
+        // resized their browser narrow.
+        var isTouchSmall = window.matchMedia('(pointer: coarse) and (max-width: 1024px)').matches;
+        if (isIPadOS || isPhoneUA || isTouchSmall) {
           window.location.replace('mobile.html');
         }
       } catch (e) {
@@ -29,13 +36,83 @@
     })();
   </script>
   <title>Retirement Planner</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-is@18/umd/react-is.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/prop-types@15/prop-types.min.js"></script>
-  <script src="https://unpkg.com/recharts@2.10.3/umd/Recharts.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Vendored libraries (see vendor/README.md for source URLs). Served locally
+       so the app works offline and isn't affected by CDN cert/network issues. -->
+  <script src="vendor/tailwind.js"></script>
+  <script src="vendor/react.min.js"></script>
+  <script src="vendor/react-dom.min.js"></script>
+  <script src="vendor/react-is.min.js"></script>
+  <script src="vendor/prop-types.min.js"></script>
+  <script src="vendor/recharts.js"></script>
+  <script src="vendor/babel.min.js"></script>
+  <!-- ============================================================
+       APP_VERSION — SINGLE SOURCE OF TRUTH
+       Bumping this one number drives:
+         - the version label in the sidebar (read by retirement-planner.jsx)
+         - the ?v= cache-bust query string for engine.js and worker.js
+         - the worker's own importScripts('engine.js?v=...') (it reads
+           the value off its own Worker URL search params)
+       So one edit per release, in both index.html AND mobile.html.
+       ============================================================ -->
+  <script>window.APP_VERSION = '1.9.0';</script>
+  <!-- engine.js is loaded dynamically from the body IIFE (after the library
+       check) using `appendChild` so its ?v= comes from APP_VERSION without any
+       hardcoded version in a <script> tag. -->
+  <!-- PlannerWorker client. Wraps the Web Worker that runs heavy projection
+       loops (MonteCarloTab, SocialSecurityTab grid + MC) off the main thread.
+       Defined before the JSX fetch so window.PlannerWorker is available when
+       the JSX destructures it. -->
+  <script>
+    window.PlannerWorker = (function () {
+      let worker = null;
+      let nextJobId = 1;
+      const jobs = new Map();  // jobId -> { resolve, reject, onProgress }
+
+      function ensureWorker() {
+        if (!worker) {
+          // Worker URL carries APP_VERSION so the worker can extract it and
+          // pass the same ?v= to its own importScripts('engine.js') call.
+          worker = new Worker('worker.js?v=' + window.APP_VERSION);
+          worker.onmessage = function (e) {
+            const msg = e.data;
+            const job = jobs.get(msg.jobId);
+            if (!job) return;  // stale message after cancel — ignore
+            if (msg.type === 'progress') { if (job.onProgress) job.onProgress(msg.percent); }
+            else if (msg.type === 'result') { jobs.delete(msg.jobId); job.resolve(msg.data); }
+            else if (msg.type === 'error')  { jobs.delete(msg.jobId); job.reject(new Error(msg.error)); }
+          };
+          worker.onerror = function (e) {
+            // Worker crashed — reject all in-flight jobs and force respawn next call
+            jobs.forEach(function (j) { j.reject(new Error('Worker crashed: ' + e.message)); });
+            jobs.clear();
+            if (worker) { worker.terminate(); worker = null; }
+          };
+        }
+        return worker;
+      }
+
+      return {
+        run: function (opts) {
+          const jobId = nextJobId++;
+          ensureWorker().postMessage({ jobId: jobId, type: opts.type, payload: opts.payload });
+          const promise = new Promise(function (resolve, reject) {
+            jobs.set(jobId, { resolve: resolve, reject: reject, onProgress: opts.onProgress });
+          });
+          return { jobId: jobId, promise: promise };
+        },
+        // Terminate-and-respawn: cheap, atomic, guarantees no stray result
+        // messages from a cancelled job land on a new one. All in-flight jobs
+        // reject with 'Cancelled' so callers can distinguish from real errors.
+        cancel: function () {
+          if (!worker) return;
+          worker.terminate();
+          worker = null;
+          jobs.forEach(function (j) { j.reject(new Error('Cancelled')); });
+          jobs.clear();
+        },
+      };
+    })();
+  </script>
   <style>
     body { background: #0f172a; margin: 0; }
     #loading { display:flex; flex-direction:column; justify-content:center; align-items:center; height:100vh; color:#94a3b8; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; }
@@ -72,8 +149,44 @@
     } else if (typeof Babel === 'undefined') {
       showError('Failed to load Babel compiler. Check your internet connection and try again.');
     } else {
+      // engine.js is loaded dynamically inside the IIFE below so the ?v= cache-bust
+      // can come from window.APP_VERSION (single source of truth).
+      function loadScript(src) {
+        return new Promise(function (resolve, reject) {
+          var s = document.createElement('script');
+          s.src = src;
+          s.onload = resolve;
+          s.onerror = function () { reject(new Error('Failed to load ' + src)); };
+          document.head.appendChild(s);
+        });
+      }
+      // Top-level React error boundary. Without this, any render error in any tab
+      // whitescreens the whole app — with 13k lines of UI behind tabs, that's high risk.
+      // Catches render/lifecycle errors only — async/event-handler errors bypass it
+      // (React limitation; those still bubble to window.onerror).
+      class ErrorBoundary extends React.Component {
+        constructor(props) { super(props); this.state = { error: null }; }
+        static getDerivedStateFromError(error) { return { error: error }; }
+        componentDidCatch(error, info) { console.error('App crashed:', error, info); }
+        render() {
+          if (!this.state.error) return this.props.children;
+          var msg = (this.state.error && this.state.error.message) || String(this.state.error);
+          var stack = (this.state.error && this.state.error.stack) || '';
+          return React.createElement('div', { style: { maxWidth: 720, margin: '60px auto', padding: 24, background: '#1e293b', border: '1px solid #ef4444', borderRadius: 12, color: '#fca5a5', fontFamily: '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif' } },
+            React.createElement('div', { style: { fontSize: 20, fontWeight: 600, color: '#fee2e2', marginBottom: 8 } }, 'Something went wrong'),
+            React.createElement('div', { style: { fontSize: 14, marginBottom: 16, color: '#fecaca' } }, 'Your saved data is safe in browser storage. Try reloading the page.'),
+            React.createElement('pre', { style: { fontSize: 12, background: '#0f172a', padding: 12, borderRadius: 6, overflow: 'auto', maxHeight: 240, color: '#fda4af', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, msg + (stack ? '\n\n' + stack : '')),
+            React.createElement('button', { onClick: function() { window.location.reload(); }, style: { marginTop: 16, padding: '8px 16px', background: '#dc2626', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 14, fontWeight: 500 } }, 'Reload page')
+          );
+        }
+      }
       (async function() {
         try {
+          document.getElementById('load-status').textContent = 'Loading engine...';
+          await loadScript('engine.js?v=' + window.APP_VERSION);
+          if (typeof window.PlannerEngine === 'undefined') {
+            throw new Error('engine.js loaded but window.PlannerEngine is undefined.');
+          }
           document.getElementById('load-status').textContent = 'Fetching app code...';
           var resp = await fetch(APP_FILE);
           if (!resp.ok) throw new Error('Failed to load ' + APP_FILE + ': HTTP ' + resp.status);
@@ -96,7 +209,7 @@
           (0, eval)(globals + '\n' + code);
           document.getElementById('load-status').textContent = 'Rendering...';
           var root = ReactDOM.createRoot(document.getElementById('root'));
-          root.render(React.createElement(RetirementPlanner));
+          root.render(React.createElement(ErrorBoundary, null, React.createElement(RetirementPlanner)));
         } catch (err) {
           showError('Error loading app:\n\n' + err.message + '\n\n' + (err.stack || ''));
         }
