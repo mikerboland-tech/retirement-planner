@@ -469,6 +469,61 @@ if (!IS_MOBILE) {
   }
 }
 
+// ── Percent-mode contributions track salary COLA ─────────────────────────────
+section('Percent-mode — contribution scales with salary COLA');
+{
+  // Two parallel young savers, identical except contribution mode.
+  // Acct A: fixed $10K/yr, 0% growth — flat in nominal $.
+  // Acct B: 10% of $100K salary with 3% COLA — should grow with salary.
+  // After 10 years of identical 7% CAGR, Acct B should be the larger balance.
+  const TODAY = TODAY_YEAR;
+  const pi = {
+    myAge: 35, spouseAge: 35,
+    myRetirementAge: 65, spouseRetirementAge: 65,
+    myBirthYear: TODAY - 35, spouseBirthYear: TODAY - 35,
+    filingStatus: 'single',
+    state: 'Florida',
+    desiredRetirementIncome: 60000,
+    inflationRate: 0.03,
+    withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+    charitableGivingPercent: 0,
+    rothConversionAmount: 0, rothConversionStartAge: 0, rothConversionEndAge: 0,
+    rothConversionBracket: '', rothConversionTaxSource: 'withdrawal',
+    legacyAge: 95, survivorModelEnabled: false,
+    myLifeExpectancy: 95, spouseLifeExpectancy: 95,
+    healthcareModel: 'none', pre65HealthcareAnnual: 0, post65OOPAnnual: 0,
+    includeMedigap: false, ltcModel: 'none', ltcMonthlyAmount: 0, ltcDurationMonths: 0,
+    medicalInflation: 0.05,
+  };
+  const accts = [
+    { id: 1, name: 'Fixed', type: '401k', balance: 0, contribution: 10000, contributionGrowth: 0, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Percent', type: '401k', balance: 0, contributionMode: 'percent', employeePercent: 0.10, employerMatchPercent: 0, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'me' },
+  ];
+  const streams = [
+    { id: 1, name: 'Salary', type: 'earned_income', amount: 100000, startAge: 35, endAge: 64, cola: 0.03, owner: 'me' },
+  ];
+  const proj = computeProjections(pi, accts, streams, [], [], [], TODAY);
+  const yr10 = proj.find(r => r.myAge === 45);
+  const fixedBal = yr10.perAccountBalances ? yr10.perAccountBalances[1] : null;
+  const percentBal = yr10.perAccountBalances ? yr10.perAccountBalances[2] : null;
+  // Sanity — both balances exist and grew.
+  gt(fixedBal, 100000, 'fixed-$ account has accumulated balance after 10 yrs');
+  gt(percentBal, 100000, 'percent-mode account has accumulated balance after 10 yrs');
+  // The percent-mode account should outpace the fixed account because its contribution
+  // grew from $10K (10% of $100K) to ~$13,439 (10% of $100K × 1.03^10) by year 10.
+  gt(percentBal, fixedBal, 'percent-mode balance > fixed-$ balance after 10 yrs of salary COLA');
+
+  // Backwards-compat: omitting contributionMode behaves exactly like 'fixed'.
+  // Re-run with the same first account but no mode field — should match the prior result.
+  const acctsNoMode = [
+    { id: 1, name: 'NoMode', type: '401k', balance: 0, contribution: 10000, contributionGrowth: 0, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'me' },
+  ];
+  const projNoMode = computeProjections(pi, acctsNoMode, streams, [], [], [], TODAY);
+  const noModeYr10 = projNoMode.find(r => r.myAge === 45);
+  const noModeBal = noModeYr10.perAccountBalances[1];
+  approx(noModeBal, fixedBal, 'missing contributionMode field == fixed mode (backwards-compat)', 0.001);
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
