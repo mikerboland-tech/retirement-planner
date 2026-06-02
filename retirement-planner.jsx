@@ -871,7 +871,9 @@ const STORAGE_KEY = 'retirement_planner_data';
 // Bump this whenever the persisted data shape changes in a way an older build
 // could not safely consume. loadFromStorage refuses to read anything with a
 // future schemaVersion so a downgrade doesn't silently shred the user's data (B8).
-const SCHEMA_VERSION = 1;
+// v2: account.contributionMode ('fixed' | 'percent') + employeePercent + employerMatchPercent
+//     are optional; absent → engine treats as 'fixed' so older saved scenarios still load.
+const SCHEMA_VERSION = 2;
 
 const DEFAULT_DASHBOARD_VISIBILITY = {
   summaryCards: true,
@@ -978,7 +980,7 @@ const DEFAULT_INCOME_STREAMS = [
 ];
 
 const DEFAULT_ASSETS = [
-  { id: 1, name: 'Primary Residence', type: 'real_estate', value: 350000, appreciationRate: 0.03, mortgage: 150000, mortgagePayoffAge: 70 },
+  { id: 1, name: 'Primary Residence', type: 'real_estate', value: 315000, appreciationRate: 0.03, mortgage: 260000, mortgagePayoffAge: 60 },
   { id: 2, name: 'Vehicles', type: 'vehicle', value: 35000, appreciationRate: -0.10, mortgage: 0, mortgagePayoffAge: null }
 ];
 
@@ -8276,18 +8278,34 @@ function AccountsTab({ accountTypes, accounts, contributorTypes, personalInfo, p
                     />
                   </td>
                   <td className="py-2 px-1">
-                    <CurrencyCell
-                      value={account.contribution}
-                      onValueChange={v => updateAccount(account.id, 'contribution', v)}
-                      className="bg-transparent border border-transparent rounded px-2 py-1.5 text-sky-400 font-semibold text-right w-20 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                    />
+                    {account.contributionMode === 'percent' ? (
+                      <div
+                        onClick={() => { setEditingAccount(account); setShowAccountModal(true); }}
+                        className="px-2 py-1.5 text-sky-400 font-semibold text-right w-20 cursor-pointer hover:bg-slate-800/50 rounded text-sm"
+                        title="Percent-mode contribution — click to edit in modal"
+                      >% salary</div>
+                    ) : (
+                      <CurrencyCell
+                        value={account.contribution}
+                        onValueChange={v => updateAccount(account.id, 'contribution', v)}
+                        className="bg-transparent border border-transparent rounded px-2 py-1.5 text-sky-400 font-semibold text-right w-20 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                      />
+                    )}
                   </td>
                   <td className="py-2 px-1">
-                    <PercentCell
-                      value={account.contributionGrowth || 0}
-                      onValueChange={v => updateAccount(account.id, 'contributionGrowth', v)}
-                      className="bg-transparent border border-transparent rounded px-2 py-1.5 text-cyan-400 font-semibold text-right w-16 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                    />
+                    {account.contributionMode === 'percent' ? (
+                      <div
+                        onClick={() => { setEditingAccount(account); setShowAccountModal(true); }}
+                        className="px-2 py-1.5 text-cyan-400 font-semibold text-right w-20 cursor-pointer hover:bg-slate-800/50 rounded text-xs whitespace-nowrap"
+                        title="Employee + employer match — click to edit"
+                      >{((account.employeePercent || 0) * 100).toFixed(1)}%+{((account.employerMatchPercent || 0) * 100).toFixed(1)}%</div>
+                    ) : (
+                      <PercentCell
+                        value={account.contributionGrowth || 0}
+                        onValueChange={v => updateAccount(account.id, 'contributionGrowth', v)}
+                        className="bg-transparent border border-transparent rounded px-2 py-1.5 text-cyan-400 font-semibold text-right w-16 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                      />
+                    )}
                   </td>
                   <td className="py-2 px-1">
                     <div className="flex items-center justify-center gap-0.5">
@@ -12214,7 +12232,21 @@ function RetirementPlanner() {
   );
   
   const AccountModal = () => {
-    const [formData, setFormData] = useState(editingAccount || { name: '', type: '401k', balance: 0, contribution: 0, contributionGrowth: 0.02, cagr: 0.07, startAge: personalInfo.myAge, stopAge: personalInfo.myRetirementAge, owner: 'me', contributor: 'me', costBasisPercent: 0.50 });
+    const [formData, setFormData] = useState(editingAccount || { name: '', type: '401k', balance: 0, contribution: 0, contributionGrowth: personalInfo.inflationRate || 0.03, cagr: 0.07, startAge: personalInfo.myAge, stopAge: personalInfo.myRetirementAge, owner: 'me', contributor: 'me', costBasisPercent: 0.50 });
+    const isPercentMode = formData.contributionMode === 'percent';
+    const percentEligible = (formData.owner === 'me' || formData.owner === 'spouse')
+      && ['401k','roth_401k','traditional_ira','roth_ira','403b'].includes(formData.type);
+    // Year-1 / Year-30 preview: look up the owner's salary stream so the saver sees the dollar
+    // impact of their slider choice. If no salary stream exists, show a helpful dash.
+    const ownerSalaryStream = isPercentMode
+      ? incomeStreams.find(s => s.type === 'earned_income' && s.owner === formData.owner)
+      : null;
+    const employeeFrac = Number(formData.employeePercent) || 0;
+    const matchFrac = Number(formData.employerMatchPercent) || 0;
+    const totalFrac = employeeFrac + matchFrac;
+    const year1Contrib = ownerSalaryStream ? Math.round(ownerSalaryStream.amount * totalFrac) : null;
+    const year30Salary = ownerSalaryStream ? ownerSalaryStream.amount * Math.pow(1 + (ownerSalaryStream.cola || 0), 30) : null;
+    const year30Contrib = year30Salary !== null ? Math.round(year30Salary * totalFrac) : null;
     return (
       <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
         <div className={`${cardStyle} max-w-lg w-full max-h-[90vh] overflow-y-auto`}>
@@ -12226,14 +12258,72 @@ function RetirementPlanner() {
               <div><label className={labelStyle}>Owner</label><select value={formData.owner} onChange={e => setFormData({...formData, owner: e.target.value})} className={inputStyle}><option value="me">Me</option><option value="spouse">Spouse</option><option value="joint">Joint</option></select></div>
               <div><label className={labelStyle}>Contributor</label><select value={formData.contributor || 'me'} onChange={e => setFormData({...formData, contributor: e.target.value})} className={inputStyle}>{contributorTypes.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
             </div>
+            {percentEligible && (
+              <div className="border-t border-slate-700/50 pt-3">
+                <label className={labelStyle}>Contribution Mode</label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setFormData({...formData, contributionMode: 'fixed'})}
+                    className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition ${!isPercentMode ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-slate-800/60 text-slate-400 border-slate-700/50 hover:text-slate-200'}`}
+                  >$ Fixed Amount</button>
+                  <button
+                    type="button"
+                    onClick={() => setFormData({...formData, contributionMode: 'percent', employeePercent: formData.employeePercent ?? 0.10, employerMatchPercent: formData.employerMatchPercent ?? 0.04, contributionGrowth: 0})}
+                    className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition ${isPercentMode ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-slate-800/60 text-slate-400 border-slate-700/50 hover:text-slate-200'}`}
+                  >% of Salary</button>
+                </div>
+                {isPercentMode && (
+                  <p className="text-xs text-slate-500 mt-2">Pulls from this owner's earned-income stream. If you also have a separate "Employer Match" account, delete it to avoid double-counting.</p>
+                )}
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-4">
               <div><label className={labelStyle}>Current Balance</label><input type="number" value={formData.balance} onChange={e => setFormData({...formData, balance: Number(e.target.value)})} className={inputStyle} /></div>
-              <div><label className={labelStyle}>Annual Contribution</label><input type="number" value={formData.contribution} onChange={e => setFormData({...formData, contribution: Number(e.target.value)})} className={inputStyle} /></div>
+              {!isPercentMode && (
+                <div><label className={labelStyle}>Annual Contribution</label><input type="number" value={formData.contribution} onChange={e => setFormData({...formData, contribution: Number(e.target.value)})} className={inputStyle} /></div>
+              )}
+              {isPercentMode && (
+                <div><label className={labelStyle}>Expected CAGR (%)</label><input type="number" step="0.1" value={(formData.cagr * 100).toFixed(1)} onChange={e => setFormData({...formData, cagr: Number(e.target.value) / 100})} className={inputStyle} /></div>
+              )}
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div><label className={labelStyle}>Contribution Growth (%/yr)</label><input type="number" step="0.1" value={((formData.contributionGrowth || 0) * 100).toFixed(1)} onChange={e => setFormData({...formData, contributionGrowth: Number(e.target.value) / 100})} className={inputStyle} /></div>
-              <div><label className={labelStyle}>Expected CAGR (%)</label><input type="number" step="0.1" value={(formData.cagr * 100).toFixed(1)} onChange={e => setFormData({...formData, cagr: Number(e.target.value) / 100})} className={inputStyle} /></div>
-            </div>
+            {!isPercentMode && (
+              <div className="grid grid-cols-2 gap-4">
+                <div><label className={labelStyle}>Contribution Growth (%/yr)</label><input type="number" step="0.1" value={((formData.contributionGrowth || 0) * 100).toFixed(1)} onChange={e => setFormData({...formData, contributionGrowth: Number(e.target.value) / 100})} className={inputStyle} /></div>
+                <div><label className={labelStyle}>Expected CAGR (%)</label><input type="number" step="0.1" value={(formData.cagr * 100).toFixed(1)} onChange={e => setFormData({...formData, cagr: Number(e.target.value) / 100})} className={inputStyle} /></div>
+              </div>
+            )}
+            {isPercentMode && (
+              <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg space-y-3">
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className={labelStyle} style={{marginBottom: 0}}>Employee Contribution</label>
+                    <span className="text-sm font-semibold text-amber-300">{(employeeFrac * 100).toFixed(1)}%</span>
+                  </div>
+                  <input type="range" min="0" max="0.25" step="0.005" value={employeeFrac}
+                    onChange={e => setFormData({...formData, employeePercent: Number(e.target.value)})}
+                    className="w-full" />
+                </div>
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className={labelStyle} style={{marginBottom: 0}}>Employer Match</label>
+                    <span className="text-sm font-semibold text-amber-300">{(matchFrac * 100).toFixed(1)}%</span>
+                  </div>
+                  <input type="range" min="0" max="0.10" step="0.005" value={matchFrac}
+                    onChange={e => setFormData({...formData, employerMatchPercent: Number(e.target.value)})}
+                    className="w-full" />
+                </div>
+                <div className="text-xs text-slate-400 border-t border-slate-700/50 pt-2">
+                  {ownerSalaryStream ? (
+                    <>Year 1: <span className="text-emerald-400 font-semibold">${year1Contrib.toLocaleString()}</span>
+                    {' → '}Year 30: <span className="text-emerald-400 font-semibold">${year30Contrib.toLocaleString()}</span>
+                    <span className="text-slate-500"> (salary ${Math.round(ownerSalaryStream.amount).toLocaleString()} × {(totalFrac*100).toFixed(1)}%)</span></>
+                  ) : (
+                    <span className="text-rose-400">No earned-income stream found for this owner. Add one in the Income tab — contribution will be $0 otherwise.</span>
+                  )}
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-4">
               <div><label className={labelStyle}>Contribution Start Age</label><input type="number" value={formData.startAge} onChange={e => setFormData({...formData, startAge: Number(e.target.value)})} className={inputStyle} /></div>
               <div><label className={labelStyle}>Contribution Stop Age</label><input type="number" value={formData.stopAge} onChange={e => setFormData({...formData, stopAge: Number(e.target.value)})} className={inputStyle} /></div>
@@ -12568,16 +12658,16 @@ function RetirementPlanner() {
         filingStatus, state: w.state, desiredRetirementIncome: num(w.desiredSpending)||suggestedSpending||60000,
         inflationRate: 0.03, withdrawalPriority: ['pretax','brokerage','roth'] };
       const accts = []; let aid = 1;
-      if (w.has401k) { accts.push({id:aid++,name:'My 401(k)',type:'401k',balance:num(w.balance401k),contribution:num(w.contrib401k),contributionGrowth:0.02,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'}); }
-      if (w.hasRoth401k) { accts.push({id:aid++,name:'My Roth 401(k)',type:'roth_401k',balance:num(w.balanceRoth401k),contribution:num(w.contribRoth401k),contributionGrowth:0.02,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'}); }
-      if ((w.has401k||w.hasRoth401k)&&num(w.match401k)>0) { accts.push({id:aid++,name:'Employer Match',type:'401k',balance:0,contribution:num(w.match401k),contributionGrowth:0.02,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'employer'}); }
+      if (w.has401k) { accts.push({id:aid++,name:'My 401(k)',type:'401k',balance:num(w.balance401k),contribution:num(w.contrib401k),contributionGrowth:0.03,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'}); }
+      if (w.hasRoth401k) { accts.push({id:aid++,name:'My Roth 401(k)',type:'roth_401k',balance:num(w.balanceRoth401k),contribution:num(w.contribRoth401k),contributionGrowth:0.03,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'}); }
+      if ((w.has401k||w.hasRoth401k)&&num(w.match401k)>0) { accts.push({id:aid++,name:'Employer Match',type:'401k',balance:0,contribution:num(w.match401k),contributionGrowth:0.03,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'employer'}); }
       if (w.hasRothIRA) accts.push({id:aid++,name:'My Roth IRA',type:'roth_ira',balance:num(w.balanceRothIRA),contribution:num(w.contribRothIRA),contributionGrowth:0,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'});
       if (w.hasTraditionalIRA) accts.push({id:aid++,name:'My Traditional IRA',type:'traditional_ira',balance:num(w.balanceTraditionalIRA),contribution:num(w.contribTraditionalIRA),contributionGrowth:0,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'});
       if (w.hasBrokerage) accts.push({id:aid++,name:'Brokerage',type:'brokerage',balance:num(w.balanceBrokerage),contribution:num(w.contribBrokerage),contributionGrowth:0,cagr:0.06,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'});
       if (w.hasHSA) accts.push({id:aid++,name:'HSA',type:'hsa',balance:num(w.balanceHSA),contribution:num(w.contribHSA),contributionGrowth:0,cagr:0.06,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'});
-      if (w.hasSpouse&&w.spouseHas401k) { accts.push({id:aid++,name:'Spouse 401(k)',type:'401k',balance:num(w.spouseBalance401k),contribution:num(w.spouseContrib401k),contributionGrowth:0.02,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'me'}); }
-      if (w.hasSpouse&&w.spouseHasRoth401k) { accts.push({id:aid++,name:'Spouse Roth 401(k)',type:'roth_401k',balance:num(w.spouseBalanceRoth401k),contribution:num(w.spouseContribRoth401k),contributionGrowth:0.02,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'me'}); }
-      if (w.hasSpouse&&(w.spouseHas401k||w.spouseHasRoth401k)&&num(w.spouseMatch401k)>0) { accts.push({id:aid++,name:'Spouse Match',type:'401k',balance:0,contribution:num(w.spouseMatch401k),contributionGrowth:0.02,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'employer'}); }
+      if (w.hasSpouse&&w.spouseHas401k) { accts.push({id:aid++,name:'Spouse 401(k)',type:'401k',balance:num(w.spouseBalance401k),contribution:num(w.spouseContrib401k),contributionGrowth:0.03,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'me'}); }
+      if (w.hasSpouse&&w.spouseHasRoth401k) { accts.push({id:aid++,name:'Spouse Roth 401(k)',type:'roth_401k',balance:num(w.spouseBalanceRoth401k),contribution:num(w.spouseContribRoth401k),contributionGrowth:0.03,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'me'}); }
+      if (w.hasSpouse&&(w.spouseHas401k||w.spouseHasRoth401k)&&num(w.spouseMatch401k)>0) { accts.push({id:aid++,name:'Spouse Match',type:'401k',balance:0,contribution:num(w.spouseMatch401k),contributionGrowth:0.03,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'employer'}); }
       if (w.hasSpouse&&w.spouseHasRothIRA) accts.push({id:aid++,name:'Spouse Roth IRA',type:'roth_ira',balance:num(w.spouseBalanceRothIRA),contribution:num(w.spouseContribRothIRA),contributionGrowth:0,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'me'});
       const incs = []; let iid = 1;
       if (mySalary>0) incs.push({id:iid++,name:'My Salary',type:'earned_income',amount:mySalary,startAge:myAge,endAge:retAge-1,cola:num(w.mySalaryGrowth)/100,owner:'me'});

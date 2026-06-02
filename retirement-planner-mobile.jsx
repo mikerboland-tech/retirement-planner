@@ -273,6 +273,13 @@ function MobilePlanner() {
   const [legacyAge, setLegacyAge] = useState(saved.legacyAge ?? 90);
   const [portfolio, setPortfolio] = useState(saved.portfolio ?? 250000);
   const [annualContribution, setAnnualContribution] = useState(saved.annualContribution ?? 20000);
+  // Percent-of-salary contribution mode. Missing in saved → 'fixed' for backwards-compat.
+  // In 'percent' mode, the engine reads myEarnedIncome from the salary stream we inject below
+  // and computes contribution = salary × (contributionPercent / 100) each year, so the
+  // contribution automatically tracks salary COLA instead of silently shrinking in real terms.
+  const [contributionMode, setContributionMode] = useState(saved.contributionMode ?? 'fixed');
+  const [currentSalary, setCurrentSalary] = useState(saved.currentSalary ?? 80000);
+  const [contributionPercent, setContributionPercent] = useState(saved.contributionPercent ?? 10);
   const [desiredSpending, setDesiredSpending] = useState(saved.desiredSpending ?? 60000);
   const [cagr, setCagr] = useState(saved.cagr ?? 7);
   const [inflationRate, setInflationRate] = useState(saved.inflationRate ?? 3);
@@ -309,12 +316,14 @@ function MobilePlanner() {
   useEffect(() => {
     const t = setTimeout(() => saveMobileState({
       currentAge, retirementAge, legacyAge, portfolio, annualContribution, desiredSpending,
+      contributionMode, currentSalary, contributionPercent,
       cagr, inflationRate, ssEnabled, ssMonthly, ssClaimAge, ssCola,
       pensionEnabled, pensionAnnual, pensionStartAge, pensionCola,
       otherEnabled, otherAnnual, otherStartAge, otherEndAge, otherCola,
     }), SAVE_DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [currentAge, retirementAge, legacyAge, portfolio, annualContribution, desiredSpending,
+      contributionMode, currentSalary, contributionPercent,
       cagr, inflationRate, ssEnabled, ssMonthly, ssClaimAge, ssCola,
       pensionEnabled, pensionAnnual, pensionStartAge, pensionCola,
       otherEnabled, otherAnnual, otherStartAge, otherEndAge, otherCola]);
@@ -344,7 +353,23 @@ function MobilePlanner() {
       charitableGivingPercent: 0,
       healthcareModel: 'none', // Engine reads pi.healthcareModel (enum). The old healthcareModelEnabled key was ignored, so healthcare costs were billed by default on mobile (B11).
     };
-    const accounts = [{
+    // In percent mode the engine reads owner salary from the earned_income stream we inject
+    // below and computes contribution = salary × employeePercent each year (with salary COLA).
+    // In fixed mode we pass the $ amount and let it stay flat in nominal $.
+    const isPercent = contributionMode === 'percent';
+    const accounts = [isPercent ? {
+      id: 1,
+      name: 'Portfolio',
+      type: '401k',
+      balance: portfolio,
+      contributionMode: 'percent',
+      employeePercent: contributionPercent / 100,
+      employerMatchPercent: 0,
+      cagr: cagr / 100,
+      startAge: currentAge,
+      stopAge: retirementAge,
+      owner: 'me',
+    } : {
       id: 1,
       name: 'Portfolio',
       type: '401k',
@@ -367,7 +392,23 @@ function MobilePlanner() {
     //   - COLA off: cola = 0, meaning the stream is fixed in nominal dollars and shrinks in real terms.
     const inflationFraction = inflationRate / 100;
     const streams = [];
-    
+
+    // In percent mode the engine needs an earned_income stream to read myEarnedIncome from.
+    // Salary grows at the user's inflation rate (close enough to typical wage COLA for this
+    // mobile what-if). endAge = retirementAge - 1 so the stream ends the year before retirement,
+    // matching the account's stopAge (which is exclusive in the engine's contribution loop).
+    if (isPercent && currentSalary > 0) {
+      streams.push({
+        id: 9,
+        type: 'earned_income',
+        owner: 'me',
+        amount: currentSalary,
+        cola: inflationFraction,
+        startAge: currentAge,
+        endAge: Math.max(currentAge, retirementAge - 1),
+      });
+    }
+
     let annualSS = 0;
     if (ssEnabled && ssMonthly > 0) {
       annualSS = calculateSSBenefit(ssMonthly, ssClaimAge, birthYear) * 12;
@@ -535,7 +576,49 @@ function MobilePlanner() {
         <SliderRow label="Plan through age" value={legacyAge} onChange={setLegacyAge} min={75} max={100} />
         
         <MoneyInput label="Current portfolio total" value={portfolio} onChange={setPortfolio} hint="All your retirement & investment accounts combined" />
-        <MoneyInput label="Annual contributions" value={annualContribution} onChange={setAnnualContribution} hint="What you save each year (yours + employer match)" />
+
+        {/* Contribution mode: $ fixed vs % of salary. Percent mode tracks salary COLA so a young
+            saver's contribution doesn't silently shrink in real terms over a 40-year horizon. */}
+        <div className="py-2">
+          <div className="flex items-baseline justify-between mb-1.5">
+            <span className="text-sm text-slate-300 font-medium">Contribution mode</span>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setContributionMode('fixed')}
+              className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition-colors ${contributionMode !== 'percent' ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/60' : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'}`}
+            >$ Fixed</button>
+            <button
+              type="button"
+              onClick={() => setContributionMode('percent')}
+              className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition-colors ${contributionMode === 'percent' ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/60' : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'}`}
+            >% of salary</button>
+          </div>
+        </div>
+
+        {contributionMode === 'percent' ? (
+          <>
+            <MoneyInput label="Current annual salary" value={currentSalary} onChange={setCurrentSalary} hint="Gross annual pay. Used to compute your $ contribution each year." />
+            <SliderRow
+              label="Contribution % (you + employer)"
+              value={contributionPercent}
+              onChange={setContributionPercent}
+              min={0}
+              max={25}
+              step={0.5}
+              format={(v) => `${v}%`}
+            />
+            <p className="text-[11px] text-emerald-400/80 -mt-1 mb-2 px-1 tabular-nums">
+              Year 1: ${Math.round(currentSalary * contributionPercent / 100).toLocaleString()}/yr
+              {' → '}
+              Year {Math.max(1, retirementAge - currentAge)}: ${Math.round(currentSalary * Math.pow(1 + inflationRate / 100, Math.max(0, retirementAge - currentAge - 1)) * contributionPercent / 100).toLocaleString()}/yr
+            </p>
+          </>
+        ) : (
+          <MoneyInput label="Annual contributions" value={annualContribution} onChange={setAnnualContribution} hint="What you save each year (yours + employer match)" />
+        )}
+
         <MoneyInput label="Desired annual spending" value={desiredSpending} onChange={setDesiredSpending} hint="What you want to spend each year in retirement (today's dollars)" />
         
         <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1 mt-4">Assumptions</h2>
@@ -658,7 +741,11 @@ function MobilePlanner() {
         {showDetails && retirementProj && legacyProj && (
           <div className="mt-3 space-y-2 text-sm bg-slate-800/40 border border-slate-700 rounded-lg p-3">
             <div className="flex justify-between"><span className="text-slate-400">Years until retirement</span><span className="text-slate-200 tabular-nums">{yearsToRetirement}</span></div>
-            <div className="flex justify-between"><span className="text-slate-400">Total contributions</span><span className="text-slate-200 tabular-nums">{fmtFull(annualContribution * yearsToRetirement)}</span></div>
+            <div className="flex justify-between"><span className="text-slate-400">Total contributions</span><span className="text-slate-200 tabular-nums">{fmtFull(
+              contributionMode === 'percent'
+                ? projections.filter(p => p.myAge < retirementAge).reduce((s, p) => s + ((p.perAccountContributions && p.perAccountContributions[1]) || 0), 0)
+                : annualContribution * yearsToRetirement
+            )}</span></div>
             <div className="flex justify-between"><span className="text-slate-400">Portfolio at retirement</span><span className="text-emerald-300 tabular-nums">{fmtFull(retirementProj.totalPortfolio)}</span></div>
             {ssEnabled && ssAnnual > 0 && (
               <div className="flex justify-between"><span className="text-slate-400">Lifetime SS received</span><span className="text-sky-300 tabular-nums">{fmtFull(projections.filter(p => p.myAge >= ssClaimAge).reduce((s, p) => s + (p.socialSecurity || 0), 0))}</span></div>

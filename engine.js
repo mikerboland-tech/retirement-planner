@@ -1295,7 +1295,17 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       
       // Add contributions if in contribution period AND owner is alive
       if (ownerAlive && ownerAge >= account.startAge && ownerAge < account.stopAge) {
-        const adjustedContribution = account.contribution * Math.pow(1 + contributionGrowth, Math.max(0, yearsContributing));
+        // Determine base contribution: fixed-$ from the field, or % of this year's salary.
+        // In 'percent' mode the saver thinks "X% of paycheck" — the contribution scales
+        // with the owner's salary COLA automatically, so contributionGrowth defaults to 0.
+        let baseContribution = account.contribution;
+        if (account.contributionMode === 'percent') {
+          const ownerSalary = account.owner === 'me' ? myEarnedIncome
+                            : account.owner === 'spouse' ? spouseEarnedIncome
+                            : 0;
+          baseContribution = ownerSalary * ((account.employeePercent || 0) + (account.employerMatchPercent || 0));
+        }
+        const adjustedContribution = baseContribution * Math.pow(1 + contributionGrowth, Math.max(0, yearsContributing));
         accountBalances[account.id] += adjustedContribution;
         accountContributions[account.id] = Math.round(adjustedContribution);
         
