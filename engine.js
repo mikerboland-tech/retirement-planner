@@ -74,6 +74,14 @@ const FEDERAL_TAX_BRACKETS_2026 = {
   ]
 };
 
+// Map UI bracket labels to FEDERAL_TAX_BRACKETS_2026 indices.
+// Used by Roth conversion bracket-fill mode. An unrecognized label resolves
+// to undefined and the caller skips the conversion that year, rather than
+// silently mis-bracketing (the pre-fix default was index 2 = '22%').
+const RATE_TO_BRACKET_IDX = {
+  '10%': 0, '12%': 1, '22%': 2, '24%': 3, '32%': 4, '35%': 5, '37%': 6,
+};
+
 // 2026 Standard Deductions — Source: IRS Revenue Procedure 2025-32
 const STANDARD_DEDUCTION_2026 = {
   single: 16100,
@@ -363,6 +371,22 @@ const SS_FULL_RETIREMENT_AGE = {
   1960: 67, // 1960 and later = 67
 };
 
+// Pre-1943 FRA phase-in. SSA: 1937 and earlier = 65; 1938-1942 phase from 65y2m to 65y10m.
+const SS_FRA_PRE_1943 = {
+  1938: 65 + 2/12, 1939: 65 + 4/12, 1940: 65 + 6/12,
+  1941: 65 + 8/12, 1942: 65 + 10/12,
+};
+
+// Single source of truth for FRA lookup. Used by calculateSSBenefit and the
+// SS earnings-test caller. Defends against missing/invalid birth years and
+// against the prior fallthrough that treated all pre-1943 cohorts as FRA 67.
+const getFullRetirementAge = (birthYear) => {
+  if (!birthYear || typeof birthYear !== 'number') return 67;
+  if (birthYear <= 1937) return 65;
+  if (birthYear >= 1960) return 67;
+  return SS_FRA_PRE_1943[birthYear] || SS_FULL_RETIREMENT_AGE[birthYear] || 67;
+};
+
 // ACA Federal Poverty Level 2025 (for subsidy calculations)
 const ACA_FPL_2025 = {
   1: 15060, 2: 20440, 3: 25820, 4: 31200, 5: 36580, 6: 41960, 7: 47340, 8: 52720
@@ -465,9 +489,9 @@ const calculateSSEarningsTestReduction = (earnedIncome, claimAge, fra, yearsFrom
 
 // Calculate Social Security benefit at different claiming ages
 const calculateSSBenefit = (pia, claimAge, birthYear) => {
-  // Get Full Retirement Age (FRA)
-  const fra = birthYear >= 1960 ? 67 : (SS_FULL_RETIREMENT_AGE[birthYear] || 67);
-  
+  // Get Full Retirement Age (FRA) — includes pre-1943 phase-in
+  const fra = getFullRetirementAge(birthYear);
+
   if (claimAge < 62) return 0; // Can't claim before 62
   if (claimAge > 70) claimAge = 70; // No additional credits after 70
   
@@ -873,16 +897,9 @@ const calculateStateTax = (grossIncome, state, filingStatus, yearsFromNow = 0, i
 // IMPROVED: RMD calculation with birth year consideration (SECURE 2.0 Act)
 const calculateRMD = (balance, age, birthYear) => {
   // Determine RMD start age based on birth year (SECURE 2.0 Act rules)
-  // Confirmed by IRS final regulations (July 2024)
-  let rmdStartAge = 73; // Default for those born 1951-1959
-  
-  if (birthYear >= 1960) {
-    rmdStartAge = 75; // Age 75 for those born 1960 or later
-  } else if (birthYear <= 1950) {
-    rmdStartAge = 72; // Age 72 for those born 1950 or earlier
-  }
-  // Note: Those born in 1959 have RMD age of 73 (IRS clarified the SECURE 2.0 drafting error)
-  
+  // Single source of truth — getRmdStartAge handles missing/unknown birthYear (defaults to 75).
+  const rmdStartAge = getRmdStartAge(birthYear);
+
   // No RMD required before start age
   if (age < rmdStartAge) return 0;
   
@@ -1221,7 +1238,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         const ownerBirthYear = stream.owner === 'me'
           ? (pi.myBirthYear || (currentYear - pi.myAge))
           : (pi.spouseBirthYear || (currentYear - pi.spouseAge));
-        const ownerFRA = ownerBirthYear >= 1960 ? 67 : (SS_FULL_RETIREMENT_AGE[ownerBirthYear] || 67);
+        const ownerFRA = getFullRetirementAge(ownerBirthYear);
         const ownerEarned = stream.owner === 'me' ? myEarnedIncome : spouseEarnedIncome;
         
         if (ownerAge >= stream.startAge && ownerAge < ownerFRA && ownerEarned > 0) {
@@ -1327,14 +1344,17 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       }
       
       // Calculate RMD for pre-tax accts using constant
-      if (isPreTaxAccount(account.type)) {
+      // Skip if the account's owner is deceased — consistent with the engine's "not alive for
+      // income/RMDs/SS in the death year" convention (see survivor-event block above). A
+      // surviving spouse on a joint account still triggers RMDs (ownerAlive uses OR for joint).
+      if (isPreTaxAccount(account.type) && ownerAlive) {
         // Get birth year based on account owner
-        const ownerBirthYear = account.owner === 'me' 
-          ? pi.myBirthYear 
-          : account.owner === 'spouse' 
-          ? pi.spouseBirthYear 
+        const ownerBirthYear = account.owner === 'me'
+          ? pi.myBirthYear
+          : account.owner === 'spouse'
+          ? pi.spouseBirthYear
           : pi.myBirthYear; // Default to primary owner for joint accts
-        
+
         const rmd = calculateRMD(accountBalances[account.id], ownerAge, ownerBirthYear);
         accountRMDs[account.id] = rmd;
         totalRMD += rmd;
@@ -1541,7 +1561,14 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             estimatedGains, Math.max(0, ordinaryBaseGross - iterAdjDeduction) + estimatedGains,
             effectiveFilingStatus, yearsFromNow, pi.inflationRate
           );
-          const totalFedTax = totalFedOrdinary + estCapGainsTax;
+          // NIIT (3.8%) — kicks in when MAGI crosses the filing-status threshold.
+          // Mirrors the final-block calc at the bottom of the year loop so the solver
+          // pre-funds the surtax instead of having it eat into realized net income.
+          const iterMAGI = ordinaryBaseGross + estimatedGains + preTaxDeduction;
+          const iterDividendEst = totalBrokerageBalance * 0.02; // matches final-block dividend estimate
+          const iterInvestmentIncome = estimatedGains + iterDividendEst;
+          const iterNIIT = calculateNIIT(iterInvestmentIncome, iterMAGI, effectiveFilingStatus);
+          const totalFedTax = totalFedOrdinary + estCapGainsTax + iterNIIT;
           // Retirement income for state exemption: pension only (401k/IRA withdrawals are NOT exempt).
           // State taxes capital gains as ordinary income → use the gains-inclusive base.
           const iterRetirementIncome = totalPension;
@@ -1551,9 +1578,17 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           const withdrawalFedTax = totalFedTax - baseFederalTax;
           const withdrawalStateTax = totalStateTax - baseStateTax;
           const withdrawalTax = withdrawalFedTax + withdrawalStateTax;
-          
-          // Net income from this withdrawal
-          const netFromWithdrawal = testWithdrawal - withdrawalTax;
+
+          // IRMAA cliff correction — recompute surcharge from the iter's MAGI and book
+          // any increase beyond the pre-loop estimate as additional out-of-pocket cost.
+          // estimatedIRMAA is already in afterTaxGap, so only the *delta* affects the shortfall.
+          const iterIRMAA = estMedicareEligible > 0
+            ? calculateIRMAASurcharge(iterMAGI, effectiveFilingStatus, yearsFromNow, pi.inflationRate, estMedicareEligible).totalSurcharge
+            : 0;
+          const iterIRMAADelta = iterIRMAA - estimatedIRMAA;
+
+          // Net income from this withdrawal (after taxes and any IRMAA tier crossing)
+          const netFromWithdrawal = testWithdrawal - withdrawalTax - iterIRMAADelta;
           
           // How far off are we?
           const shortfall = afterTaxGap - netFromWithdrawal;
@@ -1717,9 +1752,15 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         const taxableSSWithWithdrawals = calculateSocialSecurityTaxableAmount(totalSocialSecurity, fullNonSSIncome, effectiveFilingStatus);
         const currentTaxable = Math.max(0, fullNonSSIncome + taxableSSWithWithdrawals - adjDeduction);
 
-        const bracketIdx = conversionBracket === '12%' ? 1 : conversionBracket === '22%' ? 2 : conversionBracket === '24%' ? 3 : conversionBracket === '32%' ? 4 : 2;
-        const bracketCap = baseBrackets[bracketIdx].max * inflationFactor;
-        targetConversion = Math.max(0, bracketCap - currentTaxable);
+        const bracketIdx = RATE_TO_BRACKET_IDX[conversionBracket];
+        if (bracketIdx === undefined) {
+          // Unrecognized bracket label — skip this year rather than silently
+          // mis-bracketing into the prior 22% fallback.
+          targetConversion = 0;
+        } else {
+          const bracketCap = baseBrackets[bracketIdx].max * inflationFactor;
+          targetConversion = Math.max(0, bracketCap - currentTaxable);
+        }
       } else if (conversionAmount > 0) {
         // Fixed-amount mode: inflate the nominal amount
         targetConversion = conversionAmount * inflationFactor;
@@ -1934,14 +1975,19 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // gains) and derives the stacking point internally, so we pass ordinary-after-deduction
     // PLUS the gains. (Previously this used finalTotalTaxableIncome, which already contained
     // the gains, then added them again — placing the gains too high in the brackets.)
+    // When ordinary income is less than the standard deduction, IRS Qualified Dividends and
+    // Capital Gain Tax Worksheet absorbs the unused deduction against the gains (line 5 clamps
+    // to 0). Mirror that by reducing the taxable-gains figure by any unused deduction.
     const baseDeduction = STANDARD_DEDUCTION_2026[effectiveFilingStatus] || STANDARD_DEDUCTION_2026.married_joint;
     const adjustedDeduction = baseDeduction * inflationFactor;
+    const unusedDeduction = Math.max(0, adjustedDeduction - federalOrdinaryTaxableIncome);
+    const taxableGains = Math.max(0, capitalGainsFromWithdrawals - unusedDeduction);
     const taxableOrdinaryIncome = Math.max(0, federalOrdinaryTaxableIncome - adjustedDeduction);
-    
+
     // Add capital gains tax on brokerage withdrawals using tiered rates (0%/15%/20%)
     const capitalGainsTax = calculateCapitalGainsTax(
-      capitalGainsFromWithdrawals, 
-      taxableOrdinaryIncome + capitalGainsFromWithdrawals,
+      taxableGains,
+      taxableOrdinaryIncome + taxableGains,
       effectiveFilingStatus,
       yearsFromNow,
       pi.inflationRate
@@ -2239,7 +2285,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     QCD_ANNUAL_LIMIT, QCD_START_AGE,
 
     // ── Social Security ───────────────────────────────────────────────────
-    SS_FULL_RETIREMENT_AGE,
+    SS_FULL_RETIREMENT_AGE, SS_FRA_PRE_1943, getFullRetirementAge,
     SS_EARNINGS_TEST_LIMIT_2025, SS_EARNINGS_TEST_FRA_LIMIT_2025,
     calculateSSBenefit, calculateSSEarningsTestReduction,
 

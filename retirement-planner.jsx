@@ -312,6 +312,13 @@ const STANDARD_DEDUCTION_2026 = {
   head_of_household: 24150
 };
 
+// Roth conversion bracket-fill: rate label → FEDERAL_TAX_BRACKETS_2026 index.
+// Unknown labels return undefined so the caller can skip safely instead of
+// silently mis-bucketing (the old ternary defaulted unknowns to '22%').
+const RATE_TO_BRACKET_IDX = {
+  '10%': 0, '12%': 1, '22%': 2, '24%': 3, '32%': 4, '35%': 5, '37%': 6,
+};
+
 const STATE_TAX_RATES = {
   'None': 0, 'Alabama': 0.05, 'Alaska': 0, 'Arizona': 0.025, 'Arkansas': 0.044,
   'California': 0.093, 'Colorado': 0.044, 'Connecticut': 0.0699, 'Delaware': 0.066,
@@ -580,6 +587,17 @@ const SS_FULL_RETIREMENT_AGE = {
   1955: 66.167, 1956: 66.333, 1957: 66.5, 1958: 66.667, 1959: 66.833,
   1960: 67, // 1960 and later = 67
 };
+// Pre-1943 FRA phase-in (SSA): 1937 and earlier = 65; 1938–1942 ramp 65y2m → 65y10m.
+const SS_FRA_PRE_1943 = {
+  1938: 65 + 2/12, 1939: 65 + 4/12, 1940: 65 + 6/12,
+  1941: 65 + 8/12, 1942: 65 + 10/12,
+};
+const getFullRetirementAge = (birthYear) => {
+  if (!birthYear || typeof birthYear !== 'number') return 67;
+  if (birthYear <= 1937) return 65;
+  if (birthYear >= 1960) return 67;
+  return SS_FRA_PRE_1943[birthYear] || SS_FULL_RETIREMENT_AGE[birthYear] || 67;
+};
 
 // ACA Federal Poverty Level 2025 (for subsidy calculations)
 const ACA_FPL_2025 = {
@@ -684,7 +702,7 @@ const calculateSSEarningsTestReduction = (earnedIncome, claimAge, fra, yearsFrom
 // Calculate Social Security benefit at different claiming ages
 const calculateSSBenefit = (pia, claimAge, birthYear) => {
   // Get Full Retirement Age (FRA)
-  const fra = birthYear >= 1960 ? 67 : (SS_FULL_RETIREMENT_AGE[birthYear] || 67);
+  const fra = getFullRetirementAge(birthYear);
   
   if (claimAge < 62) return 0; // Can't claim before 62
   if (claimAge > 70) claimAge = 70; // No additional credits after 70
@@ -5819,8 +5837,8 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
   
   const myBirthYear = personalInfo.myBirthYear || (new Date().getFullYear() - personalInfo.myAge);
   const spouseBirthYear = personalInfo.spouseBirthYear || (new Date().getFullYear() - personalInfo.spouseAge);
-  const myFRA = myBirthYear >= 1960 ? 67 : (SS_FULL_RETIREMENT_AGE[myBirthYear] || 67);
-  const spouseFRA = spouseBirthYear >= 1960 ? 67 : (SS_FULL_RETIREMENT_AGE[spouseBirthYear] || 67);
+  const myFRA = getFullRetirementAge(myBirthYear);
+  const spouseFRA = getFullRetirementAge(spouseBirthYear);
   
   const claimingAges = [62, 63, 64, 65, 66, 67, 68, 69, 70];
   
@@ -10918,7 +10936,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         const ownerBirthYear = stream.owner === 'me'
           ? (pi.myBirthYear || (currentYear - pi.myAge))
           : (pi.spouseBirthYear || (currentYear - pi.spouseAge));
-        const ownerFRA = ownerBirthYear >= 1960 ? 67 : (SS_FULL_RETIREMENT_AGE[ownerBirthYear] || 67);
+        const ownerFRA = getFullRetirementAge(ownerBirthYear);
         const ownerEarned = stream.owner === 'me' ? myEarnedIncome : spouseEarnedIncome;
         
         if (ownerAge >= stream.startAge && ownerAge < ownerFRA && ownerEarned > 0) {
@@ -11222,19 +11240,36 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             estimatedGains, Math.max(0, ordinaryBaseGross - iterAdjDeduction) + estimatedGains,
             effectiveFilingStatus, yearsFromNow, pi.inflationRate
           );
-          const totalFedTax = totalFedOrdinary + estCapGainsTax;
+          // NIIT 3.8% surtax on investment income when MAGI > threshold ($250k MFJ / $200k single).
+          // Investment income = realized LTCG + ~2% dividend yield on the brokerage balance.
+          // Computed per-iteration so a withdrawal that crosses the threshold gets pre-funded
+          // instead of paying NIIT out of nominally-net cash.
+          const iterMAGI = ordinaryBaseGross + estimatedGains + preTaxDeduction;
+          const iterDividendEst = totalBrokerageBalance * 0.02;
+          const iterInvestmentIncome = estimatedGains + iterDividendEst;
+          const iterNIIT = calculateNIIT(iterInvestmentIncome, iterMAGI, effectiveFilingStatus);
+          const totalFedTax = totalFedOrdinary + estCapGainsTax + iterNIIT;
           // Retirement income for state exemption: pension only (401k/IRA withdrawals are NOT exempt).
           // State taxes capital gains as ordinary income → use the gains-inclusive base.
           const iterRetirementIncome = totalPension;
           const totalStateTax = calculateStateTax(adjustedNonSSIncome + adjustedTaxableSS, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, adjustedTaxableSS, iterRetirementIncome, { federalTaxPaid: totalFedOrdinary, primaryAge: myAge, spouseAge: spouseAge });
 
+          // Recompute IRMAA per iteration so a withdrawal that crosses a Medicare-premium
+          // tier cliff (~$81/mo Part B per spouse, per tier) is funded by the withdrawal
+          // rather than silently underfunding the user's spending target.
+          const iterIRMAA = estMedicareEligible > 0
+            ? calculateIRMAASurcharge(iterMAGI, effectiveFilingStatus, yearsFromNow, pi.inflationRate, estMedicareEligible).totalSurcharge
+            : 0;
+          const iterIRMAADelta = iterIRMAA - estimatedIRMAA; // extra cost beyond the pre-loop estimate already baked into afterTaxGap
+
           // Tax attributable to the withdrawal = total tax minus tax on guaranteed income alone.
           const withdrawalFedTax = totalFedTax - baseFederalTax;
           const withdrawalStateTax = totalStateTax - baseStateTax;
           const withdrawalTax = withdrawalFedTax + withdrawalStateTax;
-          
-          // Net income from this withdrawal
-          const netFromWithdrawal = testWithdrawal - withdrawalTax;
+
+          // Net income from this withdrawal — subtract the IRMAA delta so tier crossings
+          // are reflected in the shortfall and the next iteration sizes up appropriately.
+          const netFromWithdrawal = testWithdrawal - withdrawalTax - iterIRMAADelta;
           
           // How far off are we?
           const shortfall = afterTaxGap - netFromWithdrawal;
@@ -11398,9 +11433,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         const taxableSSWithWithdrawals = calculateSocialSecurityTaxableAmount(totalSocialSecurity, fullNonSSIncome, effectiveFilingStatus);
         const currentTaxable = Math.max(0, fullNonSSIncome + taxableSSWithWithdrawals - adjDeduction);
 
-        const bracketIdx = conversionBracket === '12%' ? 1 : conversionBracket === '22%' ? 2 : conversionBracket === '24%' ? 3 : conversionBracket === '32%' ? 4 : 2;
-        const bracketCap = baseBrackets[bracketIdx].max * inflationFactor;
-        targetConversion = Math.max(0, bracketCap - currentTaxable);
+        const bracketIdx = RATE_TO_BRACKET_IDX[conversionBracket];
+        if (bracketIdx === undefined) {
+          targetConversion = 0; // unrecognized bracket label → skip this year safely
+        } else {
+          const bracketCap = baseBrackets[bracketIdx].max * inflationFactor;
+          targetConversion = Math.max(0, bracketCap - currentTaxable);
+        }
       } else if (conversionAmount > 0) {
         // Fixed-amount mode: inflate the nominal amount
         targetConversion = conversionAmount * inflationFactor;
@@ -11828,6 +11867,314 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   return years;
 }
 
+// ── Module-scope constants and modal components ─────────────────────────────
+// Hoisted out of RetirementPlanner so React keeps a stable component identity
+// across parent renders. Inner-function components were unmounting/remounting
+// on every parent state change, blowing away the user's in-progress form input.
+const ASSET_TYPES = [
+  { value: 'real_estate', label: 'Real Estate' },
+  { value: 'business', label: 'Business Ownership' },
+  { value: 'vehicle', label: 'Vehicle' },
+  { value: 'collectibles', label: 'Collectibles/Art' },
+  { value: 'other', label: 'Other Asset' }
+];
+
+const ACCOUNT_TYPES = [
+  { value: '401k', label: '401(k)' },
+  { value: 'roth_401k', label: 'Roth 401(k)' },
+  { value: '403b', label: '403(b)' },
+  { value: 'roth_403b', label: 'Roth 403(b)' },
+  { value: 'roth_ira', label: 'Roth IRA' },
+  { value: 'traditional_ira', label: 'Traditional IRA' },
+  { value: 'brokerage', label: 'Brokerage' },
+  { value: '457b', label: '457(b)' },
+  { value: 'roth_457b', label: 'Roth 457(b)' },
+  { value: 'hsa', label: 'HSA' }
+];
+
+const CONTRIBUTOR_TYPES = [
+  { value: 'me', label: 'Me' },
+  { value: 'employer', label: 'Employer' },
+  { value: 'both', label: 'Both' }
+];
+
+const INCOME_TYPES = [
+  { value: 'earned_income', label: 'Earned Income (Salary/Wages)' },
+  { value: 'social_security', label: 'Social Security' },
+  { value: 'pension', label: 'Pension' },
+  { value: 'business', label: 'Business Income' },
+  { value: 'rental', label: 'Rental Income' },
+  { value: 'annuity', label: 'Annuity' },
+  { value: 'other', label: 'Other Income' }
+];
+
+function AccountModal({ editingAccount, personalInfo, incomeStreams, onClose, onSave }) {
+  const [formData, setFormData] = useState(editingAccount || { name: '', type: '401k', balance: 0, contribution: 0, contributionGrowth: personalInfo.inflationRate || 0.03, cagr: 0.07, startAge: personalInfo.myAge, stopAge: personalInfo.myRetirementAge, owner: 'me', contributor: 'me', costBasisPercent: 0.50 });
+  const isPercentMode = formData.contributionMode === 'percent';
+  const percentEligible = (formData.owner === 'me' || formData.owner === 'spouse')
+    && ['401k','roth_401k','traditional_ira','roth_ira','403b'].includes(formData.type);
+  const ownerSalaryStream = isPercentMode
+    ? incomeStreams.find(s => s.type === 'earned_income' && s.owner === formData.owner)
+    : null;
+  const employeeFrac = Number(formData.employeePercent) || 0;
+  const matchFrac = Number(formData.employerMatchPercent) || 0;
+  const totalFrac = employeeFrac + matchFrac;
+  const year1Contrib = ownerSalaryStream ? Math.round(ownerSalaryStream.amount * totalFrac) : null;
+  const year30Salary = ownerSalaryStream ? ownerSalaryStream.amount * Math.pow(1 + (ownerSalaryStream.cola || 0), 30) : null;
+  const year30Contrib = year30Salary !== null ? Math.round(year30Salary * totalFrac) : null;
+  return (
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className={`${cardStyle} max-w-lg w-full max-h-[90vh] overflow-y-auto`}>
+        <h3 className="text-xl font-bold text-slate-100 mb-6">{editingAccount ? 'Edit Account' : 'Add New Account'}</h3>
+        <div className="space-y-4">
+          <div><label className={labelStyle}>Account Name</label><input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className={inputStyle} /></div>
+          <div><label className={labelStyle}>Account Type</label><select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className={inputStyle}>{ACCOUNT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
+          <div className="grid grid-cols-2 gap-4">
+            <div><label className={labelStyle}>Owner</label><select value={formData.owner} onChange={e => setFormData({...formData, owner: e.target.value})} className={inputStyle}><option value="me">Me</option><option value="spouse">Spouse</option><option value="joint">Joint</option></select></div>
+            <div><label className={labelStyle}>Contributor</label><select value={formData.contributor || 'me'} onChange={e => setFormData({...formData, contributor: e.target.value})} className={inputStyle}>{CONTRIBUTOR_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
+          </div>
+          {percentEligible && (
+            <div className="border-t border-slate-700/50 pt-3">
+              <label className={labelStyle}>Contribution Mode</label>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setFormData({...formData, contributionMode: 'fixed'})}
+                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition ${!isPercentMode ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-slate-800/60 text-slate-400 border-slate-700/50 hover:text-slate-200'}`}
+                >$ Fixed Amount</button>
+                <button
+                  type="button"
+                  onClick={() => setFormData({...formData, contributionMode: 'percent', employeePercent: formData.employeePercent ?? 0.10, employerMatchPercent: formData.employerMatchPercent ?? 0.04, contributionGrowth: 0})}
+                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition ${isPercentMode ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-slate-800/60 text-slate-400 border-slate-700/50 hover:text-slate-200'}`}
+                >% of Salary</button>
+              </div>
+              {isPercentMode && (
+                <p className="text-xs text-slate-500 mt-2">Pulls from this owner's earned-income stream. If you also have a separate "Employer Match" account, delete it to avoid double-counting.</p>
+              )}
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-4">
+            <div><label className={labelStyle}>Current Balance</label><input type="number" value={formData.balance} onChange={e => setFormData({...formData, balance: Number(e.target.value)})} className={inputStyle} /></div>
+            {!isPercentMode && (
+              <div><label className={labelStyle}>Annual Contribution</label><input type="number" value={formData.contribution} onChange={e => setFormData({...formData, contribution: Number(e.target.value)})} className={inputStyle} /></div>
+            )}
+            {isPercentMode && (
+              <div><label className={labelStyle}>Expected CAGR (%)</label><input type="number" step="0.1" value={(formData.cagr * 100).toFixed(1)} onChange={e => setFormData({...formData, cagr: Number(e.target.value) / 100})} className={inputStyle} /></div>
+            )}
+          </div>
+          {!isPercentMode && (
+            <div className="grid grid-cols-2 gap-4">
+              <div><label className={labelStyle}>Contribution Growth (%/yr)</label><input type="number" step="0.1" value={((formData.contributionGrowth || 0) * 100).toFixed(1)} onChange={e => setFormData({...formData, contributionGrowth: Number(e.target.value) / 100})} className={inputStyle} /></div>
+              <div><label className={labelStyle}>Expected CAGR (%)</label><input type="number" step="0.1" value={(formData.cagr * 100).toFixed(1)} onChange={e => setFormData({...formData, cagr: Number(e.target.value) / 100})} className={inputStyle} /></div>
+            </div>
+          )}
+          {isPercentMode && (
+            <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg space-y-3">
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className={labelStyle} style={{marginBottom: 0}}>Employee Contribution</label>
+                  <span className="text-sm font-semibold text-amber-300">{(employeeFrac * 100).toFixed(1)}%</span>
+                </div>
+                <input type="range" min="0" max="0.25" step="0.005" value={employeeFrac}
+                  onChange={e => setFormData({...formData, employeePercent: Number(e.target.value)})}
+                  className="w-full" />
+              </div>
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className={labelStyle} style={{marginBottom: 0}}>Employer Match</label>
+                  <span className="text-sm font-semibold text-amber-300">{(matchFrac * 100).toFixed(1)}%</span>
+                </div>
+                <input type="range" min="0" max="0.10" step="0.005" value={matchFrac}
+                  onChange={e => setFormData({...formData, employerMatchPercent: Number(e.target.value)})}
+                  className="w-full" />
+              </div>
+              <div className="text-xs text-slate-400 border-t border-slate-700/50 pt-2">
+                {ownerSalaryStream ? (
+                  <>Year 1: <span className="text-emerald-400 font-semibold">${year1Contrib.toLocaleString()}</span>
+                  {' → '}Year 30: <span className="text-emerald-400 font-semibold">${year30Contrib.toLocaleString()}</span>
+                  <span className="text-slate-500"> (salary ${Math.round(ownerSalaryStream.amount).toLocaleString()} × {(totalFrac*100).toFixed(1)}%)</span></>
+                ) : (
+                  <span className="text-rose-400">No earned-income stream found for this owner. Add one in the Income tab — contribution will be $0 otherwise.</span>
+                )}
+              </div>
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-4">
+            <div><label className={labelStyle}>Contribution Start Age</label><input type="number" value={formData.startAge} onChange={e => setFormData({...formData, startAge: Number(e.target.value)})} className={inputStyle} /></div>
+            <div><label className={labelStyle}>Contribution Stop Age</label><input type="number" value={formData.stopAge} onChange={e => setFormData({...formData, stopAge: Number(e.target.value)})} className={inputStyle} /></div>
+          </div>
+          {formData.type === 'brokerage' && (
+            <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg">
+              <label className={labelStyle}>Cost Basis (% of current balance)</label>
+              <input
+                type="number"
+                step="1"
+                min="0"
+                max="100"
+                value={Math.round(((formData.costBasisPercent ?? 0.50) * 100))}
+                onChange={e => setFormData({...formData, costBasisPercent: Math.min(1, Math.max(0, Number(e.target.value) / 100))})}
+                className={inputStyle}
+              />
+              <p className="text-xs text-slate-400 mt-2">
+                What % of this balance is your cost basis (after-tax dollars you contributed)?
+                The remainder is unrealized capital gains. New accounts: ~95%. Old accounts with deep gains: 30–50%. Default: 50%.
+              </p>
+            </div>
+          )}
+        </div>
+        <div className="flex justify-end gap-3 mt-8">
+          <button onClick={onClose} className={buttonSecondary}>Cancel</button>
+          <button onClick={() => onSave(formData)} className={buttonPrimary}>Save Account</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function IncomeModal({ editingIncome, personalInfo, onClose, onSave }) {
+  const [formData, setFormData] = useState(editingIncome || { name: '', type: 'pension', amount: 0, startAge: 62, endAge: 95, cola: 0.02, owner: 'me', pia: 0 });
+  return (
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className={`${cardStyle} max-w-lg w-full max-h-[90vh] overflow-y-auto`}>
+        <h3 className="text-xl font-bold text-slate-100 mb-6">{editingIncome ? 'Edit Income Stream' : 'Add Income Stream'}</h3>
+        <div className="space-y-4">
+          <div><label className={labelStyle}>Income Name</label><input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className={inputStyle} /></div>
+          <div><label className={labelStyle}>Income Type</label><select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className={inputStyle}>{INCOME_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
+          <div><label className={labelStyle}>Owner</label><select value={formData.owner} onChange={e => setFormData({...formData, owner: e.target.value})} className={inputStyle}><option value="me">Me</option><option value="spouse">Spouse</option></select></div>
+          {formData.type === 'social_security' && <div><label className={labelStyle}>PIA (Monthly)</label><input type="number" value={formData.pia} onChange={e => setFormData({...formData, pia: Number(e.target.value), amount: Number(e.target.value) * 12})} className={inputStyle} /></div>}
+          <div><label className={labelStyle}>Annual Amount</label><input type="number" value={formData.amount} onChange={e => setFormData({...formData, amount: Number(e.target.value)})} className={inputStyle} /></div>
+          <div><label className={labelStyle}>COLA (%)</label><input type="number" step="0.1" value={(formData.cola * 100).toFixed(1)} onChange={e => setFormData({...formData, cola: Number(e.target.value) / 100})} className={inputStyle} /></div>
+          <div className="grid grid-cols-2 gap-4">
+            <div><label className={labelStyle}>Start Age</label><input type="number" value={formData.startAge} onChange={e => setFormData({...formData, startAge: Number(e.target.value)})} className={inputStyle} /></div>
+            <div><label className={labelStyle}>End Age</label><input type="number" value={formData.endAge} onChange={e => setFormData({...formData, endAge: Number(e.target.value)})} className={inputStyle} /></div>
+          </div>
+          {formData.type === 'pension' && personalInfo.survivorModelEnabled && (
+            <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg space-y-3">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={formData.survivorBenefit || false}
+                  onChange={e => setFormData({...formData, survivorBenefit: e.target.checked})}
+                  className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-amber-500"
+                />
+                <span className="text-sm text-slate-300">Continues for surviving spouse</span>
+              </label>
+              {formData.survivorBenefit && (
+                <div>
+                  <label className={labelStyle}>Survivor Benefit Rate (%)</label>
+                  <input
+                    type="number" step="5" min={0} max={100}
+                    value={Math.round((formData.survivorBenefitRate || 0.5) * 100)}
+                    onChange={e => setFormData({...formData, survivorBenefitRate: Number(e.target.value) / 100})}
+                    className={inputStyle}
+                  />
+                  <p className="text-xs text-slate-500 mt-1">Percentage of pension paid to survivor (typically 50-100%)</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="flex justify-end gap-3 mt-8">
+          <button onClick={onClose} className={buttonSecondary}>Cancel</button>
+          <button onClick={() => onSave(formData)} className={buttonPrimary}>Save Income</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AssetModal({ editingAsset, onClose, onSave }) {
+  const [formData, setFormData] = useState(editingAsset || { name: '', type: 'real_estate', value: 0, appreciationRate: 0.03, mortgage: 0, mortgagePayoffAge: null, mortgageRate: 0.065 });
+  return (
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className={`${cardStyle} max-w-lg w-full max-h-[90vh] overflow-y-auto`}>
+        <h3 className="text-xl font-bold text-slate-100 mb-6">{editingAsset ? 'Edit Asset' : 'Add New Asset'}</h3>
+        <div className="space-y-4">
+          <div><label className={labelStyle}>Asset Name</label><input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className={inputStyle} placeholder="e.g., Primary Residence, Rental Property" /></div>
+          <div><label className={labelStyle}>Asset Type</label><select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className={inputStyle}>{ASSET_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
+          <div className="grid grid-cols-2 gap-4">
+            <div><label className={labelStyle}>Current Value</label><input type="number" value={formData.value} onChange={e => setFormData({...formData, value: Number(e.target.value)})} className={inputStyle} /></div>
+            <div><label className={labelStyle}>Annual Appreciation (%)</label><input type="number" step="0.5" value={(formData.appreciationRate * 100).toFixed(1)} onChange={e => setFormData({...formData, appreciationRate: Number(e.target.value) / 100})} className={inputStyle} /><p className="text-xs text-slate-500 mt-1">Use negative for depreciation (e.g., vehicles)</p></div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div><label className={labelStyle}>Outstanding Mortgage/Loan</label><input type="number" value={formData.mortgage} onChange={e => setFormData({...formData, mortgage: Number(e.target.value)})} className={inputStyle} /></div>
+            <div><label className={labelStyle}>Payoff Age</label><input type="number" value={formData.mortgagePayoffAge || ''} onChange={e => setFormData({...formData, mortgagePayoffAge: e.target.value ? Number(e.target.value) : null})} className={inputStyle} placeholder="Leave blank if no loan" /></div>
+          </div>
+          {formData.mortgage > 0 && (
+            <div>
+              <label className={labelStyle}>Mortgage Rate (%)</label>
+              <input
+                type="number" step="0.125" min="0" max="20"
+                value={((formData.mortgageRate ?? 0.065) * 100).toFixed(3)}
+                onChange={e => setFormData({...formData, mortgageRate: Number(e.target.value) / 100})}
+                className={inputStyle}
+              />
+              <p className="text-xs text-slate-500 mt-1">Annual interest rate. Used for proper amortization (default 6.5%). Set to 0 for interest-free loans.</p>
+            </div>
+          )}
+        </div>
+        <div className="flex justify-end gap-3 mt-8">
+          <button onClick={onClose} className={buttonSecondary}>Cancel</button>
+          <button onClick={() => onSave(formData)} className={buttonPrimary}>Save Asset</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImportExportModal({ showResetConfirm, setShowResetConfirm, onClose, handleExport, handleImport, handleReset }) {
+  return (
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className={`${cardStyle} max-w-md w-full`}>
+        <h3 className="text-xl font-bold text-slate-100 mb-6">Import / Export Data</h3>
+        <div className="space-y-6">
+          <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700/50">
+            <h4 className="text-sm font-medium text-slate-300 mb-2">Export Your Data</h4>
+            <p className="text-xs text-slate-500 mb-3">Download your retirement plan as a JSON file for backup or to transfer to another device.</p>
+            <button onClick={handleExport} className={buttonPrimary + " w-full"}>
+              📥 Download Backup File
+            </button>
+          </div>
+
+          <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700/50">
+            <h4 className="text-sm font-medium text-slate-300 mb-2">Import Data</h4>
+            <p className="text-xs text-slate-500 mb-3">Load a previously exported retirement plan file. This will replace your current data.</p>
+            <label className={buttonSecondary + " w-full block text-center cursor-pointer"}>
+              📤 Choose File to Import
+              <input type="file" accept=".json" onChange={handleImport} className="hidden" />
+            </label>
+          </div>
+
+          <div className="p-4 bg-red-900/20 rounded-lg border border-red-700/50">
+            <h4 className="text-sm font-medium text-red-400 mb-2">Clear My Data</h4>
+            <p className="text-xs text-slate-500 mb-3">Remove all your personal data from this browser and reset to sample data.</p>
+            {!showResetConfirm ? (
+              <button onClick={() => setShowResetConfirm(true)} className="w-full bg-red-600 hover:bg-red-500 text-white font-medium px-4 py-2 rounded-lg transition-all">
+                🗑️ Clear All My Data
+              </button>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-sm text-red-300 font-medium">Are you sure? This cannot be undone!</p>
+                <div className="flex gap-2">
+                  <button onClick={handleReset} className="flex-1 bg-red-600 hover:bg-red-500 text-white font-medium px-4 py-2 rounded-lg transition-all">
+                    Yes, Delete Everything
+                  </button>
+                  <button onClick={() => setShowResetConfirm(false)} className="flex-1 bg-slate-600 hover:bg-slate-500 text-white font-medium px-4 py-2 rounded-lg transition-all">
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="flex justify-end mt-6">
+          <button onClick={onClose} className={buttonSecondary}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RetirementPlanner() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [currentYear] = useState(new Date().getFullYear());
@@ -12065,43 +12412,9 @@ function RetirementPlanner() {
     setTimeout(() => setSaveStatus(''), 2000);
   };
   
-  const assetTypes = [
-    { value: 'real_estate', label: 'Real Estate' },
-    { value: 'business', label: 'Business Ownership' },
-    { value: 'vehicle', label: 'Vehicle' },
-    { value: 'collectibles', label: 'Collectibles/Art' },
-    { value: 'other', label: 'Other Asset' }
-  ];
-  
-  const accountTypes = [
-    { value: '401k', label: '401(k)' },
-    { value: 'roth_401k', label: 'Roth 401(k)' },
-    { value: '403b', label: '403(b)' },
-    { value: 'roth_403b', label: 'Roth 403(b)' },
-    { value: 'roth_ira', label: 'Roth IRA' },
-    { value: 'traditional_ira', label: 'Traditional IRA' },
-    { value: 'brokerage', label: 'Brokerage' },
-    { value: '457b', label: '457(b)' },
-    { value: 'roth_457b', label: 'Roth 457(b)' },
-    { value: 'hsa', label: 'HSA' }
-  ];
-  
-  const contributorTypes = [
-    { value: 'me', label: 'Me' },
-    { value: 'employer', label: 'Employer' },
-    { value: 'both', label: 'Both' }
-  ];
-  
-  const incomeTypes = [
-    { value: 'earned_income', label: 'Earned Income (Salary/Wages)' },
-    { value: 'social_security', label: 'Social Security' },
-    { value: 'pension', label: 'Pension' },
-    { value: 'business', label: 'Business Income' },
-    { value: 'rental', label: 'Rental Income' },
-    { value: 'annuity', label: 'Annuity' },
-    { value: 'other', label: 'Other Income' }
-  ];
-  
+  // ASSET_TYPES / ACCOUNT_TYPES / CONTRIBUTOR_TYPES / INCOME_TYPES are at module scope
+  // (above this function) so they aren't recreated on every render.
+
 
   const projections = useMemo(() => {
     return computeProjections(personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
@@ -12129,20 +12442,20 @@ function RetirementPlanner() {
       alert(error);
       return;
     }
-    if (account.id) setAccounts(accounts.map(a => a.id === account.id ? account : a));
-    else setAccounts([...accounts, { ...account, id: Date.now() }]);
+    if (account.id) setAccounts(prev => prev.map(a => a.id === account.id ? account : a));
+    else setAccounts(prev => [...prev, { ...account, id: Date.now() + Math.random() }]);
     setShowAccountModal(false);
     setEditingAccount(null);
   };
-  
+
   const handleSaveIncome = (income) => {
     const error = validateIncome(income);
     if (error) {
       alert(error);
       return;
     }
-    if (income.id) setIncomeStreams(incomeStreams.map(i => i.id === income.id ? income : i));
-    else setIncomeStreams([...incomeStreams, { ...income, id: Date.now() }]);
+    if (income.id) setIncomeStreams(prev => prev.map(i => i.id === income.id ? income : i));
+    else setIncomeStreams(prev => [...prev, { ...income, id: Date.now() + Math.random() }]);
     setShowIncomeModal(false);
     setEditingIncome(null);
   };
@@ -12231,278 +12544,17 @@ function RetirementPlanner() {
     </div>
   );
   
-  const AccountModal = () => {
-    const [formData, setFormData] = useState(editingAccount || { name: '', type: '401k', balance: 0, contribution: 0, contributionGrowth: personalInfo.inflationRate || 0.03, cagr: 0.07, startAge: personalInfo.myAge, stopAge: personalInfo.myRetirementAge, owner: 'me', contributor: 'me', costBasisPercent: 0.50 });
-    const isPercentMode = formData.contributionMode === 'percent';
-    const percentEligible = (formData.owner === 'me' || formData.owner === 'spouse')
-      && ['401k','roth_401k','traditional_ira','roth_ira','403b'].includes(formData.type);
-    // Year-1 / Year-30 preview: look up the owner's salary stream so the saver sees the dollar
-    // impact of their slider choice. If no salary stream exists, show a helpful dash.
-    const ownerSalaryStream = isPercentMode
-      ? incomeStreams.find(s => s.type === 'earned_income' && s.owner === formData.owner)
-      : null;
-    const employeeFrac = Number(formData.employeePercent) || 0;
-    const matchFrac = Number(formData.employerMatchPercent) || 0;
-    const totalFrac = employeeFrac + matchFrac;
-    const year1Contrib = ownerSalaryStream ? Math.round(ownerSalaryStream.amount * totalFrac) : null;
-    const year30Salary = ownerSalaryStream ? ownerSalaryStream.amount * Math.pow(1 + (ownerSalaryStream.cola || 0), 30) : null;
-    const year30Contrib = year30Salary !== null ? Math.round(year30Salary * totalFrac) : null;
-    return (
-      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-        <div className={`${cardStyle} max-w-lg w-full max-h-[90vh] overflow-y-auto`}>
-          <h3 className="text-xl font-bold text-slate-100 mb-6">{editingAccount ? 'Edit Account' : 'Add New Account'}</h3>
-          <div className="space-y-4">
-            <div><label className={labelStyle}>Account Name</label><input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className={inputStyle} /></div>
-            <div><label className={labelStyle}>Account Type</label><select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className={inputStyle}>{accountTypes.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
-            <div className="grid grid-cols-2 gap-4">
-              <div><label className={labelStyle}>Owner</label><select value={formData.owner} onChange={e => setFormData({...formData, owner: e.target.value})} className={inputStyle}><option value="me">Me</option><option value="spouse">Spouse</option><option value="joint">Joint</option></select></div>
-              <div><label className={labelStyle}>Contributor</label><select value={formData.contributor || 'me'} onChange={e => setFormData({...formData, contributor: e.target.value})} className={inputStyle}>{contributorTypes.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
-            </div>
-            {percentEligible && (
-              <div className="border-t border-slate-700/50 pt-3">
-                <label className={labelStyle}>Contribution Mode</label>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setFormData({...formData, contributionMode: 'fixed'})}
-                    className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition ${!isPercentMode ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-slate-800/60 text-slate-400 border-slate-700/50 hover:text-slate-200'}`}
-                  >$ Fixed Amount</button>
-                  <button
-                    type="button"
-                    onClick={() => setFormData({...formData, contributionMode: 'percent', employeePercent: formData.employeePercent ?? 0.10, employerMatchPercent: formData.employerMatchPercent ?? 0.04, contributionGrowth: 0})}
-                    className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition ${isPercentMode ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-slate-800/60 text-slate-400 border-slate-700/50 hover:text-slate-200'}`}
-                  >% of Salary</button>
-                </div>
-                {isPercentMode && (
-                  <p className="text-xs text-slate-500 mt-2">Pulls from this owner's earned-income stream. If you also have a separate "Employer Match" account, delete it to avoid double-counting.</p>
-                )}
-              </div>
-            )}
-            <div className="grid grid-cols-2 gap-4">
-              <div><label className={labelStyle}>Current Balance</label><input type="number" value={formData.balance} onChange={e => setFormData({...formData, balance: Number(e.target.value)})} className={inputStyle} /></div>
-              {!isPercentMode && (
-                <div><label className={labelStyle}>Annual Contribution</label><input type="number" value={formData.contribution} onChange={e => setFormData({...formData, contribution: Number(e.target.value)})} className={inputStyle} /></div>
-              )}
-              {isPercentMode && (
-                <div><label className={labelStyle}>Expected CAGR (%)</label><input type="number" step="0.1" value={(formData.cagr * 100).toFixed(1)} onChange={e => setFormData({...formData, cagr: Number(e.target.value) / 100})} className={inputStyle} /></div>
-              )}
-            </div>
-            {!isPercentMode && (
-              <div className="grid grid-cols-2 gap-4">
-                <div><label className={labelStyle}>Contribution Growth (%/yr)</label><input type="number" step="0.1" value={((formData.contributionGrowth || 0) * 100).toFixed(1)} onChange={e => setFormData({...formData, contributionGrowth: Number(e.target.value) / 100})} className={inputStyle} /></div>
-                <div><label className={labelStyle}>Expected CAGR (%)</label><input type="number" step="0.1" value={(formData.cagr * 100).toFixed(1)} onChange={e => setFormData({...formData, cagr: Number(e.target.value) / 100})} className={inputStyle} /></div>
-              </div>
-            )}
-            {isPercentMode && (
-              <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg space-y-3">
-                <div>
-                  <div className="flex justify-between items-center mb-1">
-                    <label className={labelStyle} style={{marginBottom: 0}}>Employee Contribution</label>
-                    <span className="text-sm font-semibold text-amber-300">{(employeeFrac * 100).toFixed(1)}%</span>
-                  </div>
-                  <input type="range" min="0" max="0.25" step="0.005" value={employeeFrac}
-                    onChange={e => setFormData({...formData, employeePercent: Number(e.target.value)})}
-                    className="w-full" />
-                </div>
-                <div>
-                  <div className="flex justify-between items-center mb-1">
-                    <label className={labelStyle} style={{marginBottom: 0}}>Employer Match</label>
-                    <span className="text-sm font-semibold text-amber-300">{(matchFrac * 100).toFixed(1)}%</span>
-                  </div>
-                  <input type="range" min="0" max="0.10" step="0.005" value={matchFrac}
-                    onChange={e => setFormData({...formData, employerMatchPercent: Number(e.target.value)})}
-                    className="w-full" />
-                </div>
-                <div className="text-xs text-slate-400 border-t border-slate-700/50 pt-2">
-                  {ownerSalaryStream ? (
-                    <>Year 1: <span className="text-emerald-400 font-semibold">${year1Contrib.toLocaleString()}</span>
-                    {' → '}Year 30: <span className="text-emerald-400 font-semibold">${year30Contrib.toLocaleString()}</span>
-                    <span className="text-slate-500"> (salary ${Math.round(ownerSalaryStream.amount).toLocaleString()} × {(totalFrac*100).toFixed(1)}%)</span></>
-                  ) : (
-                    <span className="text-rose-400">No earned-income stream found for this owner. Add one in the Income tab — contribution will be $0 otherwise.</span>
-                  )}
-                </div>
-              </div>
-            )}
-            <div className="grid grid-cols-2 gap-4">
-              <div><label className={labelStyle}>Contribution Start Age</label><input type="number" value={formData.startAge} onChange={e => setFormData({...formData, startAge: Number(e.target.value)})} className={inputStyle} /></div>
-              <div><label className={labelStyle}>Contribution Stop Age</label><input type="number" value={formData.stopAge} onChange={e => setFormData({...formData, stopAge: Number(e.target.value)})} className={inputStyle} /></div>
-            </div>
-            {formData.type === 'brokerage' && (
-              <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg">
-                <label className={labelStyle}>Cost Basis (% of current balance)</label>
-                <input
-                  type="number"
-                  step="1"
-                  min="0"
-                  max="100"
-                  value={Math.round(((formData.costBasisPercent ?? 0.50) * 100))}
-                  onChange={e => setFormData({...formData, costBasisPercent: Math.min(1, Math.max(0, Number(e.target.value) / 100))})}
-                  className={inputStyle}
-                />
-                <p className="text-xs text-slate-400 mt-2">
-                  What % of this balance is your cost basis (after-tax dollars you contributed)?
-                  The remainder is unrealized capital gains. New accounts: ~95%. Old accounts with deep gains: 30–50%. Default: 50%.
-                </p>
-              </div>
-            )}
-          </div>
-          <div className="flex justify-end gap-3 mt-8">
-            <button onClick={() => { setShowAccountModal(false); setEditingAccount(null); }} className={buttonSecondary}>Cancel</button>
-            <button onClick={() => handleSaveAccount(formData)} className={buttonPrimary}>Save Account</button>
-          </div>
-        </div>
-      </div>
-    );
-  };
-  
-  const IncomeModal = () => {
-    const [formData, setFormData] = useState(editingIncome || { name: '', type: 'pension', amount: 0, startAge: 62, endAge: 95, cola: 0.02, owner: 'me', pia: 0 });
-    return (
-      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-        <div className={`${cardStyle} max-w-lg w-full max-h-[90vh] overflow-y-auto`}>
-          <h3 className="text-xl font-bold text-slate-100 mb-6">{editingIncome ? 'Edit Income Stream' : 'Add Income Stream'}</h3>
-          <div className="space-y-4">
-            <div><label className={labelStyle}>Income Name</label><input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className={inputStyle} /></div>
-            <div><label className={labelStyle}>Income Type</label><select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className={inputStyle}>{incomeTypes.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
-            <div><label className={labelStyle}>Owner</label><select value={formData.owner} onChange={e => setFormData({...formData, owner: e.target.value})} className={inputStyle}><option value="me">Me</option><option value="spouse">Spouse</option></select></div>
-            {formData.type === 'social_security' && <div><label className={labelStyle}>PIA (Monthly)</label><input type="number" value={formData.pia} onChange={e => setFormData({...formData, pia: Number(e.target.value), amount: Number(e.target.value) * 12})} className={inputStyle} /></div>}
-            <div><label className={labelStyle}>Annual Amount</label><input type="number" value={formData.amount} onChange={e => setFormData({...formData, amount: Number(e.target.value)})} className={inputStyle} /></div>
-            <div><label className={labelStyle}>COLA (%)</label><input type="number" step="0.1" value={(formData.cola * 100).toFixed(1)} onChange={e => setFormData({...formData, cola: Number(e.target.value) / 100})} className={inputStyle} /></div>
-            <div className="grid grid-cols-2 gap-4">
-              <div><label className={labelStyle}>Start Age</label><input type="number" value={formData.startAge} onChange={e => setFormData({...formData, startAge: Number(e.target.value)})} className={inputStyle} /></div>
-              <div><label className={labelStyle}>End Age</label><input type="number" value={formData.endAge} onChange={e => setFormData({...formData, endAge: Number(e.target.value)})} className={inputStyle} /></div>
-            </div>
-            {formData.type === 'pension' && personalInfo.survivorModelEnabled && (
-              <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg space-y-3">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input 
-                    type="checkbox" 
-                    checked={formData.survivorBenefit || false}
-                    onChange={e => setFormData({...formData, survivorBenefit: e.target.checked})}
-                    className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-amber-500"
-                  />
-                  <span className="text-sm text-slate-300">Continues for surviving spouse</span>
-                </label>
-                {formData.survivorBenefit && (
-                  <div>
-                    <label className={labelStyle}>Survivor Benefit Rate (%)</label>
-                    <input 
-                      type="number" step="5" min={0} max={100}
-                      value={Math.round((formData.survivorBenefitRate || 0.5) * 100)}
-                      onChange={e => setFormData({...formData, survivorBenefitRate: Number(e.target.value) / 100})}
-                      className={inputStyle}
-                    />
-                    <p className="text-xs text-slate-500 mt-1">Percentage of pension paid to survivor (typically 50-100%)</p>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-          <div className="flex justify-end gap-3 mt-8">
-            <button onClick={() => { setShowIncomeModal(false); setEditingIncome(null); }} className={buttonSecondary}>Cancel</button>
-            <button onClick={() => handleSaveIncome(formData)} className={buttonPrimary}>Save Income</button>
-          </div>
-        </div>
-      </div>
-    );
-  };
-  
-  const AssetModal = () => {
-    const [formData, setFormData] = useState(editingAsset || { name: '', type: 'real_estate', value: 0, appreciationRate: 0.03, mortgage: 0, mortgagePayoffAge: null, mortgageRate: 0.065 });
-    return (
-      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-        <div className={`${cardStyle} max-w-lg w-full max-h-[90vh] overflow-y-auto`}>
-          <h3 className="text-xl font-bold text-slate-100 mb-6">{editingAsset ? 'Edit Asset' : 'Add New Asset'}</h3>
-          <div className="space-y-4">
-            <div><label className={labelStyle}>Asset Name</label><input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className={inputStyle} placeholder="e.g., Primary Residence, Rental Property" /></div>
-            <div><label className={labelStyle}>Asset Type</label><select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className={inputStyle}>{assetTypes.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
-            <div className="grid grid-cols-2 gap-4">
-              <div><label className={labelStyle}>Current Value</label><input type="number" value={formData.value} onChange={e => setFormData({...formData, value: Number(e.target.value)})} className={inputStyle} /></div>
-              <div><label className={labelStyle}>Annual Appreciation (%)</label><input type="number" step="0.5" value={(formData.appreciationRate * 100).toFixed(1)} onChange={e => setFormData({...formData, appreciationRate: Number(e.target.value) / 100})} className={inputStyle} /><p className="text-xs text-slate-500 mt-1">Use negative for depreciation (e.g., vehicles)</p></div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div><label className={labelStyle}>Outstanding Mortgage/Loan</label><input type="number" value={formData.mortgage} onChange={e => setFormData({...formData, mortgage: Number(e.target.value)})} className={inputStyle} /></div>
-              <div><label className={labelStyle}>Payoff Age</label><input type="number" value={formData.mortgagePayoffAge || ''} onChange={e => setFormData({...formData, mortgagePayoffAge: e.target.value ? Number(e.target.value) : null})} className={inputStyle} placeholder="Leave blank if no loan" /></div>
-            </div>
-            {formData.mortgage > 0 && (
-              <div>
-                <label className={labelStyle}>Mortgage Rate (%)</label>
-                <input
-                  type="number" step="0.125" min="0" max="20"
-                  value={((formData.mortgageRate ?? 0.065) * 100).toFixed(3)}
-                  onChange={e => setFormData({...formData, mortgageRate: Number(e.target.value) / 100})}
-                  className={inputStyle}
-                />
-                <p className="text-xs text-slate-500 mt-1">Annual interest rate. Used for proper amortization (default 6.5%). Set to 0 for interest-free loans.</p>
-              </div>
-            )}
-          </div>
-          <div className="flex justify-end gap-3 mt-8">
-            <button onClick={() => { setShowAssetModal(false); setEditingAsset(null); }} className={buttonSecondary}>Cancel</button>
-            <button onClick={() => handleSaveAsset(formData)} className={buttonPrimary}>Save Asset</button>
-          </div>
-        </div>
-      </div>
-    );
-  };
-  
   const handleSaveAsset = (asset) => {
-    if (asset.id) setAssets(assets.map(a => a.id === asset.id ? asset : a));
-    else setAssets([...assets, { ...asset, id: Date.now() }]);
+    if (asset.id) setAssets(prev => prev.map(a => a.id === asset.id ? asset : a));
+    else setAssets(prev => [...prev, { ...asset, id: Date.now() + Math.random() }]);
     setShowAssetModal(false);
     setEditingAsset(null);
   };
-  const ImportExportModal = () => (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className={`${cardStyle} max-w-md w-full`}>
-        <h3 className="text-xl font-bold text-slate-100 mb-6">Import / Export Data</h3>
-        <div className="space-y-6">
-          <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700/50">
-            <h4 className="text-sm font-medium text-slate-300 mb-2">Export Your Data</h4>
-            <p className="text-xs text-slate-500 mb-3">Download your retirement plan as a JSON file for backup or to transfer to another device.</p>
-            <button onClick={handleExport} className={buttonPrimary + " w-full"}>
-              📥 Download Backup File
-            </button>
-          </div>
-          
-          <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700/50">
-            <h4 className="text-sm font-medium text-slate-300 mb-2">Import Data</h4>
-            <p className="text-xs text-slate-500 mb-3">Load a previously exported retirement plan file. This will replace your current data.</p>
-            <label className={buttonSecondary + " w-full block text-center cursor-pointer"}>
-              📤 Choose File to Import
-              <input type="file" accept=".json" onChange={handleImport} className="hidden" />
-            </label>
-          </div>
-          
-          <div className="p-4 bg-red-900/20 rounded-lg border border-red-700/50">
-            <h4 className="text-sm font-medium text-red-400 mb-2">Clear My Data</h4>
-            <p className="text-xs text-slate-500 mb-3">Remove all your personal data from this browser and reset to sample data.</p>
-            {!showResetConfirm ? (
-              <button onClick={() => setShowResetConfirm(true)} className="w-full bg-red-600 hover:bg-red-500 text-white font-medium px-4 py-2 rounded-lg transition-all">
-                🗑️ Clear All My Data
-              </button>
-            ) : (
-              <div className="space-y-2">
-                <p className="text-sm text-red-300 font-medium">Are you sure? This cannot be undone!</p>
-                <div className="flex gap-2">
-                  <button onClick={handleReset} className="flex-1 bg-red-600 hover:bg-red-500 text-white font-medium px-4 py-2 rounded-lg transition-all">
-                    Yes, Delete Everything
-                  </button>
-                  <button onClick={() => setShowResetConfirm(false)} className="flex-1 bg-slate-600 hover:bg-slate-500 text-white font-medium px-4 py-2 rounded-lg transition-all">
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="flex justify-end mt-6">
-          <button onClick={() => setShowImportExport(false)} className={buttonSecondary}>Close</button>
-        </div>
-      </div>
-    </div>
-  );
+
+  // The four modal components (AccountModal, IncomeModal, AssetModal, ImportExportModal)
+  // are declared at module scope above so React keeps stable component identities across
+  // parent re-renders — previously they were redefined each render and React unmount/remounted
+  // them, blowing away their useState formData while the user was typing.
   
   
   // Coast FIRE Section Component with Test Scenarios
@@ -12997,9 +13049,9 @@ function RetirementPlanner() {
           <div className="max-w-7xl mx-auto">
             {activeTab === 'dashboard' && <DashboardTab accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} />}
             {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
-            {activeTab === 'accounts' && <AccountsTab accountTypes={accountTypes} accounts={accounts} contributorTypes={contributorTypes} personalInfo={personalInfo} projections={projections} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
-            {activeTab === 'assets' && <AssetsTab assetTypes={assetTypes} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
-            {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={incomeTypes} personalInfo={personalInfo} projections={projections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
+            {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} contributorTypes={CONTRIBUTOR_TYPES} personalInfo={personalInfo} projections={projections} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
+            {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
+            {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={projections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
             {activeTab === 'socialsecurity' && <SocialSecurityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
             {activeTab === 'scenarios' && <ScenarioComparisonTab activeScenarioId={activeScenarioId} assets={assets} computeProjections={computeProjections} createScenario={createScenario} deleteScenario={deleteScenario} loadScenario={loadScenario} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} scenarios={scenarios} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
@@ -13019,11 +13071,41 @@ function RetirementPlanner() {
         </footer>
       </div>
       
-      {/* Modals */}
-      {showAccountModal && <AccountModal />}
-      {showIncomeModal && <IncomeModal />}
-      {showAssetModal && <AssetModal />}
-      {showImportExport && <ImportExportModal />}
+      {/* Modals — hoisted to module scope; pass all needed state and handlers as props */}
+      {showAccountModal && (
+        <AccountModal
+          editingAccount={editingAccount}
+          personalInfo={personalInfo}
+          incomeStreams={incomeStreams}
+          onClose={() => { setShowAccountModal(false); setEditingAccount(null); }}
+          onSave={handleSaveAccount}
+        />
+      )}
+      {showIncomeModal && (
+        <IncomeModal
+          editingIncome={editingIncome}
+          personalInfo={personalInfo}
+          onClose={() => { setShowIncomeModal(false); setEditingIncome(null); }}
+          onSave={handleSaveIncome}
+        />
+      )}
+      {showAssetModal && (
+        <AssetModal
+          editingAsset={editingAsset}
+          onClose={() => { setShowAssetModal(false); setEditingAsset(null); }}
+          onSave={handleSaveAsset}
+        />
+      )}
+      {showImportExport && (
+        <ImportExportModal
+          showResetConfirm={showResetConfirm}
+          setShowResetConfirm={setShowResetConfirm}
+          onClose={() => setShowImportExport(false)}
+          handleExport={handleExport}
+          handleImport={handleImport}
+          handleReset={handleReset}
+        />
+      )}
     </div>
   );
 }
