@@ -346,6 +346,7 @@ function MobilePlanner() {
       desiredRetirementIncome: desiredSpending,
       inflationRate: inflationRate / 100,
       survivorModelEnabled: false,
+      survivorSpendingFactor: 0.75,
       rothConversionAmount: 0,
       rothConversionBracket: '',
       rothConversionStartAge: 0,
