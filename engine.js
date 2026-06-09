@@ -114,7 +114,10 @@ const STATE_TAX_RATES = {
   'Ohio': 0.0275, 'Oklahoma': 0.0475, 'Oregon': 0.099, 'Pennsylvania': 0.0307,
   'Rhode Island': 0.0599, 'South Carolina': 0.064, 'South Dakota': 0, 'Tennessee': 0,
   'Texas': 0, 'Utah': 0.0445, 'Vermont': 0.0875, 'Virginia': 0.0575, 'Washington': 0,
-  'West Virginia': 0.055, 'Wisconsin': 0.0765, 'Wyoming': 0
+  'West Virginia': 0.055, 'Wisconsin': 0.0765, 'Wyoming': 0,
+  // DC routes through STATE_TAX_CONFIG (progressive); this flat value is only a
+  // never-hit fallback, but it must exist so DC appears in the UI dropdowns.
+  'District of Columbia': 0.1075
 };
 
 // States that exempt defined-benefit pension income from state income tax.
@@ -2551,10 +2554,24 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         // The 'both' option lumps employee + employer together and can't be cleanly split,
         // so it is NOT deducted — separate such an account into an employee row ('me'/'spouse')
         // and an employer row for accurate tax modeling.
+        // Only money that actually left the saver's paycheck reduces taxable income.
+        // Fixed mode: the whole contribution is the saver's, unless it's an
+        // employer/both row (those aren't deducted — see note above).
+        // Percent mode: a single account can hold BOTH the employee deferral and the
+        // employer match (employeePercent + employerMatchPercent). Only the employee's
+        // own % was ever in wages, so only that slice is deductible — the employer
+        // match was never income and must not reduce AGI.
         const contributorRole = account.contributor || 'me';
-        if (isPreTaxAccount(account.type) && adjustedContribution > 0 &&
-            (contributorRole === 'me' || contributorRole === 'spouse')) {
-          preTaxContributions += adjustedContribution;
+        if (isPreTaxAccount(account.type) && adjustedContribution > 0) {
+          let deductible = 0;
+          if (account.contributionMode === 'percent') {
+            const eePct = account.employeePercent || 0;
+            const erPct = account.employerMatchPercent || 0;
+            if (eePct + erPct > 0) deductible = adjustedContribution * (eePct / (eePct + erPct));
+          } else if (contributorRole === 'me' || contributorRole === 'spouse') {
+            deductible = adjustedContribution;
+          }
+          preTaxContributions += deductible;
         }
       }
       
@@ -2982,6 +2999,19 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       } else if (conversionAmount > 0) {
         // Fixed-amount mode: inflate the nominal amount
         targetConversion = conversionAmount * inflationFactor;
+      }
+
+      // Pre-tax floor: stop converting once total pre-tax would drop below the
+      // user's preserved balance (entered in today's dollars, inflation-adjusted
+      // here). Lets the user keep pre-tax funds for QCDs (need an IRA balance at
+      // 70+) and for filling the low (0–12%) brackets each year, instead of
+      // converting everything away. 0 = no floor (unchanged behavior).
+      const floorToday = pi.rothConversionPreTaxFloor || 0;
+      if (floorToday > 0 && targetConversion > 0) {
+        const floorAdj = floorToday * inflationFactor;
+        const totalPreTax = accts.filter(a => isPreTaxAccount(a.type))
+          .reduce((s, a) => s + (accountBalances[a.id] || 0), 0);
+        targetConversion = Math.min(targetConversion, Math.max(0, totalPreTax - floorAdj));
       }
 
       if (targetConversion > 0) {

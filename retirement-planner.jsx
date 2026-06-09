@@ -337,6 +337,7 @@ const DEFAULT_PERSONAL_INFO = {
   rothConversionEndAge: 0,       // Age to stop converting (0 = use smart default: rmdStartAge - 1)
   rothConversionBracket: '',     // If set ('22%','24%','32%'), fill to this bracket instead of fixed amount
   rothConversionTaxSource: 'withdrawal', // 'withdrawal' = tax paid via normal withdrawal priority, 'brokerage' = tax paid from brokerage account
+  rothConversionPreTaxFloor: 0,  // Preserve this much pre-tax balance (today's $); stop converting once pre-tax hits it (0 = no floor)
   legacyAge: 95,                 // Planning horizon / legacy target age
   // Survivor modeling: when enabled, models the financial impact of a spouse dying
   // before the planning horizon ends. Changes filing status, stops income streams,
@@ -346,7 +347,7 @@ const DEFAULT_PERSONAL_INFO = {
   myLifeExpectancy: 85,          // Expected age at death (primary)
   spouseLifeExpectancy: 87,      // Expected age at death (spouse)
   // Healthcare expense modeling
-  healthcareModel: 'moderate',   // 'none','basic','moderate','comprehensive','custom' — 'moderate' is the realistic default so first-time projections aren't artificially rosy
+  healthcareModel: 'none',       // 'none','basic','moderate','comprehensive','custom' — default OFF: the engine's modeled costs overestimate for most people, so users should bake healthcare into their desired spending. Opt in on the Personal tab.
   pre65HealthcareAnnual: 12000,  // Annual healthcare cost per person before Medicare (ACA/employer)
   post65OOPAnnual: 2000,         // Annual out-of-pocket after Medicare (copays, dental, vision)
   includeMedigap: true,          // Include supplemental/Medigap insurance
@@ -1126,11 +1127,14 @@ function AssetsTab({ assetTypes, assets, setAssets, setEditingAsset, setShowAsse
   const [localAssets, setLocalAssets] = useState(assets);
   const [dirtyAssets, setDirtyAssets] = useState(false);
   
-  const assetIds = assets.map(a => a.id).join(',');
+  // Re-sync on any external content change (add/delete/edit/wholesale replace,
+  // e.g. wizard relaunch or plan load). In-tab typing only mutates the local
+  // mirror, not the parent prop, so this signature stays stable while editing.
+  const assetsSig = JSON.stringify(assets);
   useEffect(() => {
     setLocalAssets(assets);
     setDirtyAssets(false);
-  }, [assetIds]);
+  }, [assetsSig]);
   
   const updateAsset = (id, field, value) => {
     setLocalAssets(prev => prev.map(a => a.id === id ? { ...a, [field]: value } : a));
@@ -1326,11 +1330,13 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
   const tableData = projections.filter(p => p.myAge >= tableStartAge && p.myAge <= Math.min(tableStartAge + 30, personalInfo.legacyAge || 95));
   const charitablePercent = personalInfo.charitableGivingPercent || 0;
   
-  const incomeIds = incomeStreams.map(i => i.id).join(',');
+  // Re-sync on any external content change (see AssetsTab note); id-only keys
+  // missed wizard relaunches that rebuild streams with the same id sequence.
+  const incomeSig = JSON.stringify(incomeStreams);
   useEffect(() => {
     setLocalIncomes(incomeStreams);
     setDirtyIncomes(false);
-  }, [incomeIds]);
+  }, [incomeSig]);
   
   const updateIncome = (id, field, value) => {
     setLocalIncomes(prev => prev.map(i => i.id === id ? { ...i, [field]: value } : i));
@@ -2079,15 +2085,64 @@ function TaxYearSnapshot({ projections, personalInfo }) {
 // ============================================
 // RothConversionSimulator — Lifted to module scope
 // ============================================
-function RothConversionSimulator({ projections, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, retirementAge, computeProjections }) {
-  const [conversionSettings, setConversionSettings] = useState({
-    startAge: retirementAge,
-    endAge: 74, // Before RMDs start at 75
-    targetBracket: '22%',
-    fixedAmount: 0,
-    mode: 'bracket' // 'bracket' or 'fixed'
-  });
-  
+// Heuristic suggested pre-tax floor (today's $): the pool of pre-tax dollars
+// worth preserving rather than converting, sized to cover two tax-efficient uses
+// across the rest of the plan — (1) lifetime QCD giving (needs an IRA balance at
+// 70+) and (2) the unused room under the 12% bracket each year (pre-tax dollars
+// you could withdraw at ≤12%). Computed from the NO-conversion baseline so it
+// reflects the user's own giving/income, then deflated to today's dollars. This
+// is a rough sizing aid, not an optimizer.
+function suggestPreTaxFloor(baselineProj, pi) {
+  if (!baselineProj || !baselineProj.length) return 0;
+  const inflation = pi.inflationRate || 0.03;
+  const myAge = pi.myAge;
+  let total = 0;
+  for (const row of baselineProj) {
+    const age = row.myAge;
+    if (age == null) continue;
+    const yearsFromNow = age - myAge;
+    if (yearsFromNow < 0) continue;
+    const inflationFactor = Math.pow(1 + inflation, yearsFromNow);
+    const fs = row.filingStatus || pi.filingStatus || 'married_joint';
+    // (1) QCD giving this year, capped at the household QCD limit
+    let qcdYear = 0;
+    if (age >= QCD_START_AGE) {
+      const householdQCD = (fs === 'married_joint' ? 2 : 1) * QCD_ANNUAL_LIMIT * inflationFactor;
+      qcdYear = Math.min(row.charitableGiving || 0, householdQCD);
+    }
+    // (2) room remaining under the top of the 12% bracket (post-std-deduction)
+    const fsBrackets = FEDERAL_TAX_BRACKETS_2026[fs] || FEDERAL_TAX_BRACKETS_2026.married_joint;
+    const twelve = fsBrackets.find(b => b.rate === 0.12);
+    const adjDed = (STANDARD_DEDUCTION_2026[fs] || STANDARD_DEDUCTION_2026.married_joint) * inflationFactor;
+    let lowRoom = 0;
+    if (twelve) {
+      const netTaxable = Math.max(0, (row.taxableIncome || 0) - adjDed);
+      lowRoom = Math.max(0, twelve.max * inflationFactor - netTaxable);
+    }
+    total += (qcdYear + lowRoom) / inflationFactor; // deflate to today's $
+  }
+  return Math.round(total);
+}
+
+function RothConversionSimulator({ projections, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, retirementAge, computeProjections, setPersonalInfo }) {
+  // Seed the simulator from the user's SAVED plan (plus the engine's smart
+  // window defaults) so the simulator and the Personal Info "planned strategy"
+  // agree out of the box, instead of starting from hardcoded sandbox values.
+  const planToSettings = (pi) => {
+    const dw = getDefaultRothConversionWindow(pi);
+    return {
+      mode: pi.rothConversionBracket ? 'bracket' : 'fixed',
+      startAge: pi.rothConversionStartAge || dw.startAge,
+      endAge: pi.rothConversionEndAge || dw.endAge,
+      targetBracket: pi.rothConversionBracket || '22%',
+      fixedAmount: pi.rothConversionAmount || 0,
+      taxSource: pi.rothConversionTaxSource || 'withdrawal',
+      preTaxFloor: pi.rothConversionPreTaxFloor || 0,
+    };
+  };
+  const [conversionSettings, setConversionSettings] = useState(() => planToSettings(personalInfo));
+  const [savedFlash, setSavedFlash] = useState(false);
+
   const bracketOptions = [
     { value: '12%', label: '12% Bracket' },
     { value: '22%', label: '22% Bracket' },
@@ -2106,15 +2161,18 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
       rothConversionAmount: conversionSettings.mode === 'fixed' ? conversionSettings.fixedAmount : 0,
       rothConversionStartAge: conversionSettings.startAge,
       rothConversionEndAge: conversionSettings.endAge,
-      rothConversionBracket: conversionSettings.mode === 'bracket' ? conversionSettings.targetBracket : ''
+      rothConversionBracket: conversionSettings.mode === 'bracket' ? conversionSettings.targetBracket : '',
+      rothConversionTaxSource: conversionSettings.taxSource,
+      rothConversionPreTaxFloor: conversionSettings.preTaxFloor
     };
     const withProj = computeProjections(withPI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
-    
+
     // Projection WITHOUT any conversions (baseline)
     const withoutPI = {
       ...personalInfo,
       rothConversionAmount: 0,
-      rothConversionBracket: ''
+      rothConversionBracket: '',
+      rothConversionPreTaxFloor: 0
     };
     const withoutProj = computeProjections(withoutPI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
     
@@ -2188,7 +2246,24 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
       }
     };
   }, [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, conversionSettings]);
-  
+
+  const suggestedFloor = useMemo(() => suggestPreTaxFloor(baselineProj, personalInfo), [baselineProj, personalInfo]);
+
+  const saveToPlan = () => {
+    setPersonalInfo(prev => ({
+      ...prev,
+      rothConversionAmount: conversionSettings.mode === 'fixed' ? conversionSettings.fixedAmount : 0,
+      rothConversionBracket: conversionSettings.mode === 'bracket' ? conversionSettings.targetBracket : '',
+      rothConversionStartAge: conversionSettings.startAge,
+      rothConversionEndAge: conversionSettings.endAge,
+      rothConversionTaxSource: conversionSettings.taxSource,
+      rothConversionPreTaxFloor: conversionSettings.preTaxFloor,
+    }));
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 2500);
+  };
+  const resetToPlan = () => setConversionSettings(planToSettings(personalInfo));
+
   return (
     <div className={cardStyle}>
       <h4 className="text-lg font-semibold text-slate-100 mb-2">🔄 Roth Conversion Simulator</h4>
@@ -2197,7 +2272,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
       </p>
       
       {/* Settings */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6 p-4 bg-slate-800/50 rounded-lg">
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-4 mb-6 p-4 bg-slate-800/50 rounded-lg">
         <div>
           <label className="block text-sm text-slate-400 mb-1">Mode</label>
           <select
@@ -2248,9 +2323,42 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
             />
           </div>
         )}
+        <div>
+          <label className="block text-sm text-slate-400 mb-1">Tax Payment Source</label>
+          <select
+            value={conversionSettings.taxSource}
+            onChange={e => setConversionSettings({...conversionSettings, taxSource: e.target.value})}
+            className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
+          >
+            <option value="withdrawal">Normal Withdrawal Priority</option>
+            <option value="brokerage">Pay from Brokerage</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm text-slate-400 mb-1">Preserve Pre-Tax Floor</label>
+          <CurrencyCell
+            value={conversionSettings.preTaxFloor}
+            onValueChange={v => setConversionSettings({...conversionSettings, preTaxFloor: v})}
+            className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
+          />
+          <div className="text-[10px] text-slate-500 mt-1">
+            Stop converting at this pre-tax balance (today's $). 0 = no floor.
+            {suggestedFloor > 0 && (
+              <span className="block mt-0.5">
+                Suggested: <span className="text-amber-400">{formatCurrency(suggestedFloor)}</span>
+                <button
+                  onClick={() => setConversionSettings(cs => ({...cs, preTaxFloor: suggestedFloor}))}
+                  className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30"
+                >
+                  Apply
+                </button>
+              </span>
+            )}
+          </div>
+        </div>
         <div className="flex items-end">
           <div className="text-xs text-slate-500">
-            {conversionSettings.mode === 'bracket' 
+            {conversionSettings.mode === 'bracket'
               ? `Converts enough each year to fill the ${conversionSettings.targetBracket} bracket`
               : `Converts ${formatCurrency(conversionSettings.fixedAmount)}/yr (inflation-adjusted)`}
           </div>
@@ -2371,7 +2479,25 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
           </tfoot>
         </table>
       </div>
-      
+
+      {/* Save the simulated settings back to the user's plan */}
+      <div className="mt-4 flex items-center gap-3 flex-wrap">
+        <button
+          onClick={saveToPlan}
+          className="px-4 py-2 text-sm font-medium rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30"
+        >
+          Save to my plan
+        </button>
+        <button
+          onClick={resetToPlan}
+          className="px-4 py-2 text-sm font-medium rounded-lg text-slate-300 border border-slate-600/60 hover:bg-slate-700/50"
+        >
+          Reset to my saved plan
+        </button>
+        {savedFlash && <span className="text-sm text-emerald-400">Saved ✓ — this is now your baseline plan.</span>}
+        <span className="text-xs text-slate-500">Saving makes these conversion settings the baseline used everywhere (Dashboard, Detailed Table).</span>
+      </div>
+
       <div className="mt-4 p-3 bg-blue-900/20 border border-blue-800/30 rounded-lg">
         <p className="text-xs text-blue-300">
           <strong>How this works:</strong> The simulator runs your complete financial plan twice through the projection engine — once with the conversion settings above, once without any conversions. 
@@ -2387,7 +2513,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
 // ============================================
 // TaxPlanningTab — Lifted to module scope
 // ============================================
-function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses }) {
+function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setPersonalInfo }) {
   const [ageRange, setAgeRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || 95 });
   
   // Retirement age: always use personalInfo as source of truth
@@ -2682,6 +2808,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
         recurringExpenses={recurringExpenses}
         retirementAge={retirementAge}
         computeProjections={computeProjections}
+        setPersonalInfo={setPersonalInfo}
       />
     </div>
   );
@@ -5757,20 +5884,20 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
       formatStep: (base, delta) => formatCurrency(base + delta),
       formatDelta: (delta) => `${delta > 0 ? '+' : ''}${formatCurrency(delta)}`,
       apply: (delta) => {
-        // IRS annual contribution limits (2025/2026)
+        // IRS annual contribution limits (2026: Notice 2025-67 / IR-2025-111; HSA: Rev. Proc. 2025-19)
         // These are EMPLOYEE limits — employer match is separate and not capped here.
         // Accounts with contributor='employer' or 'both' may exceed these limits because
         // the combined amount includes employer match. We only cap 'me' contributions.
         const CONTRIBUTION_LIMITS = {
-          '401k':           { base: 23500, catchUp50: 7500, superCatchUp60: 11250 },
-          'roth_401k':      { base: 23500, catchUp50: 7500, superCatchUp60: 11250 },
-          '403b':           { base: 23500, catchUp50: 7500, superCatchUp60: 11250 },
-          'roth_403b':      { base: 23500, catchUp50: 7500, superCatchUp60: 11250 },
-          '457b':           { base: 23500, catchUp50: 7500, superCatchUp60: 0 },
-          'roth_457b':      { base: 23500, catchUp50: 7500, superCatchUp60: 0 },
-          'traditional_ira':{ base: 7000,  catchUp50: 1000, superCatchUp60: 0 },
-          'roth_ira':       { base: 7000,  catchUp50: 1000, superCatchUp60: 0 },
-          'hsa':            { base: 4300,  catchUp55: 1000 },  // Single; family is $8,550
+          '401k':           { base: 24500, catchUp50: 8000, superCatchUp60: 11250 },
+          'roth_401k':      { base: 24500, catchUp50: 8000, superCatchUp60: 11250 },
+          '403b':           { base: 24500, catchUp50: 8000, superCatchUp60: 11250 },
+          'roth_403b':      { base: 24500, catchUp50: 8000, superCatchUp60: 11250 },
+          '457b':           { base: 24500, catchUp50: 8000, superCatchUp60: 0 },
+          'roth_457b':      { base: 24500, catchUp50: 8000, superCatchUp60: 0 },
+          'traditional_ira':{ base: 7500,  catchUp50: 1100, superCatchUp60: 0 },
+          'roth_ira':       { base: 7500,  catchUp50: 1100, superCatchUp60: 0 },
+          'hsa':            { base: 4400,  catchUp55: 1000 },  // Single; family is $8,750
           'brokerage':      { base: Infinity } // No limit
         };
         
@@ -5778,7 +5905,7 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
           const limits = CONTRIBUTION_LIMITS[accountType];
           if (!limits) return Infinity;
           if (accountType === 'hsa') {
-            let limit = filingStatus === 'married_joint' ? 8550 : limits.base;
+            let limit = filingStatus === 'married_joint' ? 8750 : limits.base;
             if (ownerAge >= 55) limit += (limits.catchUp55 || 0);
             return limit;
           }
@@ -6597,6 +6724,17 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
                 <option value="brokerage">Pay from Brokerage</option>
               </select>
             </div>
+            <div>
+              <label className={compactLabelStyle}>Preserve Pre-Tax Floor</label>
+              <CurrencyCell
+                value={localInfo.rothConversionPreTaxFloor || 0}
+                onValueChange={v => handleChange('rothConversionPreTaxFloor', v)}
+                className={compactInputStyle}
+              />
+              <p className="text-[10px] text-slate-500 mt-0.5">
+                Stop converting once pre-tax (today's $) hits this — keeps room for QCDs and low-bracket withdrawals. 0 = convert per the window.
+              </p>
+            </div>
           </div>
           <div className="mt-3 p-3 bg-purple-900/20 border border-purple-700/30 rounded-lg">
             <p className="text-xs text-purple-300 font-medium mb-1">&#128161; Roth Conversion Strategy</p>
@@ -6605,9 +6743,12 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
               The conversion is added to your taxable income for that year. 
               Roth conversions appear as <strong className="text-purple-400">purple-highlighted rows</strong> in the Detailed Table.
               {localInfo.rothConversionBracket ? ` Fill-to-bracket mode converts enough each year to fully utilize the ${localInfo.rothConversionBracket} bracket (based on other income).` : ''}
-              {localInfo.rothConversionTaxSource === 'brokerage' 
+              {localInfo.rothConversionTaxSource === 'brokerage'
                 ? ' Tax on conversions is paid by withdrawing from your brokerage account, preserving pre-tax and Roth balances.'
                 : ' Tax on conversions is covered by the normal withdrawal solver (using your withdrawal priority order), which may pull additional pre-tax funds.'}
+              {(localInfo.rothConversionPreTaxFloor || 0) > 0
+                ? ` Conversions stop once your pre-tax balance reaches ${formatCurrency(localInfo.rothConversionPreTaxFloor)} (today's dollars), leaving funds for QCDs and low-bracket withdrawals.`
+                : ''}
             </p>
           </div>
           
@@ -7151,6 +7292,30 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
   );
 }
 
+// Split a contribution into the saver's own money vs. the employer's.
+// A percent-mode account can fold an employee deferral and an employer match into
+// one row (contributor 'both'); split it by the two percentages — the match was
+// never the saver's income. Fixed-mode rows fall back to the contributor field.
+// myContribShare is gated to owner==='me' so it only ever counts the PRIMARY saver's
+// own money toward the personal savings rate.
+function myContribShare(account, amount) {
+  if (!amount) return 0;
+  if (account.contributionMode === 'percent') {
+    if (account.owner !== 'me') return 0;
+    const ee = account.employeePercent || 0, er = account.employerMatchPercent || 0;
+    return ee + er > 0 ? amount * (ee / (ee + er)) : 0;
+  }
+  return (account.contributor || 'me') === 'me' ? amount : 0;
+}
+function employerContribShare(account, amount) {
+  if (!amount) return 0;
+  if (account.contributionMode === 'percent') {
+    const ee = account.employeePercent || 0, er = account.employerMatchPercent || 0;
+    return ee + er > 0 ? amount * (er / (ee + er)) : 0;
+  }
+  return (account.contributor || 'me') === 'employer' ? amount : 0;
+}
+
 // ============================================
 // AccountsTab — Lifted to module scope
 // ============================================
@@ -7161,12 +7326,16 @@ function AccountsTab({ accountTypes, accounts, contributorTypes, personalInfo, p
   const [localAccounts, setLocalAccounts] = useState(accounts);
   const [dirty, setDirty] = useState(false);
   
-  // Sync from parent only on add/delete (length/id change)
-  const accountIds = accounts.map(a => a.id).join(',');
+  // Re-sync on any external content change (add/delete/edit/wholesale replace).
+  // An id-only key missed wizard relaunches: finishWizard rebuilds accounts with
+  // the same id sequence (1,2,3…), so the key was identical and the tab showed
+  // stale data. In-tab typing only mutates the local mirror, so this signature
+  // stays stable while editing and won't clobber unsaved changes.
+  const accountsSig = JSON.stringify(accounts);
   useEffect(() => {
     setLocalAccounts(accounts);
     setDirty(false);
-  }, [accountIds]);
+  }, [accountsSig]);
   
   // Local-only update while typing
   const updateAccount = (id, field, value) => {
@@ -7191,11 +7360,8 @@ function AccountsTab({ accountTypes, accounts, contributorTypes, personalInfo, p
   let employerContributions = 0;
   localAccounts.forEach(a => {
     const c = currentContribs[a.id] || 0;
-    const contributor = a.contributor || 'me';
-    if (contributor === 'me') myContributions += c;
-    else if (contributor === 'employer') employerContributions += c;
-    // 'both' — can't split, so excluded from personal savings rate
-    // (users should separate into two rows for accurate tracking)
+    myContributions += myContribShare(a, c);
+    employerContributions += employerContribShare(a, c);
   });
   const totalContributions = myContributions + employerContributions;
   
@@ -7789,7 +7955,7 @@ function AccountsTab({ accountTypes, accounts, contributorTypes, personalInfo, p
                     const total = Object.values(contribs).reduce((s, v) => s + v, 0);
                     let myTotal = 0;
                     accounts.forEach(a => {
-                      if ((a.contributor || 'me') === 'me') myTotal += (contribs[a.id] || 0);
+                      myTotal += myContribShare(a, contribs[a.id] || 0);
                     });
                     const grossRate = p.earnedIncome > 0 ? (myTotal / p.earnedIncome) * 100 : null;
                     const afterTax = p.earnedIncome - (p.federalTax || 0) - (p.stateTax || 0) - (p.ficaTax || 0);
@@ -7858,10 +8024,10 @@ function AccountsTab({ accountTypes, accounts, contributorTypes, personalInfo, p
                           else brokerageC += c;
                         });
                         const total = preTaxC + rothC + brokerageC;
-                        // Only count "me" contributions for savings rate (exclude employer)
+                        // Only count the saver's own money for savings rate (exclude employer match)
                         let myTotal = 0;
                         accounts.forEach(a => {
-                          if ((a.contributor || 'me') === 'me') myTotal += (contribs[a.id] || 0);
+                          myTotal += myContribShare(a, contribs[a.id] || 0);
                         });
                         const grossRate = p.earnedIncome > 0 ? (myTotal / p.earnedIncome) * 100 : null;
                         const afterTax = p.earnedIncome - (p.federalTax || 0) - (p.stateTax || 0) - (p.ficaTax || 0);
@@ -8500,8 +8666,7 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
   let dashTotalContributions = 0;
   accounts.forEach(a => {
     const c = dashContribs[a.id] || 0;
-    const contributor = a.contributor || 'me';
-    if (contributor === 'me') dashMyContributions += c;
+    dashMyContributions += myContribShare(a, c);
     dashTotalContributions += c;
   });
   const dashSavingsRate = dashEarnedIncome > 0 ? (dashMyContributions / dashEarnedIncome) * 100 : null;
@@ -10503,18 +10668,18 @@ function RetirementPlanner() {
     // ── Wizard state — simple, human-readable fields ──
     const [w, setW] = useState({
       myAge: '', spouseAge: '', hasSpouse: true, state: 'Alabama',
-      mySalary: '', spouseSalary: '', mySalaryGrowth: '3',
+      mySalary: '', spouseSalary: '', mySalaryGrowth: '3', spouseSalaryGrowth: '3',
       myRetirementAge: 65, spouseRetirementAge: 65,
-      has401k: false, balance401k: '', contrib401k: '',
+      has401k: false, balance401k: '', contrib401k: '', contrib401kMode: 'fixed', contrib401kPercent: '',
       hasRoth401k: false, balanceRoth401k: '', contribRoth401k: '',
-      match401k: '',
+      match401k: '', match401kMode: 'fixed', match401kPercent: '',
       hasRothIRA: false, balanceRothIRA: '', contribRothIRA: '',
       hasTraditionalIRA: false, balanceTraditionalIRA: '', contribTraditionalIRA: '',
       hasBrokerage: false, balanceBrokerage: '', contribBrokerage: '',
       hasHSA: false, balanceHSA: '', contribHSA: '',
-      spouseHas401k: false, spouseBalance401k: '', spouseContrib401k: '',
+      spouseHas401k: false, spouseBalance401k: '', spouseContrib401k: '', spouseContrib401kMode: 'fixed', spouseContrib401kPercent: '',
       spouseHasRoth401k: false, spouseBalanceRoth401k: '', spouseContribRoth401k: '',
-      spouseMatch401k: '',
+      spouseMatch401k: '', spouseMatch401kMode: 'fixed', spouseMatch401kPercent: '',
       spouseHasRothIRA: false, spouseBalanceRothIRA: '', spouseContribRothIRA: '',
       expectSS: true, ssMonthly: '', ssClaimAge: '67',
       spouseExpectSS: true, spouseSSMonthly: '', spouseSSClaimAge: '67',
@@ -10524,7 +10689,29 @@ function RetirementPlanner() {
       otherIncomes: [],
       desiredSpending: '',
       ownsHome: false, homeValue: '', mortgageBalance: '', mortgagePayoffAge: '',
+      // Original account types for workplace plans loaded into the 401(k) slots, so a
+      // 403(b)/457(b) round-trips back to its true type instead of being saved as a 401k.
+      my401Type: '401k', myRoth401Type: 'roth_401k', spouse401Type: '401k', spouseRoth401Type: 'roth_401k',
+      // IDs of existing accounts the wizard consumed into its fields; everything else is
+      // preserved verbatim on finish so untouched account types are never dropped.
+      consumedAccountIds: [],
+      // True only when the user chose "Update My Plan" (loadExisting ran). On "Start Fresh"
+      // this stays false so we DON'T carry old accounts/assets forward.
+      editingExisting: false,
     });
+
+    // On the "Update My Plan" path we show EVERY account/asset as an editable list
+    // (full app-editor parity) instead of the fixed slot cards. These hold the live
+    // working copies; they're committed to the plan only on finish.
+    const [wizAccounts, setWizAccounts] = useState([]);
+    const [wizAssets, setWizAssets] = useState([]);
+    const [editingWizAccount, setEditingWizAccount] = useState(null);
+    const [showWizAccountModal, setShowWizAccountModal] = useState(false);
+    const [editingWizAsset, setEditingWizAsset] = useState(null);
+    const [showWizAssetModal, setShowWizAssetModal] = useState(false);
+    const [wizIncomes, setWizIncomes] = useState([]);
+    const [editingWizIncome, setEditingWizIncome] = useState(null);
+    const [showWizIncomeModal, setShowWizIncomeModal] = useState(false);
 
     const update = (field, value) => setW(prev => ({ ...prev, [field]: value }));
     const num = (v) => Number(String(v).replace(/[^0-9.-]/g, '')) || 0;
@@ -10554,34 +10741,65 @@ function RetirementPlanner() {
       const otherIncs = incomes.filter(i => ['rental','business','annuity','other'].includes(i.type));
       const mySal = incomes.find(i => i.type === 'earned_income' && i.owner === 'me');
       const spSal = incomes.find(i => i.type === 'earned_income' && i.owner === 'spouse');
-      const my401 = accts.find(a => a.type === '401k' && a.owner === 'me');
-      const myRoth401 = accts.find(a => a.type === 'roth_401k' && a.owner === 'me');
+      // Workplace pre-tax plans (401k/403b/457b) and their Roth variants all map into the
+      // wizard's single "401(k)" slot per owner. We remember each loaded account's real type
+      // so finishWizard writes it back as a 403(b)/457(b) instead of forcing it to 401k.
+      const PRETAX_WORKPLACE = ['401k','403b','457b'];
+      const ROTH_WORKPLACE = ['roth_401k','roth_403b','roth_457b'];
+      // The employee plan is the non-employer row; the employer match is a separate
+      // contributor==='employer' row OR is folded into the employee account as employerMatchPercent.
+      // When someone holds more than one workplace plan of an owner (e.g. a contributory
+      // 401(k) PLUS a balance-only ESOP also typed 401k), load the actively-contributed one
+      // into the wizard slot and leave the rest to be preserved verbatim — so the ESOP keeps
+      // its name/balance/growth instead of being rebuilt with generic defaults.
+      const contributes = a => (a.contribution > 0) || (a.employeePercent > 0);
+      const pickWorkplace = (types, owner) => {
+        const rows = accts.filter(a => types.includes(a.type) && a.owner === owner && a.contributor !== 'employer');
+        return rows.find(contributes) || rows[0];
+      };
+      const my401 = pickWorkplace(PRETAX_WORKPLACE, 'me');
+      const myRoth401 = pickWorkplace(ROTH_WORKPLACE, 'me');
       const myRoth = accts.find(a => a.type === 'roth_ira' && a.owner === 'me');
       const myIRA = accts.find(a => a.type === 'traditional_ira' && a.owner === 'me');
       const myBrok = accts.find(a => a.type === 'brokerage');
-      const sp401 = accts.find(a => a.type === '401k' && a.owner === 'spouse');
-      const spRoth401 = accts.find(a => a.type === 'roth_401k' && a.owner === 'spouse');
+      const sp401 = pickWorkplace(PRETAX_WORKPLACE, 'spouse');
+      const spRoth401 = pickWorkplace(ROTH_WORKPLACE, 'spouse');
       const spRoth = accts.find(a => a.type === 'roth_ira' && a.owner === 'spouse');
       const matchAcct = accts.find(a => a.contributor === 'employer' && a.owner === 'me');
       const spMatch = accts.find(a => a.contributor === 'employer' && a.owner === 'spouse');
+      const my401Pct = my401?.contributionMode === 'percent';
+      const sp401Pct = sp401?.contributionMode === 'percent';
+      const myFoldedMatch = my401Pct ? (my401.employerMatchPercent || 0) : 0;   // % match merged into the employee row
+      const spFoldedMatch = sp401Pct ? (sp401.employerMatchPercent || 0) : 0;
       const home = assets.find(a => a.type === 'real_estate');
       const isMarried = pi.filingStatus === 'married_joint' || pi.filingStatus === 'married_separate';
       setW({
         myAge: String(pi.myAge||''), spouseAge: String(pi.spouseAge||''), hasSpouse: isMarried, state: pi.state||'Alabama',
         mySalary: mySal ? String(mySal.amount) : '', spouseSalary: spSal ? String(spSal.amount) : '',
         mySalaryGrowth: mySal ? String((mySal.cola*100).toFixed(0)) : '3',
+        spouseSalaryGrowth: spSal ? String((spSal.cola*100).toFixed(0)) : (mySal ? String((mySal.cola*100).toFixed(0)) : '3'),
         myRetirementAge: pi.myRetirementAge||65, spouseRetirementAge: pi.spouseRetirementAge||65,
-        has401k: !!my401, balance401k: my401?String(my401.balance):'', contrib401k: my401?String(my401.contribution):'',
+        has401k: !!my401, balance401k: my401?String(my401.balance):'',
+        contrib401k: (my401&&!my401Pct)?String(my401.contribution):'',
+        contrib401kMode: my401Pct?'percent':'fixed',
+        contrib401kPercent: my401Pct?String(((my401.employeePercent||0)*100).toFixed(1)):'',
         hasRoth401k: !!myRoth401, balanceRoth401k: myRoth401?String(myRoth401.balance):'', contribRoth401k: myRoth401?String(myRoth401.contribution):'',
-        match401k: matchAcct?String(matchAcct.contribution):'',
+        match401k: myFoldedMatch>0?'':(matchAcct?String(matchAcct.contribution):''),
+        match401kMode: (myFoldedMatch>0||matchAcct?.contributionMode==='percent')?'percent':'fixed',
+        match401kPercent: myFoldedMatch>0?String((myFoldedMatch*100).toFixed(1)):(matchAcct?.contributionMode==='percent'?String(((matchAcct.employerMatchPercent||0)*100).toFixed(1)):''),
         hasRothIRA: !!myRoth, balanceRothIRA: myRoth?String(myRoth.balance):'', contribRothIRA: myRoth?String(myRoth.contribution):'',
         hasTraditionalIRA: !!myIRA, balanceTraditionalIRA: myIRA?String(myIRA.balance):'', contribTraditionalIRA: myIRA?String(myIRA.contribution):'',
         hasBrokerage: !!myBrok, balanceBrokerage: myBrok?String(myBrok.balance):'', contribBrokerage: myBrok?String(myBrok.contribution):'',
-        spouseHas401k: !!sp401, spouseBalance401k: sp401?String(sp401.balance):'', spouseContrib401k: sp401?String(sp401.contribution):'',
+        spouseHas401k: !!sp401, spouseBalance401k: sp401?String(sp401.balance):'',
+        spouseContrib401k: (sp401&&!sp401Pct)?String(sp401.contribution):'',
+        spouseContrib401kMode: sp401Pct?'percent':'fixed',
+        spouseContrib401kPercent: sp401Pct?String(((sp401.employeePercent||0)*100).toFixed(1)):'',
         spouseHasRoth401k: !!spRoth401, spouseBalanceRoth401k: spRoth401?String(spRoth401.balance):'', spouseContribRoth401k: spRoth401?String(spRoth401.contribution):'',
-        spouseMatch401k: spMatch?String(spMatch.contribution):'',
+        spouseMatch401k: spFoldedMatch>0?'':(spMatch?String(spMatch.contribution):''),
+        spouseMatch401kMode: (spFoldedMatch>0||spMatch?.contributionMode==='percent')?'percent':'fixed',
+        spouseMatch401kPercent: spFoldedMatch>0?String((spFoldedMatch*100).toFixed(1)):(spMatch?.contributionMode==='percent'?String(((spMatch.employerMatchPercent||0)*100).toFixed(1)):''),
         spouseHasRothIRA: !!spRoth, spouseBalanceRothIRA: spRoth?String(spRoth.balance):'', spouseContribRothIRA: spRoth?String(spRoth.contribution):'',
-        expectSS: !!mySS||true, ssMonthly: mySS?String(Math.round(mySS.amount/12)):'', ssClaimAge: mySS?String(mySS.startAge):'67',
+        expectSS: !!mySS, ssMonthly: mySS?String(Math.round(mySS.amount/12)):'', ssClaimAge: mySS?String(mySS.startAge):'67',
         spouseExpectSS: !!spSS||isMarried, spouseSSMonthly: spSS?String(Math.round(spSS.amount/12)):'', spouseSSClaimAge: spSS?String(spSS.startAge):'67',
         hasPension: !!pension, pensionAmount: pension?String(pension.amount):'', pensionStartAge: pension?String(pension.startAge):'65', pensionOwner: pension?pension.owner:'me',
         hasPension2: !!pension2, pension2Amount: pension2?String(pension2.amount):'', pension2StartAge: pension2?String(pension2.startAge):'65', pension2Owner: pension2?pension2.owner:'spouse',
@@ -10589,33 +10807,75 @@ function RetirementPlanner() {
         otherIncomes: otherIncs.map(i => ({id:i.id,name:i.name,type:i.type,amount:String(i.amount),startAge:String(i.startAge),endAge:String(i.endAge),cola:String(((i.cola||0)*100).toFixed(0)),owner:i.owner||'me'})),
         desiredSpending: pi.desiredRetirementIncome?String(pi.desiredRetirementIncome):'',
         ownsHome: !!home, homeValue: home?String(home.value):'', mortgageBalance: home?String(home.mortgage||0):'', mortgagePayoffAge: home?.mortgagePayoffAge?String(home.mortgagePayoffAge):'',
+        my401Type: my401?.type || '401k', myRoth401Type: myRoth401?.type || 'roth_401k',
+        spouse401Type: sp401?.type || '401k', spouseRoth401Type: spRoth401?.type || 'roth_401k',
+        consumedAccountIds: [my401,myRoth401,myRoth,myIRA,myBrok,myHSA,matchAcct,sp401,spRoth401,spRoth,spMatch]
+          .filter(Boolean).map(a => a.id),
+        editingExisting: true,
       });
+      // Seed the full editable lists with working copies of every account/asset/income.
+      setWizAccounts((existingData.accounts || []).map(a => ({ ...a })));
+      setWizAssets((existingData.assets || []).map(a => ({ ...a })));
+      setWizIncomes((existingData.incomeStreams || []).map(i => ({ ...i })));
     };
 
     const finishWizard = () => {
       const myAge = num(w.myAge)||45; const spouseAge = num(w.spouseAge)||43;
       const retAge = num(w.myRetirementAge)||65; const spRetAge = num(w.spouseRetirementAge)||65;
       const filingStatus = w.hasSpouse ? 'married_joint' : 'single';
-      const newPI = { ...DEFAULT_PERSONAL_INFO, myAge, spouseAge: w.hasSpouse?spouseAge:myAge,
+      // In edit mode, base the new personalInfo on the SAVED plan so Personal-tab
+      // settings the wizard never asks about (withdrawal priority overrides, Roth
+      // conversion window, healthcare model, COLA assumptions, etc.) are preserved.
+      const basePI = (w.editingExisting && existingData && existingData.personalInfo)
+        ? existingData.personalInfo : DEFAULT_PERSONAL_INFO;
+      const newPI = { ...basePI, myAge, spouseAge: w.hasSpouse?spouseAge:myAge,
         myRetirementAge: retAge, spouseRetirementAge: w.hasSpouse?spRetAge:retAge,
         myBirthYear: yr-myAge, spouseBirthYear: yr-(w.hasSpouse?spouseAge:myAge),
         filingStatus, state: w.state, desiredRetirementIncome: num(w.desiredSpending)||suggestedSpending||60000,
-        inflationRate: 0.03, withdrawalPriority: ['pretax','brokerage','roth'] };
+        inflationRate: basePI.inflationRate || 0.03,
+        withdrawalPriority: basePI.withdrawalPriority || ['pretax','brokerage','roth'] };
       const accts = []; let aid = 1;
-      if (w.has401k) { accts.push({id:aid++,name:'My 401(k)',type:'401k',balance:num(w.balance401k),contribution:num(w.contrib401k),contributionGrowth:0.03,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'}); }
-      if (w.hasRoth401k) { accts.push({id:aid++,name:'My Roth 401(k)',type:'roth_401k',balance:num(w.balanceRoth401k),contribution:num(w.contribRoth401k),contributionGrowth:0.03,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'}); }
-      if ((w.has401k||w.hasRoth401k)&&num(w.match401k)>0) { accts.push({id:aid++,name:'Employer Match',type:'401k',balance:0,contribution:num(w.match401k),contributionGrowth:0.03,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'employer'}); }
-      if (w.hasRothIRA) accts.push({id:aid++,name:'My Roth IRA',type:'roth_ira',balance:num(w.balanceRothIRA),contribution:num(w.contribRothIRA),contributionGrowth:0,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'});
-      if (w.hasTraditionalIRA) accts.push({id:aid++,name:'My Traditional IRA',type:'traditional_ira',balance:num(w.balanceTraditionalIRA),contribution:num(w.contribTraditionalIRA),contributionGrowth:0,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'});
-      if (w.hasBrokerage) accts.push({id:aid++,name:'Brokerage',type:'brokerage',balance:num(w.balanceBrokerage),contribution:num(w.contribBrokerage),contributionGrowth:0,cagr:0.06,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'});
-      if (w.hasHSA) accts.push({id:aid++,name:'HSA',type:'hsa',balance:num(w.balanceHSA),contribution:num(w.contribHSA),contributionGrowth:0,cagr:0.06,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'});
-      if (w.hasSpouse&&w.spouseHas401k) { accts.push({id:aid++,name:'Spouse 401(k)',type:'401k',balance:num(w.spouseBalance401k),contribution:num(w.spouseContrib401k),contributionGrowth:0.03,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'me'}); }
-      if (w.hasSpouse&&w.spouseHasRoth401k) { accts.push({id:aid++,name:'Spouse Roth 401(k)',type:'roth_401k',balance:num(w.spouseBalanceRoth401k),contribution:num(w.spouseContribRoth401k),contributionGrowth:0.03,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'me'}); }
-      if (w.hasSpouse&&(w.spouseHas401k||w.spouseHasRoth401k)&&num(w.spouseMatch401k)>0) { accts.push({id:aid++,name:'Spouse Match',type:'401k',balance:0,contribution:num(w.spouseMatch401k),contributionGrowth:0.03,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'employer'}); }
-      if (w.hasSpouse&&w.spouseHasRothIRA) accts.push({id:aid++,name:'Spouse Roth IRA',type:'roth_ira',balance:num(w.spouseBalanceRothIRA),contribution:num(w.spouseContribRothIRA),contributionGrowth:0,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'me'});
+      // Workplace plans keep their real type (401k/403b/457b) captured at load time so a
+      // 403(b)/457(b) round-trips instead of being rewritten as a 401k.
+      const my401Type = w.my401Type || '401k', myRoth401Type = w.myRoth401Type || 'roth_401k';
+      const sp401Type = w.spouse401Type || '401k', spRoth401Type = w.spouseRoth401Type || 'roth_401k';
+      const planLabel = { '401k':'401(k)','403b':'403(b)','457b':'457(b)','roth_401k':'Roth 401(k)','roth_403b':'Roth 403(b)','roth_457b':'Roth 457(b)' };
+      // Traditional 401(k): when BOTH the employee deferral and the employer match are
+      // entered as %, fold them into ONE percent account (employee% + match%, only the
+      // employee slice is tax-deductible per engine). Otherwise emit the employee account
+      // in its own mode plus a separate employer-match row.
+      const my401Pct = w.contrib401kMode==='percent';
+      const myMatchPct = w.match401kMode==='percent';
+      const myMatchFolded = w.has401k && my401Pct && myMatchPct && num(w.match401kPercent)>0;
+      if (w.has401k) {
+        if (my401Pct) { accts.push({id:aid++,name:'My '+planLabel[my401Type],type:my401Type,balance:num(w.balance401k),contribution:0,contributionMode:'percent',employeePercent:num(w.contrib401kPercent)/100,employerMatchPercent:myMatchFolded?num(w.match401kPercent)/100:0,contributionGrowth:0,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:myMatchFolded?'both':'me'}); }
+        else { accts.push({id:aid++,name:'My '+planLabel[my401Type],type:my401Type,balance:num(w.balance401k),contribution:num(w.contrib401k),contributionGrowth:0.03,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'}); }
+      }
+      if (w.hasRoth401k) { accts.push({id:aid++,name:'My '+planLabel[myRoth401Type],type:myRoth401Type,balance:num(w.balanceRoth401k),contribution:num(w.contribRoth401k),contributionGrowth:0.03,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'}); }
+      if ((w.has401k||w.hasRoth401k) && !myMatchFolded) {
+        if (myMatchPct&&num(w.match401kPercent)>0) { accts.push({id:aid++,name:'Employer Match',type:my401Type,balance:0,contribution:0,contributionMode:'percent',employeePercent:0,employerMatchPercent:num(w.match401kPercent)/100,contributionGrowth:0,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'employer'}); }
+        else if (!myMatchPct&&num(w.match401k)>0) { accts.push({id:aid++,name:'Employer Match',type:my401Type,balance:0,contribution:num(w.match401k),contributionGrowth:0.03,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'employer'}); }
+      }
+      if (w.hasRothIRA) accts.push({id:aid++,name:'My Roth IRA',type:'roth_ira',balance:num(w.balanceRothIRA),contribution:num(w.contribRothIRA),contributionGrowth:0.03,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'});
+      if (w.hasTraditionalIRA) accts.push({id:aid++,name:'My Traditional IRA',type:'traditional_ira',balance:num(w.balanceTraditionalIRA),contribution:num(w.contribTraditionalIRA),contributionGrowth:0.03,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'});
+      if (w.hasBrokerage) accts.push({id:aid++,name:'Brokerage',type:'brokerage',balance:num(w.balanceBrokerage),contribution:num(w.contribBrokerage),contributionGrowth:0.03,cagr:0.06,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'});
+      if (w.hasHSA) accts.push({id:aid++,name:'HSA',type:'hsa',balance:num(w.balanceHSA),contribution:num(w.contribHSA),contributionGrowth:0.03,cagr:0.06,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'});
+      const sp401Pct = w.spouseContrib401kMode==='percent';
+      const spMatchPct = w.spouseMatch401kMode==='percent';
+      const spMatchFolded = w.hasSpouse && w.spouseHas401k && sp401Pct && spMatchPct && num(w.spouseMatch401kPercent)>0;
+      if (w.hasSpouse&&w.spouseHas401k) {
+        if (sp401Pct) { accts.push({id:aid++,name:'Spouse '+planLabel[sp401Type],type:sp401Type,balance:num(w.spouseBalance401k),contribution:0,contributionMode:'percent',employeePercent:num(w.spouseContrib401kPercent)/100,employerMatchPercent:spMatchFolded?num(w.spouseMatch401kPercent)/100:0,contributionGrowth:0,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:spMatchFolded?'both':'spouse'}); }
+        else { accts.push({id:aid++,name:'Spouse '+planLabel[sp401Type],type:sp401Type,balance:num(w.spouseBalance401k),contribution:num(w.spouseContrib401k),contributionGrowth:0.03,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'spouse'}); }
+      }
+      if (w.hasSpouse&&w.spouseHasRoth401k) { accts.push({id:aid++,name:'Spouse '+planLabel[spRoth401Type],type:spRoth401Type,balance:num(w.spouseBalanceRoth401k),contribution:num(w.spouseContribRoth401k),contributionGrowth:0.03,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'spouse'}); }
+      if (w.hasSpouse&&(w.spouseHas401k||w.spouseHasRoth401k)&&!spMatchFolded) {
+        if (spMatchPct&&num(w.spouseMatch401kPercent)>0) { accts.push({id:aid++,name:'Spouse Match',type:sp401Type,balance:0,contribution:0,contributionMode:'percent',employeePercent:0,employerMatchPercent:num(w.spouseMatch401kPercent)/100,contributionGrowth:0,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'employer'}); }
+        else if (!spMatchPct&&num(w.spouseMatch401k)>0) { accts.push({id:aid++,name:'Spouse Match',type:sp401Type,balance:0,contribution:num(w.spouseMatch401k),contributionGrowth:0.03,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'employer'}); }
+      }
+      if (w.hasSpouse&&w.spouseHasRothIRA) accts.push({id:aid++,name:'Spouse Roth IRA',type:'roth_ira',balance:num(w.spouseBalanceRothIRA),contribution:num(w.spouseContribRothIRA),contributionGrowth:0.03,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'spouse'});
       const incs = []; let iid = 1;
       if (mySalary>0) incs.push({id:iid++,name:'My Salary',type:'earned_income',amount:mySalary,startAge:myAge,endAge:retAge-1,cola:num(w.mySalaryGrowth)/100,owner:'me'});
-      if (w.hasSpouse&&spouseSalary>0) incs.push({id:iid++,name:'Spouse Salary',type:'earned_income',amount:spouseSalary,startAge:spouseAge,endAge:spRetAge-1,cola:num(w.mySalaryGrowth)/100,owner:'spouse'});
+      if (w.hasSpouse&&spouseSalary>0) incs.push({id:iid++,name:'Spouse Salary',type:'earned_income',amount:spouseSalary,startAge:spouseAge,endAge:spRetAge-1,cola:num(w.spouseSalaryGrowth||w.mySalaryGrowth)/100,owner:'spouse'});
       if (w.expectSS) { const mo=num(w.ssMonthly)||estimateSSMonthly(mySalary); const age=num(w.ssClaimAge)||67; const adj=calculateSSBenefit(mo,age,yr-myAge); incs.push({id:iid++,name:'My Social Security',type:'social_security',amount:adj*12,startAge:age,endAge:95,cola:0.02,owner:'me',pia:mo}); }
       if (w.hasSpouse&&w.spouseExpectSS) { const mo=num(w.spouseSSMonthly)||estimateSSMonthly(spouseSalary); const age=num(w.spouseSSClaimAge)||67; const adj=calculateSSBenefit(mo,age,yr-spouseAge); incs.push({id:iid++,name:'Spouse Social Security',type:'social_security',amount:adj*12,startAge:age,endAge:95,cola:0.02,owner:'spouse',pia:mo}); }
       if (w.hasPension) incs.push({id:iid++,name:'Pension',type:'pension',amount:num(w.pensionAmount),startAge:num(w.pensionStartAge)||retAge,endAge:95,cola:0.01,owner:w.pensionOwner||'me'});
@@ -10627,26 +10887,55 @@ function RetirementPlanner() {
             startAge:num(oi.startAge)||myAge, endAge:num(oi.endAge)||95, cola:(num(oi.cola)||2)/100, owner:oi.owner||'me'});
         }
       });
-      const assets = [];
-      if (w.ownsHome&&num(w.homeValue)>0) assets.push({id:1,name:'Home',type:'real_estate',value:num(w.homeValue),appreciationRate:0.03,mortgage:num(w.mortgageBalance),mortgagePayoffAge:num(w.mortgagePayoffAge)||null});
-      onComplete(newPI, accts.length>0?accts:DEFAULT_ACCOUNTS, incs.length>0?incs:DEFAULT_INCOME_STREAMS, assets.length>0?assets:DEFAULT_ASSETS);
+      const assets = []; let asid = 1;
+      if (w.ownsHome&&num(w.homeValue)>0) assets.push({id:asid++,name:'Home',type:'real_estate',value:num(w.homeValue),appreciationRate:0.03,mortgage:num(w.mortgageBalance),mortgagePayoffAge:num(w.mortgagePayoffAge)||null});
+      // Edit mode shows every account/asset as an editable list, so the wiz lists ARE
+      // the complete plan — use them wholesale. Start Fresh / new users build from the
+      // guided slot fields (accts/assets) as before.
+      const finalAccts = w.editingExisting ? wizAccounts : accts;
+      const finalAssets = w.editingExisting ? wizAssets : assets;
+      const finalIncs = w.editingExisting ? wizIncomes : incs;
+      onComplete(newPI, finalAccts.length>0?finalAccts:DEFAULT_ACCOUNTS, finalIncs.length>0?finalIncs:DEFAULT_INCOME_STREAMS, finalAssets.length>0?finalAssets:DEFAULT_ASSETS);
     };
 
     const getQuickPreview = () => {
       try {
-        const totalSaved = num(w.balance401k)+num(w.balanceRoth401k)+num(w.balanceRothIRA)+num(w.balanceTraditionalIRA)+num(w.balanceBrokerage)+num(w.balanceHSA)+num(w.spouseBalance401k)+num(w.spouseBalanceRoth401k)+num(w.spouseBalanceRothIRA);
-        const totalContrib = num(w.contrib401k)+num(w.contribRoth401k)+num(w.match401k)+num(w.contribRothIRA)+num(w.contribTraditionalIRA)+num(w.contribBrokerage)+num(w.contribHSA)+num(w.spouseContrib401k)+num(w.spouseContribRoth401k)+num(w.spouseMatch401k)+num(w.spouseContribRothIRA);
+        let totalSaved = num(w.balance401k)+num(w.balanceRoth401k)+num(w.balanceRothIRA)+num(w.balanceTraditionalIRA)+num(w.balanceBrokerage)+num(w.balanceHSA)+num(w.spouseBalance401k)+num(w.spouseBalanceRoth401k)+num(w.spouseBalanceRothIRA);
+        const my401Est = w.contrib401kMode==='percent' ? mySalary*(num(w.contrib401kPercent)/100) : num(w.contrib401k);
+        const sp401Est = w.spouseContrib401kMode==='percent' ? spouseSalary*(num(w.spouseContrib401kPercent)/100) : num(w.spouseContrib401k);
+        const myMatch = w.match401kMode==='percent' ? mySalary*(num(w.match401kPercent)/100) : num(w.match401k);
+        const spMatchEst = w.spouseMatch401kMode==='percent' ? spouseSalary*(num(w.spouseMatch401kPercent)/100) : num(w.spouseMatch401k);
+        let totalContrib = my401Est+num(w.contribRoth401k)+myMatch+num(w.contribRothIRA)+num(w.contribTraditionalIRA)+num(w.contribBrokerage)+num(w.contribHSA)+sp401Est+num(w.spouseContribRoth401k)+spMatchEst+num(w.spouseContribRothIRA);
+        // Edit mode: totals come from the full account list, not the slot fields.
+        if (w.editingExisting) {
+          totalSaved = wizAccounts.reduce((s,a)=>s+(Number(a.balance)||0),0);
+          totalContrib = wizAccounts.reduce((s,a)=>{
+            if (a.contributionMode==='percent') {
+              const sal = a.owner==='spouse'?spouseSalary:mySalary;
+              return s + sal*((Number(a.employeePercent)||0)+(Number(a.employerMatchPercent)||0));
+            }
+            return s + (Number(a.contribution)||0);
+          },0);
+        }
         const years = yearsToRetire; const cagr = 0.07;
         const fvLump = totalSaved * Math.pow(1+cagr, years);
         const fvAnnuity = years>0 ? totalContrib*((Math.pow(1+cagr,years)-1)/cagr)*(1+cagr) : 0;
         const proj = Math.round(fvLump+fvAnnuity);
         const spending = num(w.desiredSpending)||suggestedSpending||60000;
-        const ssAnn = (num(w.ssMonthly)||estimateSSMonthly(mySalary))*12;
-        const spSSAnn = w.hasSpouse ? (num(w.spouseSSMonthly)||estimateSSMonthly(spouseSalary))*12 : 0;
-        const pensionAnn = w.hasPension ? num(w.pensionAmount) : 0;
-        const pension2Ann = w.hasPension2 ? num(w.pension2Amount) : 0;
-        const otherIncAnn = w.otherIncomes.reduce((sum, oi) => sum + (num(oi.endAge) >= (num(w.myRetirementAge)||65) ? num(oi.amount) : 0), 0);
-        const guaranteed = ssAnn+spSSAnn+pensionAnn+pension2Ann+otherIncAnn;
+        const retA = num(w.myRetirementAge)||65;
+        let guaranteed;
+        if (w.editingExisting) {
+          // Edit mode: guaranteed income from the full income list (non-salary streams
+          // still active at retirement).
+          guaranteed = wizIncomes.reduce((s,i)=> s + (i.type!=='earned_income' && (Number(i.endAge)||95) >= retA ? (Number(i.amount)||0) : 0), 0);
+        } else {
+          const ssAnn = (num(w.ssMonthly)||estimateSSMonthly(mySalary))*12;
+          const spSSAnn = w.hasSpouse ? (num(w.spouseSSMonthly)||estimateSSMonthly(spouseSalary))*12 : 0;
+          const pensionAnn = w.hasPension ? num(w.pensionAmount) : 0;
+          const pension2Ann = w.hasPension2 ? num(w.pension2Amount) : 0;
+          const otherIncAnn = w.otherIncomes.reduce((sum, oi) => sum + (num(oi.endAge) >= retA ? num(oi.amount) : 0), 0);
+          guaranteed = ssAnn+spSSAnn+pensionAnn+pension2Ann+otherIncAnn;
+        }
         const gap = Math.max(0, spending-guaranteed);
         const wr = proj>0 ? gap/proj*100 : 0;
         return { proj, spending, guaranteed, gap, wr, totalSaved, totalContrib };
@@ -10656,6 +10945,94 @@ function RetirementPlanner() {
     const inputStyle = "w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-slate-100 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all";
     const cardBtn = (active) => `p-4 rounded-xl border-2 text-left transition-all cursor-pointer ${active ? 'border-amber-500 bg-amber-500/10' : 'border-slate-700 bg-slate-800/50 hover:border-slate-500'}`;
     const dollarInput = (value, onChange, placeholder) => (<div className="relative"><span className="absolute left-3 top-2.5 text-slate-500">$</span><input type="text" inputMode="numeric" value={num(value)>0?num(value).toLocaleString():''} onChange={e=>onChange(e.target.value.replace(/[^0-9]/g,''))} placeholder={placeholder} className={`${inputStyle} pl-7`} /></div>);
+
+    // Keyboard-accessible selectable account card (Enter/Space toggles).
+    const AccountCard = ({active, onToggle, title, desc}) => (
+      <div role="button" tabIndex={0} aria-pressed={active}
+        onClick={onToggle}
+        onKeyDown={e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();onToggle();}}}
+        className={`${cardBtn(active)} focus:outline-none focus:ring-2 focus:ring-amber-500/50`}>
+        <div className="flex items-center gap-3">
+          <input type="checkbox" checked={active} readOnly tabIndex={-1} className="w-4 h-4 rounded border-slate-600 text-amber-500 pointer-events-none" />
+          <div><div className="text-sm font-medium text-slate-200">{title}</div>{desc&&<div className="text-xs text-slate-500">{desc}</div>}</div>
+        </div>
+      </div>
+    );
+
+    // Employer-match input with a $ / % of-salary toggle. In % mode the match
+    // becomes a percent-of-salary account (scales with the owner's salary COLA).
+    const matchInput = ({label, modeKey, dollarKey, pctKey, dollarPlaceholder, pctPlaceholder='4',
+        pctHint='Most employers match 3–6% of salary; it grows with your pay.',
+        dollarHint='Total dollar amount your employer contributes per year.', border='border-sky-500/30'}) => {
+      const isPct = w[modeKey] === 'percent';
+      return (
+        <div className={`pl-4 border-l-2 ${border}`}>
+          <label className="text-xs text-slate-400 mb-1 block">{label}</label>
+          <div className="flex gap-2 mb-2">
+            <button type="button" onClick={()=>update(modeKey,'fixed')} className={`flex-1 px-2 py-1.5 rounded-lg text-xs font-medium border transition ${!isPct?'bg-amber-500/20 text-amber-300 border-amber-500/40':'bg-slate-800/60 text-slate-400 border-slate-700/50 hover:text-slate-200'}`}>$ per year</button>
+            <button type="button" onClick={()=>update(modeKey,'percent')} className={`flex-1 px-2 py-1.5 rounded-lg text-xs font-medium border transition ${isPct?'bg-amber-500/20 text-amber-300 border-amber-500/40':'bg-slate-800/60 text-slate-400 border-slate-700/50 hover:text-slate-200'}`}>% of salary</button>
+          </div>
+          {isPct
+            ? <div className="relative"><input type="number" step="0.5" value={w[pctKey]} onChange={e=>update(pctKey,e.target.value)} placeholder={pctPlaceholder} className={`${inputStyle} pr-8`} /><span className="absolute right-3 top-2.5 text-slate-500">%</span></div>
+            : dollarInput(w[dollarKey],v=>update(dollarKey,v),dollarPlaceholder)}
+          <p className="text-xs text-slate-500 mt-0.5">{isPct?pctHint:dollarHint}</p>
+        </div>
+      );
+    };
+
+    // Gate the Continue button: require age on step 1 (and spouse age if married).
+    const canContinue = (s) => {
+      if (s === 1) {
+        if (!(num(w.myAge) > 0)) return false;
+        if (w.hasSpouse && !(num(w.spouseAge) > 0)) return false;
+      }
+      return true;
+    };
+
+    // IRS 401(k)/403(b) limits (2025/2026). 402(g) = employee elective deferral;
+    // 415(c) = combined employee + employer "annual additions". Age-50 catch-up and
+    // the SECURE 2.0 ages-60–63 super catch-up raise both ceilings.
+    const irs401kLimits = (age) => {
+      // 2026 IRS limits (Notice 2025-67 / IR-2025-111): 402(g) elective deferral
+      // $24,500; 415(c) annual additions $72,000; age-50 catch-up $8,000; ages
+      // 60–63 SECURE 2.0 super catch-up $11,250. Catch-ups sit ON TOP of the
+      // 415(c) limit (they don't reduce it), so the combined personal cap is
+      // base + catch-up.
+      const a = num(age);
+      let catchUp = 0;
+      if (a >= 50) catchUp = (a >= 60 && a <= 63) ? 11250 : 8000;
+      const note = catchUp > 0 ? ` (includes the $${catchUp.toLocaleString()} age-${a >= 60 && a <= 63 ? '60–63 super' : '50'} catch-up)` : '';
+      return { deferral: 24500 + catchUp, additions: 72000 + catchUp, note };
+    };
+
+    // Year-1 contribution check for one person's 401(k)/403(b) plan. Trad + Roth
+    // share the employee-deferral limit; the employer match counts only toward the
+    // combined annual-additions limit. Percent-mode amounts are estimated from the
+    // current salary. Returns an array of warning strings (empty = within limits).
+    const check401kLimits = ({age, salary, has401k, c401Mode, c401Pct, c401Fixed,
+        hasRoth401k, rothFixed, matchMode, matchPct, matchFixed}) => {
+      const warns = [];
+      if (!has401k && !hasRoth401k) return warns;
+      const usingPct = (has401k && c401Mode === 'percent') || ((has401k||hasRoth401k) && matchMode === 'percent');
+      if (usingPct && salary <= 0) return warns; // can't size a % without salary
+      const empTrad = has401k ? (c401Mode === 'percent' ? salary * (num(c401Pct)/100) : num(c401Fixed)) : 0;
+      const empRoth = hasRoth401k ? num(rothFixed) : 0;
+      const employee = empTrad + empRoth;
+      const employer = (matchMode === 'percent' ? salary * (num(matchPct)/100) : num(matchFixed));
+      const combined = employee + employer;
+      const { deferral, additions, note } = irs401kLimits(age);
+      if (employee > deferral + 1) warns.push(`Employee 401(k)/403(b) contributions (≈$${Math.round(employee).toLocaleString()}/yr) exceed the IRS elective-deferral limit of $${deferral.toLocaleString()}${note} for this age.`);
+      if (combined > additions + 1) warns.push(`Combined employee + employer contributions (≈$${Math.round(combined).toLocaleString()}/yr) exceed the IRS combined limit of $${additions.toLocaleString()}${note} for this age.`);
+      return warns;
+    };
+
+    // Render a non-blocking red warning panel for a list of limit messages.
+    const limitWarning = (warns) => warns.length > 0 ? (
+      <div className="pl-4 border-l-2 border-red-500/50 bg-red-500/5 rounded-r-lg py-2 pr-3 space-y-1">
+        {warns.map((m, i) => <p key={i} className="text-xs text-red-300">⚠️ {m}</p>)}
+        <p className="text-[10px] text-red-400/60">Estimated from current salary — you can still continue, but the IRS won't allow contributions above these limits.</p>
+      </div>
+    ) : null;
 
     const stepTitles = [
       {title:'Welcome',icon:'👋'},{title:'About You',icon:'👤'},{title:'What Do You Earn?',icon:'💼'},
@@ -10696,50 +11073,100 @@ function RetirementPlanner() {
               <p className="text-sm text-slate-400">What's your current annual income before taxes?</p>
               <div><label className="text-sm font-medium text-slate-300 mb-1 block">My annual salary</label>{dollarInput(w.mySalary,v=>update('mySalary',v),'85,000')}</div>
               {w.hasSpouse && <div><label className="text-sm font-medium text-slate-300 mb-1 block">Spouse's annual salary</label>{dollarInput(w.spouseSalary,v=>update('spouseSalary',v),'60,000')}</div>}
-              <div><label className="text-sm font-medium text-slate-300 mb-1 block">Expected annual raises (%)</label><input type="number" step="0.5" value={w.mySalaryGrowth} onChange={e=>update('mySalaryGrowth',e.target.value)} className={`${inputStyle} w-24`} /><p className="text-xs text-slate-500 mt-1">Most people get 2–4% annual raises.</p></div>
+              <div><label className="text-sm font-medium text-slate-300 mb-1 block">My expected annual raises (%)</label><input type="number" step="0.5" value={w.mySalaryGrowth} onChange={e=>update('mySalaryGrowth',e.target.value)} className={`${inputStyle} w-24`} /><p className="text-xs text-slate-500 mt-1">Most people get 2–4% annual raises.</p></div>
+              {w.hasSpouse && <div><label className="text-sm font-medium text-slate-300 mb-1 block">Spouse's expected annual raises (%)</label><input type="number" step="0.5" value={w.spouseSalaryGrowth} onChange={e=>update('spouseSalaryGrowth',e.target.value)} className={`${inputStyle} w-24`} /></div>}
               {householdIncome>0 && <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/50"><div className="text-xs text-slate-500">Household income</div><div className="text-xl font-bold text-emerald-400">${householdIncome.toLocaleString()}/year</div></div>}
             </div>)}
 
             {step===3 && (<div className="space-y-5">
               <p className="text-sm text-slate-400">When do you want to stop working?</p>
-              <div><input type="range" min="55" max="75" value={w.myRetirementAge} onChange={e=>update('myRetirementAge',Number(e.target.value))} className="w-full accent-amber-500" /><div className="flex justify-between text-sm mt-1"><span className="text-slate-500">55</span><span className="text-2xl font-bold text-amber-400">Age {w.myRetirementAge}</span><span className="text-slate-500">75</span></div></div>
+              <div><input type="range" min="50" max="75" value={w.myRetirementAge} onChange={e=>update('myRetirementAge',Number(e.target.value))} className="w-full accent-amber-500" /><div className="flex justify-between text-sm mt-1"><span className="text-slate-500">50</span><span className="text-2xl font-bold text-amber-400">Age {w.myRetirementAge}</span><span className="text-slate-500">75</span></div></div>
               {num(w.myAge)>0 && <div className="grid grid-cols-2 gap-3"><div className="p-3 bg-slate-800/60 rounded-lg text-center"><div className="text-xs text-slate-500">Years to go</div><div className="text-xl font-bold text-slate-200">{yearsToRetire}</div></div>{mySalary>0&&<div className="p-3 bg-slate-800/60 rounded-lg text-center"><div className="text-xs text-slate-500">Salary at retirement</div><div className="text-lg font-bold text-slate-200">${Math.round(salaryAtRetire).toLocaleString()}</div></div>}</div>}
-              {w.hasSpouse && <div className="pl-4 border-l-2 border-amber-500/30 space-y-2"><label className="text-sm font-medium text-slate-300 mb-1 block">Spouse's retirement age</label><input type="range" min="55" max="75" value={w.spouseRetirementAge} onChange={e=>update('spouseRetirementAge',Number(e.target.value))} className="w-full accent-amber-500" /><div className="flex justify-between text-sm"><span className="text-slate-500">55</span><span className="text-xl font-bold text-amber-400">Age {w.spouseRetirementAge}</span><span className="text-slate-500">75</span></div>{num(w.spouseAge)>0&&<div className="p-2 bg-slate-800/40 rounded text-center"><span className="text-xs text-slate-500">{Math.max(0,num(w.spouseRetirementAge)-num(w.spouseAge))} years away</span></div>}</div>}
+              {num(w.myAge)>0 && num(w.myRetirementAge)<=num(w.myAge) && <div className="p-3 bg-amber-500/10 border border-amber-500/40 rounded-lg text-sm text-amber-300">⚠️ Your retirement age is at or below your current age ({num(w.myAge)}). Slide it higher unless you're already retired.</div>}
+              {w.hasSpouse && <div className="pl-4 border-l-2 border-amber-500/30 space-y-2"><label className="text-sm font-medium text-slate-300 mb-1 block">Spouse's retirement age</label><input type="range" min="50" max="75" value={w.spouseRetirementAge} onChange={e=>update('spouseRetirementAge',Number(e.target.value))} className="w-full accent-amber-500" /><div className="flex justify-between text-sm"><span className="text-slate-500">50</span><span className="text-xl font-bold text-amber-400">Age {w.spouseRetirementAge}</span><span className="text-slate-500">75</span></div>{num(w.spouseAge)>0&&<div className="p-2 bg-slate-800/40 rounded text-center"><span className="text-xs text-slate-500">{Math.max(0,num(w.spouseRetirementAge)-num(w.spouseAge))} years away</span></div>}</div>}
             </div>)}
 
             {step===4 && (<div className="space-y-4">
+              {w.editingExisting && (<div className="space-y-2">
+                <p className="text-sm text-slate-400">Every account from your plan. Edit, remove, or add — same as the Accounts tab.</p>
+                {wizAccounts.map(a => (
+                  <div key={a.id} className="flex items-center justify-between p-3 bg-slate-800/40 rounded-lg border border-slate-700/30">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-slate-100 truncate">{a.name}</div>
+                      <div className="text-xs text-slate-500">{(ACCOUNT_TYPES.find(t=>t.value===a.type)?.label)||a.type}{' · '}{a.owner==='spouse'?'Spouse':a.owner==='joint'?'Joint':'Me'}{' · $'+Math.round(Number(a.balance)||0).toLocaleString()}</div>
+                    </div>
+                    <div className="flex gap-3 shrink-0 ml-3">
+                      <button onClick={()=>{setEditingWizAccount(a);setShowWizAccountModal(true);}} className="text-xs text-amber-400 hover:text-amber-300">Edit</button>
+                      <button onClick={()=>setWizAccounts(prev=>prev.filter(x=>x.id!==a.id))} className="text-xs text-red-400/70 hover:text-red-400">Remove</button>
+                    </div>
+                  </div>
+                ))}
+                {wizAccounts.length===0&&<p className="text-sm text-slate-500 italic">No accounts yet — add one below.</p>}
+                <button onClick={()=>{setEditingWizAccount(null);setShowWizAccountModal(true);}} className="mt-2 px-4 py-2 text-sm bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg transition-colors">+ Add Account</button>
+              </div>)}
+              {!w.editingExisting && (<>
               <p className="text-sm text-slate-400">Check each account type you have. Estimates are fine to start.</p>
-              <div className={cardBtn(w.has401k)} onClick={()=>update('has401k',!w.has401k)}><div className="flex items-center gap-3"><input type="checkbox" checked={w.has401k} readOnly className="w-4 h-4 rounded border-slate-600 text-amber-500 pointer-events-none" /><div><div className="text-sm font-medium text-slate-200">Traditional 401(k) / 403(b)</div><div className="text-xs text-slate-500">Pre-tax contributions, taxed on withdrawal</div></div></div></div>
-              {w.has401k && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Current balance</label>{dollarInput(w.balance401k,v=>update('balance401k',v),'100,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">My annual contribution</label>{dollarInput(w.contrib401k,v=>update('contrib401k',v),'10,000')}</div></div>}
-              <div className={cardBtn(w.hasRoth401k)} onClick={()=>update('hasRoth401k',!w.hasRoth401k)}><div className="flex items-center gap-3"><input type="checkbox" checked={w.hasRoth401k} readOnly className="w-4 h-4 rounded border-slate-600 text-amber-500 pointer-events-none" /><div><div className="text-sm font-medium text-slate-200">Roth 401(k) / Roth 403(b)</div><div className="text-xs text-slate-500">After-tax contributions, tax-free in retirement</div></div></div></div>
+              <AccountCard active={w.has401k} onToggle={()=>update('has401k',!w.has401k)} title="Traditional 401(k) / 403(b)" desc="Pre-tax contributions, taxed on withdrawal" />
+              {w.has401k && <div className="space-y-3">
+                <div className="pl-4 border-l-2 border-amber-500/30"><label className="text-xs text-slate-400 mb-0.5 block">Current balance</label>{dollarInput(w.balance401k,v=>update('balance401k',v),'100,000')}</div>
+                {matchInput({label:'My annual contribution',modeKey:'contrib401kMode',dollarKey:'contrib401k',pctKey:'contrib401kPercent',dollarPlaceholder:'10,000',pctPlaceholder:'10',pctHint:'Percent of your salary you defer each year; grows with your pay.',dollarHint:'Fixed dollar amount you contribute per year.',border:'border-amber-500/30'})}
+                {matchInput({label:'Employer match (covers both Traditional & Roth)',modeKey:'match401kMode',dollarKey:'match401k',pctKey:'match401kPercent',dollarPlaceholder:'5,000'})}
+              </div>}
+              <AccountCard active={w.hasRoth401k} onToggle={()=>update('hasRoth401k',!w.hasRoth401k)} title="Roth 401(k) / Roth 403(b)" desc="After-tax contributions, tax-free in retirement" />
               {w.hasRoth401k && <div className="pl-4 border-l-2 border-emerald-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Current balance</label>{dollarInput(w.balanceRoth401k,v=>update('balanceRoth401k',v),'50,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">My annual contribution</label>{dollarInput(w.contribRoth401k,v=>update('contribRoth401k',v),'10,000')}</div></div>}
-              {(w.has401k||w.hasRoth401k) && <div className="pl-4 border-l-2 border-sky-500/30"><label className="text-xs text-slate-400 mb-0.5 block">Employer match (annual $ — covers both Traditional & Roth)</label>{dollarInput(w.match401k,v=>update('match401k',v),'5,000')}<p className="text-xs text-slate-500 mt-0.5">Enter the total dollar amount your employer contributes per year.</p></div>}
-              <div className={cardBtn(w.hasRothIRA)} onClick={()=>update('hasRothIRA',!w.hasRothIRA)}><div className="flex items-center gap-3"><input type="checkbox" checked={w.hasRothIRA} readOnly className="w-4 h-4 rounded border-slate-600 text-amber-500 pointer-events-none" /><div><div className="text-sm font-medium text-slate-200">Roth IRA</div><div className="text-xs text-slate-500">Tax-free withdrawals in retirement</div></div></div></div>
+              {/* Roth-only savers still get a match (it lands in a pre-tax bucket); shown here only when there's no Traditional 401(k) block to host it above. */}
+              {w.hasRoth401k && !w.has401k && matchInput({label:'Employer match',modeKey:'match401kMode',dollarKey:'match401k',pctKey:'match401kPercent',dollarPlaceholder:'5,000'})}
+              {limitWarning(check401kLimits({age:w.myAge,salary:mySalary,has401k:w.has401k,c401Mode:w.contrib401kMode,c401Pct:w.contrib401kPercent,c401Fixed:w.contrib401k,hasRoth401k:w.hasRoth401k,rothFixed:w.contribRoth401k,matchMode:w.match401kMode,matchPct:w.match401kPercent,matchFixed:w.match401k}))}
+              <AccountCard active={w.hasRothIRA} onToggle={()=>update('hasRothIRA',!w.hasRothIRA)} title="Roth IRA" desc="Tax-free withdrawals in retirement" />
               {w.hasRothIRA && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.balanceRothIRA,v=>update('balanceRothIRA',v),'25,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Annual contribution</label>{dollarInput(w.contribRothIRA,v=>update('contribRothIRA',v),'7,000')}</div></div>}
-              <div className={cardBtn(w.hasTraditionalIRA)} onClick={()=>update('hasTraditionalIRA',!w.hasTraditionalIRA)}><div className="flex items-center gap-3"><input type="checkbox" checked={w.hasTraditionalIRA} readOnly className="w-4 h-4 rounded border-slate-600 text-amber-500 pointer-events-none" /><div><div className="text-sm font-medium text-slate-200">Traditional IRA</div><div className="text-xs text-slate-500">Tax-deductible now, taxed on withdrawal</div></div></div></div>
+              <AccountCard active={w.hasTraditionalIRA} onToggle={()=>update('hasTraditionalIRA',!w.hasTraditionalIRA)} title="Traditional IRA" desc="Tax-deductible now, taxed on withdrawal" />
               {w.hasTraditionalIRA && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.balanceTraditionalIRA,v=>update('balanceTraditionalIRA',v),'50,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Annual contribution</label>{dollarInput(w.contribTraditionalIRA,v=>update('contribTraditionalIRA',v),'7,000')}</div></div>}
-              <div className={cardBtn(w.hasBrokerage)} onClick={()=>update('hasBrokerage',!w.hasBrokerage)}><div className="flex items-center gap-3"><input type="checkbox" checked={w.hasBrokerage} readOnly className="w-4 h-4 rounded border-slate-600 text-amber-500 pointer-events-none" /><div><div className="text-sm font-medium text-slate-200">Brokerage / Taxable Savings</div><div className="text-xs text-slate-500">Regular investment account</div></div></div></div>
+              <AccountCard active={w.hasBrokerage} onToggle={()=>update('hasBrokerage',!w.hasBrokerage)} title="Brokerage / Taxable Savings" desc="Regular investment account" />
               {w.hasBrokerage && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.balanceBrokerage,v=>update('balanceBrokerage',v),'30,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Annual contribution</label>{dollarInput(w.contribBrokerage,v=>update('contribBrokerage',v),'5,000')}</div></div>}
               {w.hasSpouse && <><div className="border-t border-slate-700/50 pt-3 mt-3"><p className="text-xs text-amber-400 font-semibold mb-3">SPOUSE'S ACCOUNTS</p></div>
-                <div className={cardBtn(w.spouseHas401k)} onClick={()=>update('spouseHas401k',!w.spouseHas401k)}><div className="flex items-center gap-3"><input type="checkbox" checked={w.spouseHas401k} readOnly className="w-4 h-4 rounded border-slate-600 text-amber-500 pointer-events-none" /><div><div className="text-sm font-medium text-slate-200">Spouse's Traditional 401(k)</div></div></div></div>
-                {w.spouseHas401k && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.spouseBalance401k,v=>update('spouseBalance401k',v),'50,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Contribution</label>{dollarInput(w.spouseContrib401k,v=>update('spouseContrib401k',v),'8,000')}</div></div>}
-                <div className={cardBtn(w.spouseHasRoth401k)} onClick={()=>update('spouseHasRoth401k',!w.spouseHasRoth401k)}><div className="flex items-center gap-3"><input type="checkbox" checked={w.spouseHasRoth401k} readOnly className="w-4 h-4 rounded border-slate-600 text-amber-500 pointer-events-none" /><div><div className="text-sm font-medium text-slate-200">Spouse's Roth 401(k)</div></div></div></div>
+                <AccountCard active={w.spouseHas401k} onToggle={()=>update('spouseHas401k',!w.spouseHas401k)} title="Spouse's Traditional 401(k)" />
+                {w.spouseHas401k && <div className="space-y-3">
+                  <div className="pl-4 border-l-2 border-amber-500/30"><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.spouseBalance401k,v=>update('spouseBalance401k',v),'50,000')}</div>
+                  {matchInput({label:'Spouse annual contribution',modeKey:'spouseContrib401kMode',dollarKey:'spouseContrib401k',pctKey:'spouseContrib401kPercent',dollarPlaceholder:'8,000',pctPlaceholder:'10',pctHint:'Percent of salary deferred each year; grows with pay.',dollarHint:'Fixed dollar amount contributed per year.',border:'border-amber-500/30'})}
+                  {matchInput({label:'Spouse employer match (covers both Traditional & Roth)',modeKey:'spouseMatch401kMode',dollarKey:'spouseMatch401k',pctKey:'spouseMatch401kPercent',dollarPlaceholder:'3,000'})}
+                </div>}
+                <AccountCard active={w.spouseHasRoth401k} onToggle={()=>update('spouseHasRoth401k',!w.spouseHasRoth401k)} title="Spouse's Roth 401(k)" />
                 {w.spouseHasRoth401k && <div className="pl-4 border-l-2 border-emerald-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.spouseBalanceRoth401k,v=>update('spouseBalanceRoth401k',v),'25,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Contribution</label>{dollarInput(w.spouseContribRoth401k,v=>update('spouseContribRoth401k',v),'5,000')}</div></div>}
-                {(w.spouseHas401k||w.spouseHasRoth401k) && <div className="pl-4 border-l-2 border-sky-500/30"><label className="text-xs text-slate-400 mb-0.5 block">Spouse employer match (annual $)</label>{dollarInput(w.spouseMatch401k,v=>update('spouseMatch401k',v),'3,000')}</div>}
-                <div className={cardBtn(w.spouseHasRothIRA)} onClick={()=>update('spouseHasRothIRA',!w.spouseHasRothIRA)}><div className="flex items-center gap-3"><input type="checkbox" checked={w.spouseHasRothIRA} readOnly className="w-4 h-4 rounded border-slate-600 text-amber-500 pointer-events-none" /><div><div className="text-sm font-medium text-slate-200">Spouse's Roth IRA</div></div></div></div>
+                {w.spouseHasRoth401k && !w.spouseHas401k && matchInput({label:'Spouse employer match',modeKey:'spouseMatch401kMode',dollarKey:'spouseMatch401k',pctKey:'spouseMatch401kPercent',dollarPlaceholder:'3,000'})}
+                {limitWarning(check401kLimits({age:w.spouseAge,salary:spouseSalary,has401k:w.spouseHas401k,c401Mode:w.spouseContrib401kMode,c401Pct:w.spouseContrib401kPercent,c401Fixed:w.spouseContrib401k,hasRoth401k:w.spouseHasRoth401k,rothFixed:w.spouseContribRoth401k,matchMode:w.spouseMatch401kMode,matchPct:w.spouseMatch401kPercent,matchFixed:w.spouseMatch401k}))}
+                <AccountCard active={w.spouseHasRothIRA} onToggle={()=>update('spouseHasRothIRA',!w.spouseHasRothIRA)} title="Spouse's Roth IRA" />
                 {w.spouseHasRothIRA && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.spouseBalanceRothIRA,v=>update('spouseBalanceRothIRA',v),'15,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Contribution</label>{dollarInput(w.spouseContribRothIRA,v=>update('spouseContribRothIRA',v),'7,000')}</div></div>}
               </>}
-              <div className={cardBtn(w.hasHSA)} onClick={()=>update('hasHSA',!w.hasHSA)}><div className="flex items-center gap-3"><input type="checkbox" checked={w.hasHSA} readOnly className="w-4 h-4 rounded border-slate-600 text-amber-500 pointer-events-none" /><div><div className="text-sm font-medium text-slate-200">Health Savings Account (HSA)</div><div className="text-xs text-slate-500">Triple tax advantage — tax-free for medical expenses in retirement</div></div></div></div>
+              <AccountCard active={w.hasHSA} onToggle={()=>update('hasHSA',!w.hasHSA)} title="Health Savings Account (HSA)" desc="Triple tax advantage — tax-free for medical expenses in retirement" />
               {w.hasHSA && <div className="pl-4 border-l-2 border-teal-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.balanceHSA,v=>update('balanceHSA',v),'10,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Annual contribution</label>{dollarInput(w.contribHSA,v=>update('contribHSA',v),'4,150')}</div></div>}
               <p className="text-xs text-slate-500">You can add 457(b) and other account types later from the Accounts tab.</p>
+              </>)}
             </div>)}
 
             {step===5 && (<div className="space-y-5">
+              {w.editingExisting && (<div className="space-y-2">
+                <p className="text-sm text-slate-400">Every income stream from your plan — Social Security, pensions, salary, rental, etc. Edit, remove, or add, same as the Income tab.</p>
+                {wizIncomes.map(i => (
+                  <div key={i.id} className="flex items-center justify-between p-3 bg-slate-800/40 rounded-lg border border-slate-700/30">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-slate-100 truncate">{i.name}</div>
+                      <div className="text-xs text-slate-500">{(INCOME_TYPES.find(t=>t.value===i.type)?.label)||i.type}{' · '}{i.owner==='spouse'?'Spouse':'Me'}{' · $'+Math.round(Number(i.amount)||0).toLocaleString()+'/yr · ages '+i.startAge+'–'+i.endAge}</div>
+                    </div>
+                    <div className="flex gap-3 shrink-0 ml-3">
+                      <button onClick={()=>{setEditingWizIncome(i);setShowWizIncomeModal(true);}} className="text-xs text-amber-400 hover:text-amber-300">Edit</button>
+                      <button onClick={()=>setWizIncomes(prev=>prev.filter(x=>x.id!==i.id))} className="text-xs text-red-400/70 hover:text-red-400">Remove</button>
+                    </div>
+                  </div>
+                ))}
+                {wizIncomes.length===0&&<p className="text-sm text-slate-500 italic">No income streams yet — add one below.</p>}
+                <button onClick={()=>{setEditingWizIncome(null);setShowWizIncomeModal(true);}} className="mt-2 px-4 py-2 text-sm bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg transition-colors">+ Add Income Stream</button>
+              </div>)}
+              {!w.editingExisting && (<>
               <p className="text-sm text-slate-400">Social Security is the foundation of most retirement plans. Check your estimate at <span className="text-amber-400">ssa.gov/myaccount</span>.</p>
               <label className="flex items-center gap-3 cursor-pointer py-1"><input type="checkbox" checked={w.expectSS} onChange={e=>update('expectSS',e.target.checked)} className="w-5 h-5 rounded border-slate-600 text-amber-500 focus:ring-amber-500/50" /><span className="text-slate-200">I expect Social Security</span></label>
-              {w.expectSS && <div className="pl-4 border-l-2 border-amber-500/30 space-y-2"><div className="grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">My monthly benefit</label>{dollarInput(w.ssMonthly,v=>update('ssMonthly',v),estimateSSMonthly(mySalary)>0?estimateSSMonthly(mySalary).toLocaleString():'2,500')}{mySalary>0&&!num(w.ssMonthly)&&<button onClick={()=>update('ssMonthly',String(estimateSSMonthly(mySalary)))} className="text-xs text-emerald-400/70 hover:text-emerald-400 mt-0.5 underline cursor-pointer">Don't know? Use estimate: ~${estimateSSMonthly(mySalary).toLocaleString()}/mo</button>}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Claiming age</label><select value={w.ssClaimAge} onChange={e=>update('ssClaimAge',e.target.value)} className={inputStyle}>{[62,63,64,65,66,67,68,69,70].map(a=><option key={a} value={a}>{a}{a===62?' (earliest)':a===67?' (FRA)':a===70?' (max)':''}</option>)}</select></div></div><p className="text-xs text-slate-500">For your actual estimate, log in to <a href="https://www.ssa.gov/myaccount/" target="_blank" rel="noopener noreferrer" className="text-amber-400 underline">ssa.gov/myaccount</a> — look for "Estimated monthly benefit at age 67."</p></div>}
+              {w.expectSS && <div className="pl-4 border-l-2 border-amber-500/30 space-y-2"><div className="grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">My monthly benefit at Full Retirement Age (67)</label>{dollarInput(w.ssMonthly,v=>update('ssMonthly',v),estimateSSMonthly(mySalary)>0?estimateSSMonthly(mySalary).toLocaleString():'2,500')}{mySalary>0&&!num(w.ssMonthly)&&<button onClick={()=>update('ssMonthly',String(estimateSSMonthly(mySalary)))} className="text-xs text-emerald-400/70 hover:text-emerald-400 mt-0.5 underline cursor-pointer">Don't know? Use estimate: ~${estimateSSMonthly(mySalary).toLocaleString()}/mo</button>}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Claiming age</label><select value={w.ssClaimAge} onChange={e=>update('ssClaimAge',e.target.value)} className={inputStyle}>{[62,63,64,65,66,67,68,69,70].map(a=><option key={a} value={a}>{a}{a===62?' (earliest)':a===67?' (FRA)':a===70?' (max)':''}</option>)}</select></div></div><p className="text-xs text-slate-500">For your actual estimate, log in to <a href="https://www.ssa.gov/myaccount/" target="_blank" rel="noopener noreferrer" className="text-amber-400 underline">ssa.gov/myaccount</a> — look for "Estimated monthly benefit at age 67."</p></div>}
               {w.hasSpouse && <><div className="border-t border-slate-700/30 pt-3"><label className="flex items-center gap-3 cursor-pointer py-1"><input type="checkbox" checked={w.spouseExpectSS} onChange={e=>update('spouseExpectSS',e.target.checked)} className="w-5 h-5 rounded border-slate-600 text-amber-500 focus:ring-amber-500/50" /><span className="text-slate-200">Spouse expects Social Security</span></label></div>
-                {w.spouseExpectSS && <div className="pl-4 border-l-2 border-amber-500/30 space-y-2"><div className="grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Spouse monthly benefit</label>{dollarInput(w.spouseSSMonthly,v=>update('spouseSSMonthly',v),estimateSSMonthly(spouseSalary)>0?estimateSSMonthly(spouseSalary).toLocaleString():'1,800')}{spouseSalary>0&&!num(w.spouseSSMonthly)&&<button onClick={()=>update('spouseSSMonthly',String(estimateSSMonthly(spouseSalary)))} className="text-xs text-emerald-400/70 hover:text-emerald-400 mt-0.5 underline cursor-pointer">Don't know? Use estimate: ~${estimateSSMonthly(spouseSalary).toLocaleString()}/mo</button>}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Claiming age</label><select value={w.spouseSSClaimAge} onChange={e=>update('spouseSSClaimAge',e.target.value)} className={inputStyle}>{[62,63,64,65,66,67,68,69,70].map(a=><option key={a} value={a}>{a}</option>)}</select></div></div></div>}
+                {w.spouseExpectSS && <div className="pl-4 border-l-2 border-amber-500/30 space-y-2"><div className="grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Spouse monthly benefit at Full Retirement Age (67)</label>{dollarInput(w.spouseSSMonthly,v=>update('spouseSSMonthly',v),estimateSSMonthly(spouseSalary)>0?estimateSSMonthly(spouseSalary).toLocaleString():'1,800')}{spouseSalary>0&&!num(w.spouseSSMonthly)&&<button onClick={()=>update('spouseSSMonthly',String(estimateSSMonthly(spouseSalary)))} className="text-xs text-emerald-400/70 hover:text-emerald-400 mt-0.5 underline cursor-pointer">Don't know? Use estimate: ~${estimateSSMonthly(spouseSalary).toLocaleString()}/mo</button>}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Claiming age</label><select value={w.spouseSSClaimAge} onChange={e=>update('spouseSSClaimAge',e.target.value)} className={inputStyle}>{[62,63,64,65,66,67,68,69,70].map(a=><option key={a} value={a}>{a}</option>)}</select></div></div></div>}
               </>}
               <div className="border-t border-slate-700/30 pt-3"><label className="flex items-center gap-3 cursor-pointer py-1"><input type="checkbox" checked={w.hasPension} onChange={e=>update('hasPension',e.target.checked)} className="w-5 h-5 rounded border-slate-600 text-amber-500 focus:ring-amber-500/50" /><span className="text-slate-200">I or my spouse have a pension</span></label></div>
               {w.hasPension && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-3 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Annual amount</label>{dollarInput(w.pensionAmount,v=>update('pensionAmount',v),'24,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Starts at age</label><input type="number" value={w.pensionStartAge} onChange={e=>update('pensionStartAge',e.target.value)} className={inputStyle} /></div>{w.hasSpouse&&<div><label className="text-xs text-slate-400 mb-0.5 block">Whose?</label><select value={w.pensionOwner} onChange={e=>update('pensionOwner',e.target.value)} className={inputStyle}><option value="me">Mine</option><option value="spouse">Spouse</option></select></div>}</div>}
@@ -10760,6 +11187,7 @@ function RetirementPlanner() {
                       <div><label className="text-[10px] text-slate-500 block mb-0.5">Type</label><select value={oi.type} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,type:v}:o)}))}} className={`${inputStyle} text-xs py-1.5`}><option value="rental">Rental</option><option value="business">Business/Consulting</option><option value="annuity">Annuity</option><option value="other">Other</option></select></div>
                       <div><label className="text-[10px] text-slate-500 block mb-0.5">Annual $</label>{dollarInput(oi.amount, v=>setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,amount:v}:o)})), '12,000')}</div>
                       <div><label className="text-[10px] text-slate-500 block mb-0.5">Ages</label><div className="flex items-center gap-1"><input type="number" value={oi.startAge} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,startAge:v}:o)}))}} className={`${inputStyle} text-xs py-1.5 w-14`} /><span className="text-slate-600">–</span><input type="number" value={oi.endAge} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,endAge:v}:o)}))}} className={`${inputStyle} text-xs py-1.5 w-14`} /></div></div>
+                      <div><label className="text-[10px] text-slate-500 block mb-0.5">Annual growth (%)</label><input type="number" step="0.5" value={oi.cola} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,cola:v}:o)}))}} className={`${inputStyle} text-xs py-1.5`} placeholder="2" /></div>
                       {w.hasSpouse&&<div><label className="text-[10px] text-slate-500 block mb-0.5">Owner</label><select value={oi.owner} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,owner:v}:o)}))}} className={`${inputStyle} text-xs py-1.5`}><option value="me">Me</option><option value="spouse">Spouse</option></select></div>}
                     </div>
                   </div>
@@ -10771,6 +11199,7 @@ function RetirementPlanner() {
                 </div>
                 <p className="text-xs text-slate-500 mt-2">Set the end age past retirement if this income continues after you stop working (e.g., rental income through age 95).</p>
               </div>
+              </>)}
             </div>)}
 
             {step===6 && (<div className="space-y-5">
@@ -10785,10 +11214,29 @@ function RetirementPlanner() {
             </div>)}
 
             {step===7 && (<div className="space-y-5">
+              {w.editingExisting && (<div className="space-y-2">
+                <p className="text-sm text-slate-400">Every asset from your plan. Edit, remove, or add — same as the Assets tab.</p>
+                {wizAssets.map(a => (
+                  <div key={a.id} className="flex items-center justify-between p-3 bg-slate-800/40 rounded-lg border border-slate-700/30">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-slate-100 truncate">{a.name}</div>
+                      <div className="text-xs text-slate-500">{(ASSET_TYPES.find(t=>t.value===a.type)?.label)||a.type}{' · $'+Math.round(Number(a.value)||0).toLocaleString()}</div>
+                    </div>
+                    <div className="flex gap-3 shrink-0 ml-3">
+                      <button onClick={()=>{setEditingWizAsset(a);setShowWizAssetModal(true);}} className="text-xs text-amber-400 hover:text-amber-300">Edit</button>
+                      <button onClick={()=>setWizAssets(prev=>prev.filter(x=>x.id!==a.id))} className="text-xs text-red-400/70 hover:text-red-400">Remove</button>
+                    </div>
+                  </div>
+                ))}
+                {wizAssets.length===0&&<p className="text-sm text-slate-500 italic">No assets yet — add one below.</p>}
+                <button onClick={()=>{setEditingWizAsset(null);setShowWizAssetModal(true);}} className="mt-2 px-4 py-2 text-sm bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg transition-colors">+ Add Asset</button>
+              </div>)}
+              {!w.editingExisting && (<>
               <p className="text-sm text-slate-400">Home equity is tracked for net worth but doesn't fund spending directly.</p>
               <label className="flex items-center gap-3 cursor-pointer py-1"><input type="checkbox" checked={w.ownsHome} onChange={e=>update('ownsHome',e.target.checked)} className="w-5 h-5 rounded border-slate-600 text-amber-500 focus:ring-amber-500/50" /><span className="text-slate-200">I own a home</span></label>
               {w.ownsHome && <div className="pl-4 border-l-2 border-amber-500/30 space-y-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Estimated value</label>{dollarInput(w.homeValue,v=>update('homeValue',v),'350,000')}</div><div className="grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Remaining mortgage</label>{dollarInput(w.mortgageBalance,v=>update('mortgageBalance',v),'150,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Payoff age</label><input type="number" value={w.mortgagePayoffAge} onChange={e=>update('mortgagePayoffAge',e.target.value)} placeholder="70" className={inputStyle} /></div></div></div>}
               {!w.ownsHome && <p className="text-sm text-slate-500 italic">You can add any assets later from the Assets tab.</p>}
+              </>)}
             </div>)}
 
             {step===8 && (()=>{const pv=getQuickPreview();return(<div className="space-y-4">
@@ -10805,23 +11253,33 @@ function RetirementPlanner() {
               </div>}
               <div className="p-3 bg-slate-800/60 rounded-lg"><div className="text-xs font-semibold text-amber-400 mb-2">ABOUT YOU</div><div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm"><span className="text-slate-500">Age:</span><span className="text-slate-200">{w.myAge||'—'}, retire at {w.myRetirementAge}</span>{w.hasSpouse&&<><span className="text-slate-500">Spouse:</span><span className="text-slate-200">{w.spouseAge||'—'}, retire at {w.spouseRetirementAge}</span></>}<span className="text-slate-500">State:</span><span className="text-slate-200">{w.state}</span></div></div>
               <div className="p-3 bg-slate-800/60 rounded-lg"><div className="text-xs font-semibold text-amber-400 mb-2">INCOME</div><div className="space-y-1 text-sm">
-                {mySalary>0&&<div className="flex justify-between"><span className="text-slate-400">My salary</span><span className="text-emerald-400">${mySalary.toLocaleString()}/yr</span></div>}
-                {w.hasSpouse&&spouseSalary>0&&<div className="flex justify-between"><span className="text-slate-400">Spouse salary</span><span className="text-emerald-400">${spouseSalary.toLocaleString()}/yr</span></div>}
-                {w.expectSS&&<div className="flex justify-between"><span className="text-slate-400">My SS at {w.ssClaimAge}</span><span className="text-emerald-400">${(num(w.ssMonthly)||estimateSSMonthly(mySalary)).toLocaleString()}/mo</span></div>}
-                {w.hasSpouse&&w.spouseExpectSS&&<div className="flex justify-between"><span className="text-slate-400">Spouse SS</span><span className="text-emerald-400">${(num(w.spouseSSMonthly)||estimateSSMonthly(spouseSalary)).toLocaleString()}/mo</span></div>}
-                {w.hasPension&&<div className="flex justify-between"><span className="text-slate-400">Pension ({w.pensionOwner})</span><span className="text-emerald-400">${num(w.pensionAmount).toLocaleString()}/yr</span></div>}
-                {w.hasPension2&&<div className="flex justify-between"><span className="text-slate-400">Pension 2 ({w.pension2Owner})</span><span className="text-emerald-400">${num(w.pension2Amount).toLocaleString()}/yr</span></div>}
-                {w.otherIncomes.filter(oi=>num(oi.amount)>0).map(oi=><div key={oi.id} className="flex justify-between"><span className="text-slate-400">{oi.name} ({oi.owner})</span><span className="text-emerald-400">${num(oi.amount).toLocaleString()}/yr ages {oi.startAge}–{oi.endAge}</span></div>)}
+                {w.editingExisting ? (<>
+                  {wizIncomes.map(i=><div key={i.id} className="flex justify-between"><span className="text-slate-400 truncate mr-2">{i.name} ({i.owner})</span><span className="text-emerald-400 shrink-0">${Math.round(Number(i.amount)||0).toLocaleString()}/yr ages {i.startAge}–{i.endAge}</span></div>)}
+                  {wizIncomes.length===0&&<p className="text-slate-500 italic">No income streams</p>}
+                </>) : (<>
+                  {mySalary>0&&<div className="flex justify-between"><span className="text-slate-400">My salary</span><span className="text-emerald-400">${mySalary.toLocaleString()}/yr</span></div>}
+                  {w.hasSpouse&&spouseSalary>0&&<div className="flex justify-between"><span className="text-slate-400">Spouse salary</span><span className="text-emerald-400">${spouseSalary.toLocaleString()}/yr</span></div>}
+                  {w.expectSS&&<div className="flex justify-between"><span className="text-slate-400">My SS at {w.ssClaimAge}</span><span className="text-emerald-400">${(num(w.ssMonthly)||estimateSSMonthly(mySalary)).toLocaleString()}/mo</span></div>}
+                  {w.hasSpouse&&w.spouseExpectSS&&<div className="flex justify-between"><span className="text-slate-400">Spouse SS</span><span className="text-emerald-400">${(num(w.spouseSSMonthly)||estimateSSMonthly(spouseSalary)).toLocaleString()}/mo</span></div>}
+                  {w.hasPension&&<div className="flex justify-between"><span className="text-slate-400">Pension ({w.pensionOwner})</span><span className="text-emerald-400">${num(w.pensionAmount).toLocaleString()}/yr</span></div>}
+                  {w.hasPension2&&<div className="flex justify-between"><span className="text-slate-400">Pension 2 ({w.pension2Owner})</span><span className="text-emerald-400">${num(w.pension2Amount).toLocaleString()}/yr</span></div>}
+                  {w.otherIncomes.filter(oi=>num(oi.amount)>0).map(oi=><div key={oi.id} className="flex justify-between"><span className="text-slate-400">{oi.name} ({oi.owner})</span><span className="text-emerald-400">${num(oi.amount).toLocaleString()}/yr ages {oi.startAge}–{oi.endAge}</span></div>)}
+                </>)}
               </div></div>
               <div className="p-3 bg-slate-800/60 rounded-lg"><div className="text-xs font-semibold text-amber-400 mb-2">SAVINGS</div><div className="space-y-1 text-sm">
-                {w.has401k&&<div className="flex justify-between"><span className="text-slate-400">401(k)</span><span className="text-emerald-400">${num(w.balance401k).toLocaleString()}{num(w.contrib401k)>0?` + $${num(w.contrib401k).toLocaleString()}/yr`:''}</span></div>}
-                {w.hasRoth401k&&<div className="flex justify-between"><span className="text-slate-400">Roth 401(k)</span><span className="text-emerald-400">${num(w.balanceRoth401k).toLocaleString()}{num(w.contribRoth401k)>0?` + $${num(w.contribRoth401k).toLocaleString()}/yr`:''}</span></div>}
-                {(w.has401k||w.hasRoth401k)&&num(w.match401k)>0&&<div className="flex justify-between"><span className="text-slate-400">Employer match</span><span className="text-emerald-400">${num(w.match401k).toLocaleString()}/yr</span></div>}
-                {w.hasRothIRA&&<div className="flex justify-between"><span className="text-slate-400">Roth IRA</span><span className="text-emerald-400">${num(w.balanceRothIRA).toLocaleString()}</span></div>}
-                {w.hasTraditionalIRA&&<div className="flex justify-between"><span className="text-slate-400">Traditional IRA</span><span className="text-emerald-400">${num(w.balanceTraditionalIRA).toLocaleString()}</span></div>}
-                {w.hasBrokerage&&<div className="flex justify-between"><span className="text-slate-400">Brokerage</span><span className="text-emerald-400">${num(w.balanceBrokerage).toLocaleString()}</span></div>}
-                {w.hasHSA&&<div className="flex justify-between"><span className="text-slate-400">HSA</span><span className="text-emerald-400">${num(w.balanceHSA).toLocaleString()}{num(w.contribHSA)>0?` + $${num(w.contribHSA).toLocaleString()}/yr`:''}</span></div>}
-                {!(w.has401k||w.hasRoth401k||w.hasRothIRA||w.hasTraditionalIRA||w.hasBrokerage||w.hasHSA)&&<p className="text-slate-500 italic">Sample defaults will be used</p>}
+                {w.editingExisting ? (<>
+                  {wizAccounts.map(a=><div key={a.id} className="flex justify-between"><span className="text-slate-400 truncate mr-2">{a.name}</span><span className="text-emerald-400 shrink-0">${Math.round(Number(a.balance)||0).toLocaleString()}{a.contributionMode==='percent'?((Number(a.employeePercent)||0)+(Number(a.employerMatchPercent)||0)>0?` + ${(((Number(a.employeePercent)||0)+(Number(a.employerMatchPercent)||0))*100).toFixed(1)}% of salary`:''):(num(a.contribution)>0?` + $${num(a.contribution).toLocaleString()}/yr`:'')}</span></div>)}
+                  {wizAccounts.length===0&&<p className="text-slate-500 italic">No accounts</p>}
+                </>) : (<>
+                  {w.has401k&&<div className="flex justify-between"><span className="text-slate-400">401(k)</span><span className="text-emerald-400">${num(w.balance401k).toLocaleString()}{w.contrib401kMode==='percent'?(num(w.contrib401kPercent)>0?` + ${num(w.contrib401kPercent)}% of salary`:''):(num(w.contrib401k)>0?` + $${num(w.contrib401k).toLocaleString()}/yr`:'')}</span></div>}
+                  {w.hasRoth401k&&<div className="flex justify-between"><span className="text-slate-400">Roth 401(k)</span><span className="text-emerald-400">${num(w.balanceRoth401k).toLocaleString()}{num(w.contribRoth401k)>0?` + $${num(w.contribRoth401k).toLocaleString()}/yr`:''}</span></div>}
+                  {(w.has401k||w.hasRoth401k)&&((w.match401kMode==='percent'&&num(w.match401kPercent)>0)||(w.match401kMode!=='percent'&&num(w.match401k)>0))&&<div className="flex justify-between"><span className="text-slate-400">Employer match</span><span className="text-emerald-400">{w.match401kMode==='percent'?`${num(w.match401kPercent)}% of salary`:`$${num(w.match401k).toLocaleString()}/yr`}</span></div>}
+                  {w.hasRothIRA&&<div className="flex justify-between"><span className="text-slate-400">Roth IRA</span><span className="text-emerald-400">${num(w.balanceRothIRA).toLocaleString()}</span></div>}
+                  {w.hasTraditionalIRA&&<div className="flex justify-between"><span className="text-slate-400">Traditional IRA</span><span className="text-emerald-400">${num(w.balanceTraditionalIRA).toLocaleString()}</span></div>}
+                  {w.hasBrokerage&&<div className="flex justify-between"><span className="text-slate-400">Brokerage</span><span className="text-emerald-400">${num(w.balanceBrokerage).toLocaleString()}</span></div>}
+                  {w.hasHSA&&<div className="flex justify-between"><span className="text-slate-400">HSA</span><span className="text-emerald-400">${num(w.balanceHSA).toLocaleString()}{num(w.contribHSA)>0?` + $${num(w.contribHSA).toLocaleString()}/yr`:''}</span></div>}
+                  {!(w.has401k||w.hasRoth401k||w.hasRothIRA||w.hasTraditionalIRA||w.hasBrokerage||w.hasHSA)&&<p className="text-slate-500 italic">Sample defaults will be used</p>}
+                </>)}
               </div></div>
             </div>);})()}
           </div>
@@ -10829,10 +11287,47 @@ function RetirementPlanner() {
           <div style={{padding:'1rem 1.5rem',borderTop:'1px solid rgba(51,65,85,0.5)',flexShrink:0,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
             <div>{step>0&&<button onClick={()=>setStep(step-1)} className="px-4 py-2 text-sm text-slate-400 hover:text-slate-200 transition-colors">← Back</button>}</div>
             <div className="flex gap-3">
-              {step>0&&step<totalSteps-1&&<button onClick={()=>setStep(step+1)} className="px-5 py-2.5 text-sm bg-amber-600 hover:bg-amber-500 text-white font-medium rounded-lg transition-colors">Continue →</button>}
+              {step>0&&step<totalSteps-1&&<button onClick={()=>setStep(step+1)} disabled={!canContinue(step)} className={`px-5 py-2.5 text-sm font-medium rounded-lg transition-colors ${canContinue(step)?'bg-amber-600 hover:bg-amber-500 text-white':'bg-slate-700 text-slate-500 cursor-not-allowed'}`}>Continue →</button>}
               {step===totalSteps-1&&<button onClick={finishWizard} className="px-6 py-2.5 text-sm bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg transition-colors">✓ Launch My Plan</button>}
             </div>
           </div>
+          {/* Full app editors reused inside the wizard's edit-existing path. */}
+          {showWizAccountModal && (
+            <AccountModal
+              editingAccount={editingWizAccount}
+              personalInfo={(existingData && existingData.personalInfo) || DEFAULT_PERSONAL_INFO}
+              incomeStreams={(existingData && existingData.incomeStreams) || []}
+              onClose={()=>{setShowWizAccountModal(false);setEditingWizAccount(null);}}
+              onSave={(data)=>{
+                setWizAccounts(prev => editingWizAccount
+                  ? prev.map(a => a.id===editingWizAccount.id ? { ...data, id: editingWizAccount.id } : a)
+                  : [...prev, { ...data, id: Math.max(0,...prev.map(a=>a.id||0))+1 }]);
+                setShowWizAccountModal(false); setEditingWizAccount(null);
+              }} />
+          )}
+          {showWizAssetModal && (
+            <AssetModal
+              editingAsset={editingWizAsset}
+              onClose={()=>{setShowWizAssetModal(false);setEditingWizAsset(null);}}
+              onSave={(data)=>{
+                setWizAssets(prev => editingWizAsset
+                  ? prev.map(a => a.id===editingWizAsset.id ? { ...data, id: editingWizAsset.id } : a)
+                  : [...prev, { ...data, id: Math.max(0,...prev.map(a=>a.id||0))+1 }]);
+                setShowWizAssetModal(false); setEditingWizAsset(null);
+              }} />
+          )}
+          {showWizIncomeModal && (
+            <IncomeModal
+              editingIncome={editingWizIncome}
+              personalInfo={(existingData && existingData.personalInfo) || DEFAULT_PERSONAL_INFO}
+              onClose={()=>{setShowWizIncomeModal(false);setEditingWizIncome(null);}}
+              onSave={(data)=>{
+                setWizIncomes(prev => editingWizIncome
+                  ? prev.map(i => i.id===editingWizIncome.id ? { ...data, id: editingWizIncome.id } : i)
+                  : [...prev, { ...data, id: Math.max(0,...prev.map(i=>i.id||0))+1 }]);
+                setShowWizIncomeModal(false); setEditingWizIncome(null);
+              }} />
+          )}
         </div>
       </div>
     );
@@ -10946,7 +11441,7 @@ function RetirementPlanner() {
             {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={projections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
             {activeTab === 'socialsecurity' && <SocialSecurityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
             {activeTab === 'scenarios' && <ScenarioComparisonTab activeScenarioId={activeScenarioId} assets={assets} computeProjections={computeProjections} createScenario={createScenario} deleteScenario={deleteScenario} loadScenario={loadScenario} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} scenarios={scenarios} />}
-            {activeTab === 'taxplanning' && <TaxPlanningTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'taxplanning' && <TaxPlanningTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'withdrawal' && <WithdrawalStrategiesTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} />}
             {activeTab === 'montecarlo' && <MonteCarloTab accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'stresstest' && <StressTestTab accounts={accounts} currentYear={currentYear} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
