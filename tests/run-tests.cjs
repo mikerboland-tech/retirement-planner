@@ -532,6 +532,43 @@ section('Percent-mode — contribution scales with salary COLA');
   approx(noModeBal, fixedBal, 'missing contributionMode field == fixed mode (backwards-compat)', 0.001);
 }
 
+// ── Percent-mode deduction: only the employee slice reduces taxable income ────
+section('Percent-mode — employer match is NOT tax-deductible');
+{
+  // A combined 401(k) holds the employee deferral (10%) + employer match (5%).
+  // Only the employee 10% ever left the paycheck, so only it reduces taxable income;
+  // the 5% match was never wages and must not be deducted.
+  const TODAY = TODAY_YEAR;
+  const pi = {
+    myAge: 40, spouseAge: 40, myRetirementAge: 65, spouseRetirementAge: 65,
+    myBirthYear: TODAY - 40, spouseBirthYear: TODAY - 40,
+    filingStatus: 'single', state: 'Florida', desiredRetirementIncome: 60000,
+    inflationRate: 0.03, withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+    charitableGivingPercent: 0, rothConversionAmount: 0, rothConversionStartAge: 0,
+    rothConversionEndAge: 0, rothConversionBracket: '', rothConversionTaxSource: 'withdrawal',
+    legacyAge: 95, survivorModelEnabled: false, myLifeExpectancy: 95, spouseLifeExpectancy: 95,
+    healthcareModel: 'none', pre65HealthcareAnnual: 0, post65OOPAnnual: 0,
+    includeMedigap: false, ltcModel: 'none', ltcMonthlyAmount: 0, ltcDurationMonths: 0,
+    medicalInflation: 0.05,
+  };
+  const streams = [{ id: 1, name: 'Salary', type: 'earned_income', amount: 100000, startAge: 40, endAge: 64, cola: 0.03, owner: 'me' }];
+  const mk = (ee, er) => [{ id: 1, name: '401k', type: '401k', balance: 0, contributionMode: 'percent', employeePercent: ee, employerMatchPercent: er, cagr: 0.07, startAge: 40, stopAge: 65, owner: 'me', contributor: 'me' }];
+  const fed = (accts) => computeProjections(pi, accts, streams, [], [], [], TODAY).find(r => r.myAge === 41).federalTax;
+  const bal = (accts) => computeProjections(pi, accts, streams, [], [], [], TODAY).find(r => r.myAge === 45).perAccountBalances[1];
+
+  const fed10_5 = fed(mk(0.10, 0.05));  // employee 10% + match 5%
+  const fed10_0 = fed(mk(0.10, 0.00));  // employee 10%, no match
+  const fed15_0 = fed(mk(0.15, 0.00));  // employee 15%, no match
+
+  // Adding a 5% employer match must not change taxes (match isn't deducted).
+  approx(fed10_5, fed10_0, 'employer match % does not lower taxable income (only employee % deducts)', 0.001);
+  // A real 15% employee deferral deducts more than 10%, so taxes must be strictly lower —
+  // proving the 5% match in the combined account was genuinely NOT deducted.
+  lt(fed15_0, fed10_5, 'employee 15% deferral deducts more than employee 10% + 5% match');
+  // The match money still lands in the account: 10%+5% accumulates more than 10% alone.
+  gt(bal(mk(0.10, 0.05)), bal(mk(0.10, 0.00)), 'employer match still flows into the account balance');
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // EXPANDED COVERAGE — direct unit tests for tax/SS/RMD pure functions
 // Added so future engine math fixes (Batch 2) are guarded by direct tests.
@@ -1592,6 +1629,71 @@ section('survivor spending step-down (survivorSpendingFactor)');
   const before = projDef.find(r => r.spouseAge === 65);
   const beforeOff = projOff.find(r => r.spouseAge === 65);
   approx(before.desiredIncome / beforeOff.desiredIncome, 1.0, 'no step-down while both spouses alive', 0.001);
+}
+
+// ── Roth conversion pre-tax floor (QCD / low-bracket preservation) ───────────
+// rothConversionPreTaxFloor preserves a today's-$ pre-tax balance: conversions
+// stop once total pre-tax would drop below the (inflation-adjusted) floor, while
+// spending/RMD withdrawals are untouched. Built so pre-tax is only moved by
+// conversions: inflation 0 (floor stays nominal), pre-tax cagr 0 (predictable),
+// brokerage-first priority + brokerage tax source + no RMDs in the window.
+section('Roth conversion — pre-tax floor caps conversions');
+{
+  const makeFloorScenario = (floor) => ({
+    myAge: 65, spouseAge: 65, myRetirementAge: 65, spouseRetirementAge: 65,
+    myBirthYear: TODAY_YEAR - 65, spouseBirthYear: TODAY_YEAR - 65,
+    filingStatus: 'married_joint', state: 'Florida',
+    desiredRetirementIncome: 40000,
+    inflationRate: 0,                                  // floor stays nominal
+    withdrawalPriority: ['brokerage', 'roth', 'pretax'], // spending avoids pre-tax
+    charitableGivingPercent: 0,
+    rothConversionAmount: 200000,                      // fixed $200k/yr
+    rothConversionStartAge: 65, rothConversionEndAge: 72, // before RMD age (73)
+    rothConversionBracket: '',
+    rothConversionTaxSource: 'brokerage',             // tax avoids pre-tax too
+    rothConversionPreTaxFloor: floor,
+    legacyAge: 75, survivorModelEnabled: false,
+    myLifeExpectancy: 95, spouseLifeExpectancy: 95,
+    healthcareModel: 'none', pre65HealthcareAnnual: 0, post65OOPAnnual: 0,
+    includeMedigap: false, ltcModel: 'none', ltcMonthlyAmount: 0, ltcDurationMonths: 0,
+    medicalInflation: 0.05,
+  });
+  const floorAccts = () => ([
+    { id: 1, name: '401k', type: '401k', balance: 1000000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 65, stopAge: 65, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Brok', type: 'brokerage', balance: 3000000, contribution: 0, contributionGrowth: 0, cagr: 0, costBasisPercent: 0.5, startAge: 65, stopAge: 65, owner: 'me', contributor: 'me' },
+    { id: 3, name: 'Roth', type: 'roth_ira', balance: 0, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 65, stopAge: 65, owner: 'me', contributor: 'me' },
+  ]);
+  const sumConv = (proj, a, b) => proj.filter(r => r.myAge >= a && r.myAge <= b)
+    .reduce((s, r) => s + (r.rothConversion || 0), 0);
+
+  // (c) Floor of $400k: $1M pre-tax converts down to $400k then stops.
+  const projFloor = computeProjections(makeFloorScenario(400000), floorAccts(), [], [], [], [], TODAY_YEAR);
+  const yFloorEnd = projFloor.find(r => r.myAge === 72);
+  approx(yFloorEnd.preTaxBalance, 400000, 'pre-tax bottoms out at the $400k floor (not below)', 0.02);
+  approx(sumConv(projFloor, 65, 72), 600000, 'only ~$600k converted (down to the floor), not the full $1M', 0.02);
+  // Floor is never breached by conversions in any window year.
+  const breached = projFloor.filter(r => r.myAge >= 65 && r.myAge <= 72)
+    .some(r => r.preTaxBalance < 400000 - 1);
+  eq(breached, false, 'no window year drops pre-tax below the floor');
+
+  // No-floor baseline converts much further (pre-tax nearly depleted).
+  const projNoFloor = computeProjections(makeFloorScenario(0), floorAccts(), [], [], [], [], TODAY_YEAR);
+  const yNoFloorEnd = projNoFloor.find(r => r.myAge === 72);
+  lt(yNoFloorEnd.preTaxBalance, 50000, 'without a floor, pre-tax is nearly fully converted away');
+  gt(yFloorEnd.preTaxBalance - yNoFloorEnd.preTaxBalance, 350000, 'floor preserves >$350k more pre-tax than no floor');
+
+  // (b) Floor above the starting balance ⇒ zero conversions.
+  const projHugeFloor = computeProjections(makeFloorScenario(5000000), floorAccts(), [], [], [], [], TODAY_YEAR);
+  eq(sumConv(projHugeFloor, 65, 72), 0, 'floor above pre-tax balance ⇒ no conversions at all');
+  approx(projHugeFloor.find(r => r.myAge === 72).preTaxBalance, 1000000, 'pre-tax untouched when floor ≥ balance', 0.02);
+
+  // (a) Explicit floor:0 is identical to omitting the field (no regression).
+  const sOmit = makeFloorScenario(0); delete sOmit.rothConversionPreTaxFloor;
+  const projOmit = computeProjections(sOmit, floorAccts(), [], [], [], [], TODAY_YEAR);
+  eq(projOmit.find(r => r.myAge === 72).preTaxBalance, yNoFloorEnd.preTaxBalance,
+    'floor:0 and omitted floor produce identical pre-tax balances');
+  eq(projOmit.find(r => r.myAge === 72).rothBalance, yNoFloorEnd.rothBalance,
+    'floor:0 and omitted floor produce identical Roth balances');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
