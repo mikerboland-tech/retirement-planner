@@ -818,6 +818,443 @@ section('Unit — calculateAlabamaTax progressive brackets');
     'fed tax > AGI → clamps to 0 (no negative)');
 }
 
+// ── 8b. CA / NY / NJ progressive state tax engines ───────────────────────────
+// All use yearsFromNow=0 so no inflation factor applies (hand-computed against
+// the 2026 base schedules encoded in STATE_TAX_CONFIG).
+section('Unit — California progressive tax (credit-mode exemption + MHST)');
+{
+  // Single $60k, no SS/pension. taxable = 60000 - 5706 std = 54294.
+  // .01*11079 + .02*15185 + .04*15188 + .06*(54294-41452) = 110.79+303.70+607.52+770.52 = 1792.53
+  // minus $153 personal-exemption credit = 1639.53
+  approx(calculateStateTax(60000, 'California', 'single', 0, 0.03, 0, 0), 1639.53,
+    'CA single $60k → $1,639.53 (after $153 credit)', 0.002);
+
+  // MFJ $150k. taxable = 150000 - 11412 = 138588.
+  // .01*22158 + .02*30370 + .04*30376 + .06*32180 + .08*(138588-115084)
+  //  = 221.58+607.40+1215.04+1930.80+1880.32 = 5855.14  minus $306 credit = 5549.14
+  approx(calculateStateTax(150000, 'California', 'married_joint', 0, 0.03, 0, 0), 5549.14,
+    'CA MFJ $150k → $5,549.14 (after $306 credit)', 0.002);
+
+  // SS is exempt in CA: $60k gross of which $20k is taxable SS → taxed like $40k.
+  // taxable = 40000 - 5706 = 34294. .01*11079+.02*15185+.04*(34294-26264)=110.79+303.70+321.20=735.69 -153 = 582.69
+  approx(calculateStateTax(60000, 'California', 'single', 0, 0.03, 20000, 0), 582.69,
+    'CA single $60k w/ $20k SS exempt → $582.69', 0.003);
+
+  // MHST: 1% surtax on taxable income over $1M. Single $1.1M, taxable = 1,094,294.
+  // bracket tax to 742,953 = 72,219.83; + .123*(1,094,294-742,953)=43,214.94 → 115,434.77
+  // minus $153 credit + .01*(1,094,294-1,000,000)=942.94 → 116,224.71
+  approx(calculateStateTax(1100000, 'California', 'single', 0, 0.03, 0, 0), 116224.71,
+    'CA single $1.1M → includes 1% MHST = $116,224.71', 0.002);
+}
+
+section('Unit — New York progressive tax (benefit recapture + pension exclusion)');
+{
+  // Single $60k. taxable = 60000 - 8000 std = 52000 (no personal exemption).
+  // .039*8500+.044*3200+.0515*2200+.054*(52000-13900) = 331.50+140.80+113.30+2057.40 = 2643.00
+  approx(calculateStateTax(60000, 'New York', 'single', 0, 0.03, 0, 0), 2643.00,
+    'NY single $60k → $2,643.00', 0.002);
+
+  // Retiree single, $50k gross of which $25k is pension, age 65.
+  // $20k pension exclusion → AGI 30k; taxable = 30000-8000 = 22000.
+  // .039*8500+.044*3200+.0515*2200+.054*(22000-13900)=331.50+140.80+113.30+437.40 = 1023.00
+  approx(calculateStateTax(50000, 'New York', 'single', 0, 0.03, 0, 25000,
+    { primaryAge: 65 }), 1023.00, 'NY single retiree $50k ($25k pension, $20k excl) → $1,023.00', 0.003);
+
+  // Benefit recapture: single $200k AGI > $107,650 and ≥ $157,650 → fully flattened
+  // to top marginal rate (5.9%) on entire taxable income. taxable = 200000-8000 = 192000.
+  // 0.059 * 192000 = 11328.00
+  approx(calculateStateTax(200000, 'New York', 'single', 0, 0.03, 0, 0), 11328.00,
+    'NY single $200k → recapture flattens to 5.9% = $11,328.00', 0.002);
+}
+
+section('Unit — New Jersey progressive tax (no std deduction, pension exclusion)');
+{
+  // Single $60k, under 62. No std deduction; $1,000 personal exemption. taxable = 59000.
+  // .014*20000+.0175*15000+.035*5000+.05525*(59000-40000)=280+262.50+175+1049.75 = 1767.25
+  approx(calculateStateTax(60000, 'New Jersey', 'single', 0, 0.03, 0, 0), 1767.25,
+    'NJ single $60k (age <62) → $1,767.25', 0.002);
+
+  // Retiree MFJ $90k gross, $30k pension, both 66. njGross 90k ≤100k → 100% excl,
+  // min($30k, $100k)=30k; +$1k×2 age-65 = $32k excluded → AGI 58k; minus $2k exemption = 56000.
+  // .014*20000+.0175*30000+.0245*(56000-50000)=280+525+147 = 952.00
+  approx(calculateStateTax(90000, 'New Jersey', 'married_joint', 0, 0.03, 0, 30000,
+    { primaryAge: 66, spouseAge: 66 }), 952.00, 'NJ MFJ retiree $90k ($30k pension) → $952.00', 0.003);
+
+  // NJ pension exclusion cliff: same retiree but njGross $160k > $150k → no exclusion.
+  // gross 160k, $30k pension, both 66. exclusion = $1k×2 age-65 only = 2000 → AGI 158000;
+  // minus $2k exemption = 156000.
+  // .014*20000+.0175*30000+.0245*20000+.035*10000+.05525*70000+.0637*(156000-150000)
+  //  =280+525+490+350+3867.50+382.20 = 5894.70
+  approx(calculateStateTax(160000, 'New Jersey', 'married_joint', 0, 0.03, 0, 30000,
+    { primaryAge: 66, spouseAge: 66 }), 5894.70, 'NJ MFJ $160k → over $150k cliff, no pension excl → $5,894.70', 0.003);
+}
+
+// ── 8c. HI / OR / MN progressive state tax engines ───────────────────────────
+// yearsFromNow=0 → no inflation factor; hand-computed against 2026 base schedules.
+section('Unit — Hawaii progressive tax (12 brackets, std ded + exemption, pension exempt)');
+{
+  // Single $40k, no SS/pension. taxable = 40000 - 8000 std - 1144 exemption = 30856.
+  // .014*9600+.032*4800+.055*4800+.064*4800+.068*(30856-24000)
+  //  = 134.40+153.60+264.00+307.20+466.208 = 1325.408
+  approx(calculateStateTax(40000, 'Hawaii', 'single', 0, 0.03, 0, 0), 1325.41,
+    'HI single $40k → $1,325.41', 0.002);
+
+  // MFJ $120k. taxable = 120000 - 16000 std - 2288 exemption = 101712.
+  // .014*19200+.032*9600+.055*9600+.064*9600+.068*24000+.072*24000+.076*(101712-96000)
+  //  = 268.80+307.20+528.00+614.40+1632.00+1728.00+434.112 = 5512.512
+  approx(calculateStateTax(120000, 'Hawaii', 'married_joint', 0, 0.03, 0, 0), 5512.51,
+    'HI MFJ $120k → $5,512.51', 0.002);
+
+  // Retiree single $60k = $20k SS (exempt) + $20k employer pension (exempt) + $20k IRA (taxable).
+  // AGI 60000 -20000 SS -20000 pension = 20000; taxable = 20000-8000-1144 = 10856.
+  // .014*9600 + .032*(10856-9600) = 134.40+40.192 = 174.592
+  approx(calculateStateTax(60000, 'Hawaii', 'single', 0, 0.03, 20000, 20000,
+    { qualifiedRetirementWithdrawals: 20000 }), 174.59,
+    'HI single retiree $60k ($20k SS + $20k pension exempt) → $174.59', 0.004);
+}
+
+section('Unit — Oregon progressive tax (federal-tax subtraction + credit exemption)');
+{
+  // Single $50k, federalTaxPaid $4k (< cap, AGI < phaseout). AGI 50000-4000 = 46000;
+  // taxable = 46000 - 2835 std = 43165.
+  // .0475*4050+.0675*6150+.0875*(43165-10200) = 192.375+415.125+2884.4375 = 3491.9375
+  // minus $256 personal-exemption credit = 3235.9375
+  approx(calculateStateTax(50000, 'Oregon', 'single', 0, 0.03, 0, 0, { federalTaxPaid: 4000 }), 3235.94,
+    'OR single $50k (fed $4k deductible) → $3,235.94', 0.002);
+
+  // MFJ $120k, federalTaxPaid $10k → capped at $8,500. AGI 120000-8500 = 111500;
+  // taxable = 111500 - 5670 std = 105830.
+  // .0475*8100+.0675*12300+.0875*(105830-20400) = 384.75+830.25+7475.125 = 8690.125
+  // minus $512 credit = 8178.125
+  approx(calculateStateTax(120000, 'Oregon', 'married_joint', 0, 0.03, 0, 0, { federalTaxPaid: 10000 }), 8178.13,
+    'OR MFJ $120k (fed capped at $8.5k) → $8,178.13', 0.002);
+
+  // Retiree single $40k = $15k SS (exempt) + $25k pension/IRA (taxable). fed $1.5k.
+  // AGI 40000 -15000 SS = 25000; -1500 fed = 23500; taxable = 23500-2835 = 20665.
+  // .0475*4050+.0675*6150+.0875*(20665-10200) = 192.375+415.125+915.6875 = 1523.1875 -256 = 1267.1875
+  approx(calculateStateTax(40000, 'Oregon', 'single', 0, 0.03, 15000, 25000, { federalTaxPaid: 1500 }), 1267.19,
+    'OR single retiree $40k ($15k SS exempt, pension taxable) → $1,267.19', 0.003);
+}
+
+section('Unit — Minnesota progressive tax (federal-style std ded, taxes SS)');
+{
+  // Single $50k, no SS. taxable = 50000 - 15300 std = 34700 (no personal exemption).
+  // .0535*33310 + .068*(34700-33310) = 1782.085 + 94.52 = 1876.605
+  approx(calculateStateTax(50000, 'Minnesota', 'single', 0, 0.03, 0, 0), 1876.61,
+    'MN single $50k → $1,876.61', 0.002);
+
+  // MFJ $150k. taxable = 150000 - 30600 = 119400.
+  // .0535*48700 + .068*(119400-48700) = 2605.45 + 4807.60 = 7413.05
+  approx(calculateStateTax(150000, 'Minnesota', 'married_joint', 0, 0.03, 0, 0), 7413.05,
+    'MN MFJ $150k → $7,413.05', 0.002);
+
+  // MN TAXES SS: retiree single $40k incl $18k SS → SS NOT subtracted.
+  // taxable = 40000 - 15300 = 24700; .0535*24700 = 1321.45
+  approx(calculateStateTax(40000, 'Minnesota', 'single', 0, 0.03, 18000, 0), 1321.45,
+    'MN single $40k w/ $18k SS (SS taxed) → $1,321.45', 0.002);
+}
+
+// ── 8d. CT / MO / MT progressive state tax engines ───────────────────────────
+section('Unit — Missouri (flat 4.7%, fed+$4k std ded, SS exempt, public-pension excl)');
+{
+  // Single $50k. std ded = 16100 (fed) + 4000 = 20100. taxable = 29900.
+  // 29900 * .047 = 1405.30
+  approx(calculateStateTax(50000, 'Missouri', 'single', 0, 0.03, 0, 0), 1405.30,
+    'MO single $50k → $1,405.30', 0.002);
+
+  // MFJ $120k. std ded = 32200 + 4000 = 36200. taxable = 83800. *.047 = 3938.60
+  approx(calculateStateTax(120000, 'Missouri', 'married_joint', 0, 0.03, 0, 0), 3938.60,
+    'MO MFJ $120k → $3,938.60', 0.002);
+
+  // Retiree single $60k incl $20k public pension. Pension excl (cap $49,824) = 20000.
+  // agi = 40000; std ded 20100 → taxable 19900; *.047 = 935.30
+  approx(calculateStateTax(60000, 'Missouri', 'single', 0, 0.03, 0, 20000), 935.30,
+    'MO single $60k w/ $20k pension excluded → $935.30', 0.002);
+}
+
+section('Unit — Montana (two brackets 4.7%/5.65%, fed-taxable start, SS exempt 2026)');
+{
+  // Single $50k. std ded = 16100 (fed). taxable = 33900. All in 4.7% bracket (<47500).
+  // 33900 * .047 = 1593.30
+  approx(calculateStateTax(50000, 'Montana', 'single', 0, 0.03, 0, 0), 1593.30,
+    'MT single $50k → $1,593.30', 0.002);
+
+  // Single $80k crosses into 5.65%. taxable = 63900. 47500*.047 + (63900-47500)*.0565
+  // = 2232.50 + 926.60 = 3159.10
+  approx(calculateStateTax(80000, 'Montana', 'single', 0, 0.03, 0, 0), 3159.10,
+    'MT single $80k (spans brackets) → $3,159.10', 0.002);
+
+  // Retiree single $50k incl $10k SS, age 67. SS exempt (MT off the taxes-SS list);
+  // over-65 subtraction $5,500. agi = 50000-10000-5500 = 34500; std ded 16100 →
+  // taxable 18400; *.047 = 864.80
+  approx(calculateStateTax(50000, 'Montana', 'single', 0, 0.03, 10000, 0, { primaryAge: 67 }), 864.80,
+    'MT single $50k w/ $10k SS + over-65 (age 67) → $864.80', 0.002);
+}
+
+section('Unit — Connecticut (7 brackets, no std ded, phased exemption/pension, recapture)');
+{
+  // Single $50k. Personal exemption fully phased out (>$30k start). taxable = 50000.
+  // 10000*.02 + 40000*.045 = 200 + 1800 = 2000
+  approx(calculateStateTax(50000, 'Connecticut', 'single', 0, 0.03, 0, 0), 2000.00,
+    'CT single $50k → $2,000.00', 0.002);
+
+  // Retiree single $60k incl $30k pension. AGI $60k < $75k pension-excl threshold →
+  // 100% pension exclusion ($30k). taxable = 30000. 10000*.02 + 20000*.045 = 1100
+  approx(calculateStateTax(60000, 'Connecticut', 'single', 0, 0.03, 0, 30000), 1100.00,
+    'CT single $60k w/ $30k pension fully excluded → $1,100.00', 0.002);
+
+  // Single $300k triggers Table D benefit recapture → flattened to top rate 6.9%.
+  // 300000 * .069 = 20700
+  approx(calculateStateTax(300000, 'Connecticut', 'single', 0, 0.03, 0, 0), 20700.00,
+    'CT single $300k (benefit recapture → top rate) → $20,700.00', 0.002);
+}
+
+// ── 8e. VA / WI / ME progressive state tax engines ───────────────────────────
+section('Unit — Virginia (first-dollar 4 brackets, fixed std ded, age deduction)');
+{
+  // Single $50k. std ded 8750, exemption 930. taxable = 40320.
+  // 3000*.02 + 2000*.03 + 12000*.05 + (40320-17000)*.0575 = 60+60+600+1340.90 = 2060.90
+  approx(calculateStateTax(50000, 'Virginia', 'single', 0, 0.03, 0, 0), 2060.90,
+    'VA single $50k → $2,060.90', 0.002);
+
+  // MFJ $120k. std ded 17500, exemption 1860. taxable = 100640.
+  approx(calculateStateTax(120000, 'Virginia', 'married_joint', 0, 0.03, 0, 0), 5529.30,
+    'VA MFJ $120k → $5,529.30', 0.002);
+
+  // Retiree single $60k incl $10k SS, age 67. SS exempt → agi 50000; age deduction
+  // $12,000 (no phaseout at exactly $50k). taxable = 50000-12000-8750-930 = 28320.
+  approx(calculateStateTax(60000, 'Virginia', 'single', 0, 0.03, 10000, 0, { primaryAge: 67 }), 1370.90,
+    'VA single $60k w/ $10k SS + age-65 deduction → $1,370.90', 0.002);
+}
+
+section('Unit — Wisconsin (sliding std ded, 4 brackets, Act 15 retirement excl)');
+{
+  // Single $50k. SSSD = 13930 - .12*(50000-19310) = 10247.20; exemption 700.
+  // taxable = 39052.80. 14680*.035 + (39052.80-14680)*.044 = 513.80 + 1072.40 = 1586.20
+  approx(calculateStateTax(50000, 'Wisconsin', 'single', 0, 0.03, 0, 0), 1586.20,
+    'WI single $50k → $1,586.20', 0.002);
+
+  // MFJ $120k.
+  approx(calculateStateTax(120000, 'Wisconsin', 'married_joint', 0, 0.03, 0, 0), 5108.56,
+    'WI MFJ $120k → $5,108.56', 0.002);
+
+  // Retiree MFJ $100k incl $40k pension, both age 68 → $48k Act-15 exclusion caps
+  // at the $40k pension. agi 60000.
+  approx(calculateStateTax(100000, 'Wisconsin', 'married_joint', 0, 0.03, 0, 40000, { primaryAge: 68, spouseAge: 68 }), 1551.85,
+    'WI MFJ $100k w/ $40k pension excluded (age 67+) → $1,551.85', 0.002);
+}
+
+section('Unit — Maine (3 brackets, federal std ded phaseout, pension deduction)');
+{
+  // Single $50k. std ded 16100 (federal, no phaseout <$100k); exemption 5150.
+  // taxable = 28750. 26800*.058 + (28750-26800)*.0675 = 1554.40 + 131.625 = 1686.03
+  approx(calculateStateTax(50000, 'Maine', 'single', 0, 0.03, 0, 0), 1686.03,
+    'ME single $50k → $1,686.03', 0.002);
+
+  // MFJ $150k.
+  approx(calculateStateTax(150000, 'Maine', 'married_joint', 0, 0.03, 0, 0), 6747.05,
+    'ME MFJ $150k → $6,747.05', 0.002);
+
+  // Retiree single $60k incl $10k SS + $25k pension, age 70. SS exempt → agi 50000;
+  // pension deduction caps at $25k (cap $48,216-$10k SS, no income phaseout).
+  // taxable = 25000-16100-5150 = 3750; *.058 = 217.50
+  approx(calculateStateTax(60000, 'Maine', 'single', 0, 0.03, 10000, 25000, { primaryAge: 70 }), 217.50,
+    'ME single $60k w/ $10k SS + $25k pension excluded → $217.50', 0.002);
+}
+
+// ── 8f. MD / DC / DE / RI progressive state tax engines ──────────────────────
+section('Unit — Maryland (8+2 brackets, fixed std ded, pension exclusion; no local)');
+{
+  // Single $50k. std ded 3350, exemption 3200. taxable = 43450.
+  // 20+30+40 + (43450-3000)*.0475 = 90 + 1921.375 = 2011.38 (state only, no county)
+  approx(calculateStateTax(50000, 'Maryland', 'single', 0, 0.03, 0, 0), 2011.38,
+    'MD single $50k (state only) → $2,011.38', 0.002);
+
+  approx(calculateStateTax(120000, 'Maryland', 'married_joint', 0, 0.03, 0, 0), 5025.25,
+    'MD MFJ $120k (state only) → $5,025.25', 0.002);
+
+  // Retiree single $60k incl $10k SS + $25k pension, age 67. SS exempt; pension
+  // exclusion caps at $25k ($41,200 - $10k SS). taxable = 25000-3350-3200 = 18450.
+  approx(calculateStateTax(60000, 'Maryland', 'single', 0, 0.03, 10000, 25000, { primaryAge: 67 }), 823.88,
+    'MD single $60k w/ $10k SS + $25k pension excluded → $823.88', 0.002);
+}
+
+section('Unit — District of Columbia (7 brackets, federal std ded, $1,675 exemption)');
+{
+  // Single $50k. std ded 16100 (federal), exemption 1675. taxable = 32225.
+  // 10000*.04 + (32225-10000)*.06 = 400 + 1333.50 = 1733.50
+  approx(calculateStateTax(50000, 'District of Columbia', 'single', 0, 0.03, 0, 0), 1733.50,
+    'DC single $50k → $1,733.50', 0.002);
+
+  approx(calculateStateTax(120000, 'District of Columbia', 'married_joint', 0, 0.03, 0, 0), 5578.25,
+    'DC MFJ $120k → $5,578.25', 0.002);
+
+  // $250k spans into the 8.5% bracket.
+  approx(calculateStateTax(250000, 'District of Columbia', 'single', 0, 0.03, 0, 0), 18139.13,
+    'DC single $250k → $18,139.13', 0.002);
+}
+
+section('Unit — Delaware (6 brackets first $2k untaxed, credit exemption, pension excl)');
+{
+  // Single $50k. std ded 3250; taxable = 46750. Bracket tax 2208.125 − $110 credit = 2098.13
+  approx(calculateStateTax(50000, 'Delaware', 'single', 0, 0.03, 0, 0), 2098.13,
+    'DE single $50k → $2,098.13', 0.002);
+
+  approx(calculateStateTax(120000, 'Delaware', 'married_joint', 0, 0.03, 0, 0), 6254.50,
+    'DE MFJ $120k → $6,254.50', 0.002);
+
+  // Retiree single $60k incl $15k pension, age 65. $12,500 pension exclusion +
+  // $2,500 age-65 additional std deduction. agi = 60000-12500-2500 = 45000.
+  approx(calculateStateTax(60000, 'Delaware', 'single', 0, 0.03, 0, 15000, { primaryAge: 65 }), 1820.63,
+    'DE single $60k w/ $15k pension (age 65) → $1,820.63', 0.002);
+}
+
+section('Unit — Rhode Island (3 brackets, taxes SS, pension modification at FRA)');
+{
+  // Single $50k. std ded 10900, exemption 5100. taxable = 34000. *.0375 = 1275.00
+  approx(calculateStateTax(50000, 'Rhode Island', 'single', 0, 0.03, 0, 0), 1275.00,
+    'RI single $50k → $1,275.00', 0.002);
+
+  approx(calculateStateTax(150000, 'Rhode Island', 'married_joint', 0, 0.03, 0, 0), 4806.00,
+    'RI MFJ $150k → $4,806.00', 0.002);
+
+  // Retiree single $60k incl $10k SS (RI TAXES SS → not subtracted) + $20k pension,
+  // age 67, AGI under $107k limit → $20k pension excluded. taxable = 40000-10900-5100.
+  approx(calculateStateTax(60000, 'Rhode Island', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 900.00,
+    'RI single $60k w/ $20k pension excl (SS still taxed) → $900.00', 0.002);
+}
+
+// ── 8g. AR / KS / NE / NM / ND / OK / SC / VT / WV progressive engines ───────
+section('Unit — Arkansas (3 brackets w/ 4%>3.9% quirk, $29 credit, $6k retire excl)');
+{
+  // Single $50k. std 2400; taxable 47600. 90+176+(38700)*.039 = 1775.30 − $29 = 1746.30
+  approx(calculateStateTax(50000, 'Arkansas', 'single', 0, 0.03, 0, 0), 1746.30,
+    'AR single $50k → $1,746.30', 0.002);
+
+  approx(calculateStateTax(120000, 'Arkansas', 'married_joint', 0, 0.03, 0, 0), 4353.70,
+    'AR MFJ $120k → $4,353.70', 0.002);
+
+  // Retiree single $60k incl $10k SS + $20k pension, age 65. SS exempt → 50000;
+  // $6k retirement exclusion → agi 44000; taxable 41600.
+  approx(calculateStateTax(60000, 'Arkansas', 'single', 0, 0.03, 10000, 20000, { primaryAge: 65 }), 1512.30,
+    'AR single $60k w/ SS+$6k retire excl → $1,512.30', 0.002);
+}
+
+section('Unit — Kansas (2 brackets 5.2/5.58%, $9,160 exemption, SS exempt)');
+{
+  // Single $50k. std 3605 + exemption 9160; taxable 37235. 1196 + 14235*.0558 = 1990.31
+  approx(calculateStateTax(50000, 'Kansas', 'single', 0, 0.03, 0, 0), 1990.31,
+    'KS single $50k → $1,990.31', 0.002);
+
+  approx(calculateStateTax(120000, 'Kansas', 'married_joint', 0, 0.03, 0, 0), 5039.15,
+    'KS MFJ $120k → $5,039.15', 0.002);
+
+  // Retiree single $60k incl $10k SS + $20k pension. SS exempt → 50000 (pension
+  // taxed by KS); same taxable as $50k case → $1,990.31.
+  approx(calculateStateTax(60000, 'Kansas', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 1990.31,
+    'KS single $60k SS-exempt (pension taxed) → $1,990.31', 0.002);
+}
+
+section('Unit — Nebraska (2026 top 4.55%, $157 credit, SS exempt)');
+{
+  // Single $50k. std 7900; taxable 42100. 91.02+648.297+906.815 = 1646.13 − $157 = 1489.13
+  approx(calculateStateTax(50000, 'Nebraska', 'single', 0, 0.03, 0, 0), 1489.13,
+    'NE single $50k → $1,489.13', 0.002);
+
+  approx(calculateStateTax(120000, 'Nebraska', 'married_joint', 0, 0.03, 0, 0), 3888.27,
+    'NE MFJ $120k → $3,888.27', 0.002);
+
+  approx(calculateStateTax(60000, 'Nebraska', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 1489.13,
+    'NE single $60k SS-exempt (pension taxed) → $1,489.13', 0.002);
+}
+
+section('Unit — New Mexico (5 brackets, federal std ded, TAXES SS)');
+{
+  // Single $50k. std 16100 (federal); taxable 33900. 93.5+176+235+17900*.049 = 1381.60
+  approx(calculateStateTax(50000, 'New Mexico', 'single', 0, 0.03, 0, 0), 1381.60,
+    'NM single $50k → $1,381.60', 0.002);
+
+  approx(calculateStateTax(120000, 'New Mexico', 'married_joint', 0, 0.03, 0, 0), 3894.20,
+    'NM MFJ $120k → $3,894.20', 0.002);
+
+  // Retiree single $60k incl $10k SS — NM TAXES SS so full $60k less fed std ded.
+  approx(calculateStateTax(60000, 'New Mexico', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 1871.60,
+    'NM single $60k (SS taxed) → $1,871.60', 0.002);
+}
+
+section('Unit — North Dakota (0% bottom bracket, federal std ded, SS exempt)');
+{
+  // Single $100k. std 16100; taxable 83900. (83900-44725)*.0195 = 763.91
+  approx(calculateStateTax(100000, 'North Dakota', 'single', 0, 0.03, 0, 0), 763.91,
+    'ND single $100k → $763.91', 0.002);
+
+  approx(calculateStateTax(200000, 'North Dakota', 'married_joint', 0, 0.03, 0, 0), 1814.48,
+    'ND MFJ $200k → $1,814.48', 0.002);
+
+  // Retiree single $80k incl $10k SS. SS exempt → 70000; taxable 53900.
+  approx(calculateStateTax(80000, 'North Dakota', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 178.91,
+    'ND single $80k w/ SS exempt → $178.91', 0.002);
+}
+
+section('Unit — Oklahoma (6 fixed brackets, $1k exemption, $10k retire excl)');
+{
+  // Single $50k. std 6350 + exemption 1000; taxable 42650. 153.5 + 35450*.0475 = 1837.38
+  approx(calculateStateTax(50000, 'Oklahoma', 'single', 0, 0.03, 0, 0), 1837.38,
+    'OK single $50k → $1,837.38', 0.002);
+
+  approx(calculateStateTax(120000, 'Oklahoma', 'married_joint', 0, 0.03, 0, 0), 4624.75,
+    'OK MFJ $120k → $4,624.75', 0.002);
+
+  // Retiree single $60k incl $10k SS + $20k pension, age 67. SS exempt → 50000;
+  // $10k retirement exclusion → 40000; taxable 32650.
+  approx(calculateStateTax(60000, 'Oklahoma', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 1362.38,
+    'OK single $60k w/ SS+$10k retire excl → $1,362.38', 0.002);
+}
+
+section('Unit — South Carolina (top 6%, federal std ded, $10k/$15k retire excl)');
+{
+  // Single $50k. std 16100; taxable 33900. 14270*.03 + 16070*.06 = 1392.30
+  approx(calculateStateTax(50000, 'South Carolina', 'single', 0, 0.03, 0, 0), 1392.30,
+    'SC single $50k → $1,392.30', 0.002);
+
+  approx(calculateStateTax(120000, 'South Carolina', 'married_joint', 0, 0.03, 0, 0), 4626.30,
+    'SC MFJ $120k → $4,626.30', 0.002);
+
+  // Retiree single $60k incl $10k SS + $20k pension, age 67. SS exempt → 50000;
+  // $15k (65+) retirement exclusion → 35000; taxable 18900.
+  approx(calculateStateTax(60000, 'South Carolina', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 492.30,
+    'SC single $60k w/ SS+$15k retire excl → $492.30', 0.002);
+}
+
+section('Unit — Vermont (4 brackets, $4,850 exemption, TAXES SS)');
+{
+  // Single $50k. std 7000 + exemption 4850; taxable 38150. *.0335 = 1278.03
+  approx(calculateStateTax(50000, 'Vermont', 'single', 0, 0.03, 0, 0), 1278.03,
+    'VT single $50k → $1,278.03', 0.002);
+
+  approx(calculateStateTax(150000, 'Vermont', 'married_joint', 0, 0.03, 0, 0), 5867.38,
+    'VT MFJ $150k → $5,867.38', 0.002);
+
+  // Retiree single $60k incl $10k SS — VT TAXES SS; taxable 48150 spans 2nd bracket.
+  approx(calculateStateTax(60000, 'Vermont', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 1702.40,
+    'VT single $60k (SS taxed) → $1,702.40', 0.002);
+}
+
+section('Unit — West Virginia (no std ded, $2k exemption, SS exempt 2026, $8k 65+)');
+{
+  // Single $50k. exemption 2000; taxable 48000. 222+444+499.5+8000*.044 = 1517.50
+  approx(calculateStateTax(50000, 'West Virginia', 'single', 0, 0.03, 0, 0), 1517.50,
+    'WV single $50k → $1,517.50', 0.002);
+
+  approx(calculateStateTax(120000, 'West Virginia', 'married_joint', 0, 0.03, 0, 0), 4744.70,
+    'WV MFJ $120k → $4,744.70', 0.002);
+
+  // Retiree single $60k incl $10k SS + $20k pension, age 67. SS exempt (2026!) →
+  // 50000; $8k over-65 exclusion → 42000; exemption 2000; taxable 40000.
+  approx(calculateStateTax(60000, 'West Virginia', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 1165.50,
+    'WV single $60k w/ SS exempt + $8k 65+ → $1,165.50', 0.002);
+}
+
 // ── 9. ACA subsidy cliff ─────────────────────────────────────────────────────
 section('Unit — calculateACASubsidy thresholds');
 {
@@ -1073,6 +1510,88 @@ section('Integration — solver pre-funds NIIT on investment income');
   gt(y65.federalTax, 0, 'federalTax > 0 on high-MAGI NIIT scenario');
   gt(y65.portfolioWithdrawal, 280000, 'portfolio withdrawal exceeds desired (covers tax + NIIT)');
   eq(isNaN(y65.federalTax), false, 'NIIT-scenario federal tax is numeric');
+}
+
+// ── MC NaN guard: a sub-(-100%) return draw depletes, never goes NaN ──────────
+// Regression for the Monte Carlo bug where an unbounded return draw below -100%
+// made Math.pow(1+r, 0.5) NaN. The worker's `portfolio <= 0` survival check is
+// false for NaN, so a blown-up sim was silently tallied as a SUCCESS. The engine
+// now clamps the per-year growth rate at -1, so a catastrophic year depletes the
+// portfolio to 0 (a real failure) instead of poisoning the path with NaN.
+section('MC NaN guard — sub-(-100%) return depletes, never NaN');
+{
+  const s = baseScenario({ myRetirementAge: 60, legacyAge: 95 });
+  const overrides = [];
+  for (let y = 0; y < 40; y++) overrides[y] = { marketReturn: -1.5, inflation: 0.03 };
+  const proj = computeProjections(
+    s.pi, s.accts, s.streams, s.assets, s.events, s.recurring, TODAY_YEAR,
+    { yearOverrides: overrides }
+  );
+  const allFinite = proj.every(r => Number.isFinite(r.totalPortfolio));
+  eq(allFinite, true, 'every projection year has a finite totalPortfolio (no NaN)');
+  const last = proj[proj.length - 1];
+  eq(Number.isFinite(last.totalPortfolio), true, 'final totalPortfolio is numeric');
+  lt(last.totalPortfolio, 1, 'catastrophic returns deplete the portfolio (real failure, not phantom survival)');
+}
+
+// ── weightedCAGR: reinvestment pool must not dilute the weighted rate ─────────
+// Regression for the denominator bug: the numerator summed only real accounts but
+// the denominator included the excess-RMD reinvestment pool, pulling weightedCAGR
+// below the true balance-weighted average. With a single account, the answer must
+// equal that account's cagr exactly — no matter how large the pool grows.
+section('weightedCAGR — excess reinvestment pool must not dilute the rate');
+{
+  const s = baseScenario({
+    myAge: 75, spouseAge: 75,
+    myRetirementAge: 65, spouseRetirementAge: 65,
+    myBirthYear: TODAY_YEAR - 75, spouseBirthYear: TODAY_YEAR - 75,
+    desiredRetirementIncome: 20000, // far below RMDs on $2M → excess reinvested into the pool
+    legacyAge: 90,
+  });
+  // One pre-tax account, no brokerage/roth → excess RMDs accumulate in the reinvestment pool.
+  s.accts = [
+    { id: 1, name: '401k', type: '401k', balance: 2000000, contribution: 0, contributionGrowth: 0, cagr: 0.06, startAge: 65, stopAge: 65, owner: 'me', contributor: 'me' },
+  ];
+  s.streams = [];
+  const proj = computeProjections(s.pi, s.accts, s.streams, s.assets, s.events, s.recurring, TODAY_YEAR);
+  const late = proj.find(r => r.myAge === 85);
+  gt(late.weightedCAGR, 0.0599, 'weightedCAGR equals the sole account cagr (not diluted by the pool)');
+  lt(late.weightedCAGR, 0.0601, 'weightedCAGR is not inflated either');
+}
+
+// ── survivor spending step-down ──────────────────────────────────────────────
+// When exactly one spouse is alive under survivor modeling, household spending
+// drops to survivorSpendingFactor × the couple's target (default 0.75).
+section('survivor spending step-down (survivorSpendingFactor)');
+{
+  const common = {
+    survivorModelEnabled: true,
+    spouseLifeExpectancy: 70,
+    myLifeExpectancy: 95,
+  };
+  // Baseline: survivor modeling off — desiredIncome never steps down.
+  const sOff = baseScenario({ ...common, survivorModelEnabled: false });
+  const projOff = run(sOff, 95);
+  // Default factor (0.75).
+  const sDef = baseScenario({ ...common });
+  const projDef = run(sDef, 95);
+  // Custom factor (0.60).
+  const sCustom = baseScenario({ ...common, survivorSpendingFactor: 0.60 });
+  const projCustom = run(sCustom, 95);
+
+  // Pick a year well after the first death (spouse dies at 70, single thereafter).
+  const yr = 80;
+  const off = projOff.find(r => r.spouseAge === yr);
+  const def = projDef.find(r => r.spouseAge === yr);
+  const cust = projCustom.find(r => r.spouseAge === yr);
+  // Same calendar year & inflation in all runs → ratio isolates the spend factor.
+  approx(def.desiredIncome / off.desiredIncome, 0.75, 'default survivor spending is 75% of couple target', 0.001);
+  approx(cust.desiredIncome / off.desiredIncome, 0.60, 'custom survivor spending factor (0.60) honored', 0.001);
+
+  // Before the first death, both alive → no step-down.
+  const before = projDef.find(r => r.spouseAge === 65);
+  const beforeOff = projOff.find(r => r.spouseAge === 65);
+  approx(before.desiredIncome / beforeOff.desiredIncome, 1.0, 'no step-down while both spouses alive', 0.001);
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
