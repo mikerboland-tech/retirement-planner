@@ -10232,11 +10232,233 @@ function ImportExportModal({ showResetConfirm, setShowResetConfirm, onClose, han
   );
 }
 
+// ============================================
+// "Your Next 12 Months" action report
+// Derives a near-term, actionable checklist from the current-year projection
+// row. Almost everything is read straight off the year object; only the two
+// bracket-headroom figures are derived here from already-exported engine tables.
+// Pure function — no React, easy to unit-test and reuse for future reports.
+// ============================================
+function buildNextYearActions(projections, personalInfo, accounts, incomeStreams) {
+  const currentYear = new Date().getFullYear();
+  const y = (projections || []).find(p => p.year === currentYear) || (projections || [])[0];
+  if (!y) return [];
+
+  const fs = y.filingStatus || (personalInfo && personalInfo.filingStatus) || 'married_joint';
+  const fmt = (n) => '$' + Math.round(n).toLocaleString('en-US');
+  const actions = [];
+
+  // 1. Required Minimum Distribution — hard deadline, steep penalty.
+  if (y.rmd > 0) {
+    actions.push({
+      id: 'rmd', severity: 'high',
+      title: 'Take your Required Minimum Distribution',
+      amount: fmt(y.rmd),
+      detail: `Withdraw at least ${fmt(y.rmd)} from your pre-tax retirement accounts by Dec 31, ${currentYear}. Missing it triggers a 25% IRS penalty on the shortfall.`,
+    });
+  }
+
+  // 2. Planned Roth conversion already in the plan for this year.
+  if (y.rothConversion > 0) {
+    actions.push({
+      id: 'roth-planned', severity: 'info',
+      title: 'Execute your planned Roth conversion',
+      amount: fmt(y.rothConversion),
+      detail: `Your plan converts ${fmt(y.rothConversion)} from pre-tax to Roth this year. Complete it with your custodian before Dec 31, ${currentYear}.`,
+    });
+  }
+
+  // Taxable income after the standard deduction — the basis the federal brackets
+  // and the LTCG 0% threshold are measured against. Current year => no inflation
+  // indexing (yearsFromNow = 0), matching calculateFederalTax at year 0.
+  const brackets = (FEDERAL_TAX_BRACKETS_2026 && (FEDERAL_TAX_BRACKETS_2026[fs] || FEDERAL_TAX_BRACKETS_2026.married_joint)) || null;
+  const stdDed = (STANDARD_DEDUCTION_2026 && (STANDARD_DEDUCTION_2026[fs] || STANDARD_DEDUCTION_2026.married_joint)) || 0;
+  const taxableAfterStdDed = Math.max(0, (y.taxableIncome || 0) - stdDed);
+
+  // 3. Headroom to the top of the current federal bracket (Roth conversion room).
+  if (brackets) {
+    const idx = brackets.findIndex(b => taxableAfterStdDed >= b.min && taxableAfterStdDed < b.max);
+    const cur = idx >= 0 ? brackets[idx] : null;
+    if (cur && cur.max !== Infinity) {
+      const headroom = cur.max - taxableAfterStdDed;
+      const next = brackets[idx + 1];
+      if (headroom > 0) {
+        const curPct = Math.round(cur.rate * 100);
+        const nextPct = next ? Math.round(next.rate * 100) : curPct;
+        actions.push({
+          id: 'roth-headroom', severity: 'info',
+          title: `Room left in your ${curPct}% federal bracket`,
+          amount: fmt(headroom),
+          detail: `You can realize about ${fmt(headroom)} more ordinary income (e.g. a Roth conversion) before crossing into the ${nextPct}% bracket. Income added now is taxed at ${curPct}%.`,
+        });
+      }
+    }
+  }
+
+  // 4. Long-term capital gains 0%-rate harvesting room.
+  const cg = CAPITAL_GAINS_THRESHOLDS_2025 && (CAPITAL_GAINS_THRESHOLDS_2025[fs] || CAPITAL_GAINS_THRESHOLDS_2025.married_joint);
+  if (cg) {
+    const room = cg.zeroRate - taxableAfterStdDed;
+    if (room > 0) {
+      actions.push({
+        id: 'cap-gains', severity: 'info',
+        title: 'Harvest long-term capital gains at 0%',
+        amount: fmt(room),
+        detail: `Up to ${fmt(room)} of long-term capital gains can be realized this year at the 0% federal rate, based on your projected taxable income.`,
+      });
+    }
+  }
+
+  // 5. IRMAA — only populated at Medicare age; skip the top tier (no next tier).
+  if (y.irmaaInfo && isFinite(y.irmaaInfo.distToNextTier) && y.irmaaInfo.distToNextTier > 0 && y.magi > 0) {
+    actions.push({
+      id: 'irmaa', severity: 'warn',
+      title: 'Watch your Medicare IRMAA threshold',
+      amount: fmt(y.irmaaInfo.distToNextTier),
+      detail: `Your projected MAGI is ${fmt(y.magi)}. Adding more than ${fmt(y.irmaaInfo.distToNextTier)} of income would push you into the next IRMAA tier and raise your Medicare Part B & D premiums.`,
+    });
+  }
+
+  // 6. Estimated quarterly taxes.
+  if (y.totalTax > 0) {
+    actions.push({
+      id: 'quarterly', severity: 'info',
+      title: 'Set aside estimated quarterly taxes',
+      amount: fmt(y.totalTax / 4) + '/qtr',
+      detail: `Projected total tax this year is ${fmt(y.totalTax)} (about ${fmt(y.totalTax / 4)} per quarter). Federal estimated-payment deadlines: Apr 15, Jun 15, Sep 15, and Jan 15 next year.`,
+    });
+  }
+
+  // 7. QCD opportunity (70+, has a pre-tax balance to give from).
+  if (y.myAge >= (QCD_START_AGE || 70) && (y.preTaxBalance || 0) > 0) {
+    actions.push({
+      id: 'qcd', severity: 'info',
+      title: 'Consider a Qualified Charitable Distribution',
+      detail: `At ${y.myAge} you can give directly from an IRA via a QCD. QCDs count toward your RMD but are excluded from taxable income — more tax-efficient than deducting cash gifts.`,
+    });
+  }
+
+  // 8. HSA contribution (still eligible: under 65 and holding an HSA).
+  const hasHSA = (accounts || []).some(a => typeof isHSAAccount === 'function' && isHSAAccount(a.type));
+  if (hasHSA && y.myAge < 65) {
+    actions.push({
+      id: 'hsa', severity: 'info',
+      title: 'Make your HSA contribution',
+      detail: `You're under 65 and still HSA-eligible. Contributing before the tax-filing deadline gives a triple tax advantage: deductible going in, tax-free growth, and tax-free for medical costs.`,
+    });
+  }
+
+  // 9. Social Security claiming decision approaching (within a year of claim age).
+  (incomeStreams || []).filter(s => s.type === 'social_security').forEach(s => {
+    const age = s.owner === 'spouse' ? y.spouseAge : y.myAge;
+    if (age != null && s.startAge != null && age >= s.startAge - 1 && age <= s.startAge) {
+      const who = s.owner === 'spouse' ? 'Your spouse is' : 'You are';
+      actions.push({
+        id: 'ss-' + s.id, severity: 'warn',
+        title: 'Social Security claiming decision approaching',
+        detail: `${who} near the planned claim age of ${s.startAge}. Confirm the strategy and file with the SSA about three months before benefits should begin.`,
+      });
+    }
+  });
+
+  return actions;
+}
+
+function NextYearReport({ projections, personalInfo, accounts, incomeStreams, onClose }) {
+  const currentYear = new Date().getFullYear();
+  const actions = useMemo(
+    () => buildNextYearActions(projections, personalInfo, accounts, incomeStreams),
+    [projections, personalInfo, accounts, incomeStreams]
+  );
+  const preparedOn = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+  const SEVERITY = {
+    high: { tag: 'Action required', border: '#dc2626', chipBg: '#fee2e2', chipText: '#991b1b' },
+    warn: { tag: 'Plan ahead', border: '#d97706', chipBg: '#fef3c7', chipText: '#92400e' },
+    info: { tag: 'Opportunity', border: '#2563eb', chipBg: '#dbeafe', chipText: '#1e40af' },
+  };
+
+  // Rendered through a portal as a direct child of <body> (sibling of #root) so
+  // print CSS can hide the whole app with `#root { display:none }` and let the
+  // report flow as a single normal-flow block. Keeping it inside the app tree
+  // made it a child of a position:fixed overlay, which browsers re-stamp onto
+  // every printed page (the 7-identical-pages bug).
+  const overlay = (
+    <div className="report-overlay fixed inset-0 bg-black/60 flex items-start justify-center z-50 overflow-y-auto py-8 px-4">
+      <div
+        id="report-print"
+        style={{ background: '#ffffff', color: '#0f172a' }}
+        className="w-full max-w-3xl rounded-xl shadow-2xl p-8"
+      >
+        {/* Toolbar — hidden in print */}
+        <div className="print-hide flex justify-end gap-2 mb-6">
+          <button onClick={() => window.print()} className={buttonPrimary}>Print / Save as PDF</button>
+          <button onClick={onClose} className={buttonSecondary}>Close</button>
+        </div>
+
+        {/* Report header */}
+        <div style={{ borderBottom: '2px solid #0f172a', paddingBottom: 12, marginBottom: 20 }}>
+          <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0 }}>Your Next 12 Months</h1>
+          <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>
+            Retirement action plan for {currentYear} &nbsp;·&nbsp; Prepared {preparedOn}
+          </p>
+        </div>
+
+        {actions.length === 0 ? (
+          <p style={{ fontSize: 15, color: '#475569' }}>
+            No specific actions are flagged for this year based on your current plan. Keep contributing
+            and revisit as you approach retirement, RMD age, or Medicare enrollment.
+          </p>
+        ) : (
+          <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+            {actions.map((a, i) => {
+              const sv = SEVERITY[a.severity] || SEVERITY.info;
+              return (
+                <li
+                  key={a.id}
+                  style={{
+                    borderLeft: `4px solid ${sv.border}`,
+                    background: '#f8fafc',
+                    borderRadius: 6,
+                    padding: '12px 16px',
+                    marginBottom: 12,
+                    breakInside: 'avoid',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+                    <span style={{ fontSize: 16, fontWeight: 600 }}>{i + 1}. {a.title}</span>
+                    {a.amount && <span style={{ fontSize: 16, fontWeight: 700, whiteSpace: 'nowrap' }}>{a.amount}</span>}
+                  </div>
+                  <div style={{ marginTop: 4 }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', background: sv.chipBg, color: sv.chipText, padding: '2px 8px', borderRadius: 999 }}>
+                      {sv.tag}
+                    </span>
+                  </div>
+                  <p style={{ fontSize: 14, color: '#334155', margin: '8px 0 0', lineHeight: 1.5 }}>{a.detail}</p>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+
+        <p style={{ fontSize: 11, color: '#64748b', marginTop: 24, lineHeight: 1.5, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
+          This report is a directional planning tool generated from the assumptions in your plan, not tax or
+          investment advice. Figures are estimates based on current-year projections and 2026 tax parameters.
+          Confirm amounts and deadlines with a qualified professional before acting.
+        </p>
+      </div>
+    </div>
+  );
+
+  return ReactDOM.createPortal(overlay, document.body);
+}
+
 function RetirementPlanner() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [currentYear] = useState(new Date().getFullYear());
   const [saveStatus, setSaveStatus] = useState('');
   const [showImportExport, setShowImportExport] = useState(false);
+  const [showReport, setShowReport] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [dataWarnings, setDataWarnings] = useState([]);
   // Single localStorage read for the whole component — savedData feeds both
@@ -11393,8 +11615,15 @@ function RetirementPlanner() {
               <span className="text-base">🚀</span>
               {!sidebarCollapsed && <span className="text-sm font-medium">Guided Setup</span>}
             </button>
-            <button 
-              onClick={() => setShowImportExport(true)} 
+            <button
+              onClick={() => setShowReport(true)}
+              className="w-full flex items-center gap-3 px-3 py-2 text-slate-400 hover:text-slate-200 hover:bg-slate-700/50 rounded-lg transition-all"
+            >
+              <span className="text-base">📄</span>
+              {!sidebarCollapsed && <span className="text-sm font-medium">Reports</span>}
+            </button>
+            <button
+              onClick={() => setShowImportExport(true)}
               className="w-full flex items-center gap-3 px-3 py-2 text-slate-400 hover:text-slate-200 hover:bg-slate-700/50 rounded-lg transition-all"
             >
               <span className="text-base">💾</span>
@@ -11491,6 +11720,15 @@ function RetirementPlanner() {
           handleExport={handleExport}
           handleImport={handleImport}
           handleReset={handleReset}
+        />
+      )}
+      {showReport && (
+        <NextYearReport
+          projections={projections}
+          personalInfo={personalInfo}
+          accounts={accounts}
+          incomeStreams={incomeStreams}
+          onClose={() => setShowReport(false)}
         />
       )}
     </div>

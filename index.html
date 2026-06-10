@@ -120,6 +120,37 @@
     @keyframes spin { to { transform:rotate(360deg); } }
     .status { font-size:.85rem; margin-top:8px; color:#64748b; }
     #error-display { display:none; max-width:700px; margin:60px auto; padding:24px; background:#1e293b; border:1px solid #ef4444; border-radius:12px; color:#fca5a5; font-family:monospace; font-size:.85rem; white-space:pre-wrap; word-break:break-all; }
+    /* ============================================================
+       PRINT — "Save as PDF" for the report view (#report-print).
+       The report is rendered via a portal as a direct child of <body>
+       (sibling of #root) by the NextYearReport component, so for print
+       we simply hide the whole app and let the report flow as one block.
+       Hiding #root (rather than visibility:hidden) collapses the app's
+       height — otherwise its hidden content adds blank pages, and its
+       position:fixed overlay would re-stamp the report onto every page.
+       ============================================================ */
+    @media print {
+      @page { margin: 0.75in; }
+      html, body { background: #ffffff !important; }
+      #root { display: none !important; }
+      /* Flatten the on-screen fixed/scrolling overlay into normal flow. */
+      .report-overlay {
+        position: static !important;
+        display: block !important;
+        overflow: visible !important;
+        background: none !important;
+        padding: 0 !important;
+        z-index: auto !important;
+      }
+      #report-print {
+        max-width: none !important;
+        box-shadow: none !important;
+        border-radius: 0 !important;
+        background: #ffffff !important; color: #0f172a !important;
+      }
+      /* Toolbar buttons (Print / Close) shouldn't appear on paper. */
+      .print-hide { display: none !important; }
+    }
   </style>
 </head>
 <body>
