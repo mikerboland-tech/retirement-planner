@@ -1636,23 +1636,28 @@ const STATES_THAT_TAX_SS = new Set([
   'New Mexico', 'Rhode Island', 'Utah', 'Vermont'
 ]);
 
-// Calculate IRMAA premiums based on MAGI
+// Calculate IRMAA premiums based on MAGI.
+// Both the MAGI tier thresholds AND the premium dollar amounts are indexed
+// forward by the general inflation rate. Previously only the thresholds were
+// indexed while the premiums stayed frozen at base-year dollars, which
+// systematically understated late-life Medicare surcharges in a projection
+// where every other dollar figure is nominal (inflated).
 const calculateIRMAA = (magi, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
   // Head of household uses single thresholds per CMS rules
   const lookupStatus = filingStatus === 'head_of_household' ? 'single' : filingStatus;
   const thresholds = IRMAA_THRESHOLDS_2025[lookupStatus] || IRMAA_THRESHOLDS_2025.married_joint;
   const inflationFactor = Math.pow(1 + inflationRate, yearsFromNow);
-  
+
   // Find the applicable tier
   for (const tier of thresholds) {
     const adjustedMax = tier.maxIncome === Infinity ? Infinity : tier.maxIncome * inflationFactor;
     if (magi <= adjustedMax) {
       return {
-        partBMonthly: tier.partB,
-        partDMonthly: tier.partD,
-        partBAnnual: tier.partB * 12,
-        partDAnnual: tier.partD * 12,
-        totalAnnual: (tier.partB + tier.partD) * 12,
+        partBMonthly: tier.partB * inflationFactor,
+        partDMonthly: tier.partD * inflationFactor,
+        partBAnnual: tier.partB * 12 * inflationFactor,
+        partDAnnual: tier.partD * 12 * inflationFactor,
+        totalAnnual: (tier.partB + tier.partD) * 12 * inflationFactor,
         tier: thresholds.indexOf(tier)
       };
     }
@@ -1660,11 +1665,11 @@ const calculateIRMAA = (magi, filingStatus, yearsFromNow = 0, inflationRate = 0.
   // Highest tier
   const lastTier = thresholds[thresholds.length - 1];
   return {
-    partBMonthly: lastTier.partB,
-    partDMonthly: lastTier.partD,
-    partBAnnual: lastTier.partB * 12,
-    partDAnnual: lastTier.partD * 12,
-    totalAnnual: (lastTier.partB + lastTier.partD) * 12,
+    partBMonthly: lastTier.partB * inflationFactor,
+    partDMonthly: lastTier.partD * inflationFactor,
+    partBAnnual: lastTier.partB * 12 * inflationFactor,
+    partDAnnual: lastTier.partD * 12 * inflationFactor,
+    totalAnnual: (lastTier.partB + lastTier.partD) * 12 * inflationFactor,
     tier: thresholds.length - 1
   };
 };
@@ -1674,7 +1679,9 @@ const calculateIRMAA = (magi, filingStatus, yearsFromNow = 0, inflationRate = 0.
 // Uses 2-year MAGI lookback (we approximate by using current year's MAGI)
 const calculateIRMAASurcharge = (magi, filingStatus, yearsFromNow = 0, inflationRate = 0.03, numMedicareEligible = 1) => {
   const irmaa = calculateIRMAA(magi, filingStatus, yearsFromNow, inflationRate);
-  const standardPartB = MEDICARE_PART_B_STANDARD_2025; // Not inflation-adjusted (CMS sets annually)
+  // Standard premium indexed by the same rate as the tier premiums above, so the
+  // surcharge (tier premium − standard premium) scales consistently in nominal dollars.
+  const standardPartB = MEDICARE_PART_B_STANDARD_2025 * Math.pow(1 + inflationRate, yearsFromNow);
   const surchargePerPerson = Math.max(0, irmaa.partBMonthly - standardPartB) * 12 + irmaa.partDAnnual;
   return {
     surchargePerPerson: Math.round(surchargePerPerson),
@@ -1873,24 +1880,29 @@ const calculateHealthcareExpenses = (pi, myAge, spouseAge, yearsFromNow, primary
 
 // ── RECURRING EXPENSE CALCULATOR ────────────────────────────────────────────────
 // Computes total recurring expenses for a given year based on the expense list.
-const calculateRecurringExpenses = (expenses, myAge, spouseAge, yearsFromNow, generalInflation) => {
+// survivorSpendFactor: under survivor modeling, recurring expenses are household-
+// level line items (the UI exposes no per-person owner), so when exactly one
+// spouse is alive they get the same spending haircut as the base retirement
+// income (pi.survivorSpendingFactor, default 0.75). Previously they continued at
+// 100% after a death, inconsistent with the base-spending step-down.
+const calculateRecurringExpenses = (expenses, myAge, spouseAge, yearsFromNow, generalInflation, survivorSpendFactor = 1) => {
   if (!expenses || expenses.length === 0) return { total: 0, byCategory: {} };
-  
+
   let total = 0;
   const byCategory = {};
-  
+
   expenses.forEach(exp => {
     const ownerAge = exp.owner === 'spouse' ? spouseAge : myAge;
     if (ownerAge >= exp.startAge && ownerAge <= exp.endAge) {
       const expInflation = exp.inflationRate !== undefined ? exp.inflationRate : generalInflation;
       const inflationFactor = Math.pow(1 + expInflation, yearsFromNow);
-      const adjustedAmount = exp.amount * inflationFactor;
+      const adjustedAmount = exp.amount * inflationFactor * survivorSpendFactor;
       total += adjustedAmount;
       const cat = exp.category || 'other';
       byCategory[cat] = (byCategory[cat] || 0) + adjustedAmount;
     }
   });
-  
+
   return { total: Math.round(total), byCategory };
 };
 
@@ -2504,17 +2516,10 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     const spouseFICA = calculateFICA(spouseEarnedIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
     const totalFICA = myFICA.total + spouseFICA.total;
     
-    // Calculate the taxable portion of Social Security benefits
-    // This must be done AFTER we know total SS and other income
-    const taxableSS = calculateSocialSecurityTaxableAmount(
-      totalSocialSecurity, 
-      nonSSIncome, 
-      effectiveFilingStatus
-    );
-    
-    // Now calculate total taxable income including properly-taxed SS
-    const totalTaxableIncome = nonSSIncome + taxableSS;
-    
+    // NOTE: taxable SS is computed below, AFTER the accounts loop, because the
+    // pre-tax contribution deduction (which reduces AGI, and therefore the IRS
+    // Pub 915 combined-income base) isn't known until contributions are tallied.
+
     // First pass: add contributions and calculate RMDs (before growth)
     let totalRMD = 0;
     const accountRMDs = {}; // Track RMD per account
@@ -2596,15 +2601,24 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // ── PRE-TAX CONTRIBUTION DEDUCTION ──────────────────────────────────────────
     // Pre-tax 401k/403b/457b/IRA contributions are above-the-line deductions that
     // reduce AGI and therefore federal/state taxable income.
-    // Note: For SS taxation, IRS uses MAGI which adds these back, so the taxableSS
-    // calculation above (using gross nonSSIncome) is correct.
     // We cap the deduction at earned income (can't deduct more than you earn).
     const preTaxDeduction = Math.min(preTaxContributions, earnedIncome);
-    
-    // Adjusted taxable income after pre-tax contribution deduction
-    // totalTaxableIncome was computed as nonSSIncome + taxableSS (gross)
-    // Now subtract the pre-tax deduction for the actual taxable income
-    const totalTaxableIncome_adjusted = totalTaxableIncome - preTaxDeduction;
+
+    // AGI-side non-SS income. IRS Pub 915 "combined income" starts from AGI, and
+    // pre-tax deferrals are excluded from AGI — they are NOT added back for SS
+    // taxation. (A prior comment here claimed the opposite, which overstated
+    // taxable SS for anyone collecting SS while still contributing pre-tax.)
+    const nonSSIncomeAfterDeduction = nonSSIncome - preTaxDeduction;
+
+    // Taxable portion of Social Security benefits, on the deduction-adjusted base.
+    const taxableSS = calculateSocialSecurityTaxableAmount(
+      totalSocialSecurity,
+      nonSSIncomeAfterDeduction,
+      effectiveFilingStatus
+    );
+
+    // Taxable income after the pre-tax deduction, including taxable SS.
+    const totalTaxableIncome_adjusted = nonSSIncomeAfterDeduction + taxableSS;
     
     // ── HALF-YEAR CONVENTION: PRE-WITHDRAWAL GROWTH ────────────────────────────
     // In reality, withdrawals happen throughout the year (mid-year on average),
@@ -2667,7 +2681,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     const healthcareExpense = healthcareResult.total;
     
     // ── RECURRING EXPENSES (categorized, with per-item inflation) ───────────────
-    const recurringResult = calculateRecurringExpenses(recurringExpensesList, myAge, spouseAge, yearsFromNow, pi.inflationRate);
+    // spendFactor applies the survivor step-down to these household line items,
+    // matching the haircut already applied to desiredIncome above.
+    const recurringResult = calculateRecurringExpenses(recurringExpensesList, myAge, spouseAge, yearsFromNow, pi.inflationRate, spendFactor);
     const totalRecurringExpenses = recurringResult.total;
     
     // Adjusted desired income includes: base retirement spending + one-time expenses
@@ -2783,12 +2799,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           const taxableWithdrawals = Math.max(0, totalPreTaxFromWithdrawals - estimatedQCD);
 
           // SS taxable amount uses "combined income" which INCLUDES capital gains (IRS Pub 915).
-          const adjustedNonSSIncome = nonSSIncome + taxableWithdrawals + estimatedGains;
+          // Base is net of the pre-tax contribution deduction (AGI-side), matching the final calc.
+          const adjustedNonSSIncome = nonSSIncomeAfterDeduction + taxableWithdrawals + estimatedGains;
           const adjustedTaxableSS = calculateSocialSecurityTaxableAmount(
             totalSocialSecurity, adjustedNonSSIncome, effectiveFilingStatus
           );
           // Federal ORDINARY tax base EXCLUDES capital gains (taxed at preferential LTCG rates below).
-          const ordinaryBaseGross = nonSSIncome + taxableWithdrawals + adjustedTaxableSS;
+          const ordinaryBaseGross = nonSSIncomeAfterDeduction + taxableWithdrawals + adjustedTaxableSS;
           const totalFedOrdinary = calculateFederalTax(ordinaryBaseGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
           // LTCG tax on realized gains, stacked above ordinary taxable income.
           const iterAdjDeduction = (STANDARD_DEDUCTION_2026[effectiveFilingStatus] || STANDARD_DEDUCTION_2026.married_joint) * inflationFactor;
@@ -2982,7 +2999,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         // Full non-SS income base: everything taxable EXCEPT SS and the conversion itself.
         // RMDs are ordinary income but tracked in totalRMD separately from preTaxWithdrawals
         // (which only holds additional voluntary pre-tax withdrawals beyond the RMD).
-        const fullNonSSIncome = nonSSIncome + totalRMD + preTaxWithdrawals;
+        const fullNonSSIncome = nonSSIncomeAfterDeduction + totalRMD + preTaxWithdrawals;
         // Recalculate SS taxable with the full income base (withdrawals push more SS into taxable range)
         const taxableSSWithWithdrawals = calculateSocialSecurityTaxableAmount(totalSocialSecurity, fullNonSSIncome, effectiveFilingStatus);
         const currentTaxable = Math.max(0, fullNonSSIncome + taxableSSWithWithdrawals - adjDeduction);
@@ -3168,11 +3185,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // removed from the *federal ordinary* tax base below and taxed separately at preferential
     // 0/15/20% rates. State tax (most states, including Alabama, tax LT gains as ordinary
     // income) keeps the gains-inclusive figure via finalTotalTaxableIncome.
-    const finalNonSSIncome = nonSSIncome + ordinaryIncomeFromWithdrawals + capitalGainsFromWithdrawals;
+    const finalNonSSIncome = nonSSIncomeAfterDeduction + ordinaryIncomeFromWithdrawals + capitalGainsFromWithdrawals;
     const finalTaxableSS = calculateSocialSecurityTaxableAmount(
       totalSocialSecurity, finalNonSSIncome, effectiveFilingStatus
     );
-    finalTotalTaxableIncome = finalNonSSIncome + finalTaxableSS - preTaxDeduction; // Updates outer-scope let variable
+    finalTotalTaxableIncome = finalNonSSIncome + finalTaxableSS; // Updates outer-scope let (finalNonSSIncome is already net of preTaxDeduction)
     finalTaxableSS_out = finalTaxableSS; // Update outer-scope for year push
 
     // ── FEDERAL ORDINARY TAX ───────────────────────────────────────────────────
@@ -3306,12 +3323,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         totalSocialSecurity, nonSSWithoutExcess, effectiveFilingStatus
       );
       // Federal: gains-excluded ordinary base, with and without the excess RMD.
-      const fedOrdinaryWithoutExcess = Math.max(0, nonSSWithoutExcess - capitalGainsFromWithdrawals + taxableSSWithoutExcess - preTaxDeduction);
+      // (nonSSWithoutExcess derives from finalNonSSIncome, which is already net of preTaxDeduction.)
+      const fedOrdinaryWithoutExcess = Math.max(0, nonSSWithoutExcess - capitalGainsFromWithdrawals + taxableSSWithoutExcess);
       const fedTaxWithoutExcess = calculateFederalTax(fedOrdinaryWithoutExcess, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
       const fedTaxWithExcess = calculateFederalTax(federalOrdinaryTaxableIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
       // State: gains-inclusive base, without the excess RMD (compare against the already-
       // computed `stateTax`, which is the gains-inclusive with-excess figure).
-      const stateBaseWithoutExcess = Math.max(0, nonSSWithoutExcess + taxableSSWithoutExcess - preTaxDeduction);
+      const stateBaseWithoutExcess = Math.max(0, nonSSWithoutExcess + taxableSSWithoutExcess);
       const stateTaxWithoutExcess = calculateStateTax(
         stateBaseWithoutExcess, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate,
         taxableSSWithoutExcess, finalRetirementIncome,
@@ -3389,7 +3407,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     let weightedSum = 0, weightBase = 0;
     accts.forEach(a => {
       const bal = accountBalances[a.id] || 0;
-      weightedSum += bal * a.cagr;
+      weightedSum += bal * (a.cagr || 0); // missing cagr must not poison the weighted average with NaN
       weightBase += bal;
     });
     if (weightBase > 0) {

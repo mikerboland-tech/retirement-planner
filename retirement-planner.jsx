@@ -3270,10 +3270,10 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
                 {simResults.method === 'historical' ? 'Historical Sequences' : 'Random Sampling'}
               </div>
               <div className="text-xs text-slate-400">
-                {simResults.method === 'historical' 
-                  ? (simResults.historicalStartYearSetting === 'all' 
-                      ? `${simResults.totalSimulations.toLocaleString()} simulations cycling through ${simResults.historicalSummary?.length || 0} valid starting years from the Shiller dataset.`
-                      : `All ${simResults.totalSimulations.toLocaleString()} simulations replay returns starting in ${simResults.historicalStartYearSetting}.`)
+                {simResults.method === 'historical'
+                  ? (simResults.historicalStartYearSetting === 'all'
+                      ? `One deterministic replay of each of the ${simResults.totalSimulations.toLocaleString()} valid starting years from the Shiller dataset.`
+                      : `Deterministic replay of returns starting in ${simResults.historicalStartYearSetting}.`)
                   : `${simResults.totalSimulations.toLocaleString()} simulations sampled from a normal distribution.`}
               </div>
             </div>
@@ -10531,8 +10531,10 @@ function RetirementPlanner() {
   const [editingIncome, setEditingIncome] = useState(null);
   const [editingAsset, setEditingAsset] = useState(null);
   
-  // Scenario comparison state
-  const [scenarios, setScenarios] = useState([]);
+  // Scenario comparison state. Scenarios ARE persisted by the auto-save effect,
+  // so they must be restored here — initializing to [] meant every page load
+  // wiped saved scenarios on the next debounced save (data loss).
+  const [scenarios, setScenarios] = useState(() => savedData?.scenarios || []);
   const [activeScenarioId, setActiveScenarioId] = useState(null);
   
   // Create a scenario from current settings

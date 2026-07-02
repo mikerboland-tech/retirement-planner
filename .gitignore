@@ -1,0 +1,15 @@
+# Windows / OneDrive artifacts
+Thumbs.db
+[Dd]esktop.ini
+
+# In-progress browser downloads
+*.crdownload
+
+# Node (no dependencies today, but just in case)
+node_modules/
+
+# Editor state
+.vscode/
+
+# Claude Code machine-local settings
+.claude/settings.local.json

@@ -98,12 +98,23 @@ function runMonteCarlo(jobId, payload) {
     }
   }
 
+  // Historical replays are fully deterministic: replaying the same start year N
+  // times produces N identical projections. So in historical mode we run each
+  // start year exactly once instead of cycling numSimulations times over the
+  // same ~70 sequences (which burned ~15x the compute for identical results).
+  const totalSims = isHistorical ? historicalStartYears.length : simSettings.numSimulations;
+
   const BATCH = 50;
   const numPathsToStore = 100;
   const results = [];
   const portfolioPathsToStore = [];
+  // Per-year portfolio samples across ALL sims, for the percentile fan chart.
+  // (Previously the bands were computed from only the first `numPathsToStore`
+  // stored paths while the headline stats used every sim.)
+  const yearsToReport = (piWithLifeExp.legacyAge - simSettings.startAge) + 1;
+  const bandData = Array.from({ length: yearsToReport }, () => []);
 
-  for (let sim = 0; sim < simSettings.numSimulations; sim++) {
+  for (let sim = 0; sim < totalSims; sim++) {
     const histStartYear = isHistorical
       ? historicalStartYears[sim % historicalStartYears.length]
       : null;
@@ -154,11 +165,14 @@ function runMonteCarlo(jobId, payload) {
       historicalStartYear: histStartYear,
     });
     if (sim < numPathsToStore) portfolioPathsToStore.push(path);
+    for (let y = 0; y < yearsToReport; y++) {
+      bandData[y].push(path[y]?.portfolio || 0);
+    }
 
-    if ((sim + 1) % BATCH === 0 || sim + 1 === simSettings.numSimulations) {
+    if ((sim + 1) % BATCH === 0 || sim + 1 === totalSims) {
       postMessage({
         jobId, type: 'progress',
-        percent: Math.round(((sim + 1) / simSettings.numSimulations) * 100),
+        percent: Math.round(((sim + 1) / totalSims) * 100),
       });
     }
   }
@@ -170,21 +184,19 @@ function runMonteCarlo(jobId, payload) {
   const startingPortfolio = accounts.reduce((s, a) => s + (a.balance || 0), 0);
 
   const successCount = results.filter(r => r.survived).length;
-  const successRate = successCount / simSettings.numSimulations;
+  const successRate = successCount / totalSims;
   const finalPortfolios = results.map(r => r.finalPortfolio).sort((a, b) => a - b);
-  const percentile = (arr, p) => arr[Math.floor(arr.length * p)];
+  const percentile = (arr, p) => arr[Math.min(arr.length - 1, Math.floor(arr.length * p))];
   const failureAges = results.filter(r => !r.survived).map(r => r.failureAge);
   const avgFailureAge = failureAges.length > 0
     ? failureAges.reduce((a, b) => a + b, 0) / failureAges.length
     : null;
 
-  const yearsToReport = (piWithLifeExp.legacyAge - simSettings.startAge) + 1;
+  // Percentile fan chart from ALL sims (bandData), not just the stored sample paths.
   const percentileBands = [];
   for (let year = 0; year < yearsToReport; year++) {
     const age = simSettings.startAge + year;
-    const portfoliosAtYear = portfolioPathsToStore
-      .map(path => path[year]?.portfolio || 0)
-      .sort((a, b) => a - b);
+    const portfoliosAtYear = bandData[year].sort((a, b) => a - b);
     percentileBands.push({
       age,
       p10: percentile(portfoliosAtYear, 0.10),
@@ -227,7 +239,7 @@ function runMonteCarlo(jobId, payload) {
     data: {
       successRate,
       successCount,
-      totalSimulations: simSettings.numSimulations,
+      totalSimulations: totalSims,
       startAge: simSettings.startAge,
       startingPortfolio,
       percentile5: percentile(finalPortfolios, 0.05),
@@ -272,9 +284,11 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
   } = payload;
 
   const piWithLifeExp = { ...personalInfo, legacyAge };
+  // Clamp at -1 (a total-loss floor), NOT at 0: flooring at 0% silently converted
+  // downside scenarios into flat-return scenarios, biasing results optimistic.
   const adjustedAccounts = cagrDelta === 0
     ? accounts
-    : accounts.map(a => ({ ...a, cagr: Math.max(0, (a.cagr || 0) + cagrDelta) }));
+    : accounts.map(a => ({ ...a, cagr: Math.max(-1, (a.cagr || 0) + cagrDelta) }));
 
   const myAges = [62, 64, 66, 67, 68, 70];
   const spouseAges = isMarried ? [62, 64, 66, 67, 68, 70] : [null];
@@ -301,7 +315,11 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
   }));
 
   const runMcSimulation = (modifiedStreams, sharedShock) => {
-    const mcAccounts = adjustedAccounts.map(a => ({ ...a, cagr: Math.max(0, (a.cagr || 0) + sharedShock) }));
+    // Same -1 clamp as above. With mcVolatility defaulting to 0.15, the previous
+    // Math.max(0, ...) floor bound on roughly a third of draws — negative-return
+    // shocks were truncated to 0% while positive shocks passed through untouched,
+    // inflating every cell's MC success rate.
+    const mcAccounts = adjustedAccounts.map(a => ({ ...a, cagr: Math.max(-1, (a.cagr || 0) + sharedShock) }));
     const proj = computeProjections(piWithLifeExp, mcAccounts, modifiedStreams, assets, oneTimeEvents, recurringExpenses);
     const atLegacy = proj.find(p => p.myAge === legacyAge);
     const survived = atLegacy && atLegacy.totalPortfolio > 0;

@@ -50,10 +50,18 @@ Visit the live site: `https://YOUR-USERNAME.github.io/retirement-planner/`
 
 ### Option 2: Run Locally
 1. Clone this repository
-2. Open `index.html` in any modern browser
-3. That's it — no build step, no npm, no server needed
+2. Serve the folder with any static file server — e.g. `python -m http.server 8000` or the VS Code "Live Server" extension
+3. Open `http://localhost:8000`
 
-The app loads React, Tailwind, and Recharts from CDN, then Babel transforms the JSX in-browser.
+Note: double-clicking `index.html` does **not** work — the app fetches its JSX and spawns a Web Worker, both of which browsers block on `file://` URLs.
+
+All libraries (React, Tailwind, Recharts, Babel) are vendored in `vendor/` and load locally — no CDN dependency, works offline. Babel transforms the JSX in-browser; there is no build step.
+
+### Running the tests
+```
+node tests/run-tests.cjs
+```
+The suite exercises the shared calc engine (`engine.js`) — federal/state tax brackets, RMD, Social Security taxation, IRMAA, and full projection integration tests.
 
 ## Architecture
 

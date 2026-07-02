@@ -728,9 +728,12 @@ section('Unit — calculateIRMAA tier boundaries');
   eq(calculateIRMAA(217999, 'married_joint', 0, 0.03).tier, 0, 'tier index 0 for MFJ low');
   eq(calculateIRMAA(218001, 'married_joint', 0, 0.03).tier, 1, 'tier index 1 for MFJ first cliff');
 
-  // Inflation indexing: at year 10, $218k MAGI should still be tier 0 (thresholds inflated)
-  eq(calculateIRMAA(218000, 'married_joint', 10, 0.03).partBMonthly, 202.90,
+  // Inflation indexing: at year 10, $218k MAGI should still be tier 0 (thresholds inflated).
+  // Premium DOLLARS index forward too (R2026-07b), so tier-0 Part B = 202.90 × 1.03^10.
+  eq(calculateIRMAA(218000, 'married_joint', 10, 0.03).tier, 0,
     'MFJ MAGI=$218k at year 10 still tier 0 (threshold inflated to ~$293k)');
+  approx(calculateIRMAA(218000, 'married_joint', 10, 0.03).partBMonthly, 202.90 * Math.pow(1.03, 10),
+    'tier-0 Part B premium indexed forward 10 years', 0.001);
 }
 
 section('Unit — calculateIRMAASurcharge');
@@ -1694,6 +1697,94 @@ section('Roth conversion — pre-tax floor caps conversions');
     'floor:0 and omitted floor produce identical pre-tax balances');
   eq(projOmit.find(r => r.myAge === 72).rothBalance, yNoFloorEnd.rothBalance,
     'floor:0 and omitted floor produce identical Roth balances');
+}
+
+// ── R2026-07 review fixes ─────────────────────────────────────────────────────
+section('R2026-07a — taxable SS uses AGI net of pre-tax contributions (Pub 915)');
+{
+  // Age 68, still working (retires at 75), collecting SS since 67, deferring
+  // $12k into a 401k. Combined income must use AGI (salary MINUS the deferral):
+  //   net:   18,000 + 10,000 = 28,000 → phase-in band → taxable SS = 1,500
+  //   gross: 30,000 + 10,000 = 40,000 → 85% band     → taxable SS = 9,600 (old bug)
+  const pi = {
+    myAge: 68, spouseAge: 68, myRetirementAge: 75, spouseRetirementAge: 75,
+    myBirthYear: TODAY_YEAR - 68, spouseBirthYear: TODAY_YEAR - 68,
+    filingStatus: 'single', state: 'Florida',
+    desiredRetirementIncome: 40000, inflationRate: 0.03,
+    withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+    charitableGivingPercent: 0, rothConversionAmount: 0,
+    rothConversionStartAge: 0, rothConversionEndAge: 0, rothConversionBracket: '',
+    legacyAge: 95, survivorModelEnabled: false,
+    myLifeExpectancy: 95, spouseLifeExpectancy: 95, healthcareModel: 'none', ltcModel: 'none',
+  };
+  const accts = [
+    { id: 1, name: '401k', type: '401k', balance: 300000, contribution: 12000, contributionGrowth: 0, cagr: 0.06, startAge: 60, stopAge: 75, owner: 'me', contributor: 'me' },
+  ];
+  const streams = [
+    { id: 1, name: 'Salary', type: 'earned_income', amount: 30000, startAge: 60, endAge: 74, cola: 0, owner: 'me' },
+    { id: 2, name: 'SS', type: 'social_security', amount: 20000, startAge: 67, endAge: 95, cola: 0, owner: 'me' },
+  ];
+  const proj = computeProjections(pi, accts, streams, [], [], [], TODAY_YEAR);
+  const y0 = proj[0];
+  eq(y0.preTaxDeduction, 12000, 'pre-tax deferral recognized as above-the-line deduction');
+  eq(y0.taxableSS, 1500, 'taxable SS computed on deduction-adjusted combined income', 1);
+  // Direct cross-check against the Pub 915 helper on the net base.
+  eq(y0.taxableSS, Math.round(calculateSocialSecurityTaxableAmount(20000, 18000, 'single')),
+    'engine taxableSS matches helper called with AGI-net other income', 1);
+  eq(y0.taxableIncome, 18000 + 1500, 'federal taxable income = net non-SS income + taxable SS', 1);
+}
+
+section('R2026-07b — IRMAA premium dollars index forward with the thresholds');
+{
+  // Base year: single, MAGI $300k → tier 4 (Part B 649.20, Part D 83.30).
+  // Surcharge = (649.20 − 202.90) × 12 + 83.30 × 12 = 6,355.2/yr.
+  const s0 = calculateIRMAASurcharge(300000, 'single', 0, 0.03, 1);
+  eq(s0.totalSurcharge, 6355, 'base-year surcharge unchanged by the indexing fix', 1);
+  eq(s0.tier, 4, 'MAGI $300k lands in tier 4 (single)');
+  // 20 years out with the same REAL income (MAGI scaled by inflation): the tier is
+  // unchanged and the nominal surcharge scales by the same inflation factor.
+  const factor = Math.pow(1.03, 20);
+  const s20 = calculateIRMAASurcharge(300000 * factor, 'single', 20, 0.03, 1);
+  eq(s20.tier, 4, 'inflation-scaled MAGI stays in the same tier 20 years out');
+  approx(s20.totalSurcharge, 6355.2 * factor, 'surcharge scales with inflation (was frozen at base-year dollars)', 0.005);
+  // The IRMAA detail premiums scale too (consumed by display + healthcare totals).
+  const d20 = calculateIRMAA(300000 * factor, 'single', 20, 0.03);
+  approx(d20.partBMonthly, 649.20 * factor, 'Part B tier premium indexed', 0.005);
+  approx(d20.partDMonthly, 83.30 * factor, 'Part D surcharge indexed', 0.005);
+}
+
+section('R2026-07c — recurring expenses step down for the survivor');
+{
+  // Unit: the survivor spend factor scales the total (default arg = 1 → unchanged).
+  const exps = [{ id: 1, name: 'Property Tax', category: 'housing', amount: 10000, startAge: 60, endAge: 95, inflationRate: 0, owner: 'me' }];
+  eq(engine.calculateRecurringExpenses(exps, 70, 70, 0, 0.03).total, 10000, 'no factor → unchanged (backward compatible)');
+  eq(engine.calculateRecurringExpenses(exps, 70, 70, 0, 0.03, 0.75).total, 7500, 'factor 0.75 scales recurring total');
+
+  // Integration: survivor modeling on, spouse dies at 80 → household recurring
+  // expenses get the same 75% step-down as base spending from the death year on.
+  const { pi, accts, streams } = baseScenario({
+    myAge: 70, spouseAge: 70,
+    myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 70,
+    myRetirementAge: 70, spouseRetirementAge: 70,
+    survivorModelEnabled: true, myLifeExpectancy: 95, spouseLifeExpectancy: 80,
+  });
+  const proj = computeProjections(pi, accts, streams, [], [], exps, TODAY_YEAR);
+  const before = proj.find(r => r.spouseAge === 79);
+  const after = proj.find(r => r.spouseAge === 80);
+  eq(before.recurringExpenses, 10000, 'both alive → full recurring expense');
+  eq(after.recurringExpenses, 7500, 'survivor year → recurring expense × survivorSpendingFactor');
+}
+
+section('R2026-07d — weightedCAGR survives an account with no cagr');
+{
+  const { pi } = baseScenario();
+  const accts = [
+    { id: 1, name: 'No-cagr brokerage', type: 'brokerage', balance: 100000, contribution: 0, contributionGrowth: 0, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me' }, // cagr intentionally missing
+    { id: 2, name: '401k', type: '401k', balance: 100000, contribution: 0, contributionGrowth: 0, cagr: 0.06, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me' },
+  ];
+  const proj = computeProjections(pi, accts, [], [], [], [], TODAY_YEAR);
+  eq(Number.isFinite(proj[0].weightedCAGR), true, 'weightedCAGR is finite with a missing cagr (was NaN)');
+  gt(proj[0].weightedCAGR, 0, 'weighted rate reflects the account that HAS a cagr');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
