@@ -1786,6 +1786,24 @@ const getDefaultRothConversionWindow = (personalInfo) => {
   };
 };
 
+// ── SPENDING PHASES (go-go / slow-go / no-go) ────────────────────────────────
+// Real retirement spending is not flat: T. Rowe Price and JPMorgan spending
+// research show a "retirement smile" — spending runs 20-30% higher in the
+// active early years (go-go), declines through the slow-go years, and settles
+// lower in the no-go years (healthcare is modeled separately and rises, which
+// is why this multiplier applies to BASE discretionary spending only).
+// Band semantics: myAge <= goGoEndAge → goGo; <= slowGoEndAge → slowGo; else noGo.
+// Returns 1 (no adjustment) when the feature is disabled or fields are absent,
+// so plans saved before this feature behave identically.
+const getSpendingPhaseMultiplier = (pi, myAge) => {
+  if (!pi || !pi.spendingPhasesEnabled) return 1;
+  const goGoEnd = pi.goGoEndAge ?? 75;
+  const slowGoEnd = pi.slowGoEndAge ?? 85;
+  if (myAge <= goGoEnd) return pi.goGoMultiplier ?? 1.0;
+  if (myAge <= slowGoEnd) return pi.slowGoMultiplier ?? 0.85;
+  return pi.noGoMultiplier ?? 0.75;
+};
+
 // Calculate ACA subsidy eligibility (simplified)
 const calculateACASubsidy = (income, householdSize, filingStatus) => {
   const fpl = ACA_FPL_2025[Math.min(householdSize, 8)] || ACA_FPL_2025[2];
@@ -2357,7 +2375,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // A single person's fixed costs don't halve, so this is a haircut, not a split.
     const survivorActive = survivorEnabled && (primaryAlive !== spouseAlive);
     const spendFactor = survivorActive ? (pi.survivorSpendingFactor ?? 0.75) : 1;
-    const desiredIncome = pi.desiredRetirementIncome * inflationFactor * spendFactor;
+    // Spending-phase multiplier (go-go/slow-go/no-go) applies to BASE spending
+    // only — recurring expense items carry their own age windows, and healthcare
+    // is modeled separately (and typically rises while discretionary falls).
+    const phaseMultiplier = getSpendingPhaseMultiplier(pi, myAge);
+    const desiredIncome = pi.desiredRetirementIncome * inflationFactor * spendFactor * phaseMultiplier;
     
     let totalSocialSecurity = 0, totalPension = 0, totalOtherIncome = 0, earnedIncome = 0;
     let nonSSIncome = 0; // Track non-SS income for calculating SS taxation
@@ -3575,6 +3597,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     PRE_65_HEALTHCARE_ANNUAL_2025, MEDICAL_INFLATION_RATE,
     LTC_MONTHLY_ASSISTED_LIVING_2025, LTC_DEFAULT_DURATION_MONTHS,
     ACA_FPL_2025, calculateACASubsidy,
+    getSpendingPhaseMultiplier,
     calculateHealthcareExpenses, calculateRecurringExpenses,
 
     // ── Historical sequences + main projection entry point ────────────────

@@ -1787,6 +1787,40 @@ section('R2026-07d — weightedCAGR survives an account with no cagr');
   gt(proj[0].weightedCAGR, 0, 'weighted rate reflects the account that HAS a cagr');
 }
 
+// ── P1 — spending phases (go-go / slow-go / no-go) ────────────────────────────
+section('P1 — getSpendingPhaseMultiplier band boundaries');
+{
+  const pi = { spendingPhasesEnabled: true, goGoEndAge: 75, slowGoEndAge: 85, goGoMultiplier: 1.0, slowGoMultiplier: 0.85, noGoMultiplier: 0.75 };
+  eq(engine.getSpendingPhaseMultiplier(pi, 65), 1.0, 'age 65 → go-go');
+  eq(engine.getSpendingPhaseMultiplier(pi, 75), 1.0, 'age 75 (boundary, inclusive) → go-go');
+  eq(engine.getSpendingPhaseMultiplier(pi, 76), 0.85, 'age 76 → slow-go');
+  eq(engine.getSpendingPhaseMultiplier(pi, 85), 0.85, 'age 85 (boundary, inclusive) → slow-go');
+  eq(engine.getSpendingPhaseMultiplier(pi, 86), 0.75, 'age 86 → no-go');
+  eq(engine.getSpendingPhaseMultiplier({ ...pi, spendingPhasesEnabled: false }, 86), 1, 'disabled → always 1');
+  eq(engine.getSpendingPhaseMultiplier({}, 86), 1, 'fields absent (pre-feature plan) → always 1');
+}
+
+section('P1 — desiredIncome steps down across phase boundaries');
+{
+  const { pi, accts, streams } = baseScenario({
+    spendingPhasesEnabled: true, goGoEndAge: 75, slowGoEndAge: 85,
+    goGoMultiplier: 1.0, slowGoMultiplier: 0.85, noGoMultiplier: 0.75,
+  });
+  const proj = computeProjections(pi, accts, streams, [], [], [], TODAY_YEAR);
+  const expected = (age, mult) => Math.round(60000 * Math.pow(1.03, age - 60) * mult);
+  eq(proj.find(r => r.myAge === 74).desiredIncome, expected(74, 1.0), 'age 74 spends full go-go target', 1);
+  eq(proj.find(r => r.myAge === 76).desiredIncome, expected(76, 0.85), 'age 76 spends 85% (slow-go)', 1);
+  eq(proj.find(r => r.myAge === 86).desiredIncome, expected(86, 0.75), 'age 86 spends 75% (no-go)', 1);
+
+  // Disabled (or fields absent) must be byte-identical to the pre-feature engine.
+  const { pi: piOff, accts: aOff, streams: sOff } = baseScenario();
+  const projOff = computeProjections(piOff, aOff, sOff, [], [], [], TODAY_YEAR);
+  eq(projOff.find(r => r.myAge === 76).desiredIncome, expected(76, 1.0), 'feature absent → flat spending unchanged', 1);
+  // Lower late-life spending must preserve more portfolio.
+  gt(proj.find(r => r.myAge === 90).totalPortfolio, projOff.find(r => r.myAge === 90).totalPortfolio,
+    'phased spending preserves more portfolio by age 90 than flat spending');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

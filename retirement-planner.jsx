@@ -280,6 +280,8 @@ const STORAGE_KEY = 'retirement_planner_data';
 // future schemaVersion so a downgrade doesn't silently shred the user's data (B8).
 // v2: account.contributionMode ('fixed' | 'percent') + employeePercent + employerMatchPercent
 //     are optional; absent → engine treats as 'fixed' so older saved scenarios still load.
+//     Spending-phase fields (spendingPhasesEnabled, goGoEndAge, ...) are also optional;
+//     absent → engine multiplier is 1 (flat spending), so no version bump needed.
 const SCHEMA_VERSION = 2;
 
 const DEFAULT_DASHBOARD_VISIBILITY = {
@@ -339,6 +341,15 @@ const DEFAULT_PERSONAL_INFO = {
   rothConversionTaxSource: 'withdrawal', // 'withdrawal' = tax paid via normal withdrawal priority, 'brokerage' = tax paid from brokerage account
   rothConversionPreTaxFloor: 0,  // Preserve this much pre-tax balance (today's $); stop converting once pre-tax hits it (0 = no floor)
   legacyAge: 95,                 // Planning horizon / legacy target age
+  // Spending phases (go-go / slow-go / no-go): staged multipliers on base
+  // retirement spending. Disabled by default — flat spending is the classic
+  // (conservative) assumption; enabling this models the "retirement smile."
+  spendingPhasesEnabled: false,
+  goGoEndAge: 75,                // Last age of the go-go phase (inclusive)
+  slowGoEndAge: 85,              // Last age of the slow-go phase (inclusive); no-go after
+  goGoMultiplier: 1.0,           // Spending multiplier during go-go years
+  slowGoMultiplier: 0.85,        // Spending multiplier during slow-go years
+  noGoMultiplier: 0.75,          // Spending multiplier during no-go years
   // Survivor modeling: when enabled, models the financial impact of a spouse dying
   // before the planning horizon ends. Changes filing status, stops income streams,
   // and applies SS survivor benefit rules.
@@ -6892,6 +6903,85 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
           </p>
         </div>
         
+        {/* Spending Phases Section (go-go / slow-go / no-go) */}
+        <div className="border-t border-slate-700/50 mt-5 pt-5">
+          <h4 className="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wide">Spending Phases</h4>
+          <div className="flex items-center gap-3 mb-4">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={localInfo.spendingPhasesEnabled || false}
+                onChange={e => handleChange('spendingPhasesEnabled', e.target.checked)}
+                className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-amber-500 focus:ring-amber-500/50"
+              />
+              <span className="text-sm text-slate-300">Enable staged spending (go-go / slow-go / no-go)</span>
+            </label>
+          </div>
+
+          {localInfo.spendingPhasesEnabled && (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">
+                <div>
+                  <label className={compactLabelStyle}>Go-Go Phase (% of base, through age)</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="number" min="0" max="200" step="1"
+                      value={Math.round((localInfo.goGoMultiplier ?? 1.0) * 100)}
+                      onChange={e => handleChange('goGoMultiplier', Math.max(0, (Number(e.target.value) || 0) / 100))}
+                      className={compactInputStyle}
+                      title="Spending as % of your base retirement income during the active go-go years"
+                    />
+                    <AgeCell
+                      value={localInfo.goGoEndAge ?? 75}
+                      onChange={e => handleChange('goGoEndAge', Number(e.target.value) || 75)}
+                      className={compactInputStyle}
+                    />
+                  </div>
+                  <span className="text-xs text-slate-500">Active travel years</span>
+                </div>
+                <div>
+                  <label className={compactLabelStyle}>Slow-Go Phase (% of base, through age)</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="number" min="0" max="200" step="1"
+                      value={Math.round((localInfo.slowGoMultiplier ?? 0.85) * 100)}
+                      onChange={e => handleChange('slowGoMultiplier', Math.max(0, (Number(e.target.value) || 0) / 100))}
+                      className={compactInputStyle}
+                      title="Spending as % of your base retirement income during the slow-go years"
+                    />
+                    <AgeCell
+                      value={localInfo.slowGoEndAge ?? 85}
+                      onChange={e => handleChange('slowGoEndAge', Number(e.target.value) || 85)}
+                      className={compactInputStyle}
+                    />
+                  </div>
+                  <span className="text-xs text-slate-500">Settling down</span>
+                </div>
+                <div>
+                  <label className={compactLabelStyle}>No-Go Phase (% of base)</label>
+                  <input
+                    type="number" min="0" max="200" step="1"
+                    value={Math.round((localInfo.noGoMultiplier ?? 0.75) * 100)}
+                    onChange={e => handleChange('noGoMultiplier', Math.max(0, (Number(e.target.value) || 0) / 100))}
+                    className={compactInputStyle}
+                    title="Spending as % of your base retirement income after the slow-go phase ends"
+                  />
+                  <span className="text-xs text-slate-500">All remaining years</span>
+                </div>
+              </div>
+              <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg">
+                <p className="text-xs text-slate-400">
+                  <strong className="text-slate-300">The retirement smile:</strong> research (T. Rowe Price, JPMorgan) shows
+                  real spending isn't flat — it runs highest in the active early years, declines ~20%+ through the slow-go
+                  years, and settles lower after. These multipliers scale your <strong className="text-amber-400">base desired
+                  retirement income</strong> only. Recurring expense line items keep their own age windows, and healthcare
+                  costs are modeled separately (they typically rise while discretionary spending falls).
+                </p>
+              </div>
+            </>
+          )}
+        </div>
+
         {/* Survivor Modeling Section */}
         {localInfo.filingStatus === 'married_joint' && (
           <div className="border-t border-slate-700/50 mt-5 pt-5">
@@ -8977,7 +9067,7 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
                 {
                   heading: 'The Lines',
                   items: [
-                    { color: '#ef4444', label: 'Red Solid — Desired Spending', desc: 'The annual income you said you need in retirement (from Personal Info), adjusted upward each year for inflation. This is your spending target.' },
+                    { color: '#ef4444', label: 'Red Solid — Desired Spending', desc: 'The annual income you said you need in retirement (from Personal Info), adjusted upward each year for inflation. If Spending Phases are enabled, this line also steps down at your go-go and slow-go boundary ages. This is your spending target.' },
                     { color: '#10b981', label: 'Green Dashed — Net Income After Tax', desc: 'What you actually take home after federal and state taxes. This is the number that matters — it needs to meet or exceed the red line for your plan to work.' },
                     { color: '#dc2626', label: 'Dark Red Dotted — Total Tax', desc: 'Your combined federal + state + FICA payroll tax burden. The gap between the top of the bars and the green dashed line.' }
                   ]
