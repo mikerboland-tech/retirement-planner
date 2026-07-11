@@ -30,7 +30,8 @@ const {
   MEDICARE_SUPPLEMENT_PREMIUM_2025, MEDICARE_OOP_ANNUAL_2025,
   PRE_65_HEALTHCARE_ANNUAL_2025, MEDICAL_INFLATION_RATE,
   LTC_MONTHLY_ASSISTED_LIVING_2025, LTC_DEFAULT_DURATION_MONTHS, ACA_FPL_2025,
-  calculateACASubsidy, calculateHealthcareExpenses, calculateRecurringExpenses,
+  calculateACASubsidy, calculateACAPremiumCredit, ACA_BENCHMARK_PREMIUM_2026,
+  calculateHealthcareExpenses, calculateRecurringExpenses,
   HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
   computeProjections,
 } = PlannerEngine;
@@ -360,6 +361,11 @@ const DEFAULT_PERSONAL_INFO = {
   // Healthcare expense modeling
   healthcareModel: 'none',       // 'none','basic','moderate','comprehensive','custom' — default OFF: the engine's modeled costs overestimate for most people, so users should bake healthcare into their desired spending. Opt in on the Personal tab.
   pre65HealthcareAnnual: 12000,  // Annual healthcare cost per person before Medicare (ACA/employer)
+  // Pre-65 coverage model: 'flat' = fixed annual cost above; 'aca' = retired
+  // under-65 members buy marketplace coverage where the premium is MAGI-driven
+  // (benchmark − premium tax credit, 2026 post-ARPA rules with the 400% FPL cliff).
+  pre65Coverage: 'flat',
+  acaBenchmarkPremium: 14000,    // Unsubsidized silver benchmark (SLCSP) per person/yr — replace with your healthcare.gov quote
   post65OOPAnnual: 2000,         // Annual out-of-pocket after Medicare (copays, dental, vision)
   includeMedigap: true,          // Include supplemental/Medigap insurance
   ltcModel: 'none',              // 'none','default','custom' — LTC off by default so the starter scenario doesn't show two large spike clusters at ages 82–84 (my LTC window) and 86–88 (spouse's). Real risk, but a probabilistic/insurance concern that confuses first-time users looking at point-estimate cash flow. Enable on the Personal tab when ready.
@@ -2801,9 +2807,75 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
           )}
         </p>
       </div>
-      
+
+      {/* ACA subsidy impact of Roth conversions (pre-65, ACA coverage mode).
+          Near the 400% FPL cliff a conversion dollar costs marginal tax PLUS
+          lost premium credit — this table makes that second cost visible. */}
+      {personalInfo.pre65Coverage === 'aca' && (() => {
+        const acaConvYears = projections.filter(p => (p.rothConversion || 0) > 0 && (p.acaGrossPremium || 0) > 0);
+        if (acaConvYears.length === 0) return null;
+        const rows = acaConvYears.map(p => {
+          const acaMagi = (p.taxableIncome || 0) + Math.max(0, (p.socialSecurity || 0) - (p.taxableSS || 0));
+          const householdSize = p.filingStatus === 'married_joint' ? 2 : 1;
+          const without = calculateACAPremiumCredit({
+            magi: Math.max(0, acaMagi - p.rothConversion),
+            householdSize,
+            benchmarkPremium: p.acaGrossPremium,
+            yearsFromNow: p.myAge - personalInfo.myAge,
+            inflationRate: personalInfo.inflationRate,
+          });
+          const subsidyLost = Math.max(0, Math.round(without.subsidy - (p.acaSubsidy || 0)));
+          const crossesCliff = (p.acaSubsidy || 0) === 0 && without.subsidy > 0;
+          return { age: p.myAge, conversion: p.rothConversion, fplPercent: p.acaFplPercent, subsidyKept: p.acaSubsidy || 0, subsidyLost, crossesCliff };
+        });
+        const totalLost = rows.reduce((s, r) => s + r.subsidyLost, 0);
+        return (
+          <div className={cardStyle}>
+            <h4 className="text-lg font-semibold text-slate-100 mb-1">Roth Conversions vs. ACA Subsidy</h4>
+            <p className="text-xs text-slate-400 mb-3">
+              Conversions raise MAGI, which shrinks your marketplace premium credit — and above 400% of the poverty
+              level the credit vanishes entirely (the 2026 cliff). Near the cliff, a conversion dollar costs its
+              marginal tax rate <em>plus</em> lost subsidy.
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-slate-400 border-b border-slate-700">
+                    <th className="py-2 pr-3">Age</th>
+                    <th className="py-2 pr-3">Conversion</th>
+                    <th className="py-2 pr-3">% of FPL</th>
+                    <th className="py-2 pr-3">Subsidy Kept</th>
+                    <th className="py-2 pr-3">Subsidy Lost to Conversion</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map(r => (
+                    <tr key={r.age} className={`border-b border-slate-800 ${r.crossesCliff ? 'bg-red-900/20' : ''}`}>
+                      <td className="py-2 pr-3 text-slate-300">{r.age}</td>
+                      <td className="py-2 pr-3 text-slate-300">{formatCurrency(r.conversion)}</td>
+                      <td className="py-2 pr-3 text-slate-300">{r.fplPercent !== null ? `${r.fplPercent}%` : '—'}</td>
+                      <td className="py-2 pr-3 text-emerald-400">{formatCurrency(r.subsidyKept)}</td>
+                      <td className={`py-2 pr-3 ${r.subsidyLost > 0 ? 'text-red-400' : 'text-slate-500'}`}>
+                        {formatCurrency(r.subsidyLost)}{r.crossesCliff ? ' ⚠ crosses the 400% cliff' : ''}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {totalLost > 0 && (
+              <p className="text-xs text-red-400/90 mt-2">
+                Your planned conversions forfeit {formatCurrency(totalLost)} of premium credits across these years.
+                Consider smaller conversions in pre-65 years (staying under the cliff) and larger ones from 65 on,
+                when IRMAA — not the ACA — becomes the constraint.
+              </p>
+            )}
+          </div>
+        );
+      })()}
+
       {/* Tax Year Snapshot */}
-      <TaxYearSnapshot 
+      <TaxYearSnapshot
         projections={projections}
         personalInfo={personalInfo}
       />
@@ -7066,7 +7138,37 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
           
           {localInfo.healthcareModel !== 'none' && (
             <div className="space-y-3">
+              <div className="mb-3">
+                <label className={compactLabelStyle}>Pre-65 Coverage Model</label>
+                <select
+                  value={localInfo.pre65Coverage || 'flat'}
+                  onChange={e => handleChange('pre65Coverage', e.target.value)}
+                  className={compactInputStyle}
+                >
+                  <option value="flat">Fixed annual cost — same premium every pre-65 year</option>
+                  <option value="aca">ACA marketplace — premium depends on your income (MAGI) with the 2026 subsidy cliff</option>
+                </select>
+                {(localInfo.pre65Coverage || 'flat') === 'aca' && (
+                  <p className="text-xs text-amber-400/90 mt-2">
+                    Once retired and under 65, your premium = benchmark − premium tax credit. The credit shrinks as MAGI rises
+                    and disappears entirely above 400% of the poverty level (the cliff returned in 2026) — so withdrawals and
+                    Roth conversions in those years directly raise your healthcare cost. Working years still use the fixed
+                    annual cost (employer coverage).
+                  </p>
+                )}
+              </div>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                {(localInfo.pre65Coverage || 'flat') === 'aca' && (
+                  <div>
+                    <label className={compactLabelStyle}>ACA Benchmark Premium (per person)</label>
+                    <CurrencyCell
+                      value={localInfo.acaBenchmarkPremium || ACA_BENCHMARK_PREMIUM_2026 || 14000}
+                      onValueChange={v => handleChange('acaBenchmarkPremium', v)}
+                      className={compactInputStyle}
+                    />
+                    <span className="text-xs text-slate-500">Full unsubsidized silver (SLCSP) — get yours at healthcare.gov</span>
+                  </div>
+                )}
                 <div>
                   <label className={compactLabelStyle}>Pre-65 Annual Cost (per person)</label>
                   <CurrencyCell
@@ -7074,7 +7176,7 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
                     onValueChange={v => handleChange('pre65HealthcareAnnual', v)}
                     className={compactInputStyle}
                   />
-                  <span className="text-xs text-slate-500">ACA/employer premiums + copays</span>
+                  <span className="text-xs text-slate-500">{(localInfo.pre65Coverage || 'flat') === 'aca' ? 'Used for WORKING years (employer coverage)' : 'ACA/employer premiums + copays'}</span>
                 </div>
                 <div>
                   <label className={compactLabelStyle}>Post-65 OOP Annual (per person)</label>

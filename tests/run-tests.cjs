@@ -1295,40 +1295,92 @@ section('Unit — West Virginia (no std ded, $2k exemption, SS exempt 2026, $8k 
     'WV single $60k w/ SS exempt + $8k 65+ → $1,165.50', 0.002);
 }
 
-// ── 9. ACA subsidy cliff ─────────────────────────────────────────────────────
-section('Unit — calculateACASubsidy thresholds');
+// ── 9. ACA subsidy cliff (2026 post-ARPA law: Rev. Proc. 2025-25) ─────────────
+section('Unit — calculateACASubsidy thresholds (2026 law)');
 {
-  // FPL 2025: household 1 = $15,060, 4 = $31,200, 8 = $52,720
-  // Below 100% FPL: ineligible (Medicaid territory)
+  // FPL (2025 HHS guidelines, governing 2026 coverage): household 1 = $15,650,
+  // 4 = $32,150, 8 = $54,150. Above 400% FPL: HARD CLIFF, no credit at all.
   const below = calculateACASubsidy(10000, 1, 'single');
   eq(below.eligible, false, '<100% FPL → ineligible');
-  // At 100% FPL: Silver 94 tier
-  const at100 = calculateACASubsidy(15060, 1, 'single');
+  const at100 = calculateACASubsidy(15650, 1, 'single');
   eq(at100.eligible, true, '100% FPL → eligible');
   eq(at100.tier, 'Silver 94', '100% FPL tier = Silver 94');
-  eq(at100.premiumCap, 0, '100% FPL premium cap = 0%');
-  // 150% FPL boundary (≤150 still Silver 94)
-  const at150 = calculateACASubsidy(15060 * 1.5, 1, 'single');
-  eq(at150.tier, 'Silver 94', '150% FPL → Silver 94');
-  // Just above 150%: Silver 87, 2% cap
-  const above150 = calculateACASubsidy(15060 * 1.5 + 100, 1, 'single');
-  eq(above150.tier, 'Silver 87', '>150% FPL → Silver 87');
-  eq(above150.premiumCap, 2.0, '>150% FPL cap = 2%');
-  // 250% FPL: Silver 73, 4% cap
-  const at250 = calculateACASubsidy(15060 * 2.5, 1, 'single');
-  eq(at250.premiumCap, 4.0, '250% FPL cap = 4%');
-  // Above 400% FPL: still eligible (ARPA/IRA extension) with note
-  const above400 = calculateACASubsidy(15060 * 5, 1, 'single');
-  eq(above400.eligible, true, '>400% FPL still eligible under ARPA/IRA');
-  eq(above400.premiumCap, 8.5, '>400% FPL cap = 8.5%');
-  eq(typeof above400.note, 'string', '>400% FPL includes note about reduced subsidy');
+  approx(at100.premiumCap, 2.10, '100% FPL required contribution = 2.10% of MAGI', 0.01);
+  // 150% FPL: top of the 133–150 band → 4.19%
+  const at150 = calculateACASubsidy(15650 * 1.5, 1, 'single');
+  approx(at150.premiumCap, 4.19, '150% FPL contribution = 4.19%', 0.01);
+  // 250% FPL: 8.44%
+  const at250 = calculateACASubsidy(15650 * 2.5, 1, 'single');
+  approx(at250.premiumCap, 8.44, '250% FPL contribution = 8.44%', 0.01);
+  // 300–400% FPL: flat 9.96%
+  const at350 = calculateACASubsidy(15650 * 3.5, 1, 'single');
+  approx(at350.premiumCap, 9.96, '350% FPL contribution = 9.96%', 0.01);
+  // Above 400% FPL: the cliff is BACK (ARPA/IRA enhancement expired 12/31/2025)
+  const above400 = calculateACASubsidy(15650 * 4.01, 1, 'single');
+  eq(above400.eligible, false, '>400% FPL → INELIGIBLE (2026 cliff)');
   // Household size handling: size 4 uses larger FPL
-  const family100 = calculateACASubsidy(31200, 4, 'married_joint');
-  eq(family100.eligible, true, 'family of 4 at $31,200 → 100% FPL → eligible');
-  eq(family100.tier, 'Silver 94', 'family of 4 at 100% FPL → Silver 94');
+  const family100 = calculateACASubsidy(32150, 4, 'married_joint');
+  eq(family100.eligible, true, 'family of 4 at $32,150 → 100% FPL → eligible');
   // Household size > 8 capped at 8
-  const big = calculateACASubsidy(52720, 12, 'married_joint');
-  eq(big.fplPercent, 100, 'household 12 capped to household 8 FPL ($52,720)');
+  const big = calculateACASubsidy(54150, 12, 'married_joint');
+  eq(big.fplPercent, 100, 'household 12 capped to household 8 FPL ($54,150)');
+}
+
+section('P2 — calculateACAPremiumCredit (dollar credit + cliff)');
+{
+  const { calculateACAPremiumCredit } = engine;
+  // Single, MAGI exactly 2× FPL ($31,300), benchmark $14,000.
+  // Contribution = 6.60% × 31,300 = $2,065.80 → subsidy = 14,000 − 2,065.80.
+  const mid = calculateACAPremiumCredit({ magi: 31300, householdSize: 1, benchmarkPremium: 14000 });
+  approx(mid.subsidy, 14000 - 31300 * 0.066, '200% FPL: subsidy = benchmark − 6.60% of MAGI', 0.005);
+  approx(mid.netPremium, 31300 * 0.066, '200% FPL: net premium = required contribution', 0.005);
+  // One dollar over the cliff: subsidy vanishes entirely.
+  const cliffEdge = 15650 * 4;
+  const under = calculateACAPremiumCredit({ magi: cliffEdge - 1, householdSize: 1, benchmarkPremium: 14000 });
+  const over = calculateACAPremiumCredit({ magi: cliffEdge + 1, householdSize: 1, benchmarkPremium: 14000 });
+  gt(under.subsidy, 7000, 'just under 400% FPL: substantial subsidy remains');
+  eq(over.subsidy, 0, 'just over 400% FPL: subsidy = 0 (hard cliff)');
+  eq(over.cliff, true, 'cliff flag set above 400%');
+  eq(over.netPremium, 14000, 'above cliff: full benchmark premium due');
+  // FPL indexes forward: same REAL income 10 years out keeps the same % of FPL.
+  const later = calculateACAPremiumCredit({ magi: 31300 * Math.pow(1.03, 10), householdSize: 1, benchmarkPremium: 14000, yearsFromNow: 10, inflationRate: 0.03 });
+  approx(later.fplPercent, 200, 'inflation-scaled MAGI stays at 200% FPL 10 years out', 0.01);
+}
+
+section('P2 — ACA premiums wired into projections (pre65Coverage: aca)');
+{
+  // Retired couple, both 60 (pre-65). Brokerage-first withdrawals (30% basis)
+  // keep MAGI ≈ pension $20k + realized gains ≈ $55-65k — inside the 100–400%
+  // FPL band (household-2 cliff ≈ $84.6k), so a subsidy exists. (Pre-tax-first
+  // at $60k spending lands ON the cliff — a correct but useless test point.)
+  const mk = (overrides = {}) => baseScenario({
+    healthcareModel: 'basic', pre65Coverage: 'aca', acaBenchmarkPremium: 14000,
+    pre65HealthcareAnnual: 10000, medicalInflation: 0.05,
+    desiredRetirementIncome: 50000,
+    withdrawalPriority: ['brokerage', 'pretax', 'roth'],
+    ...overrides,
+  });
+  const { pi, accts, streams } = mk();
+  const proj = computeProjections(pi, accts, streams, [], [], [], TODAY_YEAR);
+  const y0 = proj[0];
+  gt(y0.acaGrossPremium, 27999, 'two under-65 retirees → gross benchmark = 2 × $14k');
+  gt(y0.acaSubsidy, 0, 'subsidy present at moderate MAGI');
+  eq(y0.acaNetPremium, y0.acaGrossPremium - y0.acaSubsidy, 'net = gross − subsidy', 1);
+  eq(y0.healthcarePre65, y0.acaNetPremium, 'pre-65 healthcare = ACA net premium (no flat cost double-charge)', 1);
+  // At 65+ the ACA fields go quiet (Medicare takes over).
+  const y65 = proj.find(r => r.myAge === 65);
+  eq(y65.acaGrossPremium, 0, 'no ACA premium once both are 65');
+
+  // Flat mode (default) must be unaffected by the new fields' presence.
+  const { pi: piFlat, accts: aF, streams: sF } = mk({ pre65Coverage: 'flat' });
+  const projFlat = computeProjections(piFlat, aF, sF, [], [], [], TODAY_YEAR);
+  eq(projFlat[0].acaGrossPremium, 0, 'flat mode → no ACA pricing');
+  eq(projFlat[0].healthcarePre65, Math.round(2 * 10000), 'flat mode → flat pre-65 cost, both persons', 1);
+
+  // A large Roth conversion in an ACA year reduces (or kills) the subsidy.
+  const { pi: piConv, accts: aC, streams: sC } = mk({ rothConversionAmount: 100000, rothConversionStartAge: 60, rothConversionEndAge: 64 });
+  const projConv = computeProjections(piConv, aC, sC, [], [], [], TODAY_YEAR);
+  lt(projConv[0].acaSubsidy, y0.acaSubsidy, 'Roth conversion raises MAGI → smaller ACA subsidy');
 }
 
 // ── 10. Account-type predicate completeness ──────────────────────────────────

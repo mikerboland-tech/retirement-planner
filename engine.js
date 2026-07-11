@@ -1606,10 +1606,27 @@ const getFullRetirementAge = (birthYear) => {
   return SS_FRA_PRE_1943[birthYear] || SS_FULL_RETIREMENT_AGE[birthYear] || 67;
 };
 
-// ACA Federal Poverty Level 2025 (for subsidy calculations)
+// ACA Federal Poverty Level — 2025 HHS guidelines (48 contiguous states), which
+// govern PREMIUM TAX CREDITS for the 2026 coverage year (the ACA uses the prior
+// year's FPL). $15,650 for one person + $5,500 per additional person.
+// Name kept for stability; values are the 2025 guidelines / 2026 coverage year.
 const ACA_FPL_2025 = {
-  1: 15060, 2: 20440, 3: 25820, 4: 31200, 5: 36580, 6: 41960, 7: 47340, 8: 52720
+  1: 15650, 2: 21150, 3: 26650, 4: 32150, 5: 37650, 6: 43150, 7: 48650, 8: 54150
 };
+
+// Post-ARPA applicable-percentage table for 2026 (IRS Rev. Proc. 2025-25).
+// The enhanced ARPA/IRA subsidies expired 12/31/2025: the 400% FPL hard cliff is
+// BACK, and the required contribution runs 2.10% → 9.96% of MAGI with linear
+// interpolation inside each band. Rows: from `lo`% to `hi`% of FPL, the
+// contribution percentage interpolates pctLo → pctHi.
+const ACA_APPLICABLE_PCT_2026 = [
+  { lo: 100, hi: 133, pctLo: 0.0210, pctHi: 0.0210 },
+  { lo: 133, hi: 150, pctLo: 0.0314, pctHi: 0.0419 },
+  { lo: 150, hi: 200, pctLo: 0.0419, pctHi: 0.0660 },
+  { lo: 200, hi: 250, pctLo: 0.0660, pctHi: 0.0844 },
+  { lo: 250, hi: 300, pctLo: 0.0844, pctHi: 0.0996 },
+  { lo: 300, hi: 400, pctLo: 0.0996, pctHi: 0.0996 },
+];
 
 // QCD (Qualified Charitable Distribution) constants
 // QCDs allow direct IRA-to-charity transfers that satisfy RMD but aren't taxable income
@@ -1804,28 +1821,52 @@ const getSpendingPhaseMultiplier = (pi, myAge) => {
   return pi.noGoMultiplier ?? 0.75;
 };
 
-// Calculate ACA subsidy eligibility (simplified)
+// Applicable percentage (required contribution as a fraction of MAGI) for a
+// given % of FPL, per the 2026 post-ARPA table. Returns null when the household
+// is outside the 100%–400% eligibility window.
+const getACAApplicablePercentage = (fplPercent) => {
+  if (fplPercent < 100 || fplPercent > 400) return null;
+  const row = ACA_APPLICABLE_PCT_2026.find(r => fplPercent <= r.hi) || ACA_APPLICABLE_PCT_2026[ACA_APPLICABLE_PCT_2026.length - 1];
+  const span = row.hi - row.lo;
+  const t = span > 0 ? Math.min(Math.max((fplPercent - row.lo) / span, 0), 1) : 0;
+  return row.pctLo + (row.pctHi - row.pctLo) * t;
+};
+
+// Premium tax credit for a household. The credit = benchmark (SLCSP) premium
+// minus the required contribution (applicablePct × MAGI), floored at 0.
+// FPL is indexed forward by general inflation for future projection years.
+// ACA MAGI = AGI + tax-exempt interest + UNTAXED Social Security (the caller is
+// responsible for building that base — see computeProjections).
+const calculateACAPremiumCredit = ({ magi, householdSize, benchmarkPremium, yearsFromNow = 0, inflationRate = 0.03 }) => {
+  const inf = Math.pow(1 + inflationRate, yearsFromNow);
+  const fpl = (ACA_FPL_2025[Math.min(Math.max(householdSize, 1), 8)] || ACA_FPL_2025[1]) * inf;
+  const fplPercent = fpl > 0 ? (magi / fpl) * 100 : Infinity;
+  const applicablePct = getACAApplicablePercentage(fplPercent);
+  if (applicablePct === null) {
+    // Below 100% FPL (Medicaid territory in expansion states) or above the 400%
+    // hard cliff (back since 1/1/2026): no marketplace credit — full premium.
+    return { subsidy: 0, netPremium: benchmarkPremium, fplPercent, applicablePct: null, cliff: fplPercent > 400 };
+  }
+  const requiredContribution = magi * applicablePct;
+  const subsidy = Math.max(0, benchmarkPremium - requiredContribution);
+  return { subsidy, netPremium: benchmarkPremium - subsidy, fplPercent, applicablePct, cliff: false };
+};
+
+// Calculate ACA subsidy eligibility (simplified summary — 2026 post-ARPA rules).
+// The ARPA-era "no cliff, 8.5% cap above 400%" law expired 12/31/2025; above
+// 400% FPL there is NO premium tax credit at all.
 const calculateACASubsidy = (income, householdSize, filingStatus) => {
   const fpl = ACA_FPL_2025[Math.min(householdSize, 8)] || ACA_FPL_2025[2];
   const fplPercent = (income / fpl) * 100;
-  
-  // Subsidy cliff is at 400% FPL (after American Rescue Plan extension)
-  // Enhanced subsidies available above 400% but phase out
+
   if (fplPercent < 100) {
     return { eligible: false, fplPercent, reason: 'Below 100% FPL - may qualify for Medicaid' };
-  } else if (fplPercent <= 150) {
-    return { eligible: true, fplPercent, premiumCap: 0, tier: 'Silver 94' };
-  } else if (fplPercent <= 200) {
-    return { eligible: true, fplPercent, premiumCap: 2.0, tier: 'Silver 87' };
-  } else if (fplPercent <= 250) {
-    return { eligible: true, fplPercent, premiumCap: 4.0, tier: 'Silver 73' };
-  } else if (fplPercent <= 300) {
-    return { eligible: true, fplPercent, premiumCap: 6.0, tier: 'Silver' };
-  } else if (fplPercent <= 400) {
-    return { eligible: true, fplPercent, premiumCap: 8.5, tier: 'Silver' };
-  } else {
-    return { eligible: true, fplPercent, premiumCap: 8.5, tier: 'Silver', note: 'Above 400% FPL - reduced subsidy' };
   }
+  if (fplPercent > 400) {
+    return { eligible: false, fplPercent, premiumCap: null, reason: 'Above 400% FPL - subsidy cliff (no premium tax credit as of 2026)' };
+  }
+  const applicablePct = getACAApplicablePercentage(fplPercent);
+  return { eligible: true, fplPercent, premiumCap: applicablePct * 100, tier: fplPercent <= 150 ? 'Silver 94' : fplPercent <= 200 ? 'Silver 87' : fplPercent <= 250 ? 'Silver 73' : 'Silver' };
 };
 
 
@@ -1843,18 +1884,28 @@ const calculateHealthcareExpenses = (pi, myAge, spouseAge, yearsFromNow, primary
   let pre65Cost = 0;
   let medicareCost = 0;
   let ltcCost = 0;
+  let acaPersons = 0; // under-65 retired persons whose premium is MAGI-based (pre65Coverage: 'aca')
   const isMarried = pi.filingStatus === 'married_joint';
-  
+
   // Determine who needs healthcare costs modeled
   const people = [];
-  if (primaryAlive) people.push({ age: myAge, label: 'me', lifeExp: pi.myLifeExpectancy || 85 });
-  if (spouseAlive && isMarried) people.push({ age: spouseAge, label: 'spouse', lifeExp: pi.spouseLifeExpectancy || 87 });
-  
+  if (primaryAlive) people.push({ age: myAge, label: 'me', lifeExp: pi.myLifeExpectancy || 85, retirementAge: pi.myRetirementAge ?? 65 });
+  if (spouseAlive && isMarried) people.push({ age: spouseAge, label: 'spouse', lifeExp: pi.spouseLifeExpectancy || 87, retirementAge: pi.spouseRetirementAge ?? 65 });
+
   people.forEach(person => {
     if (person.age < 65) {
-      // PRE-MEDICARE: ACA/employer healthcare
-      const annualPre65 = (pi.pre65HealthcareAnnual || PRE_65_HEALTHCARE_ANNUAL_2025);
-      pre65Cost += annualPre65 * medInflationFactor;
+      // PRE-MEDICARE. Two coverage models:
+      //  - 'flat' (default): fixed annual cost (employer or self-estimated ACA).
+      //  - 'aca': once the person is RETIRED, the premium is MAGI-driven
+      //    (benchmark − premium tax credit) and cannot be computed here — the
+      //    projection loop prices it after MAGI is known. We only COUNT those
+      //    people. Pre-retirement years still use the flat cost (employer coverage).
+      if (pi.pre65Coverage === 'aca' && person.age >= person.retirementAge) {
+        acaPersons++;
+      } else {
+        const annualPre65 = (pi.pre65HealthcareAnnual || PRE_65_HEALTHCARE_ANNUAL_2025);
+        pre65Cost += annualPre65 * medInflationFactor;
+      }
     } else {
       // MEDICARE (age 65+): Part B + Part D + optional Medigap + OOP
       // Note: IRMAA surcharges are handled separately in the engine
@@ -1892,6 +1943,7 @@ const calculateHealthcareExpenses = (pi, myAge, spouseAge, yearsFromNow, primary
   
   const total = Math.round(pre65Cost + medicareCost + ltcCost);
   return { total, pre65: Math.round(pre65Cost), medicare: Math.round(medicareCost), ltc: Math.round(ltcCost),
+    acaPersons, // priced by the projection loop (MAGI-dependent), NOT included in `total`
     breakdown: { numPeople: people.length, pre65Count: people.filter(p => p.age < 65).length, medicareCount: people.filter(p => p.age >= 65).length }
   };
 };
@@ -1929,6 +1981,7 @@ const MEDICARE_PART_D_PREMIUM_2025 = 39;     // Avg monthly Part D base premium 
 const MEDICARE_SUPPLEMENT_PREMIUM_2025 = 175; // Avg monthly Medigap premium (2025)
 const MEDICARE_OOP_ANNUAL_2025 = 2000;       // Avg annual out-of-pocket (copays, dental, vision)
 const PRE_65_HEALTHCARE_ANNUAL_2025 = 12000; // Avg annual ACA/employer premium for one person
+const ACA_BENCHMARK_PREMIUM_2026 = 14000;    // Default unsubsidized silver benchmark (SLCSP) per person/yr — typical for an early retiree in their late 50s/60s; users should replace with their healthcare.gov quote
 const MEDICAL_INFLATION_RATE = 0.05;         // Healthcare cost inflation (higher than general CPI)
 const LTC_MONTHLY_ASSISTED_LIVING_2025 = 5900; // Median monthly assisted living cost (Genworth 2024)
 const LTC_DEFAULT_DURATION_MONTHS = 28;      // Default LTC planning: 28 months before death
@@ -2701,6 +2754,29 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // ── HEALTHCARE EXPENSES (unified model) ─────────────────────────────────────
     const healthcareResult = calculateHealthcareExpenses(pi, myAge, spouseAge, yearsFromNow, primaryAlive, spouseAlive);
     const healthcareExpense = healthcareResult.total;
+
+    // ── ACA MARKETPLACE PREMIUM (MAGI-driven, pre-65 retired persons) ───────────
+    // When pi.pre65Coverage === 'aca', retired under-65 household members buy
+    // marketplace coverage: net premium = benchmark − premium tax credit, and the
+    // credit depends on MAGI — which depends on withdrawals. Mirrors the IRMAA
+    // pattern: estimate here from pre-withdrawal income, correct per solver
+    // iteration, and settle from final MAGI after withdrawals are known.
+    // ACA MAGI = AGI + tax-exempt interest (not modeled) + UNTAXED Social Security.
+    const acaPersons = healthcareResult.acaPersons || 0;
+    const acaMedInflationFactor = Math.pow(1 + (pi.medicalInflation || MEDICAL_INFLATION_RATE), yearsFromNow);
+    const acaGrossPremium = acaPersons > 0
+      ? acaPersons * (pi.acaBenchmarkPremium || ACA_BENCHMARK_PREMIUM_2026) * acaMedInflationFactor
+      : 0;
+    // FPL household = the tax household (both spouses when MFJ and both alive),
+    // even if one of them is already on Medicare.
+    const acaHouseholdSize = (effectiveFilingStatus === 'married_joint' && primaryAlive && spouseAlive) ? 2 : 1;
+    const acaCredit = (acaMagi) => calculateACAPremiumCredit({
+      magi: acaMagi, householdSize: acaHouseholdSize,
+      benchmarkPremium: acaGrossPremium, yearsFromNow, inflationRate: pi.inflationRate,
+    });
+    // AGI ≈ totalTaxableIncome_adjusted (net non-SS income + taxable SS).
+    const baseACAMagi = totalTaxableIncome_adjusted + (totalSocialSecurity - taxableSS);
+    const estACANetPremium = acaGrossPremium > 0 ? acaCredit(baseACAMagi).netPremium : 0;
     
     // ── RECURRING EXPENSES (categorized, with per-item inflation) ───────────────
     // spendFactor applies the survivor step-down to these household line items,
@@ -2709,8 +2785,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     const totalRecurringExpenses = recurringResult.total;
     
     // Adjusted desired income includes: base retirement spending + one-time expenses
-    // + healthcare + recurring expense items
-    const adjustedDesiredIncome = desiredIncome + oneTimeExpenseTotal + healthcareExpense + totalRecurringExpenses;
+    // + healthcare + recurring expense items + estimated ACA net premium (the
+    // solver books MAGI-driven premium movement as a delta, like IRMAA)
+    const adjustedDesiredIncome = desiredIncome + oneTimeExpenseTotal + healthcareExpense + totalRecurringExpenses + estACANetPremium;
     
     // If retired, calculate portfolio withdrawal needs to meet desired income
     if (isRetired) {
@@ -2861,8 +2938,19 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             : 0;
           const iterIRMAADelta = iterIRMAA - estimatedIRMAA;
 
-          // Net income from this withdrawal (after taxes and any IRMAA tier crossing)
-          const netFromWithdrawal = testWithdrawal - withdrawalTax - iterIRMAADelta;
+          // ACA premium correction — withdrawals move MAGI, which moves the
+          // premium tax credit. Book only the delta vs. the pre-loop estimate
+          // (estACANetPremium is already inside adjustedDesiredIncome), exactly
+          // like the IRMAA correction above. ACA MAGI adds UNTAXED SS to AGI.
+          let iterACADelta = 0;
+          if (acaGrossPremium > 0) {
+            const iterACAMagi = ordinaryBaseGross + estimatedGains + (totalSocialSecurity - adjustedTaxableSS);
+            iterACADelta = acaCredit(iterACAMagi).netPremium - estACANetPremium;
+          }
+
+          // Net income from this withdrawal (after taxes, IRMAA tier crossings,
+          // and ACA subsidy movement)
+          const netFromWithdrawal = testWithdrawal - withdrawalTax - iterIRMAADelta - iterACADelta;
           
           // How far off are we?
           const shortfall = afterTaxGap - netFromWithdrawal;
@@ -3327,6 +3415,19 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       }
     }
     
+    // ── ACA PREMIUM: settle from final MAGI ────────────────────────────────────
+    // The solver worked from estimates; price the year's actual net premium from
+    // the settled income figure (finalTotalTaxableIncome = AGI incl. gains and
+    // taxable SS, net of the pre-tax deduction).
+    let acaSubsidy = 0, acaNetPremium = 0, acaFplPercent = null;
+    if (acaGrossPremium > 0) {
+      const finalACAMagi = finalTotalTaxableIncome + (totalSocialSecurity - finalTaxableSS);
+      const finalACA = acaCredit(finalACAMagi);
+      acaSubsidy = finalACA.subsidy;
+      acaNetPremium = finalACA.netPremium;
+      acaFplPercent = finalACA.fplPercent;
+    }
+
     // Update total taxes for downstream calculations
     const totalTaxes = federalTax + stateTax;
     
@@ -3506,9 +3607,16 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       irmaaSurcharge: Math.round(irmaaSurcharge), // Medicare IRMAA surcharge (Part B + Part D above standard)
       irmaaInfo, // IRMAA tier detail { tier, totalAnnual, partBAnnual, partDAnnual, distToNextTier }
       ssEarningsTestReduction: Math.round(ssEarningsTestReduction), // SS benefits withheld due to earnings test
-      // Healthcare and recurring expense data (from unified model)
-      healthcareExpense: healthcareExpense, // Total healthcare costs this year
-      healthcarePre65: healthcareResult.pre65,
+      // Healthcare and recurring expense data (from unified model).
+      // The ACA net premium (MAGI-priced in this loop) is folded into the totals
+      // here — calculateHealthcareExpenses only counted the people.
+      healthcareExpense: healthcareExpense + Math.round(acaNetPremium), // Total healthcare costs this year
+      healthcarePre65: healthcareResult.pre65 + Math.round(acaNetPremium),
+      // ACA marketplace detail (pre65Coverage === 'aca' and someone is retired & under 65)
+      acaGrossPremium: Math.round(acaGrossPremium),
+      acaSubsidy: Math.round(acaSubsidy),
+      acaNetPremium: Math.round(acaNetPremium),
+      acaFplPercent: acaFplPercent !== null ? Math.round(acaFplPercent) : null,
       healthcareMedicare: healthcareResult.medicare,
       healthcareLTC: healthcareResult.ltc,
       recurringExpenses: totalRecurringExpenses, // Total categorized recurring expenses
@@ -3597,6 +3705,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     PRE_65_HEALTHCARE_ANNUAL_2025, MEDICAL_INFLATION_RATE,
     LTC_MONTHLY_ASSISTED_LIVING_2025, LTC_DEFAULT_DURATION_MONTHS,
     ACA_FPL_2025, calculateACASubsidy,
+    ACA_APPLICABLE_PCT_2026, ACA_BENCHMARK_PREMIUM_2026,
+    getACAApplicablePercentage, calculateACAPremiumCredit,
     getSpendingPhaseMultiplier,
     calculateHealthcareExpenses, calculateRecurringExpenses,
 
