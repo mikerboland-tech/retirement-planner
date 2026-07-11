@@ -1908,6 +1908,48 @@ section('P3 — bracket-fill strategy vs baseline (integration)');
   gt(sConv.afterTaxLegacy, sNo.afterTaxLegacy, '12% fill beats baseline on after-tax legacy at 25% heir rate');
 }
 
+// ── P4 — Monte Carlo spending guardrails (opts.spendingRule) ─────────────────
+section('P4 — guardrails cut spending after a crash, absent otherwise');
+{
+  const { pi, accts, streams } = baseScenario();
+  const horizon = (pi.legacyAge - pi.myAge) + 1;
+  const rule = { bandPct: 0.20, adjustPct: 0.10 };
+
+  // No rule → guardrail fields stay undefined and behavior is unchanged.
+  const plain = computeProjections(pi, accts, streams, [], [], [], TODAY_YEAR);
+  eq(plain[0].guardrailMultiplier, undefined, 'no spendingRule → no guardrail fields');
+
+  // Rule active, three consecutive -30% years right at retirement: the
+  // withdrawal rate blows past anchor × 1.2 → a persistent cut must fire.
+  const crash = new Array(horizon).fill(undefined);
+  crash[0] = { marketReturn: -0.30, inflation: 0.03 };
+  crash[1] = { marketReturn: -0.30, inflation: 0.03 };
+  crash[2] = { marketReturn: -0.30, inflation: 0.03 };
+  const cut = computeProjections(pi, accts, streams, [], [], [], TODAY_YEAR, { yearOverrides: crash, spendingRule: rule });
+  const firstCut = cut.find(r => r.guardrailEvent === 'cut');
+  eq(!!firstCut, true, 'a crash sequence triggers a guardrail cut');
+  lt(firstCut.myAge, 66, 'the cut fires within the first years after the crash');
+  lt(firstCut.guardrailMultiplier, 1, 'cut year multiplier < 1');
+  // Spending in the cut year is lower than the same crash WITHOUT guardrails.
+  const noRule = computeProjections(pi, accts, streams, [], [], [], TODAY_YEAR, { yearOverrides: crash });
+  const sameYearNoRule = noRule.find(r => r.myAge === firstCut.myAge);
+  lt(firstCut.desiredIncome, sameYearNoRule.desiredIncome, 'guardrail cut reduces the spending target vs no rule');
+  // Shortly after the cuts (before recovery-era raises), the guarded portfolio
+  // is ahead of the unguarded one. (At the END of the horizon guarded may hold
+  // LESS — guardrails also RAISE spending in recovery, which is the point.)
+  const checkAge = firstCut.myAge + 3;
+  gt(cut.find(r => r.myAge === checkAge).totalPortfolio,
+     noRule.find(r => r.myAge === checkAge).totalPortfolio,
+     'guarded portfolio is ahead shortly after the cuts');
+
+  // Steady prosperous markets (account cagr, no overrides): no cuts in the
+  // pre-SS/pre-RMD years (excess RMDs are reinvested, not spent, so they must
+  // NOT trip the guardrail), and the multiplier never ends below plan level.
+  const calm = computeProjections(pi, accts, streams, [], [], [], TODAY_YEAR, { spendingRule: rule });
+  eq(calm.filter(r => r.myAge < 70).some(r => r.guardrailEvent === 'cut'), false, 'no cuts before 70 in steadily growing markets');
+  gt(calm[calm.length - 1].guardrailMultiplier, 0.999, 'multiplier never ends below 1 in good markets');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

@@ -3069,6 +3069,11 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
     method: 'random',     // 'random' or 'historical'
     assetMix: 0.7,        // For historical mode: 0.7 = 70% stocks / 30% bonds
     historicalStartYear: 'all',  // 'all' = run every valid start year (and resample), or a specific year
+    // Dynamic spending guardrails (Guyton-Klinger style): when the prior year's
+    // withdrawal rate drifts outside the anchor rate ± band, real spending is
+    // cut/raised by adjustPct (persistently). Turns MC pass/fail into "what
+    // spending flexibility keeps this plan alive."
+    guardrails: { enabled: false, bandPct: 0.20, adjustPct: 0.10 },
   });
   const [simResults, setSimResults] = useState(null);
   const [simError, setSimError] = useState(null);
@@ -3340,11 +3345,51 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
             <input 
               type="number" 
               step="0.25"
-              value={(simSettings.inflationStdDev * 100).toFixed(2)} 
+              value={(simSettings.inflationStdDev * 100).toFixed(2)}
               onChange={e => setSimSettings({...simSettings, inflationStdDev: Number(e.target.value) / 100})}
               className="w-full bg-slate-800 border border-slate-600 rounded px-3 py-2 text-slate-100"
             />
           </div>
+        </div>
+        {/* Dynamic spending guardrails (Guyton-Klinger style) */}
+        <div className="flex flex-wrap items-center gap-4 mb-4 p-3 bg-slate-800/40 border border-slate-700/50 rounded-lg">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={simSettings.guardrails?.enabled || false}
+              onChange={e => setSimSettings({ ...simSettings, guardrails: { ...(simSettings.guardrails || { bandPct: 0.20, adjustPct: 0.10 }), enabled: e.target.checked } })}
+              className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-amber-500 focus:ring-amber-500/50"
+            />
+            <span className="text-sm text-slate-300">Dynamic spending guardrails</span>
+          </label>
+          {simSettings.guardrails?.enabled && (
+            <>
+              <div className="flex items-center gap-1.5 text-sm text-slate-400">
+                <span>Band ±</span>
+                <input
+                  type="number" min="5" max="50" step="5"
+                  value={Math.round((simSettings.guardrails?.bandPct ?? 0.20) * 100)}
+                  onChange={e => setSimSettings({ ...simSettings, guardrails: { ...simSettings.guardrails, bandPct: Math.max(0.05, (Number(e.target.value) || 20) / 100) } })}
+                  className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
+                />
+                <span>%</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-sm text-slate-400">
+                <span>Adjust</span>
+                <input
+                  type="number" min="5" max="25" step="5"
+                  value={Math.round((simSettings.guardrails?.adjustPct ?? 0.10) * 100)}
+                  onChange={e => setSimSettings({ ...simSettings, guardrails: { ...simSettings.guardrails, adjustPct: Math.max(0.05, (Number(e.target.value) || 10) / 100) } })}
+                  className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
+                />
+                <span>%</span>
+              </div>
+              <span className="text-xs text-slate-500 max-w-md">
+                When a year's withdrawal rate drifts more than the band above/below your first-retirement-year rate,
+                spending is cut/raised by the adjust % — like real retirees do. Compare success rates with it on vs off.
+              </span>
+            </>
+          )}
         </div>
         <div className="flex items-center gap-4">
           {isRunning ? (
@@ -3512,9 +3557,47 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
                       ? `One deterministic replay of each of the ${simResults.totalSimulations.toLocaleString()} valid starting years from the Shiller dataset.`
                       : `Deterministic replay of returns starting in ${simResults.historicalStartYearSetting}.`)
                   : `${simResults.totalSimulations.toLocaleString()} simulations sampled from a normal distribution.`}
+                {simResults.guardrailsEnabled && ' Dynamic spending guardrails were active.'}
               </div>
             </div>
           </div>
+
+          {/* Guardrail spending outcomes — what flexibility the plan demanded */}
+          {simResults.guardrailsEnabled && simResults.guardrailStats && (
+            <div className={cardStyle}>
+              <h4 className="text-lg font-semibold text-slate-100 mb-1">🛤️ Spending Guardrail Outcomes</h4>
+              <p className="text-xs text-slate-400 mb-3">
+                With guardrails, "success" means the portfolio survived <em>given</em> these spending adjustments —
+                the numbers below show how much flexing that took.
+              </p>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="bg-slate-800/60 rounded-lg p-3">
+                  <div className="text-xs text-slate-500 mb-1">Scenarios Needing a Cut</div>
+                  <div className={`text-xl font-semibold ${simResults.guardrailStats.simsWithCutPct > 0.5 ? 'text-yellow-400' : 'text-slate-100'}`}>
+                    {Math.round(simResults.guardrailStats.simsWithCutPct * 100)}%
+                  </div>
+                </div>
+                <div className="bg-slate-800/60 rounded-lg p-3">
+                  <div className="text-xs text-slate-500 mb-1">Avg Cut Years per Scenario</div>
+                  <div className="text-xl font-semibold text-slate-100">{simResults.guardrailStats.avgCutYears.toFixed(1)}</div>
+                </div>
+                <div className="bg-slate-800/60 rounded-lg p-3">
+                  <div className="text-xs text-slate-500 mb-1">Median Ending Spending</div>
+                  <div className="text-xl font-semibold text-slate-100">{Math.round(simResults.guardrailStats.medianEndMultiplier * 100)}%<span className="text-xs text-slate-500 ml-1">of plan</span></div>
+                </div>
+                <div className="bg-slate-800/60 rounded-lg p-3">
+                  <div className="text-xs text-slate-500 mb-1">Worst-Case Trough (p10)</div>
+                  <div className={`text-xl font-semibold ${simResults.guardrailStats.p10MinMultiplier < 0.7 ? 'text-red-400' : 'text-slate-100'}`}>
+                    {Math.round(simResults.guardrailStats.p10MinMultiplier * 100)}%<span className="text-xs text-slate-500 ml-1">of plan</span>
+                  </div>
+                </div>
+              </div>
+              <p className="text-xs text-slate-500 mt-2">
+                Reading it: if the worst-case trough is a spending level you could actually live with (say, 80% of plan),
+                the guardrail success rate is a fairer picture of your plan than the rigid fixed-spending number.
+              </p>
+            </div>
+          )}
           
           {/* Historical Summary Table — only when historical mode + 'all' years */}
           {simResults.method === 'historical' && simResults.historicalSummary && simResults.historicalSummary.length > 0 && (

@@ -86,6 +86,12 @@ function runMonteCarlo(jobId, payload) {
   const walkUpYears = Math.max(0, simSettings.startAge - piWithLifeExp.myAge);
   const stochasticYears = yearsFromCurrent - walkUpYears;
 
+  // Optional Guyton-Klinger-style dynamic spending (engine opts.spendingRule).
+  const guardrails = (simSettings.guardrails && simSettings.guardrails.enabled)
+    ? { bandPct: simSettings.guardrails.bandPct ?? 0.20, adjustPct: simSettings.guardrails.adjustPct ?? 0.10 }
+    : null;
+  const gCutYears = [], gMinMult = [], gEndMult = [];
+
   const isHistorical = simSettings.method === 'historical';
   let historicalStartYears = null;
   if (isHistorical) {
@@ -140,7 +146,7 @@ function runMonteCarlo(jobId, payload) {
 
     const proj = computeProjections(
       piWithLifeExp, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
-      undefined, { yearOverrides: overrides }
+      undefined, { yearOverrides: overrides, spendingRule: guardrails || undefined }
     );
 
     // Build per-sim portfolio path from simSettings.startAge onward.
@@ -149,6 +155,20 @@ function runMonteCarlo(jobId, payload) {
       if (p.myAge >= simSettings.startAge) {
         path.push({ age: p.myAge, portfolio: p.totalPortfolio });
       }
+    }
+
+    // Guardrail spending-path stats for this sim (cuts, trough, ending level).
+    if (guardrails) {
+      let cuts = 0, minMult = 1, endMult = 1;
+      for (const p of proj) {
+        if (p.myAge < simSettings.startAge) continue;
+        if (p.guardrailEvent === 'cut') cuts++;
+        if (p.guardrailMultiplier !== undefined) {
+          endMult = p.guardrailMultiplier;
+          if (p.guardrailMultiplier < minMult) minMult = p.guardrailMultiplier;
+        }
+      }
+      gCutYears.push(cuts); gMinMult.push(minMult); gEndMult.push(endMult);
     }
 
     let portfolioSurvived = true;
@@ -208,6 +228,19 @@ function runMonteCarlo(jobId, payload) {
     });
   }
 
+  // Aggregate guardrail stats across sims.
+  let guardrailStats = null;
+  if (guardrails && gCutYears.length > 0) {
+    const sorted = (a) => [...a].sort((x, y) => x - y);
+    const median = (a) => { const s = sorted(a); return s[Math.floor(s.length / 2)]; };
+    guardrailStats = {
+      simsWithCutPct: gCutYears.filter(c => c > 0).length / gCutYears.length,
+      avgCutYears: gCutYears.reduce((s, c) => s + c, 0) / gCutYears.length,
+      medianEndMultiplier: median(gEndMult),
+      p10MinMultiplier: sorted(gMinMult)[Math.floor(gMinMult.length * 0.10)],
+    };
+  }
+
   let historicalSummary = null;
   if (isHistorical && simSettings.historicalStartYear === 'all') {
     const byYear = new Map();
@@ -254,6 +287,8 @@ function runMonteCarlo(jobId, payload) {
       method: simSettings.method,
       historicalSummary,
       historicalStartYearSetting: simSettings.historicalStartYear,
+      guardrailsEnabled: !!guardrails,
+      guardrailStats,
     },
   });
 }

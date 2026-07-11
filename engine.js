@@ -2365,6 +2365,18 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   // Each slot is null/undefined (use deterministic cagr + pi.inflationRate) or
   // { marketReturn, inflation } to drive Monte Carlo / historical sequence runs.
   const yearOverrides = opts.yearOverrides;
+  // opts.spendingRule: optional Guyton-Klinger-style dynamic spending guardrails
+  // { bandPct = 0.20, adjustPct = 0.10, initialWithdrawalRate? }. Each retirement
+  // year after the first, the PRIOR year's withdrawal rate is compared to the
+  // anchor rate (first retirement year's rate unless given) ± band. Outside the
+  // band, the real spending target is cut/raised by adjustPct — persistently
+  // (multiplier compounds). Rates use withdrawal ÷ end-of-year portfolio,
+  // consistently for both anchor and comparison.
+  const spendingRule = opts.spendingRule || null;
+  let guardrailMultiplier = 1;
+  let guardrailAnchorRate = (spendingRule && spendingRule.initialWithdrawalRate > 0)
+    ? spendingRule.initialWithdrawalRate : null;
+  let guardrailPrevYear = null; // last pushed year row (for prior-year rate)
   const years = [];
   let accountBalances = accts.reduce((acc, account) => ({ ...acc, [account.id]: account.balance }), {});
   
@@ -2460,7 +2472,28 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // only — recurring expense items carry their own age windows, and healthcare
     // is modeled separately (and typically rises while discretionary falls).
     const phaseMultiplier = getSpendingPhaseMultiplier(pi, myAge);
-    const desiredIncome = pi.desiredRetirementIncome * inflationFactor * spendFactor * phaseMultiplier;
+
+    // ── GUARDRAILS (dynamic spending) ─────────────────────────────────────────
+    // Evaluate the prior year's withdrawal rate against the anchor ± band and
+    // adjust the persistent spending multiplier before setting this year's target.
+    let guardrailEvent; // 'cut' | 'raise' | undefined
+    if (spendingRule && guardrailAnchorRate !== null && guardrailPrevYear
+        && myAge > pi.myRetirementAge && guardrailPrevYear.totalPortfolio > 0) {
+      // Spending-only rate: exclude excess RMD (forced out but reinvested, not
+      // spent) — otherwise RMD age would trip phantom "cuts" in healthy plans.
+      const prevRate = (guardrailPrevYear.portfolioWithdrawal - (guardrailPrevYear.excessRMD || 0)) / guardrailPrevYear.totalPortfolio;
+      const band = spendingRule.bandPct ?? 0.20;
+      const adjust = spendingRule.adjustPct ?? 0.10;
+      if (prevRate > guardrailAnchorRate * (1 + band)) {
+        guardrailMultiplier *= (1 - adjust);
+        guardrailEvent = 'cut';
+      } else if (prevRate < guardrailAnchorRate * (1 - band)) {
+        guardrailMultiplier *= (1 + adjust);
+        guardrailEvent = 'raise';
+      }
+    }
+    const desiredIncome = pi.desiredRetirementIncome * inflationFactor * spendFactor * phaseMultiplier
+      * (spendingRule ? guardrailMultiplier : 1);
     
     let totalSocialSecurity = 0, totalPension = 0, totalOtherIncome = 0, earnedIncome = 0;
     let nonSSIncome = 0; // Track non-SS income for calculating SS taxation
@@ -3675,8 +3708,22 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Survivor modeling status
       survivorEvent: survivorEvent || undefined,
       effectiveFilingStatus: effectiveFilingStatus !== pi.filingStatus ? effectiveFilingStatus : undefined,
-      primaryAlive, spouseAlive
+      primaryAlive, spouseAlive,
+      // Guardrails (only when opts.spendingRule is active)
+      guardrailMultiplier: spendingRule ? guardrailMultiplier : undefined,
+      guardrailEvent
     });
+
+    // Guardrails bookkeeping: remember this row for next year's rate check, and
+    // anchor the target withdrawal rate at the FIRST retirement year's actual rate
+    // (unless the caller supplied initialWithdrawalRate explicitly).
+    if (spendingRule) {
+      guardrailPrevYear = years[years.length - 1];
+      if (guardrailAnchorRate === null && isRetired && guardrailPrevYear.totalPortfolio > 0) {
+        // Same spending-only definition as the per-year rate check above.
+        guardrailAnchorRate = (guardrailPrevYear.portfolioWithdrawal - (guardrailPrevYear.excessRMD || 0)) / guardrailPrevYear.totalPortfolio;
+      }
+    }
 
     // After both spouses are dead, stop generating rows (B7). Otherwise the loop
     // would keep producing zero-income, untouched-balance rows out to legacyAge,
