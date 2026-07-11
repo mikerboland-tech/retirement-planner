@@ -8678,6 +8678,12 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
   const [netWorthRange, setNetWorthRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || MAX_AGE });
   const [incomeRange, setIncomeRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || MAX_AGE });
   const [sankeyAge, setSankeyAge] = useState(retirementAge);
+  // Roth conversion overlay on the Income vs Spending chart. Only offered when
+  // the plan actually executes conversions; defaults ON so the tax-line spike and
+  // net-income dip in conversion years are self-explanatory. The checkbox exists
+  // because a large bracket-fill conversion can dominate the y-axis scale.
+  const planHasConversions = useMemo(() => projections.some(p => (p.rothConversion || 0) > 0), [projections]);
+  const [showConversionsOnIncomeChart, setShowConversionsOnIncomeChart] = useState(true);
   
   // Info card open/close state — tracks which section's info card is visible
   const [openInfoCard, setOpenInfoCard] = useState(null);
@@ -8964,7 +8970,8 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
                     { color: '#3b82f6', label: 'Social Security (Blue)', desc: 'Your monthly Social Security benefit, shown annually. Starts at your claiming age (usually 62–70). Delaying increases the amount.' },
                     { color: '#8b5cf6', label: 'Pension (Purple)', desc: 'Any defined-benefit pension income. Starts at the age you specified in your income streams.' },
                     { color: '#06b6d4', label: 'Other Income (Teal)', desc: 'Rental income, annuities, part-time work, or any other income streams you\'ve entered.' },
-                    { color: '#f59e0b', label: 'Portfolio Withdrawal (Gold)', desc: 'Money pulled from your retirement accounts (401k, IRA, Roth, brokerage) to cover the gap between your guaranteed income and your spending needs. This is the piece the planner calculates for you.' }
+                    { color: '#f59e0b', label: 'Portfolio Withdrawal (Gold)', desc: 'Money pulled from your retirement accounts (401k, IRA, Roth, brokerage) to cover the gap between your guaranteed income and your spending needs. This is the piece the planner calculates for you.' },
+                    { color: '#ec4899', label: 'Roth Conversion (Pink, translucent)', desc: 'Only shown when your plan includes Roth conversions. This is an account TRANSFER (pre-tax → Roth), not spendable income — that\'s why it\'s drawn translucent with a dashed outline, unlike the solid income segments. It\'s taxed as ordinary income in the year it happens, which is what drives the tax spike in conversion years. Use the checkbox above the chart to hide it if a large conversion dominates the scale.' }
                   ]
                 },
                 {
@@ -8977,7 +8984,7 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
                 },
                 {
                   heading: 'How to Read It',
-                  body: 'The key relationship is between the green dashed line (net income) and the red solid line (desired spending). When green is above red, you\'re in good shape — you have more income than you need. When they\'re close together, your plan is tight. If the bars shrink below the red line, your portfolio can\'t fully cover your spending.',
+                  body: 'The key relationship is between the green dashed line (net income) and the red solid line (desired spending). When green is above red, you\'re in good shape — you have more income than you need. When they\'re close together, your plan is tight. If the bars shrink below the red line, your portfolio can\'t fully cover your spending. One important exception: in Roth conversion years, the green net-income line dips (sometimes below the red line) because the conversion tax is being prepaid that year. That\'s a deliberate transfer of tax from your future to your present — not a spending shortfall. The pink translucent segment marks those years.',
                   tip: 'Watch for the "income gap" in early retirement — the years between when earned income stops and when Social Security begins. This is often when portfolio withdrawals are heaviest and sequence-of-returns risk is greatest. Use "First 10yr Ret" to zoom in on this critical period.'
                 },
                 {
@@ -9000,6 +9007,17 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
             </button>
           </div>
           <div className="flex items-center gap-2 text-sm">
+            {planHasConversions && (
+              <label className="flex items-center gap-1.5 mr-2 text-slate-400 cursor-pointer select-none" title="Roth conversions are account transfers, not spendable income — shown as a distinct translucent segment so the tax spike in conversion years is explained. Uncheck if a large conversion dominates the chart scale.">
+                <input
+                  type="checkbox"
+                  checked={showConversionsOnIncomeChart}
+                  onChange={e => setShowConversionsOnIncomeChart(e.target.checked)}
+                  className="accent-pink-500"
+                />
+                <span>Roth conversions</span>
+              </label>
+            )}
             <span className="text-slate-400">Age:</span>
             <input
               type="number"
@@ -9049,6 +9067,14 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
               <Bar dataKey="pension" stackId="income" fill="#8b5cf6" name="Pension" />
               <Bar dataKey="otherIncome" stackId="income" fill="#06b6d4" name="Other Income" />
               <Bar dataKey="portfolioWithdrawal" stackId="income" fill="#f59e0b" name="Portfolio Withdrawal" />
+              {/* Roth conversions ride on top of the stack but are styled translucent
+                  with a dashed outline: they are account TRANSFERS (pre-tax → Roth),
+                  not spendable income, so they must read as "different in kind" from
+                  the solid income segments. Their presence explains why the tax line
+                  spikes and the net-income line dips in conversion years. */}
+              {planHasConversions && showConversionsOnIncomeChart && (
+                <Bar dataKey="rothConversion" stackId="income" fill="#ec4899" fillOpacity={0.3} stroke="#ec4899" strokeDasharray="4 2" name="Roth Conversion (transfer)" />
+              )}
               <Line type="monotone" dataKey="desiredIncome" stroke="#ef4444" strokeWidth={3} dot={false} name="Desired Spending" />
               <Line type="monotone" dataKey="netIncome" stroke="#10b981" strokeWidth={2} dot={false} name="Net Income (after tax)" strokeDasharray="5 5" />
               <Line type="monotone" dataKey="totalTax" stroke="#dc2626" strokeWidth={1} dot={false} name="Total Tax" strokeDasharray="3 3" />
@@ -9057,9 +9083,15 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
           </ResponsiveContainer>
         </div>
         <p className="text-xs text-slate-500 mt-2">
-          Bars show gross income sources. <span className="text-red-400">Red solid line</span> = desired spending. 
-          <span className="text-emerald-400 ml-1">Green dashed line</span> = net income after taxes (affected by QCD savings). 
+          Bars show gross income sources. <span className="text-red-400">Red solid line</span> = desired spending.
+          <span className="text-emerald-400 ml-1">Green dashed line</span> = net income after taxes (affected by QCD savings).
           <span className="text-red-600 ml-1">Dark red dotted line</span> = total tax burden.
+          {planHasConversions && showConversionsOnIncomeChart && (
+            <span className="text-pink-400 ml-1">Pink translucent segment</span>
+          )}
+          {planHasConversions && showConversionsOnIncomeChart && (
+            <span> = Roth conversion — an account transfer, not spendable income. Its tax is prepaid in that year, which is why the green line dips during the conversion window.</span>
+          )}
         </p>
       </div>
       )}
