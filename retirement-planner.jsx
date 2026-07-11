@@ -341,6 +341,7 @@ const DEFAULT_PERSONAL_INFO = {
   rothConversionBracket: '',     // If set ('22%','24%','32%'), fill to this bracket instead of fixed amount
   rothConversionTaxSource: 'withdrawal', // 'withdrawal' = tax paid via normal withdrawal priority, 'brokerage' = tax paid from brokerage account
   rothConversionPreTaxFloor: 0,  // Preserve this much pre-tax balance (today's $); stop converting once pre-tax hits it (0 = no floor)
+  heirTaxRate: 0.25,             // Heirs' assumed ordinary rate on inherited PRE-TAX dollars (SECURE Act 10-year drain) — used by the Roth optimizer's after-tax legacy score
   legacyAge: 95,                 // Planning horizon / legacy target age
   // Spending phases (go-go / slow-go / no-go): staged multipliers on base
   // retirement spending. Disabled by default — flat spending is the classic
@@ -2530,6 +2531,148 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
 // ============================================
 // TaxPlanningTab — Lifted to module scope
 // ============================================
+// ============================================
+// ROTH CONVERSION OPTIMIZER
+// Goal-based strategy sweep (bracket-fill targets × conversion windows) run in
+// the Web Worker; each candidate is a full computeProjections pass scored by
+// engine.scoreRothStrategy. Mirrors MonteCarloTab's job-handle pattern.
+// ============================================
+function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, setPersonalInfo }) {
+  const [goal, setGoal] = useState('legacy');
+  const [optResult, setOptResult] = useState(null);
+  const [optError, setOptError] = useState(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [appliedLabel, setAppliedLabel] = useState(null);
+  const jobRef = useRef(null);
+
+  // Cancel any in-flight job on unmount (same pattern as MonteCarloTab).
+  useEffect(() => () => {
+    if (jobRef.current && window.PlannerWorker) { window.PlannerWorker.cancel(); jobRef.current = null; }
+  }, []);
+
+  const heirTaxRate = personalInfo.heirTaxRate ?? 0.25;
+
+  const GOALS = {
+    legacy: { label: 'Maximize after-tax legacy', sort: (a, b) => b.afterTaxLegacy - a.afterTaxLegacy },
+    taxes: { label: 'Minimize lifetime taxes', sort: (a, b) => a.lifetimeTax - b.lifetimeTax },
+    irmaa: { label: 'Avoid IRMAA surcharges', sort: (a, b) => (a.lifetimeIRMAA - b.lifetimeIRMAA) || (b.afterTaxLegacy - a.afterTaxLegacy) },
+  };
+
+  const runOptimizer = () => {
+    if (!window.PlannerWorker) { setOptError('Worker not available — reload the page.'); return; }
+    setIsRunning(true); setProgress(0); setOptResult(null); setOptError(null); setAppliedLabel(null);
+    const handle = window.PlannerWorker.run({
+      type: 'rothOptimizer',
+      payload: { personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, heirTaxRate },
+      onProgress: (pct) => setProgress(pct),
+    });
+    jobRef.current = handle;
+    handle.promise
+      .then((data) => { if (jobRef.current !== handle) return; jobRef.current = null; setOptResult(data); setIsRunning(false); })
+      .catch((err) => { if (jobRef.current !== handle) return; jobRef.current = null; setIsRunning(false); if (err.message !== 'Cancelled') setOptError(err.message); });
+  };
+
+  const applyStrategy = (row) => {
+    setPersonalInfo(prev => ({
+      ...prev,
+      rothConversionAmount: 0,
+      rothConversionBracket: row.bracket || '',
+      rothConversionStartAge: row.startAge || 0,
+      rothConversionEndAge: row.endAge || 0,
+    }));
+    setAppliedLabel(row.label);
+  };
+
+  const ranked = optResult ? [...optResult.results].sort(GOALS[goal].sort) : [];
+  const best = ranked[0] || null;
+  const baseline = optResult ? optResult.baseline : null;
+  const showACA = optResult && optResult.results.some(r => (r.lifetimeACASubsidy || 0) > 0);
+  const deltaFmt = (v) => (v >= 0 ? '+' : '−') + formatCurrency(Math.abs(v)).replace('$', '$');
+
+  return (
+    <div className={cardStyle}>
+      <div className="flex flex-wrap items-end justify-between gap-3 mb-3">
+        <div>
+          <h4 className="text-lg font-semibold text-slate-100 mb-1">Roth Conversion Optimizer</h4>
+          <p className="text-xs text-slate-400 max-w-xl">
+            Sweeps bracket-fill targets and conversion windows (a full projection each — taxes, IRMAA, ACA,
+            RMDs all included), then ranks them against your goal. Apply the winner to make it your plan.
+          </p>
+        </div>
+        <div className="flex items-end gap-2">
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">Goal</label>
+            <select value={goal} onChange={e => setGoal(e.target.value)}
+              className="bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-100">
+              {Object.entries(GOALS).map(([k, g]) => <option key={k} value={k}>{g.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-400 mb-1" title="Heirs' assumed ordinary tax rate on inherited pre-tax dollars (SECURE Act 10-year rule)">Heir Tax Rate %</label>
+            <input type="number" min="0" max="60" step="1"
+              value={Math.round(heirTaxRate * 100)}
+              onChange={e => setPersonalInfo(prev => ({ ...prev, heirTaxRate: Math.min(0.6, Math.max(0, (Number(e.target.value) || 0) / 100)) }))}
+              className="w-20 bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-100 text-center" />
+          </div>
+          <button onClick={isRunning ? undefined : runOptimizer} disabled={isRunning}
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium ${isRunning ? 'bg-slate-700 text-slate-400' : 'bg-amber-600/20 text-amber-400 border border-amber-500/30 hover:bg-amber-600/30'}`}>
+            {isRunning ? `Optimizing… ${progress}%` : 'Run Optimizer'}
+          </button>
+        </div>
+      </div>
+
+      {optError && <p className="text-sm text-red-400 mb-2">{optError}</p>}
+      {appliedLabel && <p className="text-sm text-emerald-400 mb-2">✓ Applied: {appliedLabel} — every tab now reflects this strategy.</p>}
+
+      {optResult && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-slate-400 border-b border-slate-700">
+                <th className="py-2 pr-3">Strategy</th>
+                <th className="py-2 pr-3">Total Converted</th>
+                <th className="py-2 pr-3">After-Tax Legacy (vs none)</th>
+                <th className="py-2 pr-3">Lifetime Tax (vs none)</th>
+                <th className="py-2 pr-3">Lifetime IRMAA</th>
+                {showACA && <th className="py-2 pr-3">ACA Subsidy Kept</th>}
+                <th className="py-2 pr-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {ranked.slice(0, 8).map((r) => (
+                <tr key={r.label} className={`border-b border-slate-800 ${best && r.label === best.label ? 'bg-amber-900/20' : ''}`}>
+                  <td className="py-2 pr-3 text-slate-200">{best && r.label === best.label ? '★ ' : ''}{r.label}</td>
+                  <td className="py-2 pr-3 text-slate-300">{formatCurrency(r.lifetimeConversions)}</td>
+                  <td className="py-2 pr-3 text-slate-200">
+                    {formatCurrency(r.afterTaxLegacy)}
+                    {baseline && <span className={`ml-1 text-xs ${r.afterTaxLegacy >= baseline.afterTaxLegacy ? 'text-emerald-400' : 'text-red-400'}`}>({deltaFmt(r.afterTaxLegacy - baseline.afterTaxLegacy)})</span>}
+                  </td>
+                  <td className="py-2 pr-3 text-slate-200">
+                    {formatCurrency(r.lifetimeTax)}
+                    {baseline && <span className={`ml-1 text-xs ${r.lifetimeTax <= baseline.lifetimeTax ? 'text-emerald-400' : 'text-red-400'}`}>({deltaFmt(r.lifetimeTax - baseline.lifetimeTax)})</span>}
+                  </td>
+                  <td className="py-2 pr-3 text-slate-300">{formatCurrency(r.lifetimeIRMAA)}</td>
+                  {showACA && <td className="py-2 pr-3 text-slate-300">{formatCurrency(r.lifetimeACASubsidy)}</td>}
+                  <td className="py-2 pr-3">
+                    <button onClick={() => applyStrategy(r)}
+                      className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-200">Apply</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="text-xs text-slate-500 mt-2">
+            ★ = best for "{GOALS[goal].label}". After-tax legacy values pre-tax balances at {Math.round(heirTaxRate * 100)}¢ on
+            the dollar (your heirs' rate under the SECURE Act 10-year rule); Roth and brokerage pass at face value.
+            Change the goal to re-rank without re-running.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setPersonalInfo }) {
   const [ageRange, setAgeRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || 95 });
   
@@ -2880,8 +3023,19 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
         personalInfo={personalInfo}
       />
       
+      {/* Roth Conversion Optimizer — goal-based strategy sweep (worker) */}
+      <RothConversionOptimizer
+        personalInfo={personalInfo}
+        accounts={accounts}
+        incomeStreams={incomeStreams}
+        assets={assets}
+        oneTimeEvents={oneTimeEvents}
+        recurringExpenses={recurringExpenses}
+        setPersonalInfo={setPersonalInfo}
+      />
+
       {/* Roth Conversion Simulator */}
-      <RothConversionSimulator 
+      <RothConversionSimulator
         projections={projections}
         personalInfo={personalInfo}
         accounts={accounts}

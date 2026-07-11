@@ -1803,6 +1803,34 @@ const getDefaultRothConversionWindow = (personalInfo) => {
   };
 };
 
+// ── ROTH OPTIMIZER SCORING ───────────────────────────────────────────────────
+// Reduce a projection to the metrics the Roth Conversion Optimizer ranks by.
+// Lives in the engine (not the worker) so the test suite can exercise it.
+//
+// afterTaxLegacy discounts remaining PRE-TAX dollars by the heirs' assumed
+// ordinary tax rate — a $1M traditional IRA is not worth $1M to a beneficiary
+// (SECURE Act: non-spouse heirs must drain inherited IRAs within 10 years, at
+// their own marginal rates). Roth and brokerage pass at face value (brokerage
+// basis steps up at death; embedded-gain nuance is ignored).
+const scoreRothStrategy = (proj, { legacyAge, retirementAge, heirTaxRate = 0.25 } = {}) => {
+  if (!proj || proj.length === 0) return null;
+  const atLegacy = proj.find(p => p.myAge === legacyAge) || proj[proj.length - 1];
+  const retYears = proj.filter(p => p.myAge >= (retirementAge ?? 0));
+  const sum = (field) => retYears.reduce((s, p) => s + (p[field] || 0), 0);
+  const afterTaxLegacy = (atLegacy.rothBalance || 0) + (atLegacy.brokerageBalance || 0)
+    + (atLegacy.preTaxBalance || 0) * (1 - heirTaxRate);
+  return {
+    afterTaxLegacy: Math.round(afterTaxLegacy),
+    lifetimeTax: Math.round(sum('totalTax')),
+    lifetimeIRMAA: Math.round(sum('irmaaSurcharge')),
+    lifetimeACASubsidy: Math.round(sum('acaSubsidy')),
+    lifetimeConversions: Math.round(sum('rothConversion')),
+    endPreTax: atLegacy.preTaxBalance || 0,
+    endRoth: atLegacy.rothBalance || 0,
+    endTotal: atLegacy.totalPortfolio || 0,
+  };
+};
+
 // ── SPENDING PHASES (go-go / slow-go / no-go) ────────────────────────────────
 // Real retirement spending is not flat: T. Rowe Price and JPMorgan spending
 // research show a "retirement smile" — spending runs 20-30% higher in the
@@ -3707,7 +3735,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     ACA_FPL_2025, calculateACASubsidy,
     ACA_APPLICABLE_PCT_2026, ACA_BENCHMARK_PREMIUM_2026,
     getACAApplicablePercentage, calculateACAPremiumCredit,
-    getSpendingPhaseMultiplier,
+    getSpendingPhaseMultiplier, scoreRothStrategy,
     calculateHealthcareExpenses, calculateRecurringExpenses,
 
     // ── Historical sequences + main projection entry point ────────────────

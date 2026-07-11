@@ -39,6 +39,7 @@ self.onmessage = (e) => {
       case 'monteCarlo':         runMonteCarlo(jobId, payload); break;
       case 'ssGrid':             runSocialSecurityGrid(jobId, payload, false); break;
       case 'ssMonteCarlo':       runSocialSecurityGrid(jobId, payload, true);  break;
+      case 'rothOptimizer':      runRothOptimizer(jobId, payload); break;
       default:
         postMessage({ jobId, type: 'error', error: 'Unknown job type: ' + type });
     }
@@ -390,4 +391,58 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
   }
 
   postMessage({ jobId, type: 'result', data: { allScenarios } });
+}
+
+// ============================================================================
+// runRothOptimizer — goal-based Roth conversion strategy sweep.
+//
+// Builds candidate strategies (bracket-fill targets × conversion windows),
+// runs a full projection for each, and scores them via the engine's
+// scoreRothStrategy. The UI ranks by the user's chosen goal and can Apply a
+// winner back into personalInfo. Payload:
+//   { personalInfo, accounts, incomeStreams, assets, oneTimeEvents,
+//     recurringExpenses, heirTaxRate }
+// Result: { baseline, results: [{ label, bracket, startAge, endAge, ...scores }] }
+// ============================================================================
+function runRothOptimizer(jobId, payload) {
+  const {
+    personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
+    heirTaxRate,
+  } = payload;
+
+  const legacyAge = personalInfo.legacyAge || 95;
+  const retirementAge = personalInfo.myRetirementAge;
+  const defWin = E.getDefaultRothConversionWindow(personalInfo);
+
+  // Candidate windows: the smart-default window (retirement → RMDs-1), an
+  // ACA-aware variant starting at 65 (skips the pre-65 subsidy years), and an
+  // IRMAA-aware variant ending at 70 (before most Medicare/IRMAA exposure).
+  const starts = [...new Set([defWin.startAge, Math.max(65, defWin.startAge)])];
+  const ends = [...new Set([defWin.endAge, Math.min(70, defWin.endAge)])];
+  const windows = [];
+  starts.forEach(s => ends.forEach(e => { if (e >= s) windows.push({ startAge: s, endAge: e }); }));
+
+  const brackets = ['10%', '12%', '22%', '24%', '32%'];
+  const noConversionPI = { ...personalInfo, rothConversionAmount: 0, rothConversionBracket: '', rothConversionStartAge: 0, rothConversionEndAge: 0 };
+  const strategies = [{ label: 'No conversions (baseline)', bracket: '', window: null, pi: noConversionPI }];
+  windows.forEach(w => brackets.forEach(b => strategies.push({
+    label: `Fill to ${b} bracket, ages ${w.startAge}–${w.endAge}`,
+    bracket: b, window: w,
+    pi: { ...personalInfo, rothConversionAmount: 0, rothConversionBracket: b, rothConversionStartAge: w.startAge, rothConversionEndAge: w.endAge },
+  })));
+
+  const results = [];
+  strategies.forEach((s, i) => {
+    const proj = computeProjections(s.pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
+    const score = E.scoreRothStrategy(proj, { legacyAge, retirementAge, heirTaxRate });
+    results.push({
+      label: s.label, bracket: s.bracket,
+      startAge: s.window ? s.window.startAge : null,
+      endAge: s.window ? s.window.endAge : null,
+      ...score,
+    });
+    postMessage({ jobId, type: 'progress', percent: Math.round(((i + 1) / strategies.length) * 100) });
+  });
+
+  postMessage({ jobId, type: 'result', data: { baseline: results[0], results } });
 }

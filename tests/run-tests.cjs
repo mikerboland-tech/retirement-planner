@@ -1873,6 +1873,41 @@ section('P1 — desiredIncome steps down across phase boundaries');
     'phased spending preserves more portfolio by age 90 than flat spending');
 }
 
+// ── P3 — Roth conversion optimizer scoring ────────────────────────────────────
+section('P3 — scoreRothStrategy (Roth optimizer scoring)');
+{
+  const { scoreRothStrategy } = engine;
+  const proj = [
+    { myAge: 94, totalTax: 10000, irmaaSurcharge: 1000, acaSubsidy: 0, rothConversion: 50000, preTaxBalance: 500000, rothBalance: 300000, brokerageBalance: 200000, totalPortfolio: 1000000 },
+    { myAge: 95, totalTax: 12000, irmaaSurcharge: 2000, acaSubsidy: 3000, rothConversion: 0, preTaxBalance: 400000, rothBalance: 350000, brokerageBalance: 250000, totalPortfolio: 1000000 },
+  ];
+  const s = scoreRothStrategy(proj, { legacyAge: 95, retirementAge: 90, heirTaxRate: 0.25 });
+  eq(s.afterTaxLegacy, Math.round(350000 + 250000 + 400000 * 0.75), 'after-tax legacy discounts pre-tax by heir rate');
+  eq(s.lifetimeTax, 22000, 'lifetime tax sums retirement years');
+  eq(s.lifetimeIRMAA, 3000, 'lifetime IRMAA sums retirement years');
+  eq(s.lifetimeACASubsidy, 3000, 'lifetime ACA subsidy sums retirement years');
+  eq(s.lifetimeConversions, 50000, 'lifetime conversions sum');
+  // Legacy row missing (e.g. survivor-mode early termination) → falls back to last row.
+  const s2 = scoreRothStrategy(proj, { legacyAge: 99, retirementAge: 90, heirTaxRate: 0 });
+  eq(s2.afterTaxLegacy, 400000 + 350000 + 250000, 'missing legacy row → final row; 0% heir rate = face value');
+}
+
+section('P3 — bracket-fill strategy vs baseline (integration)');
+{
+  // $1M pre-tax + modest spending: filling the 12% bracket during the
+  // retirement→RMD window should beat no-conversions on after-tax legacy when
+  // heirs would pay 25% — the canonical case for Roth conversions.
+  const { pi, accts, streams } = baseScenario();
+  const noConv = computeProjections(pi, accts, streams, [], [], [], TODAY_YEAR);
+  const { pi: piConv, accts: aC, streams: sC } = baseScenario({ rothConversionBracket: '12%', rothConversionStartAge: 60, rothConversionEndAge: 72 });
+  const conv = computeProjections(piConv, aC, sC, [], [], [], TODAY_YEAR);
+  const sNo = engine.scoreRothStrategy(noConv, { legacyAge: 95, retirementAge: 60, heirTaxRate: 0.25 });
+  const sConv = engine.scoreRothStrategy(conv, { legacyAge: 95, retirementAge: 60, heirTaxRate: 0.25 });
+  gt(sConv.lifetimeConversions, 0, '12% bracket-fill executes conversions');
+  gt(sConv.endRoth, sNo.endRoth, 'conversions grow the ending Roth balance');
+  gt(sConv.afterTaxLegacy, sNo.afterTaxLegacy, '12% fill beats baseline on after-tax legacy at 25% heir rate');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
