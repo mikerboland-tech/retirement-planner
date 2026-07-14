@@ -2764,6 +2764,10 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
         pension: p.pension,
         otherIncome: p.otherIncome,
         portfolioWithdrawal: p.portfolioWithdrawal,
+        // Split for the chart: the RMD is the mandatory slice of portfolioWithdrawal
+        // (the engine sets portfolioWithdrawal = max(RMD, need), so RMD ≤ withdrawal).
+        rmd: Math.round(p.rmd || 0),
+        voluntaryWithdrawal: Math.round(Math.max(0, p.portfolioWithdrawal - (p.rmd || 0))),
         plannedConversion: Math.round(plannedConversion),
         grossIncome: Math.round(grossIncome),
         standardDeduction: Math.round(adjustedDeduction),
@@ -2868,7 +2872,8 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
               <Bar dataKey="socialSecurity" stackId="income" fill="#3b82f6" name="Social Security (85%)" />
               <Bar dataKey="pension" stackId="income" fill="#8b5cf6" name="Pension" />
               <Bar dataKey="otherIncome" stackId="income" fill="#06b6d4" name="Other Income" />
-              <Bar dataKey="portfolioWithdrawal" stackId="income" fill="#f59e0b" name="Portfolio Withdrawal" />
+              <Bar dataKey="voluntaryWithdrawal" stackId="income" fill="#f59e0b" name="Portfolio Withdrawal (voluntary)" />
+              <Bar dataKey="rmd" stackId="income" fill="#fb923c" name="RMD (mandatory)" />
               <Bar dataKey="plannedConversion" stackId="income" fill="#a855f7" name="Planned Roth Conv." />
               
               {/* Tax bracket threshold lines */}
@@ -2897,6 +2902,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
                 <th className="text-left py-2 px-2 text-slate-400">Age</th>
                 <th className="text-left py-2 px-2 text-slate-400">Year</th>
                 <th className="text-right py-2 px-2 text-slate-400">Gross Income</th>
+                <th className="text-right py-2 px-2 text-orange-400">RMD</th>
                 <th className="text-right py-2 px-2 text-slate-400">Std Deduction</th>
                 <th className="text-right py-2 px-2 text-slate-400">Taxable Income</th>
                 <th className="text-right py-2 px-2 text-purple-400">Planned Conv.</th>
@@ -2915,6 +2921,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
                   <td className="py-2 px-2 text-slate-100 font-medium">{row.myAge}</td>
                   <td className="py-2 px-2 text-slate-300">{row.year}</td>
                   <td className="py-2 px-2 text-right text-slate-300">{formatCurrency(row.grossIncome)}</td>
+                  <td className="py-2 px-2 text-right text-orange-400">{row.rmd > 0 ? formatCurrency(row.rmd) : '—'}</td>
                   <td className="py-2 px-2 text-right text-slate-500">{formatCurrency(row.standardDeduction)}</td>
                   <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.taxableIncome)}</td>
                   <td className="py-2 px-2 text-right text-purple-400 font-medium">
@@ -6604,19 +6611,57 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
   // Check for data inconsistencies that need user attention
   const getDataWarnings = (info) => {
     const warnings = [];
-    
-    // Check accounts with stopAge that don't match retirement age
+    const isMarried = info.hasSpouse || info.filingStatus === 'married_joint' || info.filingStatus === 'married_separate';
+
+    // Check accounts with stopAge that don't match retirement age.
+    // IRA-type accounts (Traditional/Roth IRA) allow a spousal contribution: as long as
+    // EITHER spouse has earned income, both spouses' IRAs stay eligible — so a stop age
+    // matching EITHER retirement age is legitimate, not just the account owner's own.
+    // (We can't safely convert between the two ages when spouses aren't the same age, so
+    // we treat both retirement ages as valid rather than guessing a single "expected" one.)
+    // Employer plans (401k/403b/457b) require the owner's own employment, so those stay
+    // tied strictly to the owner's own retirement age.
+    const isIraType = (type) => type === 'traditional_ira' || type === 'roth_ira';
+    const isStopAgeExpected = (a) => {
+      if (isIraType(a.type) && isMarried) {
+        return a.stopAge === info.myRetirementAge || a.stopAge === info.spouseRetirementAge;
+      }
+      return a.stopAge === (a.owner === 'spouse' ? info.spouseRetirementAge : info.myRetirementAge);
+    };
     const accountsWithOldStopAge = accounts.filter(a => {
-      const ownerRetAge = a.owner === 'spouse' ? info.spouseRetirementAge : info.myRetirementAge;
-      return a.contribution > 0 && a.stopAge !== ownerRetAge && a.stopAge > info.myAge;
+      return a.contribution > 0 && !isStopAgeExpected(a) && a.stopAge > info.myAge;
     });
     if (accountsWithOldStopAge.length > 0) {
       warnings.push({
         type: 'retirement_age_accounts',
         severity: 'warning',
-        message: `${accountsWithOldStopAge.length} account(s) have contribution stop ages that don't match your retirement age (${info.myRetirementAge}):`,
+        message: `${accountsWithOldStopAge.length} account(s) have contribution stop ages that don't match either retirement age:`,
         details: accountsWithOldStopAge.map(a => `"${a.name}" stops contributions at age ${a.stopAge}`),
-        action: 'Update stop ages on the Accounts tab, or this may be intentional (e.g., employer match ending early).'
+        action: 'Update stop ages on the Accounts tab, or this may be intentional (e.g., employer match ending early, or a spousal IRA contribution funded by the other spouse\'s earned income).'
+      });
+    }
+
+    // Check accounts whose contribution start age is still in the future — the engine
+    // skips contributions until the owner reaches startAge, so these accounts silently
+    // contribute nothing for the first year(s). Common after lowering your current age
+    // in Personal Info (account start ages don't shift automatically).
+    const ownerCurrentAge = (a) => a.owner === 'spouse' ? info.spouseAge
+      : a.owner === 'joint' ? Math.max(info.myAge, info.spouseAge || info.myAge)
+      : info.myAge;
+    const hasActiveContribution = (a) => a.contribution > 0 ||
+      (a.contributionMode === 'percent' && ((a.employeePercent || 0) + (a.employerMatchPercent || 0)) > 0);
+    const accountsStartingLater = accounts.filter(a =>
+      hasActiveContribution(a) && a.startAge > ownerCurrentAge(a) && a.startAge < a.stopAge);
+    if (accountsStartingLater.length > 0) {
+      warnings.push({
+        type: 'contribution_start_in_future',
+        severity: 'info',
+        message: `${accountsStartingLater.length} account(s) have contribution start ages in the future, so they won't contribute for the first year(s):`,
+        details: accountsStartingLater.map(a => {
+          const gap = a.startAge - ownerCurrentAge(a);
+          return `"${a.name}" starts contributions at age ${a.startAge} — ${gap} year${gap === 1 ? '' : 's'} from now`;
+        }),
+        action: 'If contributions should begin immediately, lower the start age on the Accounts tab to the owner\'s current age. If the account opens later by design, no action needed.'
       });
     }
     
@@ -6730,9 +6775,15 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
         });
       }
       
-      // Warn if spouse has no earned income streams at all but has a retirement age set
+      // Warn if spouse has no earned income streams at all but has a retirement age set.
+      // Skip IRA-type accounts (Traditional/Roth IRA) when the OTHER spouse still has
+      // earned income — a spousal IRA contribution is funded from the working spouse's
+      // income and doesn't require the account owner to have their own earned income.
       if (spouseEarned.length === 0 && info.spouseAge && info.spouseAge < spouseRetAge) {
-        const spouseAcctsWithContributions = accounts.filter(a => a.owner === 'spouse' && a.contribution > 0);
+        const myEarned = incomeStreams.filter(s => s.type === 'earned_income' && s.owner === 'me' && s.endAge > info.myAge);
+        const spousalContributionCovered = myEarned.length > 0;
+        const spouseAcctsWithContributions = accounts.filter(a => a.owner === 'spouse' && a.contribution > 0
+          && !(spousalContributionCovered && isIraType(a.type)));
         if (spouseAcctsWithContributions.length > 0) {
           warnings.push({
             type: 'spouse_no_income_but_contributing',
@@ -7166,14 +7217,14 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
                 if (idx === 0) return;
                 const newPriority = [...priority];
                 [newPriority[idx - 1], newPriority[idx]] = [newPriority[idx], newPriority[idx - 1]];
-                setPersonalInfo(prev => ({ ...prev, withdrawalPriority: newPriority }));
+                handleChange('withdrawalPriority', newPriority);
               };
-              
+
               const moveDown = () => {
                 if (idx === priority.length - 1) return;
                 const newPriority = [...priority];
                 [newPriority[idx], newPriority[idx + 1]] = [newPriority[idx + 1], newPriority[idx]];
-                setPersonalInfo(prev => ({ ...prev, withdrawalPriority: newPriority }));
+                handleChange('withdrawalPriority', newPriority);
               };
               
               return (
@@ -10448,7 +10499,17 @@ function AccountModal({ editingAccount, personalInfo, incomeStreams, onClose, on
           <div><label className={labelStyle}>Account Name</label><input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className={inputStyle} /></div>
           <div><label className={labelStyle}>Account Type</label><select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className={inputStyle}>{ACCOUNT_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
           <div className="grid grid-cols-2 gap-4">
-            <div><label className={labelStyle}>Owner</label><select value={formData.owner} onChange={e => setFormData({...formData, owner: e.target.value})} className={inputStyle}><option value="me">Me</option><option value="spouse">Spouse</option><option value="joint">Joint</option></select></div>
+            <div><label className={labelStyle}>Owner</label><select value={formData.owner} onChange={e => {
+              const owner = e.target.value;
+              const next = {...formData, owner};
+              // New accounts: re-seed the start/stop age defaults to the selected owner's
+              // ages (joint accounts follow "me"). Edited accounts keep their saved ages.
+              if (!editingAccount) {
+                next.startAge = owner === 'spouse' ? (personalInfo.spouseAge ?? personalInfo.myAge) : personalInfo.myAge;
+                next.stopAge = owner === 'spouse' ? (personalInfo.spouseRetirementAge ?? personalInfo.myRetirementAge) : personalInfo.myRetirementAge;
+              }
+              setFormData(next);
+            }} className={inputStyle}><option value="me">Me</option><option value="spouse">Spouse</option><option value="joint">Joint</option></select></div>
             <div><label className={labelStyle}>Contributor</label><select value={formData.contributor || 'me'} onChange={e => setFormData({...formData, contributor: e.target.value})} className={inputStyle}>{CONTRIBUTOR_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
           </div>
           {percentEligible && (
@@ -10502,7 +10563,7 @@ function AccountModal({ editingAccount, personalInfo, incomeStreams, onClose, on
                   <label className={labelStyle} style={{marginBottom: 0}}>Employer Match</label>
                   <span className="text-sm font-semibold text-amber-300">{(matchFrac * 100).toFixed(1)}%</span>
                 </div>
-                <input type="range" min="0" max="0.10" step="0.005" value={matchFrac}
+                <input type="range" min="0" max="0.25" step="0.005" value={matchFrac}
                   onChange={e => setFormData({...formData, employerMatchPercent: Number(e.target.value)})}
                   className="w-full" />
               </div>
@@ -10521,6 +10582,17 @@ function AccountModal({ editingAccount, personalInfo, incomeStreams, onClose, on
             <div><label className={labelStyle}>Contribution Start Age</label><input type="number" value={formData.startAge} onChange={e => setFormData({...formData, startAge: Number(e.target.value)})} className={inputStyle} /></div>
             <div><label className={labelStyle}>Contribution Stop Age</label><input type="number" value={formData.stopAge} onChange={e => setFormData({...formData, stopAge: Number(e.target.value)})} className={inputStyle} /></div>
           </div>
+          {(() => {
+            const ownerRetAge = formData.owner === 'spouse'
+              ? (personalInfo.spouseRetirementAge || personalInfo.myRetirementAge)
+              : personalInfo.myRetirementAge;
+            return (
+              <p className="text-xs text-slate-500">
+                The stop age is exclusive — the last contribution happens the year BEFORE the stop age.
+                {ownerRetAge ? ` Typically set it to ${formData.owner === 'spouse' ? "the spouse's" : 'your'} retirement age (${ownerRetAge}): contributions then stop exactly when retirement begins.` : ''}
+              </p>
+            );
+          })()}
           {formData.type === 'brokerage' && (
             <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg">
               <label className={labelStyle}>Cost Basis (% of current balance)</label>
@@ -10566,6 +10638,19 @@ function IncomeModal({ editingIncome, personalInfo, onClose, onSave }) {
             <div><label className={labelStyle}>Start Age</label><input type="number" value={formData.startAge} onChange={e => setFormData({...formData, startAge: Number(e.target.value)})} className={inputStyle} /></div>
             <div><label className={labelStyle}>End Age</label><input type="number" value={formData.endAge} onChange={e => setFormData({...formData, endAge: Number(e.target.value)})} className={inputStyle} /></div>
           </div>
+          {(() => {
+            const ownerRetAge = formData.owner === 'spouse'
+              ? (personalInfo.spouseRetirementAge || personalInfo.myRetirementAge)
+              : personalInfo.myRetirementAge;
+            return (
+              <p className="text-xs text-slate-500">
+                Both ages are inclusive — the income is received during the start year AND the end year.
+                {formData.type === 'earned_income' && ownerRetAge
+                  ? ` For a salary, set the end age to the year before ${formData.owner === 'spouse' ? "the spouse's" : 'your'} retirement age (${ownerRetAge}) — i.e. ${ownerRetAge - 1} — so the paycheck stops exactly when retirement starts.`
+                  : ''}
+              </p>
+            );
+          })()}
           {formData.type === 'pension' && personalInfo.survivorModelEnabled && (
             <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg space-y-3">
               <label className="flex items-center gap-2 cursor-pointer">
@@ -11403,6 +11488,16 @@ function RetirementPlanner() {
 
     const mySalary = num(w.mySalary);
     const spouseSalary = num(w.spouseSalary);
+    // Live personalInfo for modals opened inside the wizard: overlay the ages the user
+    // has already entered on earlier steps onto the saved/default plan, so a new
+    // account defaults to THEIR ages instead of the stale saved (or 35/33 default) ages.
+    const wizPersonalInfo = {
+      ...((existingData && existingData.personalInfo) || DEFAULT_PERSONAL_INFO),
+      ...(num(w.myAge) > 0 ? { myAge: num(w.myAge) } : {}),
+      ...(num(w.spouseAge) > 0 ? { spouseAge: num(w.spouseAge) } : {}),
+      ...(num(w.myRetirementAge) > 0 ? { myRetirementAge: num(w.myRetirementAge) } : {}),
+      ...(num(w.spouseRetirementAge) > 0 ? { spouseRetirementAge: num(w.spouseRetirementAge) } : {}),
+    };
     const householdIncome = mySalary + (w.hasSpouse ? spouseSalary : 0);
     const yearsToRetire = Math.max(0, num(w.myRetirementAge) - num(w.myAge));
     const salaryAtRetire = mySalary * Math.pow(1 + num(w.mySalaryGrowth) / 100, yearsToRetire);
@@ -11980,7 +12075,7 @@ function RetirementPlanner() {
           {showWizAccountModal && (
             <AccountModal
               editingAccount={editingWizAccount}
-              personalInfo={(existingData && existingData.personalInfo) || DEFAULT_PERSONAL_INFO}
+              personalInfo={wizPersonalInfo}
               incomeStreams={(existingData && existingData.incomeStreams) || []}
               onClose={()=>{setShowWizAccountModal(false);setEditingWizAccount(null);}}
               onSave={(data)=>{
@@ -12004,7 +12099,7 @@ function RetirementPlanner() {
           {showWizIncomeModal && (
             <IncomeModal
               editingIncome={editingWizIncome}
-              personalInfo={(existingData && existingData.personalInfo) || DEFAULT_PERSONAL_INFO}
+              personalInfo={wizPersonalInfo}
               onClose={()=>{setShowWizIncomeModal(false);setEditingWizIncome(null);}}
               onSave={(data)=>{
                 setWizIncomes(prev => editingWizIncome
