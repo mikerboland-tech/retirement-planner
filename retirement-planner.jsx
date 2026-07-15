@@ -1721,7 +1721,7 @@ function TaxYearSnapshot({ projections, personalInfo }) {
   const effectiveRate = grossTaxableIncome > 0 ? (totalTax / grossTaxableIncome * 100) : 0;
   
   // Net income from engine
-  const grossIncome = p.earnedIncome + p.socialSecurity + p.pension + p.otherIncome + p.portfolioWithdrawal + rothConversion;
+  const grossIncome = p.earnedIncome + p.socialSecurity + p.pension + p.otherIncome + p.portfolioWithdrawal + rothConversion + (p.conversionTaxWithdrawal || 0);
   const netAfterTax = grossIncome - totalTax;
   
   // Bar width helper for bracket visualization
@@ -2711,10 +2711,14 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
       // RMDs, and the planned Roth conversion. This ensures the Bracket column and
       // Room figures are consistent with what the engine actually computed.
       const plannedConversion = p.rothConversion || 0;
+      const conversionTaxDraw = p.conversionTaxWithdrawal || 0;
       const taxableIncome = p.taxableIncome; // engine-computed, includes conversion
 
-      // Gross income for chart display (SS shown at 85% is a display approximation only)
-      const grossIncome = p.earnedIncome + p.socialSecurity * 0.85 + p.pension + p.otherIncome + p.portfolioWithdrawal + plannedConversion;
+      // Gross income for chart display (SS shown at 85% is a display approximation only).
+      // Includes the extra draw that pays the conversion's tax bill — it's ordinary
+      // income like any other pre-tax withdrawal, so leaving it out made taxable
+      // income appear to exceed gross income in conversion years.
+      const grossIncome = p.earnedIncome + p.socialSecurity * 0.85 + p.pension + p.otherIncome + p.portfolioWithdrawal + plannedConversion + conversionTaxDraw;
       
       // Bracket thresholds are in terms of taxable income, so add back deduction for display
       // This shows where income needs to be (gross) to hit each bracket
@@ -2785,6 +2789,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
         rmd: Math.round(p.rmd || 0),
         voluntaryWithdrawal: Math.round(Math.max(0, p.portfolioWithdrawal - (p.rmd || 0))),
         plannedConversion: Math.round(plannedConversion),
+        conversionTaxWithdrawal: Math.round(conversionTaxDraw),
         grossIncome: Math.round(grossIncome),
         standardDeduction: Math.round(adjustedDeduction),
         taxableIncome: Math.round(taxableIncome),
@@ -2891,6 +2896,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
               <Bar dataKey="voluntaryWithdrawal" stackId="income" fill="#f59e0b" name="Portfolio Withdrawal (voluntary)" />
               <Bar dataKey="rmd" stackId="income" fill="#fb923c" name="RMD (mandatory)" />
               <Bar dataKey="plannedConversion" stackId="income" fill="#a855f7" name="Planned Roth Conv." />
+              <Bar dataKey="conversionTaxWithdrawal" stackId="income" fill="#d97706" name="Conversion Tax Draw" />
               
               {/* Tax bracket threshold lines */}
               <Line type="monotone" dataKey="bracket12" stroke="#10b981" strokeWidth={2} dot={false} name="Top of 12% Bracket" strokeDasharray="5 5" />
@@ -9571,11 +9577,15 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
               <Bar dataKey="pension" stackId="income" fill="#8b5cf6" name="Pension" />
               <Bar dataKey="otherIncome" stackId="income" fill="#06b6d4" name="Other Income" />
               <Bar dataKey="portfolioWithdrawal" stackId="income" fill="#f59e0b" name="Portfolio Withdrawal" />
+              {/* The conversion-tax draw is a REAL withdrawal (it pays the conversion's
+                  tax bill), so it stacks as solid income; it flows straight out again
+                  via the tax line. */}
+              <Bar dataKey="conversionTaxWithdrawal" stackId="income" fill="#d97706" name="Conversion Tax Draw" />
               {/* Roth conversions ride on top of the stack but are styled translucent
                   with a dashed outline: they are account TRANSFERS (pre-tax → Roth),
                   not spendable income, so they must read as "different in kind" from
                   the solid income segments. Their presence explains why the tax line
-                  spikes and the net-income line dips in conversion years. */}
+                  spikes in conversion years. */}
               {planHasConversions && showConversionsOnIncomeChart && (
                 <Bar dataKey="rothConversion" stackId="income" fill="#ec4899" fillOpacity={0.3} stroke="#ec4899" strokeDasharray="4 2" name="Roth Conversion (transfer)" />
               )}
@@ -10308,7 +10318,8 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
           { label: 'Social Security', value: sankeyData.socialSecurity || 0, color: '#3b82f6' },
           { label: 'Pension', value: sankeyData.pension || 0, color: '#8b5cf6' },
           { label: 'Other Income', value: sankeyData.otherIncome || 0, color: '#06b6d4' },
-          { label: 'Portfolio Withdrawal', value: sankeyData.portfolioWithdrawal || 0, color: '#f59e0b' }
+          { label: 'Portfolio Withdrawal', value: sankeyData.portfolioWithdrawal || 0, color: '#f59e0b' },
+          { label: 'Conversion Tax Draw', value: sankeyData.conversionTaxWithdrawal || 0, color: '#d97706' }
         ].filter(item => item.value > 0);
         
         const totalIncome = income.reduce((sum, item) => sum + item.value, 0);

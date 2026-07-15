@@ -3139,6 +3139,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     //   • There are no pre-tax funds available to convert
     //   • There is no Roth account to receive the funds
     let rothConversionThisYear = 0;
+    let conversionTaxWithdrawal = 0; // Extra portfolio draw executed to pay the conversion's tax bill
     const conversionAmount = pi.rothConversionAmount || 0;
     // Use smart defaults when start/end ages aren't explicitly set.
     // The engine respects any non-zero value the user has configured, but
@@ -3236,13 +3237,89 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // tax-side effects (capital gains realized, ordinary income added) so
           // downstream tax calcs see the full picture (B5, B6).
           if (rothConversionThisYear > 0) {
-            const preConvGross = totalTaxableIncome_adjusted;
-            const postConvGross = preConvGross + rothConversionThisYear;
+            // Price the conversion's incremental tax on top of the income the year
+            // ALREADY has: guaranteed income PLUS the spending withdrawals executed
+            // above (RMDs, voluntary pre-tax draws, realized gains) and the taxable
+            // SS that base implies. (Previously the delta was measured from the
+            // pre-withdrawal base, which priced the conversion in lower brackets
+            // and under-collected the tax — the gap silently reduced net income.)
+            const spendingPreTax = preTaxWithdrawals - rothConversionThisYear; // conversion itself was added above
+            const preConvNonSS = nonSSIncomeAfterDeduction + totalRMD + spendingPreTax + brokerageCapitalGains;
+            const preConvTaxableSS = calculateSocialSecurityTaxableAmount(totalSocialSecurity, preConvNonSS, effectiveFilingStatus);
+            const preConvGross = preConvNonSS + preConvTaxableSS;
             const preConvFed = calculateFederalTax(preConvGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
-            const postConvFed = calculateFederalTax(postConvGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
-            const preConvState = calculateStateTax(preConvGross, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, taxableSS, totalPension, { federalTaxPaid: preConvFed, primaryAge: myAge, spouseAge: spouseAge });
-            const postConvState = calculateStateTax(postConvGross, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, taxableSS, totalPension, { federalTaxPaid: postConvFed, primaryAge: myAge, spouseAge: spouseAge });
-            let conversionTaxNeeded = (postConvFed - preConvFed) + (postConvState - preConvState);
+            const preConvState = calculateStateTax(preConvGross, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, preConvTaxableSS, totalPension, { federalTaxPaid: preConvFed, primaryAge: myAge, spouseAge: spouseAge });
+
+            // IRMAA: the spending solver already funded the surcharge implied by
+            // withdrawals alone; the conversion pushes MAGI (often whole tiers)
+            // higher, so fund the conversion-driven delta here too.
+            const convMedicareEligible =
+              (primaryAlive && myAge >= 65 ? 1 : 0) +
+              (effectiveFilingStatus === 'married_joint' && spouseAlive && spouseAge >= 65 ? 1 : 0);
+            const preConvIRMAA = convMedicareEligible > 0
+              ? calculateIRMAASurcharge(preConvGross + preTaxDeduction, effectiveFilingStatus, yearsFromNow, pi.inflationRate, convMedicareEligible).totalSurcharge
+              : 0;
+
+            // The bill is paid with a portfolio draw that may itself be taxable
+            // (pre-tax dollars, or brokerage gains), which raises the bill again.
+            // Simulate the draw against current balances WITHOUT mutating them,
+            // and iterate to the fixed point (converges in a few passes). Gains
+            // in the funding draw are approximated at ordinary rates here; the
+            // final tax block below applies exact preferential LTCG treatment.
+            const simulateTaxDrawTaxable = (amount) => {
+              let need = amount, taxable = 0;
+              const bal = {};
+              accts.forEach(a => { bal[a.id] = accountBalances[a.id] || 0; });
+              const bookTaxable = (account, w) => {
+                if (isPreTaxAccount(account.type)) {
+                  taxable += w;
+                } else if (isBrokerageAccount(account.type)) {
+                  const basisPct = (account.costBasisPercent !== undefined && account.costBasisPercent !== null)
+                    ? account.costBasisPercent
+                    : BROKERAGE_COST_BASIS_ESTIMATE;
+                  taxable += w * (1 - basisPct);
+                } // Roth / HSA: tax-free
+              };
+              if (pi.rothConversionTaxSource === 'brokerage') {
+                const brokerageAccts = accts.filter(a => isBrokerageAccount(a.type) || isHSAAccount(a.type));
+                if (brokerageAccts.length > 0) {
+                  const src = brokerageAccts.reduce((best, a) => bal[a.id] > bal[best.id] ? a : best, brokerageAccts[0]);
+                  bookTaxable(src, Math.min(need, bal[src.id]));
+                }
+                return taxable; // any unfundable remainder stays unfunded (unchanged behavior)
+              }
+              for (const category of priority) {
+                if (need <= 0) break;
+                const types = getAccountTypes(category);
+                for (const account of accts) {
+                  if (!types.includes(account.type) || need <= 0) continue;
+                  const w = Math.min(bal[account.id], need);
+                  if (w <= 0) continue;
+                  bal[account.id] -= w;
+                  need -= w;
+                  bookTaxable(account, w);
+                }
+              }
+              return taxable;
+            };
+
+            let conversionTaxNeeded = 0;
+            let taxDrawTaxable = 0;
+            for (let i = 0; i < MAX_ITERATIONS_FOR_TAX_CALC; i++) {
+              const postConvNonSS = preConvNonSS + rothConversionThisYear + taxDrawTaxable;
+              const postConvTaxableSS = calculateSocialSecurityTaxableAmount(totalSocialSecurity, postConvNonSS, effectiveFilingStatus);
+              const postConvGross = postConvNonSS + postConvTaxableSS;
+              const postConvFed = calculateFederalTax(postConvGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
+              const postConvState = calculateStateTax(postConvGross, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, postConvTaxableSS, totalPension, { federalTaxPaid: postConvFed, primaryAge: myAge, spouseAge: spouseAge });
+              const postConvIRMAA = convMedicareEligible > 0
+                ? calculateIRMAASurcharge(postConvGross + preTaxDeduction, effectiveFilingStatus, yearsFromNow, pi.inflationRate, convMedicareEligible).totalSurcharge
+                : 0;
+              const nextBill = Math.max(0, (postConvFed - preConvFed) + (postConvState - preConvState) + (postConvIRMAA - preConvIRMAA));
+              const converged = Math.abs(nextBill - conversionTaxNeeded) < 1;
+              conversionTaxNeeded = nextBill;
+              taxDrawTaxable = simulateTaxDrawTaxable(nextBill);
+              if (converged) break;
+            }
 
             if (conversionTaxNeeded > 0 && pi.rothConversionTaxSource === 'brokerage') {
               // Pull from the largest brokerage (or HSA) account.
@@ -3254,6 +3331,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
                 const taxPayment = Math.min(conversionTaxNeeded, accountBalances[brokerageSource.id] || 0);
                 accountBalances[brokerageSource.id] -= taxPayment;
                 brokerageWithdrawals += taxPayment;
+                conversionTaxWithdrawal += taxPayment;
                 // B6: book the embedded capital gain so cap-gains tax and NIIT
                 // see it. HSA "qualified medical" withdrawals are tax-free, so
                 // only book gains for true brokerage accounts.
@@ -3283,6 +3361,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
                   if (w <= 0) continue;
                   accountBalances[account.id] -= w;
                   conversionTaxNeeded -= w;
+                  conversionTaxWithdrawal += w;
                   if (isPreTaxAccount(account.type)) {
                     preTaxWithdrawals += w;
                   } else if (isBrokerageAccount(account.type)) {
@@ -3654,8 +3733,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       excessRMD: Math.round(excessRMD),
       qcd: Math.round(qcdAmount),
       rothConversion: Math.round(rothConversionThisYear), // Planned Roth conversion executed this year
+      conversionTaxWithdrawal: Math.round(conversionTaxWithdrawal), // Extra portfolio draw that paid the conversion's tax bill
       charitableGiving: Math.round(isRetired ? desiredIncome * (charitablePercent / 100) : 0),
-      totalIncome: Math.round(earnedIncome + totalGuaranteedIncome + portfolioWithdrawal),
+      totalIncome: Math.round(earnedIncome + totalGuaranteedIncome + portfolioWithdrawal + conversionTaxWithdrawal),
       // Tax computation intermediate values (for display components to consume)
       preTaxDeduction: Math.round(preTaxDeduction), // Pre-tax retirement contributions (above-the-line deduction)
       nonSSIncome: Math.round(nonSSIncome), // Non-SS income before pre-tax deduction (used for SS taxation display)
@@ -3684,7 +3764,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       recurringExpenses: totalRecurringExpenses, // Total categorized recurring expenses
       recurringExpensesByCategory: recurringResult.byCategory, // Breakdown by category
       totalTax: Math.round(federalTax + stateTax + totalFICA + irmaaSurcharge),
-      netIncome: Math.round(earnedIncome + totalGuaranteedIncome + portfolioWithdrawal - federalTax - stateTax - totalFICA - irmaaSurcharge),
+      netIncome: Math.round(earnedIncome + totalGuaranteedIncome + portfolioWithdrawal + conversionTaxWithdrawal - federalTax - stateTax - totalFICA - irmaaSurcharge),
       filingStatus: effectiveFilingStatus, // Actual filing status used (may differ from input after survivor event)
       preTaxBalance: Math.round(finalPreTaxBalance),
       rothBalance: Math.round(finalRothBalance),
