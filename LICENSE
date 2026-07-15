@@ -1,0 +1,37 @@
+Copyright (c) 2026 Mike Boland. All rights reserved.
+
+SOURCE-AVAILABLE LICENSE
+
+This software's source code is made publicly visible for transparency, so
+users can verify that all calculations run locally in their browser and
+that no personal or financial data is transmitted anywhere.
+
+Permission is granted, free of charge, to:
+
+  1. USE the hosted application (including the version served via GitHub
+     Pages) for personal, non-commercial retirement planning.
+  2. VIEW and study the source code.
+  3. RUN a local copy of the application for personal, non-commercial use.
+
+The following are NOT permitted without prior written permission from the
+copyright holder:
+
+  - Copying, redistributing, or republishing the source code or any
+    substantial portion of it, in any form.
+  - Creating derivative works based on this code.
+  - Using this code or any portion of it in another product or service,
+    whether commercial or non-commercial.
+  - Selling, sublicensing, or otherwise commercializing this software.
+
+NOTE: Versions of this repository published prior to this license change
+were offered under the MIT License; rights already obtained under that
+license for those prior versions are unaffected. This license governs all
+subsequent versions.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING
+FROM THE USE OF THE SOFTWARE. THIS SOFTWARE IS FOR EDUCATIONAL AND
+INFORMATIONAL PURPOSES ONLY AND DOES NOT CONSTITUTE FINANCIAL, TAX, OR
+LEGAL ADVICE.

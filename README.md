@@ -87,7 +87,7 @@ Display components read from year data
 
 ## License
 
-MIT — Free to use, modify, and share.
+Source-available — all rights reserved. You're welcome to use the hosted app and run a local copy for personal, non-commercial planning, and the source is published so you can verify that everything runs locally in your browser with no data sent anywhere. Copying, redistributing, or reusing the code in other projects requires written permission. See [LICENSE](LICENSE) for full terms.
 
 ## Disclaimer
 
