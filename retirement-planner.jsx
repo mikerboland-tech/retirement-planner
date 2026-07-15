@@ -936,7 +936,7 @@ function FAQTab() {
         },
         {
           q: "What is the Social Security earnings test?",
-          a: "If you claim SS before Full Retirement Age (FRA) and are still earning above the annual limit ($23,400 in 2025, inflation-adjusted), $1 of SS benefits is withheld for every $2 earned above the limit. In the year you reach FRA, the limit is higher ($62,160 in 2025) and only $1 per $3 is withheld. After FRA there is no limit. The model automatically applies this reduction to any year where you are collecting SS, earning income, and below FRA. Note: SSA recalculates your benefit upward at FRA to credit the withheld months, but the cash flow impact during those years is real and affects portfolio withdrawals."
+          a: "If you claim SS before Full Retirement Age (FRA) and are still earning above the annual limit ($24,480 in 2026, inflation-adjusted), $1 of SS benefits is withheld for every $2 earned above the limit. In the year you reach FRA, the limit is higher ($65,160 in 2026) and only $1 per $3 is withheld. After FRA there is no limit. The model automatically applies this reduction to any year where you are collecting SS, earning income, and below FRA. Note: SSA recalculates your benefit upward at FRA to credit the withheld months, but the cash flow impact during those years is real and affects portfolio withdrawals."
         }
       ]
     },

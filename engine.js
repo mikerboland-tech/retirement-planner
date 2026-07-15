@@ -71,9 +71,9 @@ const FEDERAL_TAX_BRACKETS_2026 = {
     { min: 0, max: 17700, rate: 0.10 },
     { min: 17700, max: 67450, rate: 0.12 },
     { min: 67450, max: 105700, rate: 0.22 },
-    { min: 105700, max: 201750, rate: 0.24 },
-    { min: 201750, max: 256200, rate: 0.32 },
-    { min: 256200, max: 640600, rate: 0.35 },
+    { min: 105700, max: 201775, rate: 0.24 },
+    { min: 201775, max: 256225, rate: 0.32 },
+    { min: 256225, max: 640600, rate: 0.35 },
     { min: 640600, max: Infinity, rate: 0.37 }
   ]
 };
@@ -1633,12 +1633,13 @@ const ACA_APPLICABLE_PCT_2026 = [
 const QCD_ANNUAL_LIMIT = 111000; // 2026 limit per person (indexed for inflation under SECURE 2.0; was 108k in 2025)
 const QCD_START_AGE = 70; // Must be 70½ or older (we use 70 for simplicity)
 
-// Social Security Earnings Test (2025 values, inflation-indexed)
+// Social Security Earnings Test (2026 values per SSA COLA fact sheet, inflation-indexed)
 // Before FRA: $1 withheld per $2 earned above limit
 // Year of FRA: $1 withheld per $3 earned above higher limit (only months before FRA)
 // After FRA: no limit
-const SS_EARNINGS_TEST_LIMIT_2025 = 23400;     // Annual limit for years before FRA year
-const SS_EARNINGS_TEST_FRA_LIMIT_2025 = 62160;  // Annual limit in the year you reach FRA
+// Names kept for stability; values are 2026.
+const SS_EARNINGS_TEST_LIMIT_2025 = 24480;     // Annual limit for years before FRA year
+const SS_EARNINGS_TEST_FRA_LIMIT_2025 = 65160;  // Annual limit in the year you reach FRA
 
 // Standard Medicare Part B premium (2025) — used to calculate IRMAA surcharge (amount ABOVE standard)
 const MEDICARE_PART_B_STANDARD_2025 = 202.90; // 2026 standard Part B premium per month (CMS). Name kept for stability; value is 2026.

@@ -797,19 +797,19 @@ section('Unit — calculateSocialSecurityTaxableAmount across thresholds');
 // ── 7. SS earnings test reduction ────────────────────────────────────────────
 section('Unit — calculateSSEarningsTestReduction');
 {
-  // Below limit → 0 reduction
+  // Below limit → 0 reduction (2026 pre-FRA limit is $24,480)
   eq(calculateSSEarningsTestReduction(20000, 63, 67, 0, 0.03), 0,
-    'earned $20k below $23,400 limit, pre-FRA → 0 reduction');
+    'earned $20k below $24,480 limit, pre-FRA → 0 reduction');
   // Pre-FRA: $1 withheld per $2 over limit
-  approx(calculateSSEarningsTestReduction(33400, 63, 67, 0, 0.03), 5000,
-    'earned $33,400 ($10k over), pre-FRA → $10k / 2 = $5,000');
+  approx(calculateSSEarningsTestReduction(34480, 63, 67, 0, 0.03), 5000,
+    'earned $34,480 ($10k over), pre-FRA → $10k / 2 = $5,000');
   // At/after FRA → 0 regardless of earnings
   eq(calculateSSEarningsTestReduction(200000, 70, 67, 0, 0.03), 0, 'post-FRA → 0 reduction');
   eq(calculateSSEarningsTestReduction(200000, 67, 67, 0, 0.03), 0, 'at FRA exact → 0 reduction');
-  // FRA-year (floor(claimAge) === floor(fra)): $1 withheld per $3 over higher limit ($62,160)
+  // FRA-year (floor(claimAge) === floor(fra)): $1 withheld per $3 over higher limit ($65,160)
   // claimAge 66.0, fra 66.5 → floor matches → FRA year
-  approx(calculateSSEarningsTestReduction(72160, 66, 66.5, 0, 0.03), (72160 - 62160) / 3,
-    'FRA-year: $72,160 ($10k over $62,160 limit) → $10k/3 ≈ $3,333');
+  approx(calculateSSEarningsTestReduction(75160, 66, 66.5, 0, 0.03), (75160 - 65160) / 3,
+    'FRA-year: $75,160 ($10k over $65,160 limit) → $10k/3 ≈ $3,333');
   // Inflation indexing: limit grows over years
   const y0 = calculateSSEarningsTestReduction(30000, 63, 67, 0, 0.03);
   const y10 = calculateSSEarningsTestReduction(30000, 63, 67, 10, 0.03);
