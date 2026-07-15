@@ -1175,9 +1175,17 @@ function AssetsTab({ assetTypes, assets, setAssets, setEditingAsset, setShowAsse
           <h3 className="text-xl font-semibold text-slate-100">Non-Liquid Assets</h3>
           <p className="text-sm text-slate-400">Real estate, business ownership, vehicles, and other assets for legacy planning. These don't affect cash flow projections.</p>
         </div>
-        <button onClick={() => { setEditingAsset(null); setShowAssetModal(true); }} className={buttonPrimary}>+ Add Asset</button>
+        <div className="flex items-center gap-2">
+          {dirtyAssets && <button onClick={saveAssetChanges} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-semibold transition-colors">💾 Save Changes</button>}
+          <button onClick={() => { setEditingAsset(null); setShowAssetModal(true); }} className={buttonPrimary}>+ Add Asset</button>
+        </div>
       </div>
-      
+      {dirtyAssets && (
+        <div className="p-2.5 bg-amber-500/10 border border-amber-500/40 rounded-lg text-sm text-amber-300">
+          ⚠️ You have unsaved edits (including any deletions) — click <strong>💾 Save Changes</strong> to apply them. Leaving this tab without saving discards them.
+        </div>
+      )}
+
       {/* Summary Cards */}
       <div className="grid grid-cols-3 gap-4">
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
@@ -1304,7 +1312,7 @@ function AssetsTab({ assetTypes, assets, setAssets, setEditingAsset, setShowAsse
                   <td className="py-2 px-1 text-center">
                     <div className="flex justify-center gap-1">
                       <button tabIndex={-1} onClick={() => { setEditingAsset(asset); setShowAssetModal(true); }} className="text-slate-400 hover:text-amber-400 text-sm px-1 py-1" title="Edit all details">⚙️</button>
-                      <button tabIndex={-1} onClick={() => setAssets(assets.filter(a => a.id !== asset.id))} className="text-slate-400 hover:text-red-400 text-sm px-1 py-1" title="Delete">🗑️</button>
+                      <button tabIndex={-1} onClick={() => { setLocalAssets(prev => prev.filter(a => a.id !== asset.id)); setDirtyAssets(true); }} className="text-slate-400 hover:text-red-400 text-sm px-1 py-1" title="Delete (applies on Save)">🗑️</button>
                     </div>
                   </td>
                 </tr>
@@ -1372,8 +1380,16 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h3 className="text-xl font-semibold text-slate-100">Income Streams</h3>
-        <button onClick={() => { setEditingIncome(null); setShowIncomeModal(true); }} className={buttonPrimary}>+ Add Income Stream</button>
+        <div className="flex items-center gap-2">
+          {dirtyIncomes && <button onClick={saveIncomeChanges} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-semibold transition-colors">💾 Save Changes</button>}
+          <button onClick={() => { setEditingIncome(null); setShowIncomeModal(true); }} className={buttonPrimary}>+ Add Income Stream</button>
+        </div>
       </div>
+      {dirtyIncomes && (
+        <div className="p-2.5 bg-amber-500/10 border border-amber-500/40 rounded-lg text-sm text-amber-300">
+          ⚠️ You have unsaved edits (including any deletions) — click <strong>💾 Save Changes</strong> to apply them. Leaving this tab without saving discards them.
+        </div>
+      )}
       
       {/* Quick Edit Table */}
       <div className={cardStyle}>
@@ -1498,7 +1514,7 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
                   <td className="py-2 px-1 text-center">
                     <div className="flex justify-center gap-1">
                       <button tabIndex={-1} onClick={() => { setEditingIncome(stream); setShowIncomeModal(true); }} className="text-slate-400 hover:text-amber-400 text-sm px-1 py-1" title="Edit all details">⚙️</button>
-                      <button tabIndex={-1} onClick={() => setIncomeStreams(incomeStreams.filter(i => i.id !== stream.id))} className="text-slate-400 hover:text-red-400 text-sm px-1 py-1" title="Delete">🗑️</button>
+                      <button tabIndex={-1} onClick={() => { setLocalIncomes(prev => prev.filter(i => i.id !== stream.id)); setDirtyIncomes(true); }} className="text-slate-400 hover:text-red-400 text-sm px-1 py-1" title="Delete (applies on Save)">🗑️</button>
                     </div>
                   </td>
                 </tr>
@@ -7858,8 +7874,16 @@ function AccountsTab({ accountTypes, accounts, contributorTypes, personalInfo, p
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h3 className="text-xl font-semibold text-slate-100">Investment Accounts</h3>
-        <button onClick={() => { setEditingAccount(null); setShowAccountModal(true); }} className={buttonPrimary}>+ Add Account</button>
+        <div className="flex items-center gap-2">
+          {dirty && <button onClick={saveChanges} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-semibold transition-colors">💾 Save Changes</button>}
+          <button onClick={() => { setEditingAccount(null); setShowAccountModal(true); }} className={buttonPrimary}>+ Add Account</button>
+        </div>
       </div>
+      {dirty && (
+        <div className="p-2.5 bg-amber-500/10 border border-amber-500/40 rounded-lg text-sm text-amber-300">
+          ⚠️ You have unsaved edits (including any deletions) — click <strong>💾 Save Changes</strong> to apply them. Leaving this tab without saving discards them.
+        </div>
+      )}
       
       {/* Quick Edit Table */}
       <div className={cardStyle}>
@@ -8022,7 +8046,7 @@ function AccountsTab({ accountTypes, accounts, contributorTypes, personalInfo, p
                   <td className="py-2 px-1 text-center">
                     <div className="flex justify-center gap-1">
                       <button tabIndex={-1} onClick={() => { setEditingAccount(account); setShowAccountModal(true); }} className="text-slate-400 hover:text-amber-400 text-sm px-1 py-1" title="Edit all details">⚙️</button>
-                      <button tabIndex={-1} onClick={() => setAccounts(accounts.filter(a => a.id !== account.id))} className="text-slate-400 hover:text-red-400 text-sm px-1 py-1" title="Delete">🗑️</button>
+                      <button tabIndex={-1} onClick={() => { setLocalAccounts(prev => prev.filter(a => a.id !== account.id)); setDirty(true); }} className="text-slate-400 hover:text-red-400 text-sm px-1 py-1" title="Delete (applies on Save)">🗑️</button>
                     </div>
                   </td>
                 </tr>
