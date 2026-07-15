@@ -11023,12 +11023,202 @@ function NextYearReport({ projections, personalInfo, accounts, incomeStreams, on
   return ReactDOM.createPortal(overlay, document.body);
 }
 
+// ============================================
+// Plan Summary Report — full printable snapshot of the plan: profile,
+// key outcomes, accounts, income, strategy, and the year-by-year projection.
+// Uses the same portal + print CSS plumbing as NextYearReport (#report-print).
+// ============================================
+function PlanSummaryReport({ projections, personalInfo, accounts, incomeStreams, assets, onClose }) {
+  const pi = personalInfo;
+  const preparedOn = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const isMarried = pi.hasSpouse || pi.filingStatus === 'married_joint' || pi.filingStatus === 'married_separate';
+
+  const rows = projections || [];
+  const retirementRow = rows.find(p => p.myAge === pi.myRetirementAge);
+  const lastRow = rows[rows.length - 1];
+  const depletionRow = rows.find(p => p.myAge >= pi.myRetirementAge && p.totalPortfolio <= 0);
+  const lifetimeTax = rows.reduce((s, p) => s + (p.totalTax || 0), 0);
+  const lifetimeIRMAA = rows.reduce((s, p) => s + (p.irmaaSurcharge || 0), 0);
+  const lifetimeConversions = rows.reduce((s, p) => s + (p.rothConversion || 0), 0);
+
+  const fmt = (n) => '$' + Math.round(n || 0).toLocaleString('en-US');
+  const fmtK = (n) => (n >= 1000000 ? '$' + (n / 1000000).toFixed(2) + 'M' : '$' + Math.round((n || 0) / 1000) + 'K');
+  const typeLabel = (list, v) => (list.find(t => t.value === v)?.label) || v;
+  const ownerLabel = (o) => o === 'spouse' ? 'Spouse' : o === 'joint' ? 'Joint' : 'Me';
+  const contribLabel = (a) => a.contributionMode === 'percent'
+    ? `${(((a.employeePercent || 0) + (a.employerMatchPercent || 0)) * 100).toFixed(1)}% of salary`
+    : fmt(a.contribution) + '/yr';
+
+  const th = { textAlign: 'left', padding: '4px 8px', borderBottom: '2px solid #0f172a', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.03em', color: '#334155' };
+  const thR = { ...th, textAlign: 'right' };
+  const td = { padding: '4px 8px', borderBottom: '1px solid #e2e8f0', fontSize: 12 };
+  const tdR = { ...td, textAlign: 'right' };
+  const h2 = { fontSize: 16, fontWeight: 700, margin: '22px 0 8px', paddingBottom: 4, borderBottom: '1px solid #cbd5e1', breakAfter: 'avoid' };
+  const statBox = { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6, padding: '8px 12px' };
+  const statLabel = { fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#64748b', margin: 0 };
+  const statValue = { fontSize: 17, fontWeight: 700, margin: '2px 0 0' };
+
+  const priorityLabels = { pretax: 'Pre-Tax', brokerage: 'Brokerage & HSA', roth: 'Roth' };
+  const priority = (pi.withdrawalPriority || ['pretax', 'brokerage', 'roth']).map(k => priorityLabels[k] || k).join(' → ');
+  const rothStrategy = pi.rothConversionBracket
+    ? `Fill the ${pi.rothConversionBracket} federal bracket each year`
+    : (pi.rothConversionAmount > 0 ? `Convert ${fmt(pi.rothConversionAmount)}/yr` : 'None planned');
+
+  const overlay = (
+    <div className="report-overlay fixed inset-0 bg-black/60 flex items-start justify-center z-50 overflow-y-auto py-8 px-4">
+      <div id="report-print" style={{ background: '#ffffff', color: '#0f172a' }} className="w-full max-w-4xl rounded-xl shadow-2xl p-8">
+        <div className="print-hide flex justify-end gap-2 mb-6">
+          <button onClick={() => window.print()} className={buttonPrimary}>Print / Save as PDF</button>
+          <button onClick={onClose} className={buttonSecondary}>Close</button>
+        </div>
+
+        <div style={{ borderBottom: '2px solid #0f172a', paddingBottom: 12, marginBottom: 16 }}>
+          <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0 }}>Retirement Plan Summary</h1>
+          <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>Prepared {preparedOn}</p>
+        </div>
+
+        <h2 style={h2}>Plan Profile</h2>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+          <div style={statBox}><p style={statLabel}>My Age / Retire At</p><p style={statValue}>{pi.myAge} / {pi.myRetirementAge}</p></div>
+          {isMarried && <div style={statBox}><p style={statLabel}>Spouse Age / Retire At</p><p style={statValue}>{pi.spouseAge} / {pi.spouseRetirementAge}</p></div>}
+          <div style={statBox}><p style={statLabel}>Filing / State</p><p style={{ ...statValue, fontSize: 14 }}>{(pi.filingStatus || '').replace(/_/g, ' ')} · {pi.state}</p></div>
+          <div style={statBox}><p style={statLabel}>Desired Spending</p><p style={statValue}>{fmt(pi.desiredRetirementIncome)}/yr</p></div>
+          <div style={statBox}><p style={statLabel}>Inflation Assumption</p><p style={statValue}>{((pi.inflationRate || 0) * 100).toFixed(1)}%</p></div>
+          <div style={statBox}><p style={statLabel}>Planning Horizon</p><p style={statValue}>Age {pi.legacyAge || 95}</p></div>
+          <div style={statBox}><p style={statLabel}>Withdrawal Order</p><p style={{ ...statValue, fontSize: 12 }}>{priority}</p></div>
+          <div style={statBox}><p style={statLabel}>Roth Conversions</p><p style={{ ...statValue, fontSize: 12 }}>{rothStrategy}</p></div>
+        </div>
+
+        <h2 style={h2}>Key Outcomes</h2>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+          {retirementRow && <div style={statBox}><p style={statLabel}>Portfolio at Retirement</p><p style={statValue}>{fmtK(retirementRow.totalPortfolio)}</p></div>}
+          {lastRow && <div style={statBox}><p style={statLabel}>Portfolio at Age {lastRow.myAge}</p><p style={statValue}>{fmtK(lastRow.totalPortfolio)}</p></div>}
+          <div style={statBox}><p style={statLabel}>Money Lasts</p><p style={{ ...statValue, color: depletionRow ? '#dc2626' : '#059669' }}>{depletionRow ? `Depletes at ${depletionRow.myAge}` : 'Full horizon ✓'}</p></div>
+          <div style={statBox}><p style={statLabel}>Lifetime Taxes</p><p style={statValue}>{fmtK(lifetimeTax)}</p></div>
+          <div style={statBox}><p style={statLabel}>Lifetime IRMAA</p><p style={statValue}>{fmtK(lifetimeIRMAA)}</p></div>
+          {lifetimeConversions > 0 && <div style={statBox}><p style={statLabel}>Total Roth Converted</p><p style={statValue}>{fmtK(lifetimeConversions)}</p></div>}
+        </div>
+
+        <h2 style={h2}>Investment Accounts</h2>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead><tr><th style={th}>Account</th><th style={th}>Type</th><th style={th}>Owner</th><th style={thR}>Balance</th><th style={thR}>Contribution</th><th style={thR}>Growth</th></tr></thead>
+          <tbody>
+            {(accounts || []).map(a => (
+              <tr key={a.id}>
+                <td style={td}>{a.name}</td>
+                <td style={td}>{typeLabel(ACCOUNT_TYPES, a.type)}</td>
+                <td style={td}>{ownerLabel(a.owner)}</td>
+                <td style={tdR}>{fmt(a.balance)}</td>
+                <td style={tdR}>{contribLabel(a)}</td>
+                <td style={tdR}>{((a.cagr || 0) * 100).toFixed(1)}%</td>
+              </tr>
+            ))}
+            <tr><td style={{ ...td, fontWeight: 700 }} colSpan={3}>Total</td><td style={{ ...tdR, fontWeight: 700 }}>{fmt((accounts || []).reduce((s, a) => s + (a.balance || 0), 0))}</td><td style={td} colSpan={2}></td></tr>
+          </tbody>
+        </table>
+
+        <h2 style={h2}>Income Streams</h2>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead><tr><th style={th}>Income</th><th style={th}>Type</th><th style={th}>Owner</th><th style={thR}>Annual Amount</th><th style={thR}>COLA</th><th style={thR}>Ages</th></tr></thead>
+          <tbody>
+            {(incomeStreams || []).map(s => (
+              <tr key={s.id}>
+                <td style={td}>{s.name}</td>
+                <td style={td}>{typeLabel(INCOME_TYPES, s.type)}</td>
+                <td style={td}>{ownerLabel(s.owner)}</td>
+                <td style={tdR}>{fmt(s.amount)}</td>
+                <td style={tdR}>{((s.cola || 0) * 100).toFixed(1)}%</td>
+                <td style={tdR}>{s.startAge}–{s.endAge}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        {(assets || []).length > 0 && (<>
+          <h2 style={h2}>Non-Liquid Assets</h2>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead><tr><th style={th}>Asset</th><th style={thR}>Value</th><th style={thR}>Debt</th><th style={thR}>Equity</th></tr></thead>
+            <tbody>
+              {assets.map(a => (
+                <tr key={a.id}>
+                  <td style={td}>{a.name}</td>
+                  <td style={tdR}>{fmt(a.value)}</td>
+                  <td style={tdR}>{fmt(a.mortgage || 0)}</td>
+                  <td style={tdR}>{fmt((a.value || 0) - (a.mortgage || 0))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>)}
+
+        <h2 style={h2}>Year-by-Year Projection</h2>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={th}>Year</th><th style={th}>Age{isMarried ? 's' : ''}</th>
+              <th style={thR}>Gross Income</th><th style={thR}>Taxes</th><th style={thR}>RMD</th>
+              <th style={thR}>Roth Conv.</th><th style={thR}>Healthcare</th><th style={thR}>End Portfolio</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(p => (
+              <tr key={p.year} style={p.myAge === pi.myRetirementAge ? { background: '#fef3c7' } : undefined}>
+                <td style={td}>{p.year}</td>
+                <td style={td}>{p.myAge}{isMarried && p.spouseAge != null ? ` / ${p.spouseAge}` : ''}</td>
+                <td style={tdR}>{fmt(p.totalIncome)}</td>
+                <td style={tdR}>{fmt(p.totalTax)}</td>
+                <td style={tdR}>{p.rmd > 0 ? fmt(p.rmd) : '—'}</td>
+                <td style={tdR}>{p.rothConversion > 0 ? fmt(p.rothConversion) : '—'}</td>
+                <td style={tdR}>{fmt(p.healthcareExpense)}</td>
+                <td style={tdR}>{fmt(p.totalPortfolio)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p style={{ fontSize: 10, color: '#94a3b8', margin: '6px 0 0' }}>Highlighted row = first retirement year. All figures are nominal (future) dollars.</p>
+
+        <p style={{ fontSize: 11, color: '#64748b', marginTop: 24, lineHeight: 1.5, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
+          This report is a directional planning tool generated from the assumptions in your plan, not tax or
+          investment advice. Projections use 2026 tax parameters inflated forward and your entered growth
+          assumptions; actual results will differ. Confirm decisions with a qualified professional.
+        </p>
+      </div>
+    </div>
+  );
+
+  return ReactDOM.createPortal(overlay, document.body);
+}
+
+// Small chooser shown by the sidebar "Reports" button.
+function ReportMenu({ onPick, onClose }) {
+  return (
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className={`${cardStyle} max-w-md w-full`}>
+        <h3 className="text-xl font-bold text-slate-100 mb-4">Reports</h3>
+        <div className="space-y-3">
+          <button onClick={() => onPick('summary')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
+            <div className="font-semibold text-slate-100">📊 Plan Summary Report</div>
+            <div className="text-xs text-slate-400 mt-1">Complete snapshot: profile, key outcomes, accounts, income, and the full year-by-year projection. Print or save as PDF.</div>
+          </button>
+          <button onClick={() => onPick('next12')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
+            <div className="font-semibold text-slate-100">✅ Your Next 12 Months</div>
+            <div className="text-xs text-slate-400 mt-1">Action checklist for this year: RMDs, conversion room, IRMAA watch, estimated taxes.</div>
+          </button>
+        </div>
+        <div className="flex justify-end mt-5">
+          <button onClick={onClose} className={buttonSecondary}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RetirementPlanner() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [currentYear] = useState(new Date().getFullYear());
   const [saveStatus, setSaveStatus] = useState('');
   const [showImportExport, setShowImportExport] = useState(false);
-  const [showReport, setShowReport] = useState(false);
+  const [showReport, setShowReport] = useState(null); // null | 'menu' | 'summary' | 'next12'
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [dataWarnings, setDataWarnings] = useState([]);
   // Single localStorage read for the whole component — savedData feeds both
@@ -12198,7 +12388,7 @@ function RetirementPlanner() {
               {!sidebarCollapsed && <span className="text-sm font-medium">Guided Setup</span>}
             </button>
             <button
-              onClick={() => setShowReport(true)}
+              onClick={() => setShowReport('menu')}
               className="w-full flex items-center gap-3 px-3 py-2 text-slate-400 hover:text-slate-200 hover:bg-slate-700/50 rounded-lg transition-all"
             >
               <span className="text-base">📄</span>
@@ -12304,13 +12494,26 @@ function RetirementPlanner() {
           handleReset={handleReset}
         />
       )}
-      {showReport && (
+      {showReport === 'menu' && (
+        <ReportMenu onPick={(v) => setShowReport(v)} onClose={() => setShowReport(null)} />
+      )}
+      {showReport === 'next12' && (
         <NextYearReport
           projections={projections}
           personalInfo={personalInfo}
           accounts={accounts}
           incomeStreams={incomeStreams}
-          onClose={() => setShowReport(false)}
+          onClose={() => setShowReport(null)}
+        />
+      )}
+      {showReport === 'summary' && (
+        <PlanSummaryReport
+          projections={projections}
+          personalInfo={personalInfo}
+          accounts={accounts}
+          incomeStreams={incomeStreams}
+          assets={assets}
+          onClose={() => setShowReport(null)}
         />
       )}
     </div>
