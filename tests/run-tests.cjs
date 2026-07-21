@@ -2046,6 +2046,74 @@ section('P9 — rothConversionInflationAdjust toggles indexing of fixed conversi
   eq(proj2.find(r => r.myAge === 68).rothConversion, 50000, 'flag false: same nominal amount years later');
 }
 
+// ── P10 — government pension estimator ───────────────────────────────────────
+section('P10 — estimateGovernmentPension matches published formulas');
+{
+  const { estimateGovernmentPension, estimateFersSupplement, dietCola } = engine;
+
+  // FERS published example: $90k high-3 × 25 yrs × 1.1% (age 62, 20+ yrs) = $24,750.
+  const fers = estimateGovernmentPension({ system: 'fers', yearsOfService: 25, retirementAge: 62, high3Direct: 90000, inflationRate: 0.03 });
+  eq(fers.annualPension, 24750, 'FERS 62/25yr uses the 1.1% enhanced multiplier');
+  eq(fers.multiplierUsed, 0.011, 'FERS enhanced multiplier reported');
+  eq(fers.colaStartAge, 62, 'FERS stream carries colaStartAge 62 (no COLA before 62)');
+  approx(fers.colaRate, 0.02, 'FERS diet COLA at 3% inflation = 2%', 0.001);
+
+  // FERS under 62 → standard 1.0% multiplier: $90k × 25 × 1.0% = $22,500.
+  const fersEarly = estimateGovernmentPension({ system: 'fers', yearsOfService: 25, retirementAge: 57, high3Direct: 90000 });
+  eq(fersEarly.annualPension, 22500, 'FERS pre-62 uses the standard 1.0% multiplier');
+
+  // CSRS tiered: 30 yrs, $90k → (5×1.5% + 5×1.75% + 20×2%) × 90k = 0.5625 × 90k = $50,625.
+  const csrs = estimateGovernmentPension({ system: 'csrs', yearsOfService: 30, retirementAge: 60, high3Direct: 90000 });
+  eq(csrs.annualPension, 50625, 'CSRS tiered accrual (1.5/1.75/2.0) over 30 years');
+  approx(csrs.colaRate, 0.03, 'CSRS gets full CPI COLA', 0.001);
+  eq(csrs.colaStartAge, null, 'CSRS COLA is immediate (no colaStartAge)');
+
+  // Military BRS: 20 yrs × 2.0% = 40% of high-3.
+  const brs = estimateGovernmentPension({ system: 'military_brs', yearsOfService: 20, retirementAge: 50, high3Direct: 80000 });
+  eq(brs.annualPension, 32000, 'BRS 20yr = 40% of $80k high-3');
+  // Legacy High-3: 20 yrs × 2.5% = 50%.
+  const legacy = estimateGovernmentPension({ system: 'military_high3', yearsOfService: 20, retirementAge: 50, high3Direct: 80000 });
+  eq(legacy.annualPension, 40000, 'legacy military High-3 20yr = 50% of $80k high-3');
+
+  // State/teacher: 30 yrs × 2% × $60k FAS = $36,000.
+  const state = estimateGovernmentPension({ system: 'state', yearsOfService: 30, retirementAge: 60, high3Direct: 60000, stateMultiplier: 0.02 });
+  eq(state.annualPension, 36000, 'state 2% × 30yr × $60k FAS');
+
+  // High-3 projection from current salary: retire in 2 yrs, 3% raises, $100k now.
+  // final-3 salaries at k=2,1,0: 106090, 103000, 100000 → avg ≈ 103030.
+  const proj = estimateGovernmentPension({ system: 'fers', yearsOfService: 30, retirementAge: 62, currentSalary: 100000, salaryGrowth: 0.03, yearsUntilRetirement: 2 });
+  approx(proj.high3, (100000*1.03**2 + 100000*1.03 + 100000) / 3, 'high-3 projected from salary + raises', 0.001);
+
+  // Survivor election reduces the base ~10%.
+  const surv = estimateGovernmentPension({ system: 'fers', yearsOfService: 25, retirementAge: 62, high3Direct: 90000, survivorElection: true });
+  eq(surv.annualPension, Math.round(24750 * 0.9), 'survivor election applies the ~10% reduction');
+
+  // Diet COLA table.
+  approx(dietCola(0.015), 0.015, 'diet COLA below 2% = CPI', 0.0001);
+  approx(dietCola(0.025), 0.02,  'diet COLA 2–3% capped at 2%', 0.0001);
+  approx(dietCola(0.04),  0.03,  'diet COLA above 3% = CPI − 1%', 0.0001);
+
+  // FERS supplement rule of thumb: $24k SS-at-62 × 30/40 = $18,000.
+  eq(estimateFersSupplement({ ssAt62Annual: 24000, yearsOfService: 30 }), 18000, 'FERS supplement ≈ SS62 × years/40');
+}
+
+// ── P11 — colaStartAge freezes stream COLA until the given age ────────────────
+section('P11 — a pension with colaStartAge gets no COLA before that age');
+{
+  // FERS-style pension: starts at 57, colaStartAge 62, 2% diet COLA.
+  const s = baseScenario({ myAge: 55, spouseAge: 55, myBirthYear: TODAY_YEAR - 55, spouseBirthYear: TODAY_YEAR - 55, myRetirementAge: 57, spouseRetirementAge: 57 });
+  s.streams = [{ id: 1, name: 'FERS', type: 'pension', amount: 30000, startAge: 57, endAge: 95, cola: 0.02, colaStartAge: 62, owner: 'me' }];
+  const proj = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  eq(proj.find(r => r.myAge === 57).pension, 30000, 'pension pays face value at the start age');
+  eq(proj.find(r => r.myAge === 61).pension, 30000, 'still frozen at 61 (no COLA before 62)');
+  approx(proj.find(r => r.myAge === 63).pension, 30000 * Math.pow(1.02, 1), 'COLA begins accruing at 62 (one year by 63)', 0.005);
+  // A normal pension without colaStartAge is unaffected (regression).
+  const s2 = baseScenario();
+  s2.streams = [{ id: 1, name: 'Plain', type: 'pension', amount: 30000, startAge: 60, endAge: 95, cola: 0.02, owner: 'me' }];
+  const proj2 = computeProjections(s2.pi, s2.accts, s2.streams, [], [], [], TODAY_YEAR);
+  approx(proj2.find(r => r.myAge === 63).pension, 30000 * Math.pow(1.02, 3), 'plain pension still COLAs from the start age', 0.005);
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

@@ -32,6 +32,7 @@ const {
   LTC_MONTHLY_ASSISTED_LIVING_2025, LTC_DEFAULT_DURATION_MONTHS, ACA_FPL_2025,
   calculateACASubsidy, calculateACAPremiumCredit, ACA_BENCHMARK_PREMIUM_2026,
   calculateHealthcareExpenses, calculateRecurringExpenses,
+  GOV_PENSION_SYSTEMS, estimateGovernmentPension, estimateFersSupplement,
   HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
   computeProjections,
 } = PlannerEngine;
@@ -4128,7 +4129,8 @@ function StressTestTab({ accounts, currentYear, incomeStreams, personalInfo, pro
           const ownerAge = stream.owner === 'me' ? myAge : spouseAge;
           if (ownerAge >= stream.startAge && ownerAge <= stream.endAge) {
             // todaysDollars: COLA compounds from today, not the stream's start age
-            const colaYears = stream.todaysDollars ? (myAge - personalInfo.myAge) : (ownerAge - stream.startAge);
+            const colaFrom = stream.colaStartAge ? Math.max(stream.startAge, stream.colaStartAge) : stream.startAge;
+            const colaYears = stream.todaysDollars ? (myAge - personalInfo.myAge) : Math.max(0, ownerAge - colaFrom);
             const adj = stream.amount * Math.pow(1 + (stream.cola || 0), colaYears);
             if (stream.type === 'social_security') totalSS += adj;
             else if (stream.type === 'pension') { totalPension += adj; nonSSIncome += adj; }
@@ -4576,7 +4578,8 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
       const ownerAge = stream.owner === 'me' ? age : age - (personalInfo.myAge - personalInfo.spouseAge);
       if (ownerAge >= stream.startAge && ownerAge <= stream.endAge) {
         // todaysDollars: COLA compounds from today, not the stream's start age
-        const colaYears = stream.todaysDollars ? (age - personalInfo.myAge) : (ownerAge - stream.startAge);
+        const colaFrom = stream.colaStartAge ? Math.max(stream.startAge, stream.colaStartAge) : stream.startAge;
+        const colaYears = stream.todaysDollars ? (age - personalInfo.myAge) : Math.max(0, ownerAge - colaFrom);
         const amount = stream.amount * Math.pow(1 + stream.cola, colaYears);
         if (stream.type === 'social_security') {
           ssIncome += amount;
@@ -10681,8 +10684,91 @@ function AccountModal({ editingAccount, personalInfo, incomeStreams, onClose, on
   );
 }
 
-function IncomeModal({ editingIncome, personalInfo, onClose, onSave }) {
+function IncomeModal({ editingIncome, personalInfo, incomeStreams = [], onClose, onSave }) {
   const [formData, setFormData] = useState(editingIncome || { name: '', type: 'pension', amount: 0, startAge: 62, endAge: 95, cola: 0.02, owner: 'me', pia: 0 });
+
+  // ── Government pension estimator state ──────────────────────────────────────
+  const [estOpen, setEstOpen] = useState(false);
+  const [est, setEst] = useState({
+    system: 'fers',
+    yearsOfService: 20,
+    salaryMode: 'project',       // 'project' (from current salary) | 'direct' (enter high-3)
+    currentSalary: 100000,
+    salaryGrowth: personalInfo.inflationRate || 0.03,
+    high3Direct: 0,
+    stateMultiplier: 0.02,
+    survivorElection: false,
+    addSupplement: true,
+    ssAt62: 0,
+  });
+
+  const ownerCurAge = formData.owner === 'spouse' ? personalInfo.spouseAge : personalInfo.myAge;
+  const ownerRetAge = formData.owner === 'spouse'
+    ? (personalInfo.spouseRetirementAge || personalInfo.myRetirementAge)
+    : personalInfo.myRetirementAge;
+  const yearsUntilRet = Math.max(0, ownerRetAge - ownerCurAge);
+  const estAvailable = typeof estimateGovernmentPension === 'function';
+
+  // Live estimate preview (recomputed on every render from `est`).
+  const estResult = estAvailable ? estimateGovernmentPension({
+    system: est.system,
+    yearsOfService: Number(est.yearsOfService) || 0,
+    retirementAge: ownerRetAge,
+    currentSalary: Number(est.currentSalary) || 0,
+    salaryGrowth: Number(est.salaryGrowth) || 0,
+    yearsUntilRetirement: yearsUntilRet,
+    high3Direct: est.salaryMode === 'direct' ? (Number(est.high3Direct) || 0) : null,
+    stateMultiplier: Number(est.stateMultiplier) || 0,
+    inflationRate: personalInfo.inflationRate || 0.03,
+    survivorElection: est.survivorElection,
+  }) : null;
+
+  const isFersEarly = est.system === 'fers' && ownerRetAge < 62;
+  // Default the SS-at-62 field from this owner's Social Security stream, if any.
+  const ownerSSStream = incomeStreams.find(s => s.type === 'social_security' && s.owner === formData.owner);
+  const supplementSS = Number(est.ssAt62) > 0 ? Number(est.ssAt62) : (ownerSSStream ? ownerSSStream.amount : 0);
+  const supplementPreview = (estAvailable && isFersEarly && est.addSupplement && typeof estimateFersSupplement === 'function')
+    ? estimateFersSupplement({ ssAt62Annual: supplementSS, yearsOfService: Number(est.yearsOfService) || 0 })
+    : 0;
+
+  const applyEstimate = () => {
+    if (!estResult) return;
+    setFormData({
+      ...formData,
+      name: formData.name && formData.name.trim() ? formData.name : `${(GOV_PENSION_SYSTEMS[est.system] || {}).label || 'Government'} Pension`,
+      amount: estResult.annualPension,
+      cola: estResult.colaRate,
+      colaStartAge: estResult.colaStartAge || undefined,
+      startAge: ownerRetAge,
+      todaysDollars: false,       // the estimate is nominal at retirement
+      survivorBenefit: est.survivorElection ? true : formData.survivorBenefit,
+      survivorBenefitRate: est.survivorElection ? 0.5 : formData.survivorBenefitRate,
+    });
+  };
+
+  const buildSupplementStream = () => {
+    if (!(estAvailable && isFersEarly && est.addSupplement) || supplementPreview <= 0) return null;
+    return {
+      name: 'FERS Supplement',
+      type: 'pension',
+      amount: supplementPreview,
+      startAge: ownerRetAge,
+      endAge: 61,                 // paid until the month before age 62
+      cola: 0,                    // the supplement gets no COLA
+      owner: formData.owner,
+      todaysDollars: false,
+    };
+  };
+
+  const handleSaveClick = () => {
+    // Strip transient underscore-prefixed keys before persisting.
+    const clean = Object.fromEntries(Object.entries(formData).filter(([k]) => !k.startsWith('_')));
+    onSave(clean, buildSupplementStream());
+  };
+
+  const estInput = "w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-slate-100 text-sm focus:border-purple-500/70 focus:outline-none";
+  const estLabel = "block text-xs text-slate-400 mb-1";
+
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
       <div className={`${cardStyle} max-w-lg w-full max-h-[90vh] overflow-y-auto`}>
@@ -10691,9 +10777,117 @@ function IncomeModal({ editingIncome, personalInfo, onClose, onSave }) {
           <div><label className={labelStyle}>Income Name</label><input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className={inputStyle} /></div>
           <div><label className={labelStyle}>Income Type</label><select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className={inputStyle}>{INCOME_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
           <div><label className={labelStyle}>Owner</label><select value={formData.owner} onChange={e => setFormData({...formData, owner: e.target.value})} className={inputStyle}><option value="me">Me</option><option value="spouse">Spouse</option></select></div>
+
+          {formData.type === 'pension' && estAvailable && (
+            <div className="border border-purple-700/40 bg-purple-900/10 rounded-lg overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setEstOpen(o => !o)}
+                className="w-full flex items-center justify-between px-3 py-2 text-left text-sm font-medium text-purple-300 hover:bg-purple-900/20"
+              >
+                <span>🏛️ Estimate a government pension</span>
+                <span className="text-purple-400">{estOpen ? '▲' : '▼'}</span>
+              </button>
+              {estOpen && (
+                <div className="px-3 pb-3 pt-1 space-y-3">
+                  <p className="text-[11px] text-slate-400">
+                    Estimates a defined-benefit pension: <em>years of service × multiplier × high-3 salary</em>.
+                    The result fills the amount, COLA, and start age below. Estimates only — verify against an official calculator.
+                  </p>
+                  <div>
+                    <label className={estLabel}>Retirement system</label>
+                    <select value={est.system} onChange={e => setEst({...est, system: e.target.value})} className={estInput}>
+                      {Object.entries(GOV_PENSION_SYSTEMS || {}).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                    </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className={estLabel}>Years of service at retirement</label>
+                      <input type="number" min={0} value={est.yearsOfService} onChange={e => setEst({...est, yearsOfService: e.target.value})} className={estInput} />
+                    </div>
+                    {est.system === 'state' && (
+                      <div>
+                        <label className={estLabel}>Multiplier (% per year)</label>
+                        <input type="number" step="0.1" value={(Number(est.stateMultiplier) * 100).toFixed(1)} onChange={e => setEst({...est, stateMultiplier: (Number(e.target.value) || 0) / 100})} className={estInput} />
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <label className={estLabel}>Salary basis (high-3 average)</label>
+                    <div className="flex gap-2 mb-2">
+                      <button type="button" onClick={() => setEst({...est, salaryMode: 'project'})} className={`px-2 py-1 text-xs rounded border ${est.salaryMode === 'project' ? 'bg-purple-500/20 text-purple-300 border-purple-500/40' : 'text-slate-400 border-slate-600/50'}`}>From current salary</button>
+                      <button type="button" onClick={() => setEst({...est, salaryMode: 'direct'})} className={`px-2 py-1 text-xs rounded border ${est.salaryMode === 'direct' ? 'bg-purple-500/20 text-purple-300 border-purple-500/40' : 'text-slate-400 border-slate-600/50'}`}>I know my high-3</button>
+                    </div>
+                    {est.salaryMode === 'project' ? (
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className={estLabel}>Current salary</label>
+                          <input type="number" value={est.currentSalary} onChange={e => setEst({...est, currentSalary: e.target.value})} className={estInput} />
+                        </div>
+                        <div>
+                          <label className={estLabel}>Annual raise (%)</label>
+                          <input type="number" step="0.1" value={(Number(est.salaryGrowth) * 100).toFixed(1)} onChange={e => setEst({...est, salaryGrowth: (Number(e.target.value) || 0) / 100})} className={estInput} />
+                        </div>
+                        <p className="col-span-2 text-[10px] text-slate-500">
+                          Projected {yearsUntilRet} yr{yearsUntilRet === 1 ? '' : 's'} to retirement (age {ownerRetAge}), averaging the final 3 years → high-3 ≈ {formatCurrency(estResult ? estResult.high3 : 0)}.
+                        </p>
+                      </div>
+                    ) : (
+                      <div>
+                        <label className={estLabel}>High-3 average salary (nominal at retirement)</label>
+                        <input type="number" value={est.high3Direct} onChange={e => setEst({...est, high3Direct: e.target.value})} className={estInput} />
+                      </div>
+                    )}
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={est.survivorElection} onChange={e => setEst({...est, survivorElection: e.target.checked})} className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-purple-500" />
+                    <span className="text-xs text-slate-300">Elect a 50% survivor annuity (≈10% base reduction)</span>
+                  </label>
+                  {isFersEarly && (
+                    <div className="p-2 bg-slate-800/50 border border-slate-700/50 rounded space-y-2">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" checked={est.addSupplement} onChange={e => setEst({...est, addSupplement: e.target.checked})} className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-purple-500" />
+                        <span className="text-xs text-slate-300">Add the FERS Special Retirement Supplement (bridges to age 62)</span>
+                      </label>
+                      {est.addSupplement && (
+                        <div>
+                          <label className={estLabel}>Est. Social Security benefit at 62 (annual)</label>
+                          <input type="number" value={est.ssAt62} placeholder={ownerSSStream ? String(ownerSSStream.amount) : '0'} onChange={e => setEst({...est, ssAt62: e.target.value})} className={estInput} />
+                          <p className="text-[10px] text-slate-500 mt-0.5">
+                            {ownerSSStream && Number(est.ssAt62) <= 0 ? `Defaulting to this owner's SS stream (${formatCurrency(ownerSSStream.amount)}). ` : ''}
+                            Supplement ≈ SS-at-62 × years ÷ 40 → {formatCurrency(supplementPreview)}/yr, paid to age 61, no COLA.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between gap-3 pt-1 border-t border-purple-700/30">
+                    <div className="text-sm">
+                      <div className="text-slate-400 text-[11px]">Estimated pension</div>
+                      <div className="text-emerald-400 font-bold text-lg">{formatCurrency(estResult ? estResult.annualPension : 0)}<span className="text-xs text-slate-500 font-normal">/yr at {ownerRetAge}</span></div>
+                      <div className="text-[10px] text-slate-500">
+                        {(estResult && estResult.multiplierUsed ? (estResult.multiplierUsed * 100).toFixed(2) : '0')}% × {est.yearsOfService} yr · COLA {(estResult ? (estResult.colaRate * 100).toFixed(1) : '0')}%{estResult && estResult.colaStartAge ? ` from age ${estResult.colaStartAge}` : ''}
+                      </div>
+                    </div>
+                    <button type="button" onClick={applyEstimate} className="px-3 py-2 text-sm bg-purple-600 hover:bg-purple-500 text-white rounded font-medium">Apply estimate</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {formData.type === 'social_security' && <div><label className={labelStyle}>PIA (Monthly)</label><input type="number" value={formData.pia} onChange={e => setFormData({...formData, pia: Number(e.target.value), amount: Number(e.target.value) * 12})} className={inputStyle} /></div>}
           <div><label className={labelStyle}>Annual Amount</label><input type="number" value={formData.amount} onChange={e => setFormData({...formData, amount: Number(e.target.value)})} className={inputStyle} /></div>
-          <div><label className={labelStyle}>COLA (%)</label><input type="number" step="0.1" value={(formData.cola * 100).toFixed(1)} onChange={e => setFormData({...formData, cola: Number(e.target.value) / 100})} className={inputStyle} /></div>
+          <div>
+            <label className={labelStyle}>COLA (%)</label>
+            <input type="number" step="0.1" value={(formData.cola * 100).toFixed(1)} onChange={e => setFormData({...formData, cola: Number(e.target.value) / 100})} className={inputStyle} />
+            {formData.colaStartAge ? (
+              <p className="text-xs text-amber-400/80 mt-1">
+                COLA is frozen until age {formData.colaStartAge} (FERS pensions get no COLA before 62).
+                {' '}<button type="button" onClick={() => setFormData({...formData, colaStartAge: undefined})} className="underline hover:text-amber-300">Clear</button>
+              </p>
+            ) : null}
+          </div>
           <label className="flex items-start gap-2 cursor-pointer">
             <input
               type="checkbox"
@@ -10756,7 +10950,7 @@ function IncomeModal({ editingIncome, personalInfo, onClose, onSave }) {
         </div>
         <div className="flex justify-end gap-3 mt-8">
           <button onClick={onClose} className={buttonSecondary}>Cancel</button>
-          <button onClick={() => onSave(formData)} className={buttonPrimary}>Save Income</button>
+          <button onClick={handleSaveClick} className={buttonPrimary}>Save Income</button>
         </div>
       </div>
     </div>
@@ -11542,7 +11736,7 @@ function RetirementPlanner() {
     setEditingAccount(null);
   };
 
-  const handleSaveIncome = (income) => {
+  const handleSaveIncome = (income, extraStream = null) => {
     const error = validateIncome(income);
     if (error) {
       alert(error);
@@ -11550,6 +11744,12 @@ function RetirementPlanner() {
     }
     if (income.id) setIncomeStreams(prev => prev.map(i => i.id === income.id ? income : i));
     else setIncomeStreams(prev => [...prev, { ...income, id: Date.now() + Math.random() }]);
+    // The pension estimator can emit a companion stream (e.g. the FERS Special
+    // Retirement Supplement that bridges an early retirement to age 62).
+    if (extraStream) {
+      const err2 = validateIncome(extraStream);
+      if (!err2) setIncomeStreams(prev => [...prev, { ...extraStream, id: Date.now() + Math.random() + 1 }]);
+    }
     setShowIncomeModal(false);
     setEditingIncome(null);
   };
@@ -12526,6 +12726,7 @@ function RetirementPlanner() {
         <IncomeModal
           editingIncome={editingIncome}
           personalInfo={personalInfo}
+          incomeStreams={incomeStreams}
           onClose={() => { setShowIncomeModal(false); setEditingIncome(null); }}
           onSave={handleSaveIncome}
         />

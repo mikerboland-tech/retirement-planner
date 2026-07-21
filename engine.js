@@ -2369,6 +2369,109 @@ const calculateNIIT = (investmentIncome, magi, filingStatus) => {
   return taxableAmount * 0.038;
 };
 
+// ── GOVERNMENT DEFINED-BENEFIT PENSION ESTIMATOR ─────────────────────────────
+// Estimates a government pension from the standard formula shared by every major
+// U.S. public system:  annual = years of service × multiplier × high-3 salary.
+// The result is emitted as a normal pension income stream (nominal at retirement)
+// plus the COLA rate and colaStartAge the stream should carry, so the projection
+// engine needs no pension-specific logic — it just receives a dollar amount.
+//
+// Sources: OPM (FERS/CSRS computation), DoD FINRED (military BRS), OPM/FedWeek
+// (CSRS tiers), TeacherPensions.org (state final-average-salary formula).
+
+// FERS "diet" COLA: no full CPI pass-through. CPI < 2% → CPI; 2–3% → capped at 2%;
+// above 3% → CPI − 1%. Applied only from age 62 (see colaStartAge on the stream).
+const dietCola = (cpi) => {
+  if (cpi < 0.02) return cpi;
+  if (cpi <= 0.03) return 0.02;
+  return cpi - 0.01;
+};
+
+// System registry. `mult` is a fixed per-year multiplier where one applies; FERS
+// and CSRS compute their multiplier from age/service and tiers respectively.
+const GOV_PENSION_SYSTEMS = {
+  fers:           { label: 'FERS (federal)',                       colaType: 'diet',   colaStartAge: 62 },
+  csrs:           { label: 'CSRS (federal, legacy)',               colaType: 'full',   colaStartAge: null },
+  military_brs:   { label: 'Military — Blended Retirement System', mult: 0.020, colaType: 'full', colaStartAge: null },
+  military_high3: { label: 'Military — legacy High-3',             mult: 0.025, colaType: 'full', colaStartAge: null },
+  state:          { label: 'State / local / teacher',             colaType: 'custom', colaStartAge: null },
+};
+
+// Project a nominal high-3 (average of the highest 36 consecutive months of base
+// pay) to the retirement date from a current salary and annual raise assumption:
+// the average of the final three years' salary at retirement.
+const projectHigh3 = (currentSalary, salaryGrowth, yearsUntilRetirement) => {
+  const n = Math.max(0, yearsUntilRetirement || 0);
+  const salAt = (k) => currentSalary * Math.pow(1 + (salaryGrowth || 0), k);
+  return (salAt(n) + salAt(Math.max(0, n - 1)) + salAt(Math.max(0, n - 2))) / 3;
+};
+
+const estimateGovernmentPension = ({
+  system,
+  yearsOfService,
+  retirementAge,
+  currentSalary = 0,
+  salaryGrowth = 0.03,
+  yearsUntilRetirement = 0,
+  high3Direct = null,            // if given (> 0), used as the nominal high-3 at retirement
+  stateMultiplier = 0.02,        // used only for system === 'state'
+  inflationRate = 0.03,          // drives the derived COLA rate
+  survivorElection = false,      // 50% survivor annuity → base reduction
+  survivorReductionPct = 0.10,   // standard ~10% for a 50% survivor benefit
+} = {}) => {
+  const cfg = GOV_PENSION_SYSTEMS[system] || GOV_PENSION_SYSTEMS.state;
+  const years = Math.max(0, yearsOfService || 0);
+
+  // 1. High-3 average salary (nominal at retirement).
+  const high3 = (high3Direct != null && high3Direct > 0)
+    ? high3Direct
+    : projectHigh3(currentSalary, salaryGrowth, yearsUntilRetirement);
+
+  // 2. Multiplier → gross annual pension.
+  let annual, multiplierUsed;
+  if (system === 'fers') {
+    multiplierUsed = (retirementAge >= 62 && years >= 20) ? 0.011 : 0.010;
+    annual = years * multiplierUsed * high3;
+  } else if (system === 'csrs') {
+    // Tiered: 1.5% for the first 5 years, 1.75% for the next 5, 2% beyond 10.
+    const factor = Math.min(years, 5) * 0.015
+      + Math.min(Math.max(years - 5, 0), 5) * 0.0175
+      + Math.max(years - 10, 0) * 0.020;
+    annual = factor * high3;
+    multiplierUsed = years > 0 ? factor / years : 0; // effective blended rate
+  } else if (system === 'military_brs' || system === 'military_high3') {
+    multiplierUsed = cfg.mult;
+    annual = years * multiplierUsed * high3;
+  } else { // state / local / teacher — caller supplies the multiplier
+    multiplierUsed = stateMultiplier;
+    annual = years * multiplierUsed * high3;
+  }
+
+  // 3. Survivor election reduces the base annuity.
+  if (survivorElection) annual *= (1 - survivorReductionPct);
+
+  // 4. COLA rate the emitted stream should carry.
+  let colaRate;
+  if (cfg.colaType === 'diet') colaRate = dietCola(inflationRate);
+  else colaRate = inflationRate; // 'full' and 'custom' both track CPI by default
+
+  return {
+    annualPension: Math.round(annual),
+    high3: Math.round(high3),
+    multiplierUsed,
+    colaRate,
+    colaStartAge: cfg.colaStartAge,
+  };
+};
+
+// FERS Special Retirement Supplement: bridges the gap from a pre-62 retirement
+// (at the Minimum Retirement Age with enough service) to age 62, approximating
+// the Social Security benefit earned during federal service. OPM's rule of thumb:
+//   supplement ≈ (estimated SS benefit at 62) × (years of FERS service ÷ 40).
+// No COLA; paid until the month before 62; reduced by an earnings test (not modeled).
+const estimateFersSupplement = ({ ssAt62Annual = 0, yearsOfService = 0 } = {}) =>
+  Math.round(ssAt62Annual * Math.min(yearsOfService, 40) / 40);
+
 function computeProjections(pi, accts, streams, assetList, events = [], recurringExpensesList = [], currentYearArg, opts = {}) {
   // currentYear used to be captured from RetirementPlanner's closure. It's now an
   // explicit parameter (with a fallback) so this function can be moved to module
@@ -2435,8 +2538,15 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   // amount is in TODAY's dollars and COLA compounds from the current year — so a
   // future-dated stream (SS from an SSA statement, future rental) is indexed
   // between now and its start instead of paying today's number in future dollars.
-  const streamColaYears = (stream, ownerAge, yearsFromNow) =>
-    stream.todaysDollars ? yearsFromNow : ownerAge - stream.startAge;
+  const streamColaYears = (stream, ownerAge, yearsFromNow) => {
+    if (stream.todaysDollars) return yearsFromNow;
+    // Standard: COLA compounds from the start age. A colaStartAge delays the first
+    // adjustment — the benefit stays frozen at its start-age value until the owner
+    // reaches that age (FERS pensions receive NO COLA before 62). Undefined/0 →
+    // colaFrom = startAge, i.e. unchanged behavior for every non-FERS stream.
+    const colaFrom = stream.colaStartAge ? Math.max(stream.startAge, stream.colaStartAge) : stream.startAge;
+    return Math.max(0, ownerAge - colaFrom);
+  };
 
   // MAGI by projection year (index = yearsFromNow). IRMAA in year t is based on
   // MAGI from year t−2 (the real Medicare lookback); for the first two years we
@@ -3925,6 +4035,10 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     getACAApplicablePercentage, calculateACAPremiumCredit,
     getSpendingPhaseMultiplier, scoreRothStrategy,
     calculateHealthcareExpenses, calculateRecurringExpenses,
+
+    // ── Government pension estimator ──────────────────────────────────────
+    GOV_PENSION_SYSTEMS, estimateGovernmentPension, estimateFersSupplement,
+    projectHigh3, dietCola,
 
     // ── Historical sequences + main projection entry point ────────────────
     HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
