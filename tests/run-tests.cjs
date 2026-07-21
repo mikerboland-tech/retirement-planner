@@ -1946,8 +1946,104 @@ section('P4 — guardrails cut spending after a crash, absent otherwise');
   // pre-SS/pre-RMD years (excess RMDs are reinvested, not spent, so they must
   // NOT trip the guardrail), and the multiplier never ends below plan level.
   const calm = computeProjections(pi, accts, streams, [], [], [], TODAY_YEAR, { spendingRule: rule });
-  eq(calm.filter(r => r.myAge < 70).some(r => r.guardrailEvent === 'cut'), false, 'no cuts before 70 in steadily growing markets');
+  // Check before 65: from 65 the household's real spending steps up (standard
+  // Medicare Part B/D premiums are charged even under healthcareModel 'none'),
+  // which can legitimately move the withdrawal rate against the retirement-year
+  // anchor. The intent here is that reinvested excess RMDs never trip the rule.
+  eq(calm.filter(r => r.myAge < 65).some(r => r.guardrailEvent === 'cut'), false, 'no cuts before 65 in steadily growing markets');
   gt(calm[calm.length - 1].guardrailMultiplier, 0.999, 'multiplier never ends below 1 in good markets');
+}
+
+// ── P5 — IRMAA 2-year MAGI lookback ──────────────────────────────────────────
+section('P5 — IRMAA surcharge is based on MAGI from two years prior');
+{
+  // One-shot $300k conversion at 66 spikes that year's MAGI. Under the lookback
+  // the surcharge must land at 68 (when Medicare looks at the 66 return), while
+  // 66 itself is priced off the modest age-64 MAGI.
+  const s = baseScenario({ rothConversionAmount: 300000, rothConversionStartAge: 66, rothConversionEndAge: 66 });
+  const proj = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  const at66 = proj.find(r => r.myAge === 66);
+  const at68 = proj.find(r => r.myAge === 68);
+  gt(at66.rothConversion, 250000, 'the one-shot conversion executes at 66');
+  eq(at66.irmaaSurcharge, 0, 'conversion year pays NO surcharge (lookback MAGI from 64 is modest)');
+  gt(at68.irmaaSurcharge, 3000, 'the surcharge lands two years later, priced off the spike');
+  // And it is funded: net income still covers desired spending + healthcare in that year.
+  const need68 = at68.desiredIncome + at68.healthcareExpense + at68.recurringExpenses;
+  approx(at68.netIncome, need68, 'the lookback surcharge is funded by the spending solver', 0.02);
+}
+
+// ── P6 — QCD capped by pre-tax income withdrawn, not remaining balance ───────
+section('P6 — QCD eligibility follows withdrawals, not the leftover balance');
+{
+  // Pre-tax-first spender whose small 401k fully depletes this year: the QCD
+  // must still apply (the withdrawals happened) — the old balance-based rule
+  // zeroed it and left net income short.
+  // desiredRetirementIncome must exceed the SS+pension guaranteed income at 71,
+  // or the solver never withdraws and the depletion premise doesn't hold.
+  const s = baseScenario({ myAge: 71, spouseAge: 71, myBirthYear: TODAY_YEAR - 71, spouseBirthYear: TODAY_YEAR - 71, charitableGivingPercent: 10, desiredRetirementIncome: 150000 });
+  s.accts = [
+    { id: 1, name: '401k', type: '401k', balance: 30000, contribution: 0, contributionGrowth: 0, cagr: 0.06, startAge: 71, stopAge: 71, owner: 'me', contributor: 'me' },
+    { id: 3, name: 'Brokerage', type: 'brokerage', balance: 1000000, contribution: 0, contributionGrowth: 0, cagr: 0.05, startAge: 71, stopAge: 71, owner: 'joint', contributor: 'me', costBasisPercent: 0.30 },
+  ];
+  const proj = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  const yr = proj[0];
+  eq(yr.preTaxBalance, 0, 'the 401k depletes in the first year');
+  approx(yr.qcd, yr.charitableGiving, 'QCD still applies in the depletion year (capped by withdrawals made)', 0.01);
+
+  // Roth/brokerage-first spender who never touches pre-tax: no pre-tax dollars
+  // were withdrawn, so NO QCD — the old rule granted a phantom exclusion here.
+  const s2 = baseScenario({ myAge: 71, spouseAge: 71, myBirthYear: TODAY_YEAR - 71, spouseBirthYear: TODAY_YEAR - 71, charitableGivingPercent: 10, desiredRetirementIncome: 150000, withdrawalPriority: ['brokerage', 'roth', 'pretax'] });
+  const proj2 = computeProjections(s2.pi, s2.accts, s2.streams, [], [], [], TODAY_YEAR);
+  const yr2 = proj2[0];
+  eq(yr2.rmd, 0, 'no RMD yet at 71 (born ' + (TODAY_YEAR - 71) + ' → RMD age 73+)');
+  eq(yr2.qcd, 0, 'no pre-tax withdrawals and no RMD → no QCD (no phantom exclusion)');
+}
+
+// ── P7 — standard Medicare premiums under healthcareModel none ───────────────
+section('P7 — base Part B/D premiums charged at 65+ even with healthcare model off');
+{
+  const s = baseScenario();
+  const proj = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  const at64 = proj.find(r => r.myAge === 64);
+  const at65 = proj.find(r => r.myAge === 65);
+  eq(at64.healthcareExpense, 0, "under 65 nothing is charged under 'none'");
+  const expected65 = (engine.MEDICARE_PART_B_PREMIUM_2025 + engine.MEDICARE_PART_D_PREMIUM_2025) * 12 * 2
+    * Math.pow(1 + s.pi.medicalInflation, 5);
+  approx(at65.healthcareExpense, expected65, 'both spouses pay standard Part B+D at 65 (medical inflation applied)', 0.02);
+  // Funded: net income covers spending + the new premiums.
+  approx(at65.netIncome, at65.desiredIncome + at65.healthcareExpense, 'premiums are funded by the solver', 0.02);
+}
+
+// ── P8 — today's-dollars income streams ──────────────────────────────────────
+section("P8 — todaysDollars streams index COLA from today, not the start age");
+{
+  const s = baseScenario();
+  const projDefault = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  const claimDefault = projDefault.find(r => r.myAge === 67);
+  // Default (unchanged behavior): first-year SS pays the entered amount.
+  approx(claimDefault.socialSecurity, 30000 + 24000, 'default: entered amounts are nominal at the claim age', 0.001);
+
+  const s2 = baseScenario();
+  s2.streams = s2.streams.map(st => st.type === 'social_security' ? { ...st, todaysDollars: true } : st);
+  const projToday = computeProjections(s2.pi, s2.accts, s2.streams, [], [], [], TODAY_YEAR);
+  const claimToday = projToday.find(r => r.myAge === 67);
+  // 7 years of 2% COLA accrue between today (60) and the claim (67).
+  approx(claimToday.socialSecurity, (30000 + 24000) * Math.pow(1.02, 7), "todaysDollars: benefits are indexed up to the claim age", 0.001);
+}
+
+// ── P9 — fixed-amount conversion: inflation toggle ───────────────────────────
+section('P9 — rothConversionInflationAdjust toggles indexing of fixed conversions');
+{
+  // Default (flag absent/true): the entered amount is today's dollars, indexed.
+  const s = baseScenario({ rothConversionAmount: 50000, rothConversionStartAge: 62, rothConversionEndAge: 70 });
+  const proj = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  approx(proj.find(r => r.myAge === 62).rothConversion, 50000 * Math.pow(1.03, 2), 'default: conversion is inflation-indexed from today', 0.001);
+
+  // Flag false: the same nominal amount converts every year.
+  const s2 = baseScenario({ rothConversionAmount: 50000, rothConversionStartAge: 62, rothConversionEndAge: 70, rothConversionInflationAdjust: false });
+  const proj2 = computeProjections(s2.pi, s2.accts, s2.streams, [], [], [], TODAY_YEAR);
+  eq(proj2.find(r => r.myAge === 62).rothConversion, 50000, 'flag false: nominal amount at the start year');
+  eq(proj2.find(r => r.myAge === 68).rothConversion, 50000, 'flag false: same nominal amount years later');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

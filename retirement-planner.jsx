@@ -335,7 +335,8 @@ const DEFAULT_PERSONAL_INFO = {
   charitableGivingPercent: 0, // Percentage of retirement spending donated to charity (enables QCD strategy)
   // Planned Roth conversions: move this much per year from largest pre-tax account to largest Roth account.
   // Conversions are treated as ordinary income in the projection engine (affects taxes and SS taxation).
-  rothConversionAmount: 0,       // Annual conversion amount in today's dollars (0 = disabled)
+  rothConversionAmount: 0,       // Annual conversion amount (0 = disabled)
+  rothConversionInflationAdjust: true, // true: amount is today's $, indexed each year; false: same nominal amount every year
   rothConversionStartAge: 0,     // Age to begin converting (0 = use smart default: myRetirementAge)
   rothConversionEndAge: 0,       // Age to stop converting (0 = use smart default: rmdStartAge - 1)
   rothConversionBracket: '',     // If set ('22%','24%','32%'), fill to this bracket instead of fixed amount
@@ -722,11 +723,11 @@ function FAQTab() {
         },
         {
           q: "How is Social Security calculated?",
-          a: "Social Security is modeled as an income stream starting at your specified claiming age. The annual amount grows by the COLA % each year (default 2-3%). The PIA (Primary Insurance Amount) field is used by the Social Security analysis tab to model different claiming ages. Social Security benefits are taxed progressively using IRS combined income thresholds — 0%, up to 50%, or up to 85% may be taxable depending on your total income (see the Tax Planning tab for details)."
+          a: "Social Security is modeled as an income stream starting at your specified claiming age. The annual amount grows by the COLA % each year (default 2-3%). IMPORTANT: SSA statements quote your benefit in today's dollars — check the stream's \"Today's $\" box so the amount is indexed by COLA between now and your claiming age (a $48,000 benefit claimed in 14 years becomes ~$63,000 nominal). Leave it unchecked only if you entered the future nominal amount yourself. The PIA (Primary Insurance Amount) field is used by the Social Security analysis tab to model different claiming ages. Social Security benefits are taxed progressively using IRS combined income thresholds — 0%, up to 50%, or up to 85% may be taxable depending on your total income (see the Tax Planning tab for details)."
         },
         {
           q: "How are pension and other income streams handled?",
-          a: "All income streams (pension, rental, business, annuity, other) work the same way: they pay the specified annual amount, adjusted by COLA each year, between the start and end ages. All non-Social Security income is treated as 100% taxable."
+          a: "All income streams (pension, rental, business, annuity, other) work the same way: they pay the specified annual amount, adjusted by COLA each year, between the start and end ages. By default the amount is what you'll receive in the FIRST year of the stream (COLA compounds from the start age). For a stream that starts years from now and was quoted in today's dollars — like today's market rent on a future rental — check \"Today's $\" so COLA compounds from today and the amount is indexed up to the start age. All non-Social Security income is treated as 100% taxable."
         },
         {
           q: "When am I considered 'retired' in the projections?",
@@ -1448,6 +1449,7 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
                 <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Owner</th>
                 <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Amount</th>
                 <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">COLA</th>
+                <th className="text-center py-3 px-1 text-slate-400 font-medium whitespace-nowrap" title="Checked: the amount is in today's dollars and COLA compounds from today — future-dated streams get indexed up to their start age. Unchecked: the amount is what you'll actually receive in the first year (COLA starts at the start age).">Today's $</th>
                 <th className="text-center py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Ages</th>
                 <th className="text-center py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Actions</th>
               </tr>
@@ -1496,6 +1498,15 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
                       className="bg-transparent border border-transparent rounded px-2 py-1.5 text-sky-400 font-semibold text-right w-16 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
                     />
                   </td>
+                  <td className="py-2 px-1 text-center">
+                    <input
+                      type="checkbox"
+                      checked={!!stream.todaysDollars}
+                      onChange={e => updateIncome(stream.id, 'todaysDollars', e.target.checked)}
+                      className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-amber-500 cursor-pointer"
+                      title="Amount is in today's dollars — COLA compounds from today, so a future-dated stream is indexed up to its start age"
+                    />
+                  </td>
                   <td className="py-2 px-1">
                     <div className="flex items-center justify-center gap-0.5">
                       <AgeCell
@@ -1524,7 +1535,7 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
               <tr className="border-t-2 border-slate-600 bg-slate-800/50">
                 <td colSpan="3" className="py-3 px-1 text-slate-300 font-semibold">Total Annual Income</td>
                 <td className="py-3 px-1 text-right text-emerald-400 font-bold">{formatCurrency(totalAnnualIncome)}</td>
-                <td colSpan="3"></td>
+                <td colSpan="4"></td>
               </tr>
             </tfoot>
           </table>
@@ -4116,8 +4127,9 @@ function StressTestTab({ accounts, currentYear, incomeStreams, personalInfo, pro
         incomeStreams.forEach(stream => {
           const ownerAge = stream.owner === 'me' ? myAge : spouseAge;
           if (ownerAge >= stream.startAge && ownerAge <= stream.endAge) {
-            const yearsFromStart = ownerAge - stream.startAge;
-            const adj = stream.amount * Math.pow(1 + (stream.cola || 0), yearsFromStart);
+            // todaysDollars: COLA compounds from today, not the stream's start age
+            const colaYears = stream.todaysDollars ? (myAge - personalInfo.myAge) : (ownerAge - stream.startAge);
+            const adj = stream.amount * Math.pow(1 + (stream.cola || 0), colaYears);
             if (stream.type === 'social_security') totalSS += adj;
             else if (stream.type === 'pension') { totalPension += adj; nonSSIncome += adj; }
             else if (stream.type === 'earned_income') { earned += adj; nonSSIncome += adj; }
@@ -4563,8 +4575,9 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
     incomeStreams.forEach(stream => {
       const ownerAge = stream.owner === 'me' ? age : age - (personalInfo.myAge - personalInfo.spouseAge);
       if (ownerAge >= stream.startAge && ownerAge <= stream.endAge) {
-        const yearsActive = ownerAge - stream.startAge;
-        const amount = stream.amount * Math.pow(1 + stream.cola, yearsActive);
+        // todaysDollars: COLA compounds from today, not the stream's start age
+        const colaYears = stream.todaysDollars ? (age - personalInfo.myAge) : (ownerAge - stream.startAge);
+        const amount = stream.amount * Math.pow(1 + stream.cola, colaYears);
         if (stream.type === 'social_security') {
           ssIncome += amount;
         } else if (stream.type === 'pension' || stream.type === 'annuity') {
@@ -5838,7 +5851,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                 // Build the config description
                 const mode = personalInfo.rothConversionBracket
                   ? `fill to ${personalInfo.rothConversionBracket} bracket`
-                  : `${formatCurrency(personalInfo.rothConversionAmount || 0)}/yr (fixed)`;
+                  : `${formatCurrency(personalInfo.rothConversionAmount || 0)}/yr ${personalInfo.rothConversionInflationAdjust === false ? '(fixed nominal)' : "(today's $, indexed)"}`;
                 const ssDefaultWindow = getDefaultRothConversionWindow(personalInfo);
                 const ages = `ages ${personalInfo.rothConversionStartAge || ssDefaultWindow.startAge}–${personalInfo.rothConversionEndAge || ssDefaultWindow.endAge}`;
                 // Find scenarios with most/fewest conversions to give the user a teaser of the interaction
@@ -7064,6 +7077,18 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
                   onValueChange={v => handleChange('rothConversionAmount', v)}
                   className={compactInputStyle}
                 />
+                <label className="flex items-start gap-1.5 mt-1 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={localInfo.rothConversionInflationAdjust !== false}
+                    onChange={e => handleChange('rothConversionInflationAdjust', e.target.checked)}
+                    className="w-3.5 h-3.5 mt-0.5 rounded border-slate-600 bg-slate-800 text-purple-500"
+                  />
+                  <span className="text-[10px] text-slate-500">
+                    Adjust for inflation — amount is today's $, indexed each year so it keeps filling the
+                    same real bracket space. Uncheck to convert this exact nominal amount every year.
+                  </span>
+                </label>
               </div>
             ) : (
               <div>
@@ -10669,6 +10694,23 @@ function IncomeModal({ editingIncome, personalInfo, onClose, onSave }) {
           {formData.type === 'social_security' && <div><label className={labelStyle}>PIA (Monthly)</label><input type="number" value={formData.pia} onChange={e => setFormData({...formData, pia: Number(e.target.value), amount: Number(e.target.value) * 12})} className={inputStyle} /></div>}
           <div><label className={labelStyle}>Annual Amount</label><input type="number" value={formData.amount} onChange={e => setFormData({...formData, amount: Number(e.target.value)})} className={inputStyle} /></div>
           <div><label className={labelStyle}>COLA (%)</label><input type="number" step="0.1" value={(formData.cola * 100).toFixed(1)} onChange={e => setFormData({...formData, cola: Number(e.target.value) / 100})} className={inputStyle} /></div>
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={!!formData.todaysDollars}
+              onChange={e => setFormData({...formData, todaysDollars: e.target.checked})}
+              className="w-4 h-4 mt-0.5 rounded border-slate-600 bg-slate-800 text-amber-500"
+            />
+            <span className="text-sm text-slate-300">
+              Amount is in today's dollars
+              <span className="block text-xs text-slate-500 mt-0.5">
+                COLA compounds from today instead of the start age. Check this for amounts quoted in today's
+                dollars — like the benefit on your SSA statement or today's market rent — so a stream that
+                starts years from now is indexed up to its start. Leave unchecked if the amount is what you'll
+                actually receive in the first year (e.g., a fixed pension quote).
+              </span>
+            </span>
+          </label>
           <div className="grid grid-cols-2 gap-4">
             <div><label className={labelStyle}>Start Age</label><input type="number" value={formData.startAge} onChange={e => setFormData({...formData, startAge: Number(e.target.value)})} className={inputStyle} /></div>
             <div><label className={labelStyle}>End Age</label><input type="number" value={formData.endAge} onChange={e => setFormData({...formData, endAge: Number(e.target.value)})} className={inputStyle} /></div>

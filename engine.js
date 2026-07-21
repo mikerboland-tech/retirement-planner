@@ -1904,7 +1904,19 @@ const calculateACASubsidy = (income, householdSize, filingStatus) => {
 // Called by the projection engine for each year — results flow into the year data.
 const calculateHealthcareExpenses = (pi, myAge, spouseAge, yearsFromNow, primaryAlive, spouseAlive) => {
   if (pi.healthcareModel === 'none') {
-    return { total: 0, pre65: 0, medicare: 0, ltc: 0, breakdown: null };
+    // Even with healthcare modeling off, standard Medicare Part B + Part D
+    // premiums are charged for each person 65+. The engine always charges
+    // IRMAA surcharges (they're income-driven, like a tax), and a surcharge
+    // without the base premium it surcharges is inconsistent. Pre-65 costs,
+    // Medigap, OOP, and LTC remain opted out under 'none'.
+    const medInflation = pi.medicalInflation || MEDICAL_INFLATION_RATE;
+    const medInflationFactor = Math.pow(1 + medInflation, yearsFromNow);
+    const basePremiumAnnual = (MEDICARE_PART_B_PREMIUM_2025 + MEDICARE_PART_D_PREMIUM_2025) * 12 * medInflationFactor;
+    let medicareCost = 0;
+    if (primaryAlive && myAge >= 65) medicareCost += basePremiumAnnual;
+    if (pi.filingStatus === 'married_joint' && spouseAlive && spouseAge >= 65) medicareCost += basePremiumAnnual;
+    medicareCost = Math.round(medicareCost);
+    return { total: medicareCost, pre65: 0, medicare: medicareCost, ltc: 0, breakdown: null };
   }
   
   const medInflation = pi.medicalInflation || MEDICAL_INFLATION_RATE;
@@ -2417,11 +2429,29 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   const spouseSSStream = streams.find(s => s.type === 'social_security' && s.owner === 'spouse');
   const primarySSAmount = primarySSStream ? primarySSStream.amount : 0;
   const spouseSSAmount = spouseSSStream ? spouseSSStream.amount : 0;
-  
+
+  // COLA base for an income stream. Default: the entered amount is nominal at the
+  // stream's startAge (COLA compounds from start). With todaysDollars: true, the
+  // amount is in TODAY's dollars and COLA compounds from the current year — so a
+  // future-dated stream (SS from an SSA statement, future rental) is indexed
+  // between now and its start instead of paying today's number in future dollars.
+  const streamColaYears = (stream, ownerAge, yearsFromNow) =>
+    stream.todaysDollars ? yearsFromNow : ownerAge - stream.startAge;
+
+  // MAGI by projection year (index = yearsFromNow). IRMAA in year t is based on
+  // MAGI from year t−2 (the real Medicare lookback); for the first two years we
+  // have no history and fall back to the current-year approximation.
+  const magiByYear = [];
+
   for (let year = currentYear; year <= currentYear + (planningAge - pi.myAge); year++) {
     const myAge = pi.myAge + (year - currentYear);
     const spouseAge = pi.spouseAge + (year - currentYear);
     const yearsFromNow = year - currentYear;
+    // IRMAA 2-year MAGI lookback: this year's surcharge is FIXED by income from
+    // two years ago — it does not respond to this year's withdrawals or
+    // conversions (those hit the surcharge two years from now). null = no
+    // history yet (first two projection years) → current-year approximation.
+    const irmaaLookbackMAGI = yearsFromNow >= 2 ? magiByYear[yearsFromNow - 2] : null;
     
     // ── SURVIVOR EVENT CHECK ────────────────────────────────────────────────────
     // Detect death events and update survivor state for this year
@@ -2511,8 +2541,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // Pension continues at survivor benefit rate (default 50%)
           const survivorRate = stream.survivorBenefitRate || 0.5;
           if (ownerAge >= stream.startAge && ownerAge <= stream.endAge) {
-            const yearsFromStart = ownerAge - stream.startAge;
-            const adjustedAmount = stream.amount * Math.pow(1 + (stream.cola || 0), yearsFromStart) * survivorRate;
+            const colaYears = streamColaYears(stream, ownerAge, yearsFromNow);
+            const adjustedAmount = stream.amount * Math.pow(1 + (stream.cola || 0), colaYears) * survivorRate;
             totalPension += adjustedAmount;
             nonSSIncome += adjustedAmount;
           }
@@ -2522,9 +2552,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       }
       
       if (ownerAge >= stream.startAge && ownerAge <= stream.endAge) {
-        const yearsFromStart = ownerAge - stream.startAge;
-        const adjustedAmount = stream.amount * Math.pow(1 + (stream.cola || 0), yearsFromStart);
-        
+        const colaYears = streamColaYears(stream, ownerAge, yearsFromNow);
+        const adjustedAmount = stream.amount * Math.pow(1 + (stream.cola || 0), colaYears);
+
         if (stream.type === 'earned_income') {
           earnedIncome += adjustedAmount;
           nonSSIncome += adjustedAmount;
@@ -2568,11 +2598,12 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         // Case 1: Survivor is currently collecting their own SS.
         // totalSocialSecurity already includes the survivor's own COLA-adjusted benefit.
         // Add the uplift if the deceased's benefit (with COLA) exceeds it.
-        const yearsFromStart = survivorAge - survivorStream.startAge;
-        const currentOwnSS = survivorStream.amount * Math.pow(1 + (survivorStream.cola || 0), yearsFromStart);
+        const ownColaYears = streamColaYears(survivorStream, survivorAge, yearsFromNow);
+        const currentOwnSS = survivorStream.amount * Math.pow(1 + (survivorStream.cola || 0), ownColaYears);
         // Approximation: apply same number of COLA years to the deceased's benefit.
         // (More precise would track each spouse's actual claim date and COLA history.)
-        const inheritedSS = deceasedSSBenefit * Math.pow(1 + deceasedCOLA, yearsFromStart);
+        const deceasedColaYears = (deceasedStream && deceasedStream.todaysDollars) ? yearsFromNow : ownColaYears;
+        const inheritedSS = deceasedSSBenefit * Math.pow(1 + deceasedCOLA, deceasedColaYears);
         if (inheritedSS > currentOwnSS) {
           totalSocialSecurity += (inheritedSS - currentOwnSS);
         }
@@ -2583,7 +2614,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         const survivorClaimAge = Math.max(60, deceasedStream.startAge);
         if (survivorAge >= survivorClaimAge) {
           // Years of COLA since the deceased's stream would have started
-          const yearsFromDeceasedStart = Math.max(0, survivorAge - deceasedStream.startAge);
+          const yearsFromDeceasedStart = deceasedStream.todaysDollars
+            ? yearsFromNow
+            : Math.max(0, survivorAge - deceasedStream.startAge);
           const inheritedSS = deceasedSSBenefit * Math.pow(1 + deceasedCOLA, yearsFromDeceasedStart);
           totalSocialSecurity += inheritedSS;
           // Note: nonSSIncome doesn't change — SS is handled separately for tax purposes
@@ -2611,8 +2644,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         if (ownerAge >= stream.startAge && ownerAge < ownerFRA && ownerEarned > 0) {
           const reduction = calculateSSEarningsTestReduction(ownerEarned, ownerAge, ownerFRA, yearsFromNow, pi.inflationRate);
           // Can't reduce more than the SS benefit itself
-          const yearsFromStart = ownerAge - stream.startAge;
-          const thisBenefit = stream.amount * Math.pow(1 + (stream.cola || 0), yearsFromStart);
+          const colaYears = streamColaYears(stream, ownerAge, yearsFromNow);
+          const thisBenefit = stream.amount * Math.pow(1 + (stream.cola || 0), colaYears);
           const cappedReduction = Math.min(reduction, thisBenefit);
           ssEarningsTestReduction += cappedReduction;
         }
@@ -2871,7 +2904,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       if (primaryAlive && myAge >= 65) estMedicareEligible++;
       if (effectiveFilingStatus === 'married_joint' && spouseAlive && spouseAge >= 65) estMedicareEligible++;
       if (estMedicareEligible > 0) {
-        const baseMAGI = baseGrossIncome; // Pre-withdrawal MAGI estimate
+        // With lookback history the surcharge is exact (fixed by year t−2 MAGI);
+        // only the first two projection years fall back to a current-year estimate.
+        const baseMAGI = irmaaLookbackMAGI !== null ? irmaaLookbackMAGI : baseGrossIncome;
         estimatedIRMAA = calculateIRMAASurcharge(baseMAGI, effectiveFilingStatus, yearsFromNow, pi.inflationRate, estMedicareEligible).totalSurcharge;
       }
       
@@ -2992,12 +3027,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           const withdrawalStateTax = totalStateTax - baseStateTax;
           const withdrawalTax = withdrawalFedTax + withdrawalStateTax;
 
-          // IRMAA cliff correction — recompute surcharge from the iter's MAGI and book
-          // any increase beyond the pre-loop estimate as additional out-of-pocket cost.
-          // estimatedIRMAA is already in afterTaxGap, so only the *delta* affects the shortfall.
-          const iterIRMAA = estMedicareEligible > 0
+          // IRMAA cliff correction — only relevant in the first two projection
+          // years (no lookback history): there the surcharge tracks current MAGI,
+          // so withdrawals can push it up. Under lookback the surcharge is fixed
+          // by year t−2 income and this year's withdrawals cannot move it.
+          const iterIRMAA = (estMedicareEligible > 0 && irmaaLookbackMAGI === null)
             ? calculateIRMAASurcharge(iterMAGI, effectiveFilingStatus, yearsFromNow, pi.inflationRate, estMedicareEligible).totalSurcharge
-            : 0;
+            : estimatedIRMAA;
           const iterIRMAADelta = iterIRMAA - estimatedIRMAA;
 
           // ACA premium correction — withdrawals move MAGI, which moves the
@@ -3129,6 +3165,12 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // Pre-tax withdrawals (including RMDs) are ordinary income
     // Brokerage withdrawals: assume cost basis is tax-free, remainder is long-term capital gains
 
+    // Pre-tax dollars withdrawn FOR SPENDING — captured before the conversion
+    // block adds the conversion and its tax draw to preTaxWithdrawals. QCD
+    // eligibility below is based on these (charity is paid out of spending money;
+    // conversion dollars went to the Roth, not to charity).
+    const spendingPreTaxWithdrawals = preTaxWithdrawals;
+
     // ── ROTH CONVERSION ──────────────────────────────────────────────────────────
     // If the user has configured a planned Roth conversion strategy, execute it now.
     // Conversions move money from the largest pre-tax account to the largest Roth account.
@@ -3187,8 +3229,14 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           targetConversion = Math.max(0, bracketCap - currentTaxable);
         }
       } else if (conversionAmount > 0) {
-        // Fixed-amount mode: inflate the nominal amount
-        targetConversion = conversionAmount * inflationFactor;
+        // Fixed-amount mode. By default the entered amount is in TODAY's dollars
+        // and is inflation-indexed each year, so it keeps filling the same REAL
+        // bracket space as the brackets themselves inflate. With
+        // rothConversionInflationAdjust === false, the same nominal amount is
+        // converted every year instead.
+        targetConversion = pi.rothConversionInflationAdjust === false
+          ? conversionAmount
+          : conversionAmount * inflationFactor;
       }
 
       // Pre-tax floor: stop converting once total pre-tax would drop below the
@@ -3250,10 +3298,12 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             const preConvFed = calculateFederalTax(preConvGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
             const preConvState = calculateStateTax(preConvGross, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, preConvTaxableSS, totalPension, { federalTaxPaid: preConvFed, primaryAge: myAge, spouseAge: spouseAge });
 
-            // IRMAA: the spending solver already funded the surcharge implied by
-            // withdrawals alone; the conversion pushes MAGI (often whole tiers)
-            // higher, so fund the conversion-driven delta here too.
-            const convMedicareEligible =
+            // IRMAA: under the 2-year lookback this year's surcharge is fixed by
+            // past MAGI — the conversion's IRMAA impact lands two years from now,
+            // where that year's solver funds it as a known cost. Only in the first
+            // two projection years (no history → current-year approximation) does
+            // the conversion move THIS year's surcharge, so fund the delta then.
+            const convMedicareEligible = irmaaLookbackMAGI !== null ? 0 :
               (primaryAlive && myAge >= 65 ? 1 : 0) +
               (effectiveFilingStatus === 'married_joint' && spouseAlive && spouseAge >= 65 ? 1 : 0);
             const preConvIRMAA = convMedicareEligible > 0
@@ -3402,22 +3452,24 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // For married couples, each spouse can do their own QCD from their own IRA
       const householdQCDLimit = effectiveFilingStatus === 'married_joint' ? adjustedQCDLimit * 2 : adjustedQCDLimit;
       
-      // QCD can come from any IRA withdrawal (RMD or voluntary)
-      // Total pre-tax withdrawals available for QCD = RMD + any additional pre-tax withdrawals
-      const totalPreTaxAvailable = totalRMD + preTaxWithdrawals;
-      
-      // Check if there are pre-tax accts with balance to do QCD from
-      const totalPreTaxBalanceForQCD = accts
-        .filter(a => isPreTaxAccount(a.type))
-        .reduce((sum, a) => sum + (accountBalances[a.id] || 0), 0);
-      
+      // QCD can come from any IRA withdrawal taken for spending (RMD or voluntary).
+      // The engine models QCDs as re-labeling part of those withdrawals as a direct
+      // IRA→charity transfer, so the cap is the pre-tax INCOME actually withdrawn —
+      // not the remaining account balance. (The old balance-based cap zeroed the QCD
+      // in the year pre-tax depleted even though the withdrawals happened, and could
+      // exclude more income than was ever withdrawn. It also disagreed with the
+      // spending solver's estimate, leaving net income short of desired spending.)
+      // Conversion dollars and the conversion-tax draw are NOT QCD-eligible: they
+      // went to the Roth / the IRS, not to charity.
+      const qcdEligibleIncome = totalRMD + spendingPreTaxWithdrawals;
+
       // QCD is limited to:
       // 1. The charitable giving amount (what you want to give)
-      // 2. Available pre-tax balance (need IRA funds to do QCD)
+      // 2. Pre-tax dollars actually withdrawn for spending this year
       // 3. The annual QCD limit
       // Note: We can do QCD even if there's no RMD yet (age 70-74)
-      if (totalPreTaxBalanceForQCD > 0) {
-        qcdAmount = Math.min(charitableGiving, totalPreTaxBalanceForQCD, householdQCDLimit);
+      if (qcdEligibleIncome > 0) {
+        qcdAmount = Math.min(charitableGiving, qcdEligibleIncome, householdQCDLimit);
       }
     }
     
@@ -3523,12 +3575,16 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // in finalTotalTaxableIncome; the previous code added them a second time, overstating
     // MAGI and pushing IRMAA tiers / NIIT too high whenever there were brokerage gains.)
     const magi = finalTotalTaxableIncome + preTaxDeduction;
+    // Record this year's MAGI so years t+2 onward can apply the IRMAA lookback.
+    magiByYear[yearsFromNow] = magi;
     const niitTax = calculateNIIT(totalInvestmentIncome, magi, effectiveFilingStatus);
     federalTax += niitTax;
-    
+
     // ── MEDICARE IRMAA SURCHARGE ──────────────────────────────────────────────
     // IRMAA adds surcharges to Part B and Part D premiums for high-income beneficiaries.
-    // Based on MAGI (uses 2-year lookback in reality; we use current year as approximation).
+    // Based on MAGI from TWO YEARS PRIOR (real Medicare lookback), applied against
+    // this year's inflation-indexed thresholds. The first two projection years have
+    // no MAGI history and fall back to current-year MAGI as an approximation.
     // Each Medicare-eligible person (age 65+) pays their own surcharge.
     let irmaaSurcharge = 0;
     let irmaaInfo = null; // IRMAA tier detail for display components
@@ -3536,17 +3592,21 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     if (primaryAlive && myAge >= 65) numMedicareEligible++;
     if (effectiveFilingStatus === 'married_joint' && spouseAlive && spouseAge >= 65) numMedicareEligible++;
     if (numMedicareEligible > 0) {
-      const irmaaResult = calculateIRMAASurcharge(magi, effectiveFilingStatus, yearsFromNow, pi.inflationRate, numMedicareEligible);
+      const irmaaMAGI = irmaaLookbackMAGI !== null ? irmaaLookbackMAGI : magi;
+      const irmaaResult = calculateIRMAASurcharge(irmaaMAGI, effectiveFilingStatus, yearsFromNow, pi.inflationRate, numMedicareEligible);
       irmaaSurcharge = irmaaResult.totalSurcharge;
-      // Store IRMAA detail for display components (avoids independent recalculation)
-      const irmaaDetail = calculateIRMAA(magi, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
-      irmaaInfo = { tier: irmaaDetail.tier, totalAnnual: irmaaDetail.totalAnnual, 
+      // Store IRMAA detail for display components (avoids independent recalculation).
+      // tier/premium fields describe the surcharge being PAID this year (lookback MAGI).
+      const irmaaDetail = calculateIRMAA(irmaaMAGI, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
+      irmaaInfo = { tier: irmaaDetail.tier, totalAnnual: irmaaDetail.totalAnnual,
         partBAnnual: irmaaDetail.partBAnnual, partDAnnual: irmaaDetail.partDAnnual,
         partBMonthly: irmaaDetail.partBMonthly, partDMonthly: irmaaDetail.partDMonthly };
-      // Calculate distance to next IRMAA tier
+      // distToNextTier is PLANNING info: headroom in THIS year's MAGI before the
+      // surcharge that lands two years from now crosses a tier. Compare current
+      // MAGI against thresholds inflated to the year the surcharge will be paid.
       const lookupStatus = effectiveFilingStatus === 'head_of_household' ? 'single' : effectiveFilingStatus;
       const tiers = IRMAA_THRESHOLDS_2025[lookupStatus] || IRMAA_THRESHOLDS_2025.married_joint;
-      const inflFactor = Math.pow(1 + pi.inflationRate, yearsFromNow);
+      const inflFactor = Math.pow(1 + pi.inflationRate, yearsFromNow + 2);
       for (const tier of tiers) {
         const adjMax = tier.maxIncome === Infinity ? Infinity : tier.maxIncome * inflFactor;
         if (magi < adjMax) {
