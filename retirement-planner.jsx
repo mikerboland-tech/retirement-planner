@@ -10731,22 +10731,10 @@ function IncomeModal({ editingIncome, personalInfo, incomeStreams = [], onClose,
     ? estimateFersSupplement({ ssAt62Annual: supplementSS, yearsOfService: Number(est.yearsOfService) || 0 })
     : 0;
 
-  const applyEstimate = () => {
-    if (!estResult) return;
-    setFormData({
-      ...formData,
-      name: formData.name && formData.name.trim() ? formData.name : `${(GOV_PENSION_SYSTEMS[est.system] || {}).label || 'Government'} Pension`,
-      amount: estResult.annualPension,
-      cola: estResult.colaRate,
-      colaStartAge: estResult.colaStartAge || undefined,
-      startAge: ownerRetAge,
-      todaysDollars: false,       // the estimate is nominal at retirement
-      survivorBenefit: est.survivorElection ? true : formData.survivorBenefit,
-      survivorBenefitRate: est.survivorElection ? 0.5 : formData.survivorBenefitRate,
-    });
-  };
-
   const buildSupplementStream = () => {
+    // Only FERS employees retiring before 62 qualify for the Special Retirement
+    // Supplement. This is evaluated at Apply time (not Save time) so it reflects
+    // the system the user actually estimated — never the estimator's default.
     if (!(estAvailable && isFersEarly && est.addSupplement) || supplementPreview <= 0) return null;
     return {
       name: 'FERS Supplement',
@@ -10760,10 +10748,29 @@ function IncomeModal({ editingIncome, personalInfo, incomeStreams = [], onClose,
     };
   };
 
+  const applyEstimate = () => {
+    if (!estResult) return;
+    setFormData({
+      ...formData,
+      name: formData.name && formData.name.trim() ? formData.name : `${(GOV_PENSION_SYSTEMS[est.system] || {}).label || 'Government'} Pension`,
+      amount: estResult.annualPension,
+      cola: estResult.colaRate,
+      colaStartAge: estResult.colaStartAge || undefined,
+      startAge: ownerRetAge,
+      todaysDollars: false,       // the estimate is nominal at retirement
+      survivorBenefit: est.survivorElection ? true : formData.survivorBenefit,
+      survivorBenefitRate: est.survivorElection ? 0.5 : formData.survivorBenefitRate,
+      // Stash the qualifying supplement (or clear a stale one) at Apply time. Save
+      // uses only this, so a supplement is never attached to a pension the user
+      // didn't actually estimate as FERS-early with the supplement enabled.
+      _pendingSupplement: buildSupplementStream() || undefined,
+    });
+  };
+
   const handleSaveClick = () => {
     // Strip transient underscore-prefixed keys before persisting.
     const clean = Object.fromEntries(Object.entries(formData).filter(([k]) => !k.startsWith('_')));
-    onSave(clean, buildSupplementStream());
+    onSave(clean, formData._pendingSupplement || null);
   };
 
   const estInput = "w-full bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-slate-100 text-sm focus:border-purple-500/70 focus:outline-none";
