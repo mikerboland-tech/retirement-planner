@@ -11467,6 +11467,304 @@ function ReportMenu({ onPick, onClose }) {
   );
 }
 
+// ============================================
+// GUIDED TOUR — post-setup orientation
+//
+// The SetupWizard gets the user's DATA in. This gets the user oriented in the
+// app that data lands in: 13 tabs of analysis with no explanation of which one
+// answers which question. Runs once automatically after setup, then stays
+// available from the sidebar.
+//
+// Deliberately shell-only: every step points at the sidebar or a utility
+// button, never at content inside a tab. That keeps the tour from breaking
+// whenever a tab's internals get rearranged, and means it never has to switch
+// tabs — so no projection recompute is triggered mid-tour.
+//
+// Seen-state lives under its OWN localStorage key rather than in the plan blob,
+// so it can't collide with SCHEMA_VERSION migrations, isn't carried between
+// machines by an import/export, and isn't reset by "Clear My Data" — having
+// taken the tour is a property of this browser, not of the plan.
+// ============================================
+const TOUR_STORAGE_KEY = 'retirement_planner_tour_v1';
+
+function hasSeenTour() {
+  try {
+    return localStorage.getItem(TOUR_STORAGE_KEY) === 'seen';
+  } catch (e) {
+    // Private mode / blocked storage. Report "seen" so we don't re-offer the
+    // tour on every single load in a browser that can never remember the answer.
+    return true;
+  }
+}
+
+function markTourSeen() {
+  try {
+    localStorage.setItem(TOUR_STORAGE_KEY, 'seen');
+  } catch (e) {
+    // Non-fatal — the tour simply offers itself again next visit.
+  }
+}
+
+// Each step highlights one [data-tour] element in the shell. `target: null`
+// renders a centered card with the screen dimmed instead.
+const TOUR_STEPS = [
+  {
+    target: null,
+    title: 'Welcome to your plan',
+    body: "Your numbers are in. This quick tour explains what each part of the app answers — about a minute. Leave whenever you like; you can restart it from the sidebar.",
+  },
+  {
+    target: 'nav-overview',
+    title: 'Dashboard — start here',
+    body: "Your plan at a glance: portfolio balance year by year, whether the money lasts, and the point where it gets tight. After you change any input, this is where you check what it did.",
+  },
+  {
+    target: 'nav-plan-setup',
+    title: 'Plan Setup — the inputs',
+    body: "Everything the projection is built from. Change a number here and every chart in the app updates from it.",
+    bullets: [
+      ['Personal Info', 'ages, retirement dates, spending, recurring expenses'],
+      ['Accounts', 'balances, contributions, employer match, growth rates'],
+      ['Assets', 'home equity and other property'],
+      ['Income Streams', 'salary, Social Security, pensions, rental income'],
+    ],
+  },
+  {
+    target: 'nav-analysis',
+    title: 'Analysis — six different questions',
+    body: "These look easy to confuse. Each one answers something distinct:",
+    bullets: [
+      ['Social Security', 'what claiming age is worth most to you?'],
+      ['Tax Planning', 'should you do Roth conversions, and how much?'],
+      ['Withdrawals', 'which accounts should you spend down first?'],
+      ['Monte Carlo', 'how does the plan hold up across 1,000 random markets?'],
+      ['Stress Test', 'what happens in a specific bad event — a crash, high inflation?'],
+      ['Sensitivity', 'which single assumption changes the outcome most?'],
+    ],
+  },
+  {
+    target: 'nav-tools',
+    title: 'Tools — compare and verify',
+    body: "Scenarios saves a full copy of your plan so you can compare alternatives side by side — retire at 62 vs. 67, for instance. Assumptions lists every tax bracket, limit and rate the engine uses, so you can check the math rather than trust it.",
+  },
+  {
+    target: 'tour-guided-setup',
+    title: 'Guided Setup, anytime',
+    body: "The setup wizard you just finished stays here. Re-run it to walk through your whole plan again — it loads your current numbers, so it's a fast way to review everything without hunting tab to tab.",
+  },
+  {
+    target: 'tour-reports',
+    title: 'Reports',
+    body: "Two printable summaries: a full plan snapshot, and \"Your Next 12 Months\" — a near-term checklist covering things with real deadlines, like RMDs and conversion room before year end. Both print to PDF from your browser.",
+  },
+  {
+    target: 'tour-import-export',
+    title: 'Your data stays on this device',
+    body: "Nothing is uploaded anywhere — the whole plan lives in this browser's local storage. That also means clearing site data erases it. Export a backup file here, especially before switching browsers or machines.",
+  },
+  {
+    target: null,
+    title: "That's the tour",
+    body: "If a number ever looks wrong, the Assumptions tab shows exactly what the engine used to produce it. Start on the Dashboard and change one input to see how it flows through.",
+  },
+];
+
+// Spotlight ring thickness around the highlighted element, tooltip width, and
+// the gap between the two / the viewport edge.
+const SPOT_PAD = 8;
+const CARD_W = 380;
+const GAP = 16;
+
+function GuidedTour({ onFinish }) {
+  const [stepIndex, setStepIndex] = useState(0);
+  const [rect, setRect] = useState(null);
+  const step = TOUR_STEPS[stepIndex];
+  const isLast = stepIndex === TOUR_STEPS.length - 1;
+
+  const finish = useCallback(() => {
+    markTourSeen();
+    onFinish();
+  }, [onFinish]);
+
+  // Bring the target into view before it's measured. The sidebar is as tall as
+  // the whole page (its nav never scrolls independently), so on a short viewport
+  // the utility buttons at the bottom start below the fold — without this they'd
+  // be spotlit off-screen and the step would look like it highlighted nothing.
+  //
+  // Only scroll when the target isn't already comfortably visible, so steps near
+  // the top of the sidebar don't yank the page for no reason. The margin leaves
+  // room for the spotlight ring drawn around the element — aligning the element
+  // itself flush to the edge would push the ring off-screen. The scroll listener
+  // below re-measures as this animates, so the spotlight tracks it on the way in.
+  useEffect(() => {
+    if (!step.target) return;
+    const el = document.querySelector('[data-tour="' + step.target + '"]');
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const margin = SPOT_PAD + 8;
+    if (r.top < margin || r.bottom > window.innerHeight - margin) {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }, [stepIndex, step.target]);
+
+  // Measure the highlighted element in viewport coordinates. Re-measured on
+  // resize and on scroll in the capture phase, so the sidebar's own overflow-y
+  // scrolling moves the spotlight too (it wouldn't bubble to window otherwise).
+  useEffect(() => {
+    const measure = () => {
+      if (!step.target) { setRect(null); return; }
+      const el = document.querySelector('[data-tour="' + step.target + '"]');
+      // Missing target (e.g. collapsed sidebar) degrades to the centered card
+      // rather than pointing at nothing.
+      if (!el) { setRect(null); return; }
+      const r = el.getBoundingClientRect();
+      setRect({ top: r.top, left: r.left, width: r.width, height: r.height });
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true);
+    return () => {
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', measure, true);
+    };
+  }, [stepIndex, step.target]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); finish(); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); setStepIndex(i => Math.min(i + 1, TOUR_STEPS.length - 1)); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); setStepIndex(i => Math.max(i - 1, 0)); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [finish]);
+
+  // The card's own height decides how far down it can sit, and it varies a lot
+  // by step (the Analysis step's six bullets are roughly double the shortest
+  // card). Measuring it beats assuming a fixed height — guessing too small
+  // pushes the footer buttons off-screen on the tall steps.
+  const cardRef = useRef(null);
+  const [cardH, setCardH] = useState(0);
+  React.useLayoutEffect(() => {
+    if (cardRef.current) setCardH(cardRef.current.offsetHeight);
+  }, [stepIndex]);
+
+  // Card sits to the right of the spotlight (all targets are in the left
+  // sidebar); flips to the left side if that would overflow, and falls back to
+  // dead center when there's no target to point at.
+  let cardPos;
+  if (rect) {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    let left = rect.left + rect.width + GAP;
+    if (left + CARD_W > vw - GAP) left = Math.max(GAP, rect.left - CARD_W - GAP);
+    // Prefer aligning with the highlighted element, but never let the card
+    // hang below the fold. On the first paint of a step cardH is still the
+    // previous step's height; the layout effect corrects it before the browser
+    // paints, so there's no visible jump.
+    const maxTop = Math.max(GAP, vh - cardH - GAP);
+    cardPos = {
+      position: 'fixed',
+      left,
+      top: Math.max(GAP, Math.min(rect.top, maxTop)),
+      width: CARD_W,
+      maxWidth: 'calc(100vw - 32px)',
+      maxHeight: 'calc(100vh - 32px)',
+      overflowY: 'auto',
+      zIndex: 61,
+    };
+  } else {
+    cardPos = {
+      position: 'fixed',
+      left: '50%',
+      top: '50%',
+      transform: 'translate(-50%, -50%)',
+      width: CARD_W,
+      maxWidth: 'calc(100vw - 32px)',
+      maxHeight: 'calc(100vh - 32px)',
+      overflowY: 'auto',
+      zIndex: 61,
+    };
+  }
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Guided tour">
+      {/* With a target, the dark layer is painted by the spotlight's own
+          9999px box-shadow spread, which leaves a clean hole around the
+          element. Without one, a plain dimmer covers the screen. */}
+      {!rect && <div className="fixed inset-0 bg-black/75" style={{ zIndex: 60 }} />}
+      {rect && (
+        <div
+          className="fixed rounded-lg pointer-events-none transition-all duration-200"
+          style={{
+            top: rect.top - SPOT_PAD,
+            left: rect.left - SPOT_PAD,
+            width: rect.width + SPOT_PAD * 2,
+            height: rect.height + SPOT_PAD * 2,
+            boxShadow: '0 0 0 9999px rgba(0,0,0,0.75)',
+            border: '2px solid rgb(245 158 11)',
+            zIndex: 60,
+          }}
+        />
+      )}
+
+      <div
+        ref={cardRef}
+        style={cardPos}
+        className="bg-gradient-to-br from-slate-800 to-slate-900 border border-amber-500/40 rounded-xl p-5 shadow-2xl"
+      >
+        <div className="text-xs font-semibold text-amber-400 mb-1.5">
+          STEP {stepIndex + 1} OF {TOUR_STEPS.length}
+        </div>
+        <h3 className="text-lg font-bold text-slate-100 mb-2">{step.title}</h3>
+        <p className="text-sm text-slate-300 leading-relaxed">{step.body}</p>
+
+        {step.bullets && (
+          <ul className="mt-3 space-y-1.5">
+            {step.bullets.map(([label, text]) => (
+              <li key={label} className="text-sm text-slate-400 leading-snug">
+                <span className="text-slate-200 font-medium">{label}</span> — {text}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div className="flex items-center justify-between mt-5 pt-4 border-t border-slate-700/50">
+          <div className="flex gap-1.5">
+            {TOUR_STEPS.map((s, i) => (
+              <div
+                key={i}
+                className={`w-1.5 h-1.5 rounded-full transition-colors ${i === stepIndex ? 'bg-amber-400' : 'bg-slate-600'}`}
+              />
+            ))}
+          </div>
+          <div className="flex items-center gap-2">
+            {!isLast && (
+              <button onClick={finish} className="px-3 py-2 text-sm text-slate-500 hover:text-slate-300 transition-colors">
+                Skip
+              </button>
+            )}
+            {stepIndex > 0 && (
+              <button
+                onClick={() => setStepIndex(i => i - 1)}
+                className="px-3 py-2 text-sm text-slate-400 hover:text-slate-200 transition-colors"
+              >
+                ← Back
+              </button>
+            )}
+            <button
+              onClick={() => (isLast ? finish() : setStepIndex(i => i + 1))}
+              className="px-4 py-2 text-sm bg-amber-600 hover:bg-amber-500 text-white font-medium rounded-lg transition-colors"
+            >
+              {isLast ? '✓ Done' : 'Next →'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RetirementPlanner() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [currentYear] = useState(new Date().getFullYear());
@@ -11480,7 +11778,22 @@ function RetirementPlanner() {
   const [savedData] = useState(() => loadFromStorage());
 
   const [showSetupWizard, setShowSetupWizard] = useState(() => !savedData);
-  
+
+  // The tour is offered once per browser. A brand-new user gets it when the
+  // wizard finishes (see onComplete below); someone whose plan predates the
+  // tour gets it on load. Gated on savedData so it never stacks on top of the
+  // wizard — a first-time user would otherwise get both modals at once.
+  const [showTour, setShowTour] = useState(() => !!savedData && !hasSeenTour());
+
+  // Whether this browser holds a plan the user actually entered. The wizard's
+  // opening screen keys off this to decide between its first-run copy and its
+  // "update what you have" copy. It deliberately does NOT come from current
+  // component state: accounts/personalInfo are seeded with sample defaults on a
+  // fresh install, so testing those made hasExisting true for everyone and a
+  // brand-new user was greeted with "Update Your Plan — walk through with
+  // current data", offering to revise a plan they had never made.
+  const [hasSavedPlan, setHasSavedPlan] = useState(() => !!savedData);
+
   // Logo Component - MB makers mark on blue circle
   const Logo = ({ size = 'large' }) => {
     const dimensions = size === 'large' ? 'w-14 h-14' : 'w-10 h-10';
@@ -11767,6 +12080,14 @@ function RetirementPlanner() {
   
   // Sidebar state
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  // Every tour step points at the sidebar, so expand it first — a collapsed
+  // sidebar still has the target elements but hides their labels, which makes
+  // the highlighted item meaningless.
+  const startTour = () => {
+    setSidebarCollapsed(false);
+    setShowTour(true);
+  };
   
   // Navigation structure with groups
   const navGroups = [
@@ -11825,7 +12146,9 @@ function RetirementPlanner() {
   );
   
   const NavGroup = ({ group }) => (
-    <div className="mb-4">
+    // data-tour is derived from the group label ('PLAN SETUP' -> 'nav-plan-setup')
+    // and is what GuidedTour's spotlight anchors to.
+    <div className="mb-4" data-tour={`nav-${group.label.toLowerCase().replace(/\s+/g, '-')}`}>
       {!sidebarCollapsed && (
         <div className="flex items-center gap-2 px-3 py-2 text-xs font-bold text-slate-300 uppercase tracking-wider border-b border-slate-700/50 pb-2 mb-1">
           <span>{group.icon}</span>
@@ -11904,10 +12227,13 @@ function RetirementPlanner() {
   // Feels like talking to a financial advisor, not filling out forms.
   // Each step asks one clear question with smart defaults.
   // ============================================
-  const SetupWizard = ({ onComplete, onExplore, existingData }) => {
+  const SetupWizard = ({ onComplete, onExplore, existingData, hasSavedPlan }) => {
     const [step, setStep] = useState(0);
     const yr = new Date().getFullYear();
-    const hasExisting = existingData && existingData.personalInfo;
+    // Gated on hasSavedPlan so the sample defaults present on a fresh install
+    // don't read as an existing plan; existingData is still what loadExisting()
+    // pulls from once we know there IS one.
+    const hasExisting = hasSavedPlan && existingData && existingData.personalInfo;
 
     // ── Wizard state — simple, human-readable fields ──
     const [w, setW] = useState({
@@ -12599,19 +12925,29 @@ function RetirementPlanner() {
       {showSetupWizard && (
         <SetupWizard
           existingData={{ personalInfo, accounts, incomeStreams, assets }}
+          hasSavedPlan={hasSavedPlan}
           onComplete={(pi, accts, incomes, assetList) => {
             setPersonalInfo(pi);
             setAccounts(accts);
             setIncomeStreams(incomes);
             setAssets(assetList);
             setShowSetupWizard(false);
+            // From here on this browser has a real plan, so re-opening the
+            // wizard offers "Update My Plan" rather than first-run copy.
+            setHasSavedPlan(true);
             setSaveStatus('Plan updated!');
             setTimeout(() => setSaveStatus(''), 3000);
+            // Hand a first-time user straight from "here are your numbers" to
+            // "here's what the app does with them". Re-running the wizard later
+            // won't re-trigger it, since the tour marks itself seen.
+            if (!hasSeenTour()) setShowTour(true);
           }}
           onExplore={() => setShowSetupWizard(false)}
         />
       )}
-      
+
+      {showTour && <GuidedTour onFinish={() => setShowTour(false)} />}
+
       {/* Sidebar Navigation */}
       <aside className={`${sidebarCollapsed ? 'w-16' : 'w-56'} flex-shrink-0 bg-slate-900/95 border-r border-slate-700/50 backdrop-blur-sm transition-all duration-300 flex flex-col`}>
         {/* Logo / Header */}
@@ -12640,15 +12976,24 @@ function RetirementPlanner() {
           
           {/* Utility buttons - right after nav groups */}
           <div className="mt-4 pt-4 border-t border-slate-700/50">
-            <button 
-              onClick={() => setShowSetupWizard(true)} 
+            <button
+              onClick={() => setShowSetupWizard(true)}
+              data-tour="tour-guided-setup"
               className="w-full flex items-center gap-3 px-3 py-2 text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 rounded-lg transition-all"
             >
               <span className="text-base">🚀</span>
               {!sidebarCollapsed && <span className="text-sm font-medium">Guided Setup</span>}
             </button>
             <button
+              onClick={startTour}
+              className="w-full flex items-center gap-3 px-3 py-2 text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 rounded-lg transition-all"
+            >
+              <span className="text-base">🧭</span>
+              {!sidebarCollapsed && <span className="text-sm font-medium">Take a Tour</span>}
+            </button>
+            <button
               onClick={() => setShowReport('menu')}
+              data-tour="tour-reports"
               className="w-full flex items-center gap-3 px-3 py-2 text-slate-400 hover:text-slate-200 hover:bg-slate-700/50 rounded-lg transition-all"
             >
               <span className="text-base">📄</span>
@@ -12656,6 +13001,7 @@ function RetirementPlanner() {
             </button>
             <button
               onClick={() => setShowImportExport(true)}
+              data-tour="tour-import-export"
               className="w-full flex items-center gap-3 px-3 py-2 text-slate-400 hover:text-slate-200 hover:bg-slate-700/50 rounded-lg transition-all"
             >
               <span className="text-base">💾</span>
