@@ -2114,6 +2114,410 @@ section('P11 — a pension with colaStartAge gets no COLA before that age');
   approx(proj2.find(r => r.myAge === 63).pension, 30000 * Math.pow(1.02, 3), 'plain pension still COLAs from the start age', 0.005);
 }
 
+// ── P12 — a depleted portfolio cannot fund withdrawals ───────────────────────
+section('P12 — withdrawals are capped by what the portfolio actually holds');
+{
+  // $200k portfolio, $80k/yr spending, no guaranteed income: runs dry in ~3 years.
+  // The solver still ASKS for ~$95k/yr afterwards; the engine must only report
+  // what it could actually withdraw, and flag the rest as an unfunded shortfall.
+  const s = baseScenario({ desiredRetirementIncome: 80000, filingStatus: 'single' });
+  s.accts = [{ id: 1, name: '401k', type: '401k', balance: 200000, contribution: 0,
+    contributionGrowth: 0, cagr: 0.05, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me' }];
+  s.streams = [];
+  const proj = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+
+  // Invariant: you can never withdraw more than last year's balance plus a year
+  // of growth. 1.05 is the account's cagr; +1 absorbs the row rounding.
+  let worstOverdraw = 0;
+  let prevPortfolio = 200000;
+  proj.forEach(r => {
+    const available = prevPortfolio * 1.05 + 1;
+    const drawn = r.portfolioWithdrawal + (r.conversionTaxWithdrawal || 0);
+    worstOverdraw = Math.max(worstOverdraw, drawn - available);
+    prevPortfolio = r.totalPortfolio;
+  });
+  eq(worstOverdraw <= 0, true, 'no year withdraws more than the portfolio could supply');
+
+  // Once the portfolio is empty it stays empty and supplies nothing.
+  const firstEmptyIdx = proj.findIndex(r => r.totalPortfolio <= 0);
+  gt(firstEmptyIdx, 0, 'the $200k plan does run dry before the horizon');
+  const emptyYears = proj.slice(firstEmptyIdx + 1);
+  eq(emptyYears.every(r => r.portfolioWithdrawal === 0), true,
+    'a $0 portfolio reports $0 of withdrawals');
+  eq(emptyYears.every(r => r.netIncome === 0), true,
+    'a $0 portfolio with no other income reports $0 of net income');
+  eq(emptyYears.every(r => r.unfundedShortfall > 0), true,
+    'the spending the portfolio cannot cover is reported as unfundedShortfall');
+  approx(emptyYears[0].unfundedShortfall, emptyYears[0].desiredIncome,
+    'unfundedShortfall equals the whole spending target once nothing is left', 0.02);
+
+  // Non-regression: a healthy plan is untouched and never reports a shortfall.
+  const h = baseScenario();
+  const healthy = computeProjections(h.pi, h.accts, h.streams, h.assets, h.events, h.recurring, TODAY_YEAR);
+  eq(healthy.every(r => (r.unfundedShortfall || 0) === 0), true,
+    'a funded plan reports no shortfall in any year');
+  const mid = healthy.find(r => r.myAge === 70);
+  // netIncome funds base spending plus healthcare (baseScenario has no recurring items).
+  approx(mid.netIncome, mid.desiredIncome + mid.healthcareExpense,
+    'a funded plan still hits its spending target', 0.02);
+}
+
+// ── P13 — bracket-fill lands ON the top of the chosen bracket ────────────────
+section('P13 — Roth bracket-fill hits the bracket top exactly');
+{
+  // Zero inflation and zero growth so every figure is exact. Spending is drawn
+  // from Roth first, so the conversion is the ONLY ordinary income and the
+  // arithmetic is unambiguous. MFJ 2026: std deduction 32,200, top of 22% bracket
+  // (a TAXABLE-income figure) 211,400 → the conversion must gross up by the
+  // deduction: 211,400 + 32,200 = 243,600 of AGI.
+  // Both spouses are 64 — under 65, so the deduction is exactly the plain MFJ
+  // standard deduction and the arithmetic below is hand-checkable without the
+  // age-65 additions (those are covered in P14). Claiming SS at 64 and converting
+  // in the low-income 60s is the canonical bracket-fill scenario anyway.
+  const TOP22 = 211400, SD = 32200;
+  const mk = (over = {}, streams = []) => {
+    const s = baseScenario({
+      myAge: 64, spouseAge: 64, myBirthYear: TODAY_YEAR - 64, spouseBirthYear: TODAY_YEAR - 64,
+      myRetirementAge: 64, spouseRetirementAge: 64, legacyAge: 70,
+      inflationRate: 0, desiredRetirementIncome: 60000,
+      withdrawalPriority: ['roth', 'pretax', 'brokerage'],
+      rothConversionBracket: '22%', rothConversionStartAge: 64, rothConversionEndAge: 70,
+      ...over,
+    });
+    s.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 3000000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', contributor: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 1000000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', contributor: 'me' },
+    ];
+    s.streams = streams;
+    return computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  };
+
+  // A — no Social Security. Catches the lost standard deduction: `currentTaxable`
+  // was floored at 0, throwing away the unused deduction as conversion headroom.
+  const a = mk()[0];
+  eq(a.rothConversion, TOP22 + SD, 'no-SS fill grosses the conversion up by the standard deduction');
+  eq(a.taxableIncome - SD, TOP22, 'no-SS fill lands exactly on the top of the 22% bracket');
+
+  // B — $48k of Social Security. Catches the overshoot: the conversion itself
+  // pushes SS into the taxable range, and that taxable SS consumes bracket room.
+  // 85% of 48,000 = 40,800 taxable → conversion = 243,600 − 40,800 = 202,800.
+  const ssStream = [{ id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 64, endAge: 95, cola: 0, owner: 'me' }];
+  const b = mk({}, ssStream)[0];
+  eq(b.taxableSS, 40800, 'the whole 85% of SS is taxable at this income level');
+  eq(b.rothConversion, TOP22 + SD - 40800, 'the fill leaves room for the SS the conversion makes taxable');
+  eq(b.taxableIncome - SD, TOP22, 'with SS the fill still lands on the bracket top, not past it');
+
+  // C — end-to-end: the marginal dollar is taxed at 22%, never 24%.
+  // MFJ 2026 tax on exactly 211,400 of ordinary income:
+  //   24,800×10% + 76,000×12% + 110,600×22% = 2,480 + 9,120 + 24,332 = 35,932
+  eq(Math.round(b.federalTax), 35932, 'federal tax equals the exact tax at the top of the 22% bracket');
+  eq(Math.round(a.federalTax), 35932, 'same tax with no SS — both plans fill the identical bracket space');
+
+  // D — realized capital gains must NOT consume ordinary bracket space (they
+  // stack above ordinary income at preferential rates). Spending brokerage-first
+  // realizes gains; the conversion should be unchanged from case A.
+  const s = baseScenario({
+    myAge: 64, spouseAge: 64, myBirthYear: TODAY_YEAR - 64, spouseBirthYear: TODAY_YEAR - 64,
+    myRetirementAge: 64, spouseRetirementAge: 64, legacyAge: 68,
+    inflationRate: 0, desiredRetirementIncome: 60000,
+    withdrawalPriority: ['brokerage', 'roth', 'pretax'],
+    rothConversionBracket: '22%', rothConversionStartAge: 64, rothConversionEndAge: 68,
+  });
+  s.accts = [
+    { id: 1, name: 'IRA', type: 'traditional_ira', balance: 3000000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Roth', type: 'roth_ira', balance: 500000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', contributor: 'me' },
+    { id: 3, name: 'Brokerage', type: 'brokerage', balance: 800000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', contributor: 'me', costBasisPercent: 0.4 },
+  ];
+  s.streams = [];
+  const d = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR)[0];
+  eq(d.rothConversion, TOP22 + SD, 'capital gains do not eat ordinary bracket space');
+  // AGI = conversion + preferential income, which is realized gains (60% of every
+  // brokerage dollar drawn) PLUS the year's qualified dividends. Both stack above
+  // ordinary income, so neither should consume ordinary bracket space.
+  const gains = 0.6 * (d.portfolioWithdrawal + d.conversionTaxWithdrawal) + d.brokerageDividends;
+  approx(d.taxableIncome - gains - SD, TOP22, 'ordinary taxable income (gains excluded) sits at the bracket top', 0.005);
+
+  // F — SS partway through the 85% phase-in, where each conversion dollar drags
+  // in another $0.85 of taxable SS (marginal slope 1.85). Fill to the 10% bracket
+  // (MFJ top 24,800) with $30k of SS:
+  //   X + [6,000 + 0.85·(X + 15,000 − 44,000)] = 24,800 + 32,200
+  //   1.85X = 75,650 → X = 40,891.89, taxable SS = 16,108.11
+  // Neither the 0% floor nor the 85%-of-benefit cap binds here, so this is the
+  // case a naive fixed point oscillates on.
+  const f = mk({ rothConversionBracket: '10%' },
+    [{ id: 1, name: 'My SS', type: 'social_security', amount: 30000, startAge: 64, endAge: 95, cola: 0, owner: 'me' }])[0];
+  approx(f.rothConversion, 40891.89, 'fill solves the 1.85 marginal slope through the SS phase-in', 0.0001);
+  eq(f.taxableSS, 16108, 'taxable SS sits inside the phase-in band, not at the 85% cap');
+  eq(f.taxableIncome - SD, 24800, 'phase-in case still lands on the top of the 10% bracket');
+
+  // E — non-regression: fixed-amount mode is untouched by the bracket-fill rework.
+  const fixed = mk({ rothConversionBracket: '', rothConversionAmount: 50000, rothConversionInflationAdjust: false })[0];
+  eq(fixed.rothConversion, 50000, 'fixed-amount conversions still convert the entered amount');
+}
+
+// ── P14 — age-65 federal deductions ──────────────────────────────────────────
+section('P14 — additional standard deduction (65+) and the OBBBA senior deduction');
+{
+  const { getFederalDeduction, ADDITIONAL_STD_DEDUCTION_65_2026 } = engine;
+  const SD_S = 16100, SD_J = 32200;
+
+  // ── The permanent §63(f) additional standard deduction ──
+  eq(getFederalDeduction('single', 0, 0, { age65Count: 0, taxYear: 2030 }), SD_S,
+    'under 65 gets the plain standard deduction');
+  eq(getFederalDeduction('single', 0, 0, { age65Count: 1, taxYear: 2030 }), SD_S + 2050,
+    'single 65+ adds $2,050 (2030 — senior deduction has sunset)');
+  eq(getFederalDeduction('married_joint', 0, 0, { age65Count: 1, taxYear: 2030 }), SD_J + 1650,
+    'MFJ with one spouse 65+ adds $1,650');
+  eq(getFederalDeduction('married_joint', 0, 0, { age65Count: 2, taxYear: 2030 }), SD_J + 3300,
+    'MFJ with both 65+ adds $1,650 each');
+  eq(getFederalDeduction('head_of_household', 0, 0, { age65Count: 1, taxYear: 2030 }), 24150 + 2050,
+    'head of household 65+ uses the single-rate $2,050');
+  // It is indexed, like the base deduction.
+  approx(getFederalDeduction('single', 10, 0.03, { age65Count: 1, taxYear: 2040 }),
+    (SD_S + 2050) * Math.pow(1.03, 10), 'the 65+ additional deduction is inflation-indexed', 0.0001);
+
+  // ── The temporary OBBBA senior deduction ──
+  eq(getFederalDeduction('single', 0, 0, { age65Count: 1, taxYear: 2026, magi: 60000 }), SD_S + 2050 + 6000,
+    'single 65+ below the phaseout gets the full $6,000 senior deduction');
+  eq(getFederalDeduction('married_joint', 0, 0, { age65Count: 2, taxYear: 2026, magi: 100000 }), SD_J + 3300 + 12000,
+    'MFJ both 65+ below the phaseout get $6,000 each');
+  // 6% of MAGI above $75,000 (single): at $125,000 the $6,000 is cut to $3,000.
+  eq(getFederalDeduction('single', 0, 0, { age65Count: 1, taxYear: 2026, magi: 125000 }), SD_S + 2050 + 3000,
+    'senior deduction phases out at 6% of MAGI over $75,000');
+  eq(getFederalDeduction('single', 0, 0, { age65Count: 1, taxYear: 2026, magi: 175000 }), SD_S + 2050,
+    'senior deduction is fully phased out at $175,000 (single)');
+  eq(getFederalDeduction('married_joint', 0, 0, { age65Count: 2, taxYear: 2026, magi: 250000 }), SD_J + 3300,
+    'senior deduction is fully phased out at $250,000 (joint)');
+  // Statutory dollars — NOT inflation-indexed, unlike the §63(f) amount.
+  eq(getFederalDeduction('single', 2, 0, { age65Count: 1, taxYear: 2028, magi: 60000 }), SD_S + 2050 + 6000,
+    'the senior deduction still applies in 2028, its final year');
+  eq(getFederalDeduction('single', 3, 0, { age65Count: 1, taxYear: 2029, magi: 60000 }), SD_S + 2050,
+    'the senior deduction is gone in 2029 (sunsets after 2028)');
+  eq(getFederalDeduction('single', 0, 0, { age65Count: 1, taxYear: 2024, magi: 60000 }), SD_S + 2050,
+    'the senior deduction did not exist before 2025');
+
+  // ── End-to-end through computeProjections ──
+  // Single, 66, $80k pension, spending far below income so nothing is withdrawn:
+  // AGI is exactly $80,000 every year and the tax is hand-checkable.
+  const mk = (startYear) => {
+    const s = baseScenario({
+      myAge: 66, myBirthYear: startYear - 66, filingStatus: 'single', state: 'Florida',
+      myRetirementAge: 66, legacyAge: 72, inflationRate: 0, desiredRetirementIncome: 1000,
+    });
+    s.accts = [{ id: 1, name: 'Roth', type: 'roth_ira', balance: 500000, contribution: 0,
+      contributionGrowth: 0, cagr: 0, startAge: 66, stopAge: 66, owner: 'me', contributor: 'me' }];
+    s.streams = [{ id: 1, name: 'Pension', type: 'pension', amount: 80000, startAge: 66, endAge: 95, cola: 0, owner: 'me' }];
+    return computeProjections(s.pi, s.accts, s.streams, [], [], [], startYear);
+  };
+  const proj = mk(2026);
+  eq(proj[0].taxableIncome, 80000, 'AGI is exactly the pension — no withdrawals needed');
+
+  // 2026: 16,100 + 2,050 + (6,000 − 6% × 5,000 over the $75k threshold = 5,700) = 23,850
+  //   taxable 56,150 → 12,400×10% + 38,000×12% + 5,750×22% = 1,240 + 4,560 + 1,265 = 7,065
+  eq(proj[0].federalTax, 7065, '2026 tax reflects both the 65+ and (partly phased-out) senior deductions');
+  // 2029 (age 69): senior deduction gone → 16,100 + 2,050 = 18,150
+  //   taxable 61,850 → 1,240 + 4,560 + 11,450×22% = 2,519 → 8,319
+  const y2029 = proj.find(r => r.year === 2029);
+  eq(y2029.federalTax, 8319, '2029 tax drops the sunset senior deduction but keeps the 65+ amount');
+  // Regression: the pre-fix engine used a flat 16,100 → taxable 63,900 → 8,770.
+  lt(proj[0].federalTax, 8770, 'the 66-year-old is no longer taxed as if under 65');
+
+  // Under 65 is untouched.
+  const under = baseScenario({
+    myAge: 60, myBirthYear: 2026 - 60, filingStatus: 'single', state: 'Florida',
+    myRetirementAge: 60, legacyAge: 62, inflationRate: 0, desiredRetirementIncome: 1000,
+  });
+  under.accts = [{ id: 1, name: 'Roth', type: 'roth_ira', balance: 500000, contribution: 0,
+    contributionGrowth: 0, cagr: 0, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me' }];
+  under.streams = [{ id: 1, name: 'Pension', type: 'pension', amount: 80000, startAge: 60, endAge: 95, cola: 0, owner: 'me' }];
+  const u = computeProjections(under.pi, under.accts, under.streams, [], [], [], 2026)[0];
+  // 80,000 − 16,100 = 63,900 → 1,240 + 4,560 + 13,500×22% = 2,970 → 8,770
+  eq(u.federalTax, 8770, 'a 60-year-old still gets only the plain standard deduction');
+}
+
+// ── P15 — §72(t) early withdrawal penalty ────────────────────────────────────
+section('P15 — 10% penalty on pre-tax withdrawals before 59½');
+{
+  // Retire at 52 and live entirely off a traditional IRA: every dollar drawn is
+  // an early distribution. inflationRate 0 keeps the arithmetic checkable.
+  const mk = (over = {}, acctType = 'traditional_ira') => {
+    const s = baseScenario({
+      myAge: 52, spouseAge: 52, myBirthYear: TODAY_YEAR - 52, spouseBirthYear: TODAY_YEAR - 52,
+      myRetirementAge: 52, spouseRetirementAge: 52, legacyAge: 63,
+      filingStatus: 'single', state: 'Florida', inflationRate: 0,
+      desiredRetirementIncome: 70000, withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+      ...over,
+    });
+    s.accts = [{ id: 1, name: 'Pre-tax', type: acctType, balance: 3000000, contribution: 0,
+      contributionGrowth: 0, cagr: 0, startAge: 52, stopAge: 52, owner: 'me', contributor: 'me' }];
+    s.streams = [];
+    return computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  };
+
+  const p = mk();
+  const at = (age) => p.find(r => r.myAge === age);
+  gt(at(52).earlyWithdrawalPenalty, 0, 'an IRA draw at 52 incurs the early withdrawal penalty');
+  approx(at(52).earlyWithdrawalPenalty, at(52).portfolioWithdrawal * 0.10,
+    'the penalty is 10% of the penalized pre-tax distribution', 0.001);
+  // The solver must fund the penalty, or spending silently falls short.
+  approx(at(52).netIncome, at(52).desiredIncome + at(52).healthcareExpense,
+    'the solver grosses up for the penalty so spending is still met', 0.02);
+
+  // Age boundary: full penalty through 58, half in the 59½ transition year, none at 60+.
+  approx(at(58).earlyWithdrawalPenalty, at(58).portfolioWithdrawal * 0.10, 'still fully penalized at 58', 0.001);
+  approx(at(59).earlyWithdrawalPenalty, at(59).portfolioWithdrawal * 0.05,
+    'age 59 straddles the 59½ birthday — half the year is penalized', 0.001);
+  eq(at(60).earlyWithdrawalPenalty, 0, 'no penalty from age 60');
+  eq(at(62).earlyWithdrawalPenalty, 0, 'no penalty later either');
+
+  // The penalty is a federal tax: it must land in federalTax and totalTax.
+  gt(at(52).federalTax, at(60).federalTax * 0 + at(52).earlyWithdrawalPenalty,
+    'federalTax includes the penalty on top of the ordinary tax');
+
+  // A governmental 457(b) is statutorily exempt from §72(t) at any age.
+  eq(mk({}, '457b').find(r => r.myAge === 52).earlyWithdrawalPenalty, 0,
+    'a 457(b) is exempt from the early withdrawal penalty');
+
+  // Rule of 55: separating at 55+ exempts that employer's 401(k)/403(b) — but not an IRA.
+  const r55 = { myAge: 56, spouseAge: 56, myBirthYear: TODAY_YEAR - 56, spouseBirthYear: TODAY_YEAR - 56,
+    myRetirementAge: 56, spouseRetirementAge: 56, legacyAge: 60 };
+  eq(mk(r55, '401k').find(r => r.myAge === 56).earlyWithdrawalPenalty, 0,
+    'rule of 55 exempts a 401(k) when you separate at 55 or later');
+  gt(mk(r55, 'traditional_ira').find(r => r.myAge === 56).earlyWithdrawalPenalty, 0,
+    'rule of 55 does NOT apply to an IRA');
+  // Retiring before 55 does not qualify, even for a 401(k).
+  gt(mk({}, '401k').find(r => r.myAge === 54).earlyWithdrawalPenalty, 0,
+    'retiring at 52 means the 401(k) gets no rule-of-55 relief');
+
+  // A 72(t) SEPP plan exempts pre-tax draws.
+  eq(mk({ sepp72tEnabled: true }).find(r => r.myAge === 52).earlyWithdrawalPenalty, 0,
+    '72(t) SEPP payments avoid the penalty');
+
+  // Roth and brokerage draws are never penalized here.
+  const rothFirst = baseScenario({
+    myAge: 52, spouseAge: 52, myBirthYear: TODAY_YEAR - 52, spouseBirthYear: TODAY_YEAR - 52,
+    myRetirementAge: 52, spouseRetirementAge: 52, legacyAge: 56,
+    filingStatus: 'single', state: 'Florida', inflationRate: 0,
+    desiredRetirementIncome: 70000, withdrawalPriority: ['roth', 'brokerage', 'pretax'],
+  });
+  rothFirst.accts = [
+    { id: 1, name: 'Roth', type: 'roth_ira', balance: 2000000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 52, stopAge: 52, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'IRA', type: 'traditional_ira', balance: 500000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 52, stopAge: 52, owner: 'me', contributor: 'me' },
+  ];
+  rothFirst.streams = [];
+  const rf = computeProjections(rothFirst.pi, rothFirst.accts, rothFirst.streams, [], [], [], TODAY_YEAR);
+  eq(rf[0].earlyWithdrawalPenalty, 0, 'drawing from Roth first incurs no early withdrawal penalty');
+
+  // Non-regression: a normal 65-year-old plan reports no penalty at all.
+  const h = baseScenario();
+  const healthy = computeProjections(h.pi, h.accts, h.streams, h.assets, h.events, h.recurring, TODAY_YEAR);
+  eq(healthy.every(r => (r.earlyWithdrawalPenalty || 0) === 0), true,
+    'a plan that retires at 60 never triggers the penalty');
+}
+
+// ── P16 — planning horizon covers a younger spouse ───────────────────────────
+section('P16 — the projection runs until the YOUNGER spouse reaches legacyAge');
+{
+  const { getPlanningHorizonYears } = engine;
+
+  // Helper: the horizon in years for a household.
+  eq(getPlanningHorizonYears({ myAge: 70, spouseAge: 55, legacyAge: 90, filingStatus: 'married_joint' }), 35,
+    'married: horizon spans until the younger spouse reaches legacyAge');
+  eq(getPlanningHorizonYears({ myAge: 55, spouseAge: 70, legacyAge: 90, filingStatus: 'married_joint' }), 35,
+    'it is the younger of the two, whichever spouse that is');
+  eq(getPlanningHorizonYears({ myAge: 70, spouseAge: 55, legacyAge: 90, filingStatus: 'single' }), 20,
+    'single filers ignore the spouse fields entirely');
+  eq(getPlanningHorizonYears({ myAge: 60, spouseAge: 60, legacyAge: 95, filingStatus: 'married_joint' }), 35,
+    'same-age couple is unchanged from the old myAge-only horizon');
+
+  // Integration: the case from the review — me 70, spouse 55, legacyAge 90.
+  const s = baseScenario({
+    myAge: 70, spouseAge: 55, myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 55,
+    myRetirementAge: 70, spouseRetirementAge: 70, legacyAge: 90,
+    myLifeExpectancy: 95, spouseLifeExpectancy: 95,
+  });
+  const proj = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  const last = proj[proj.length - 1];
+  eq(last.spouseAge, 90, 'the projection now runs until the spouse reaches the planning age');
+  eq(proj.length, 36, '36 rows (years 0 through 35), not the 21 the old myAge-only horizon gave');
+  eq(proj.some(p => p.myAge === 90), true, 'the primary still has a row at their own legacyAge');
+
+  // Survivor modeling still stops the plan once both have died — no long tail of
+  // empty rows just because the horizon got longer.
+  const sv = baseScenario({
+    myAge: 70, spouseAge: 55, myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 55,
+    myRetirementAge: 70, spouseRetirementAge: 70, legacyAge: 90,
+    survivorModelEnabled: true, myLifeExpectancy: 80, spouseLifeExpectancy: 75,
+  });
+  const svp = computeProjections(sv.pi, sv.accts, sv.streams, [], [], [], TODAY_YEAR);
+  eq(svp[svp.length - 1].spouseAge, 75, 'survivor mode still ends the plan at the second death');
+
+  // Non-regression: an equal-age couple and a single filer are untouched.
+  const h = baseScenario(); // 60/60, legacyAge 95
+  eq(computeProjections(h.pi, h.accts, h.streams, [], [], [], TODAY_YEAR).length, 36,
+    'equal-age couple keeps exactly the same row count as before');
+  const sg = baseScenario({ filingStatus: 'single', myAge: 60, spouseAge: 40, legacyAge: 95 });
+  eq(computeProjections(sg.pi, sg.accts, sg.streams, [], [], [], TODAY_YEAR).length, 36,
+    'a single filer with stale spouse fields is not extended');
+}
+
+// ── P17 — taxable-account dividends are taxed annually ───────────────────────
+section('P17 — brokerage dividends are annual taxable income, not tax-deferred');
+{
+  // $3M brokerage, no other income, small spending. A real taxable account throws
+  // off dividends every year whether or not you sell — they belong in AGI.
+  const mk = (over = {}) => {
+    const s = baseScenario({
+      myAge: 62, spouseAge: 62, myBirthYear: TODAY_YEAR - 62, spouseBirthYear: TODAY_YEAR - 62,
+      myRetirementAge: 62, spouseRetirementAge: 62, legacyAge: 66,
+      filingStatus: 'single', state: 'Florida', inflationRate: 0,
+      desiredRetirementIncome: 40000, withdrawalPriority: ['brokerage', 'pretax', 'roth'],
+      ...over,
+    });
+    s.accts = [{ id: 1, name: 'Taxable', type: 'brokerage', balance: 3000000, contribution: 0,
+      contributionGrowth: 0, cagr: 0, startAge: 62, stopAge: 62, owner: 'me', contributor: 'me',
+      costBasisPercent: 0.6 }];
+    s.streams = [];
+    return computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  };
+
+  const r = mk()[0];
+  // Default 2% yield on a $3M balance = $60,000 of qualified dividends.
+  approx(r.brokerageDividends, 60000, 'a $3M taxable account yields $60k of dividends at the 2% default', 0.02);
+  gt(r.taxableIncome, 60000, 'dividends are in AGI, not invisible');
+  gt(r.federalTax, 0, 'dividends produce federal tax even in a year with modest withdrawals');
+
+  // They get preferential (qualified) rates, not ordinary rates.
+  // Single, 2026: deduction 16,100. Ordinary income here is ~0, so the deduction
+  // absorbs part of the dividends and the rest sits in the 0% LTCG bracket
+  // (top 49,450) before any 15% applies.
+  const capGainsOnly = mk({ desiredRetirementIncome: 1000 })[0];
+  lt(capGainsOnly.federalTax, 60000 * 0.22,
+    'dividends are taxed at preferential rates, nowhere near ordinary brackets');
+
+  // The yield is configurable, and zero restores the old (deferred) behavior.
+  eq(mk({ brokerageDividendYield: 0 })[0].brokerageDividends, 0,
+    'a 0% yield turns dividend modeling off');
+  approx(mk({ brokerageDividendYield: 0.03 })[0].brokerageDividends, 90000,
+    'the dividend yield is configurable', 0.02);
+
+  // Dividends raise MAGI, so they must reach the things MAGI drives.
+  gt(mk()[0].magi, mk({ brokerageDividendYield: 0 })[0].magi,
+    'dividends raise MAGI (and therefore IRMAA, ACA and NIIT exposure)');
+
+  // Accounts that are not taxable brokerage produce none.
+  const roth = baseScenario({
+    myAge: 62, spouseAge: 62, myBirthYear: TODAY_YEAR - 62, spouseBirthYear: TODAY_YEAR - 62,
+    myRetirementAge: 62, spouseRetirementAge: 62, legacyAge: 64,
+    filingStatus: 'single', state: 'Florida', inflationRate: 0, desiredRetirementIncome: 40000,
+  });
+  roth.accts = [{ id: 1, name: 'Roth', type: 'roth_ira', balance: 3000000, contribution: 0,
+    contributionGrowth: 0, cagr: 0, startAge: 62, stopAge: 62, owner: 'me', contributor: 'me' }];
+  roth.streams = [];
+  eq(computeProjections(roth.pi, roth.accts, roth.streams, [], [], [], TODAY_YEAR)[0].brokerageDividends, 0,
+    'tax-sheltered accounts generate no taxable dividends');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

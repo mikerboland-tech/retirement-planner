@@ -94,6 +94,126 @@ const STANDARD_DEDUCTION_2026 = {
   head_of_household: 24150
 };
 
+// ── AGE-65 FEDERAL DEDUCTIONS ────────────────────────────────────────────────
+// Two separate provisions, with different rules. Both matter enormously for a
+// retirement projection, where most years are lived at 65+.
+
+// 1. IRC §63(f) additional standard deduction, PER qualifying person age 65+.
+//    Permanent and inflation-indexed (like the base standard deduction).
+//    2026 amounts per Rev. Proc. 2025-32. (The identical amount for blindness is
+//    not modeled — the engine has no disability input.)
+const ADDITIONAL_STD_DEDUCTION_65_2026 = {
+  single: 2050,
+  head_of_household: 2050,
+  married_joint: 1650,
+  married_separate: 1650
+};
+
+// 2. The OBBBA "senior deduction" (P.L. 119-21 §70103): $6,000 per person 65+,
+//    available on top of the standard deduction. Two properties the §63(f)
+//    amount does not share:
+//      • It is STATUTORY, not inflation-indexed.
+//      • It applies to tax years 2025–2028 ONLY, then sunsets. The engine models
+//        the sunset — treating it as permanent would overstate the deduction for
+//        every year of a 30-year projection. If Congress extends it, bump
+//        SENIOR_DEDUCTION_LAST_YEAR.
+//    It phases out at 6% of MAGI above the threshold, applied to each person's
+//    $6,000, so it is fully gone at $175,000 (single) / $250,000 (joint).
+const SENIOR_DEDUCTION_AMOUNT = 6000;
+const SENIOR_DEDUCTION_FIRST_YEAR = 2025;
+const SENIOR_DEDUCTION_LAST_YEAR = 2028;
+const SENIOR_DEDUCTION_PHASEOUT_RATE = 0.06;
+const SENIOR_DEDUCTION_PHASEOUT_START = {
+  single: 75000,
+  head_of_household: 75000,
+  married_separate: 75000,
+  married_joint: 150000
+};
+
+// ── §72(t) EARLY WITHDRAWAL PENALTY ──────────────────────────────────────────
+// A 10% additional federal tax on distributions from pre-tax retirement accounts
+// taken before age 59½. This is the single biggest tax fact for anyone retiring
+// early, and it changes the arithmetic of a bridge-year plan materially.
+//
+// Modeled exceptions:
+//   • Governmental 457(b) plans are exempt at any age (statutory).
+//   • "Rule of 55": distributions from the 401(k)/403(b) of the employer you
+//     separated from, in or after the year you turn 55, are exempt. The engine
+//     treats reaching myRetirementAge as separation from service. It does NOT
+//     apply to IRAs — and the account TYPE is the signal: money rolled to an IRA
+//     should be entered as traditional_ira, which correctly loses the exception.
+//   • 72(t) SEPP (substantially equal periodic payments), via pi.sepp72tEnabled.
+//
+// NOT modeled (each requires inputs the planner doesn't collect): disability,
+// death, unreimbursed medical above 7.5% of AGI, health insurance while
+// unemployed, first-home ($10k) and higher-education IRA exceptions, birth or
+// adoption ($5k), qualified disaster and public-safety-employee rules. Also not
+// modeled: the Roth 5-year conversion clock (converted dollars withdrawn within
+// five years are penalized) — the engine does not track Roth basis vintages, so
+// Roth withdrawals are always treated as penalty-free.
+// State-level early-distribution penalties (e.g. California's extra 2.5%) are
+// not modeled either; this is federal only.
+const EARLY_WITHDRAWAL_PENALTY_RATE = 0.10;
+const EARLY_WITHDRAWAL_AGE = 59.5;
+const RULE_OF_55_AGE = 55;
+// Account types never subject to the additional tax (governmental 457(b)).
+const PENALTY_EXEMPT_TYPES = new Set(['457b']);
+// Types the rule-of-55 separation exception can reach (employer plans, not IRAs).
+const RULE_OF_55_TYPES = new Set(['401k', '403b']);
+
+// Fraction of a projection year's pre-tax draw that is subject to the penalty.
+// Ages are integers, but the threshold falls mid-year: someone who is 59 for the
+// whole projection year crosses 59½ partway through it, so on average half that
+// year's distributions are early. Returns 1 below 59, 0.5 at 59, 0 from 60.
+const earlyWithdrawalPenaltyFraction = (ownerAge) => {
+  if (ownerAge >= EARLY_WITHDRAWAL_AGE + 0.5) return 0;   // 60+
+  if (ownerAge >= EARLY_WITHDRAWAL_AGE - 0.5) return 0.5; // the year spanning 59½
+  return 1;
+};
+
+// Penalized share of a distribution from `account` by an owner aged `ownerAge`.
+// ownerRetirementAge drives the rule-of-55 test; sepp72t exempts everything.
+const earlyWithdrawalPenaltyShare = (account, ownerAge, ownerRetirementAge, sepp72t) => {
+  if (!isPreTaxAccount(account.type)) return 0;         // Roth/HSA/brokerage: not §72(t)
+  if (sepp72t) return 0;
+  if (PENALTY_EXEMPT_TYPES.has(account.type)) return 0;
+  const fraction = earlyWithdrawalPenaltyFraction(ownerAge);
+  if (fraction === 0) return 0;
+  // Rule of 55: separated from service in or after the year you turn 55, and the
+  // money is still in that employer's plan.
+  if (RULE_OF_55_TYPES.has(account.type)
+      && ownerRetirementAge >= RULE_OF_55_AGE
+      && ownerAge >= ownerRetirementAge) return 0;
+  return fraction;
+};
+
+const seniorDeduction = (age65Count, taxYear, magi, filingStatus) => {
+  if (!age65Count || !taxYear) return 0;
+  if (taxYear < SENIOR_DEDUCTION_FIRST_YEAR || taxYear > SENIOR_DEDUCTION_LAST_YEAR) return 0;
+  const threshold = SENIOR_DEDUCTION_PHASEOUT_START[filingStatus] ?? SENIOR_DEDUCTION_PHASEOUT_START.single;
+  const excess = Math.max(0, (magi || 0) - threshold);
+  const perPerson = Math.max(0, SENIOR_DEDUCTION_AMOUNT - SENIOR_DEDUCTION_PHASEOUT_RATE * excess);
+  return age65Count * perPerson;
+};
+
+// Total federal deduction against ordinary income for a projection year:
+// standard deduction + the §63(f) 65+ amount (both indexed) + the OBBBA senior
+// deduction (statutory, MAGI-phased, 2025-2028).
+//   opts.age65Count — people 65+ in the tax household (clamped to the filing
+//                     status: 2 for MFJ, 1 otherwise)
+//   opts.taxYear    — calendar tax year, needed for the senior-deduction sunset
+//   opts.magi       — MAGI driving the senior-deduction phaseout
+// Callers that pass no opts get exactly the old behavior (plain standard
+// deduction), so every existing call site is unaffected until it opts in.
+const getFederalDeduction = (filingStatus, yearsFromNow = 0, inflationRate = 0.03, opts = {}) => {
+  const base = STANDARD_DEDUCTION_2026[filingStatus] || STANDARD_DEDUCTION_2026.married_joint;
+  const maxAge65 = filingStatus === 'married_joint' ? 2 : 1;
+  const age65Count = Math.min(Math.max(0, opts.age65Count || 0), maxAge65);
+  const per65 = ADDITIONAL_STD_DEDUCTION_65_2026[filingStatus] || ADDITIONAL_STD_DEDUCTION_65_2026.married_joint;
+  const indexed = (base + age65Count * per65) * Math.pow(1 + inflationRate, yearsFromNow);
+  return indexed + seniorDeduction(age65Count, opts.taxYear, opts.magi, filingStatus);
+};
+
 // Flat / top-rate fallback table. Used by calculateStateTax for any state NOT in
 // STATE_TAX_CONFIG (i.e. the genuinely flat-tax states). Progressive states are
 // handled by the config-driven engine below and ignore these values.
@@ -1795,6 +1915,26 @@ const getRmdStartAge = (birthYear) => {
 //
 // The end age is INCLUSIVE (the engine does `myAge <= conversionEndAge`), so
 // rmdStartAge - 1 means "the last full year before RMDs."
+// ── PLANNING HORIZON ─────────────────────────────────────────────────────────
+// How many projection years a plan needs. `legacyAge` means "plan until this
+// age" — and for a married household that has to hold for BOTH people, not just
+// the primary. Anchoring on myAge alone silently truncated the plan whenever the
+// spouse was younger: a 70-year-old with a 55-year-old spouse and legacyAge 90
+// got 21 years, leaving the spouse's last 15 years (ages 75-90) unmodelled,
+// including every dollar the portfolio still had to cover.
+//
+// Returns the number of years AFTER the current one, so a projection has
+// getPlanningHorizonYears(pi) + 1 rows (survivor modeling may end it earlier,
+// once both spouses have died).
+const getPlanningHorizonYears = (pi) => {
+  const legacyAge = pi.legacyAge || MAX_AGE;
+  let years = legacyAge - pi.myAge;
+  if (pi.filingStatus === 'married_joint' && typeof pi.spouseAge === 'number') {
+    years = Math.max(years, legacyAge - pi.spouseAge);
+  }
+  return Math.max(0, years);
+};
+
 const getDefaultRothConversionWindow = (personalInfo) => {
   const retirementAge = personalInfo?.myRetirementAge ?? 65;
   const rmdAge = getRmdStartAge(personalInfo?.myBirthYear);
@@ -2017,7 +2157,10 @@ const calculateRecurringExpenses = (expenses, myAge, spouseAge, yearsFromNow, ge
   return { total: Math.round(total), byCategory };
 };
 
-const MEDICARE_PART_B_PREMIUM_2025 = 202.90; // Monthly Part B base premium (2026, CMS)
+// Alias of MEDICARE_PART_B_STANDARD_2025 (declared above with the IRMAA table).
+// Kept as a separate export name for the healthcare components, but pointed at
+// the same value so a CMS update only has to be made in one place.
+const MEDICARE_PART_B_PREMIUM_2025 = MEDICARE_PART_B_STANDARD_2025;
 const MEDICARE_PART_D_PREMIUM_2025 = 39;     // Avg monthly Part D base premium (2026; national base ~$38.99)
 const MEDICARE_SUPPLEMENT_PREMIUM_2025 = 175; // Avg monthly Medigap premium (2025)
 const MEDICARE_OOP_ANNUAL_2025 = 2000;       // Avg annual out-of-pocket (copays, dental, vision)
@@ -2175,15 +2318,21 @@ const getValidStartYears = (numYears, allowWrap = false) => {
     .map(r => r.year);
 };
 
-const calculateFederalTax = (grossIncome, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
+// opts (all optional): { age65Count, taxYear, magi } — see getFederalDeduction.
+// Omitting them yields the plain standard deduction, i.e. the historic behavior.
+// `magi` defaults to grossIncome; pass it explicitly at call sites where the two
+// differ (e.g. the final tax block, whose base excludes capital gains).
+const calculateFederalTax = (grossIncome, filingStatus, yearsFromNow = 0, inflationRate = 0.03, opts = {}) => {
   const baseBrackets = FEDERAL_TAX_BRACKETS_2026[filingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
-  const baseDeduction = STANDARD_DEDUCTION_2026[filingStatus] || STANDARD_DEDUCTION_2026.married_joint;
-  
-  // Adjust standard deduction and brackets for inflation
+
+  // Adjust deduction and brackets for inflation
   const inflationFactor = Math.pow(1 + inflationRate, yearsFromNow);
-  const adjustedDeduction = baseDeduction * inflationFactor;
-  
-  // Apply standard deduction
+  const adjustedDeduction = getFederalDeduction(filingStatus, yearsFromNow, inflationRate, {
+    ...opts,
+    magi: opts.magi !== undefined && opts.magi !== null ? opts.magi : grossIncome,
+  });
+
+  // Apply the deduction
   const taxableIncome = Math.max(0, grossIncome - adjustedDeduction);
   
   // Adjust brackets for inflation
@@ -2501,14 +2650,16 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   let excessReinvestmentPool = 0;
   const reinvestmentGrowthRate = 0.06; // Conservative brokerage-like return
   
-  // Use legacyAge as the planning horizon (default 95 if not set)
-  const planningAge = pi.legacyAge || MAX_AGE;
-  
+  // Planning horizon in years. Covers the YOUNGER spouse when married, so a plan
+  // is never truncated before the person who has to live off it reaches
+  // legacyAge (see getPlanningHorizonYears).
+  const horizonYears = getPlanningHorizonYears(pi);
+
   // Pre-calculate inflation factors for better performance.
   // Cumulative product so per-year overrides (MC / historical) can replace
   // pi.inflationRate one year at a time. When yearOverrides is absent, this is
   // mathematically identical to Math.pow(1 + pi.inflationRate, i).
-  const maxYears = planningAge - pi.myAge + 1;
+  const maxYears = horizonYears + 1;
   const inflationFactors = new Array(maxYears);
   inflationFactors[0] = 1;
   for (let i = 1; i < maxYears; i++) {
@@ -2553,7 +2704,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   // have no history and fall back to the current-year approximation.
   const magiByYear = [];
 
-  for (let year = currentYear; year <= currentYear + (planningAge - pi.myAge); year++) {
+  for (let year = currentYear; year <= currentYear + horizonYears; year++) {
     const myAge = pi.myAge + (year - currentYear);
     const spouseAge = pi.spouseAge + (year - currentYear);
     const yearsFromNow = year - currentYear;
@@ -2601,7 +2752,28 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Both deceased — no more projections needed, but we'll still calculate for the record
       effectiveFilingStatus = 'single';
     }
-    
+
+    // Living members of the tax household who have reached 65. Drives BOTH the
+    // age-65 federal deductions and Medicare eligibility — the predicate is
+    // identical, so it lives in one place rather than being re-derived at each
+    // of the three sites that used to compute it independently.
+    let age65Count = 0;
+    if (primaryAlive && myAge >= 65) age65Count++;
+    if (effectiveFilingStatus === 'married_joint' && spouseAlive && spouseAge >= 65) age65Count++;
+    // Federal deduction opts for this year. `magi` is supplied per call site,
+    // since the senior deduction phases out on MAGI and the various tax bases
+    // (with/without capital gains, pre/post conversion) differ.
+    const fedOpts = (magiForPhaseout) => ({ age65Count, taxYear: year, magi: magiForPhaseout });
+
+    // Penalized share of a distribution from a given account this year (§72(t)).
+    // Resolves the owner's age and retirement age, then defers to the shared rule.
+    const penaltyShareFor = (account) => {
+      const ownerAge = account.owner === 'spouse' ? spouseAge : myAge;
+      const ownerRetirementAge = account.owner === 'spouse'
+        ? (pi.spouseRetirementAge ?? pi.myRetirementAge) : pi.myRetirementAge;
+      return earlyWithdrawalPenaltyShare(account, ownerAge, ownerRetirementAge, !!pi.sepp72tEnabled);
+    };
+
     // Use pre-calculated inflation factor
     const inflationFactor = inflationFactors[yearsFromNow] || Math.pow(1 + pi.inflationRate, yearsFromNow);
     // Survivor spending step-down: when exactly one spouse is alive under survivor
@@ -2935,7 +3107,28 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       }
     });
     
+    // ── TAXABLE-ACCOUNT DIVIDENDS ──────────────────────────────────────────────
+    // A taxable brokerage account distributes dividends and interest every year,
+    // and they are taxed in that year whether or not you sell anything. The
+    // engine previously ignored this: account CAGRs are TOTAL returns (dividends
+    // included), so the whole yield compounded untaxed, as if a taxable account
+    // were an IRA. That understated lifetime tax and biased withdrawal-order
+    // comparisons toward draining tax-sheltered accounts first.
+    //
+    // Modeled as qualified dividends — preferential 0/15/20% rates, like realized
+    // gains — which fits a typical broad index portfolio. A holder of bond funds,
+    // REITs or high-turnover funds would owe ORDINARY rates on much of it and is
+    // better off raising the yield to compensate. Balances are not reduced: the
+    // dividend is already inside the CAGR (i.e. reinvested); what this adds is
+    // the tax on it, which the withdrawal solver then funds.
+    const dividendYield = pi.brokerageDividendYield ?? 0.02;
+    const brokerageDividends = Math.max(0, totalBrokerageBalance * dividendYield);
+
     const totalGuaranteedIncome = totalSocialSecurity + totalPension + totalOtherIncome;
+    // What the solver ASKS the portfolio for. The amount actually withdrawn is
+    // computed in Steps 1-2 below and can be less when balances run out — see
+    // `portfolioWithdrawal` / `unfundedShortfall`.
+    let requestedWithdrawal = 0;
     let portfolioWithdrawal = 0;
     let federalTax = 0;
     let stateTax = 0;
@@ -2998,7 +3191,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     if (isRetired) {
       // Calculate taxes on guaranteed income + any earned income first
       const baseGrossIncome = totalTaxableIncome_adjusted; // Adjusted for pre-tax contributions
-      const baseFederalTax = calculateFederalTax(baseGrossIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
+      const baseFederalTax = calculateFederalTax(baseGrossIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(baseGrossIncome + preTaxDeduction));
       // For state tax, pension is retirement income exempt in some states (e.g., Alabama)
       const baseRetirementIncome = totalPension;
       const baseStateTax = calculateStateTax(baseGrossIncome, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, taxableSS, baseRetirementIncome, { federalTaxPaid: baseFederalTax, primaryAge: myAge, spouseAge: spouseAge });
@@ -3010,9 +3203,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // This is an out-of-pocket cost that must be covered by withdrawals
       // Use base MAGI as starting estimate; actual IRMAA recalculated after final MAGI known
       let estimatedIRMAA = 0;
-      let estMedicareEligible = 0;
-      if (primaryAlive && myAge >= 65) estMedicareEligible++;
-      if (effectiveFilingStatus === 'married_joint' && spouseAlive && spouseAge >= 65) estMedicareEligible++;
+      const estMedicareEligible = age65Count; // same predicate as the 65+ deductions
       if (estMedicareEligible > 0) {
         // With lookback history the surcharge is exact (fixed by year t−2 MAGI);
         // only the first two projection years fall back to a current-year estimate.
@@ -3049,7 +3240,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Returns { preTax: ordinary pre-tax voluntarily drawn, gains: realized LT capital gains }.
       const estimateDrawComposition = (gross) => {
         let need = Math.max(0, gross - totalRMD); // voluntary draw beyond the mandatory RMD
-        let preTax = 0, gains = 0;
+        let preTax = 0, gains = 0, penalized = 0;
         const bal = {};
         accts.forEach(a => {
           bal[a.id] = accountBalances[a.id];
@@ -3063,7 +3254,12 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             if (types.includes(a.type) && need > 0) {
               const w = Math.min(bal[a.id], need);
               bal[a.id] -= w; need -= w;
-              if (isPreTaxAccount(a.type)) preTax += w;
+              if (isPreTaxAccount(a.type)) {
+                preTax += w;
+                // §72(t): the solver must gross up for the penalty, or an early
+                // retiree's spending target is silently missed by 10% of the draw.
+                penalized += w * penaltyShareFor(a);
+              }
               else if (isBrokerageAccount(a.type)) {
                 const basisPct = (a.costBasisPercent !== undefined && a.costBasisPercent !== null) ? a.costBasisPercent : BROKERAGE_COST_BASIS_ESTIMATE;
                 gains += w * (1 - basisPct);
@@ -3076,7 +3272,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             gains += pw * 0.20; // reinvestment pool is basis-heavy (≈80% basis)
           }
         }
-        return { preTax, gains };
+        return { preTax, gains, penalized };
       };
 
       // Iteratively calculate the right withdrawal to hit desired net income
@@ -3093,7 +3289,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // grossed the withdrawal up for phantom tax on Roth-first / brokerage-first strategies.
           const draw = estimateDrawComposition(testWithdrawal);
           const totalPreTaxFromWithdrawals = totalRMD + draw.preTax; // ordinary income: RMD + voluntary pre-tax
-          const estimatedGains = draw.gains;                          // realized long-term capital gains
+          // Preferential-rate income: realized long-term gains PLUS the year's
+          // qualified dividends, which are taxable whether or not anything sold.
+          const estimatedGains = draw.gains + brokerageDividends;
 
           // Calculate QCD if applicable (reduces taxable ordinary income)
           let estimatedQCD = 0;
@@ -3112,9 +3310,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           );
           // Federal ORDINARY tax base EXCLUDES capital gains (taxed at preferential LTCG rates below).
           const ordinaryBaseGross = nonSSIncomeAfterDeduction + taxableWithdrawals + adjustedTaxableSS;
-          const totalFedOrdinary = calculateFederalTax(ordinaryBaseGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
+          // MAGI drives both the NIIT threshold and the senior-deduction phaseout,
+          // so it is derived before the federal tax that depends on the deduction.
+          const iterMAGI = ordinaryBaseGross + estimatedGains + preTaxDeduction;
+          const totalFedOrdinary = calculateFederalTax(ordinaryBaseGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(iterMAGI));
           // LTCG tax on realized gains, stacked above ordinary taxable income.
-          const iterAdjDeduction = (STANDARD_DEDUCTION_2026[effectiveFilingStatus] || STANDARD_DEDUCTION_2026.married_joint) * inflationFactor;
+          // The 65+ deductions lower ordinary taxable income, so gains stack lower too.
+          const iterAdjDeduction = getFederalDeduction(effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(iterMAGI));
           const estCapGainsTax = calculateCapitalGainsTax(
             estimatedGains, Math.max(0, ordinaryBaseGross - iterAdjDeduction) + estimatedGains,
             effectiveFilingStatus, yearsFromNow, pi.inflationRate
@@ -3122,11 +3324,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // NIIT (3.8%) — kicks in when MAGI crosses the filing-status threshold.
           // Mirrors the final-block calc at the bottom of the year loop so the solver
           // pre-funds the surtax instead of having it eat into realized net income.
-          const iterMAGI = ordinaryBaseGross + estimatedGains + preTaxDeduction;
-          const iterDividendEst = totalBrokerageBalance * 0.02; // matches final-block dividend estimate
-          const iterInvestmentIncome = estimatedGains + iterDividendEst;
+          const iterInvestmentIncome = estimatedGains; // gains + dividends, already combined above
           const iterNIIT = calculateNIIT(iterInvestmentIncome, iterMAGI, effectiveFilingStatus);
-          const totalFedTax = totalFedOrdinary + estCapGainsTax + iterNIIT;
+          // §72(t) additional tax on the early-distribution slice of this draw.
+          const iterPenalty = draw.penalized * EARLY_WITHDRAWAL_PENALTY_RATE;
+          const totalFedTax = totalFedOrdinary + estCapGainsTax + iterNIIT + iterPenalty;
           // Retirement income for state exemption: pension only (401k/IRA withdrawals are NOT exempt).
           // State taxes capital gains as ordinary income → use the gains-inclusive base.
           const iterRetirementIncome = totalPension;
@@ -3170,40 +3372,52 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         }
         
         withdrawalNeeded = testWithdrawal;
-        portfolioWithdrawal = Math.max(totalRMD, withdrawalNeeded);
+        requestedWithdrawal = Math.max(totalRMD, withdrawalNeeded);
       } else {
         withdrawalNeeded = 0;
-        portfolioWithdrawal = totalRMD;
+        requestedWithdrawal = totalRMD;
       }
-      
+
       // Store actual withdrawal needed for excess RMD calculation
       actualWithdrawalNeeded = withdrawalNeeded;
     } else {
       // Still pre-retirement - just ensure RMDs are taken if required, no extra withdrawals
-      portfolioWithdrawal = totalRMD;
+      requestedWithdrawal = totalRMD;
       actualWithdrawalNeeded = 0; // Pre-retirement, we don't need portfolio withdrawals for spending
       // Taxes will be calculated after actual withdrawals are made
     }
-    
-    // Excess RMD is the RMD amount that exceeds what we actually need for spending
-    // Pre-retirement, ALL of the RMD is "excess" since we don't need it for spending
-    let excessRMD = Math.max(0, totalRMD - actualWithdrawalNeeded);
-    
+
     // Now actually withdraw from accts
     // Step 1: Withdraw RMDs from pre-tax accts (mandatory - regardless of priority)
+    // A balance can fall short of its own RMD only after a catastrophic negative
+    // return (the RMD was computed on the pre-growth balance), but when it does,
+    // only what's there comes out — so totalRMD is re-stated to the amount actually
+    // distributed. Everything downstream (taxable ordinary income, QCD eligibility,
+    // the bracket-fill base, the reported `rmd` field) then reflects reality.
+    let rmdWithdrawn = 0;
     accts.forEach(account => {
       if (isPreTaxAccount(account.type)) {
         const rmd = accountRMDs[account.id] || 0;
         if (rmd > 0) {
-          accountBalances[account.id] = Math.max(0, accountBalances[account.id] - rmd);
+          const drawn = Math.min(Math.max(0, accountBalances[account.id]), rmd);
+          accountBalances[account.id] -= drawn;
+          rmdWithdrawn += drawn;
         }
       }
     });
-    
+    totalRMD = rmdWithdrawn;
+
+    // Excess RMD is the RMD amount that exceeds what we actually need for spending.
+    // Pre-retirement, ALL of the RMD is "excess" since we don't need it for spending.
+    // Computed from the DISTRIBUTED figure above, so a short RMD can't reinvest
+    // dollars that never left the account.
+    let excessRMD = Math.max(0, totalRMD - actualWithdrawalNeeded);
+
     // Step 2: If RETIRED and we need more than RMD, withdraw based on user's priority
     // Pre-retirement, we do NOT withdraw extra even if income < desired spending
-    let additionalNeeded = isRetired ? Math.max(0, actualWithdrawalNeeded - totalRMD) : 0;
-    
+    const additionalRequested = isRetired ? Math.max(0, actualWithdrawalNeeded - totalRMD) : 0;
+    let additionalNeeded = additionalRequested;
+
     // Get withdrawal priority (default: pretax, brokerage, roth)
     const priority = pi.withdrawalPriority || ['pretax', 'brokerage', 'roth'];
     
@@ -3223,10 +3437,21 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     let preTaxWithdrawals = 0;
     let brokerageWithdrawals = 0;
     let rothWithdrawals = 0;
+    // Pre-tax dollars distributed before 59½ without an exception (§72(t) base).
+    // RMDs can never be early (they start at 73/75), so only voluntary draws and
+    // the conversion-tax draw contribute. Converting to Roth is NOT a
+    // distribution and is not penalized — but pre-tax dollars pulled out to PAY
+    // the conversion's tax bill are, and are booked below.
+    let penalizedWithdrawals = 0;
     // Per-account cost-basis tracking: each brokerage account can have its own
     // costBasisPercent (e.g. 0.30 for an old account with deep gains, 0.95 for a new one).
     // We accumulate the actual capital gains and basis recovered to use them in tax calc.
-    let brokerageCapitalGains = 0;
+    // Seeded with this year's qualified dividends: from here down, this variable
+    // is "income taxed at preferential rates", i.e. realized gains + dividends.
+    // Every downstream use (Pub 915 combined income, removal from the ordinary
+    // federal base, LTCG stacking, the state gains-inclusive base, NIIT) applies
+    // to dividends identically.
+    let brokerageCapitalGains = brokerageDividends;
     let brokerageBasisRecovered = 0;
     // HSA withdrawals for qualified medical expenses are tax-free (not tracked for tax)
     
@@ -3243,6 +3468,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // HSA withdrawals for qualified medical expenses are tax-free
           if (isPreTaxAccount(account.type)) {
             preTaxWithdrawals += withdrawal;
+            penalizedWithdrawals += withdrawal * penaltyShareFor(account);
           } else if (isBrokerageAccount(account.type)) {
             brokerageWithdrawals += withdrawal;
             // Apply this account's specific cost basis (default 0.50 if not set)
@@ -3269,7 +3495,20 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         brokerageCapitalGains += poolWithdrawal * 0.20;
       }
     }
-    
+
+    // ── WHAT THE PORTFOLIO ACTUALLY DELIVERED ──────────────────────────────────
+    // The solver sizes `requestedWithdrawal` from the spending target alone; it
+    // has no view of account balances. Steps 1-2 above draw against real balances
+    // and stop when they're empty, leaving the unfunded remainder in
+    // `additionalNeeded`. Report the amount actually withdrawn — not the amount
+    // asked for — so netIncome, totalIncome, totalTax, the charts, and the
+    // guardrail withdrawal rate all describe money that exists. The gap is
+    // surfaced as `unfundedShortfall` so the UI can say "this plan runs dry".
+    // (Previously portfolioWithdrawal carried the request, and a fully depleted
+    // plan kept reporting that it met its spending target every year.)
+    portfolioWithdrawal = totalRMD + (additionalRequested - additionalNeeded);
+    const unfundedShortfall = Math.max(0, requestedWithdrawal - portfolioWithdrawal);
+
     // Step 2.5: Calculate ACTUAL taxes based on withdrawal composition
     // Now that we know which accts were tapped, calculate proper taxes
     // Pre-tax withdrawals (including RMDs) are ordinary income
@@ -3311,23 +3550,43 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       let targetConversion = 0;
 
       if (conversionBracket) {
-        // Bracket-fill mode: convert up to the top of the chosen bracket.
-        // We must account for ALL taxable income already recognized this year:
-        //   - nonSSIncome: earned income + pension + other income
-        //   - totalRMD: mandatory pre-tax distributions (ordinary income, tracked separately)
-        //   - preTaxWithdrawals: additional voluntary pre-tax withdrawals for spending
-        //   - taxable SS: recalculated with the full non-SS income base including all withdrawals
+        // ── BRACKET-FILL MODE ────────────────────────────────────────────────
+        // Convert up to the top of the chosen bracket. Two things make this a
+        // solve rather than a subtraction:
+        //
+        //  1. Bracket tops are TAXABLE-income figures (post-standard-deduction),
+        //     but a conversion adds GROSS income. So the target must be grossed
+        //     up by the deduction. The old code computed `currentTaxable` with a
+        //     Math.max(0, …) floor, which silently discarded any unused deduction
+        //     — under-converting by up to a full standard deduction in exactly
+        //     the low-income bridge years this feature exists to exploit.
+        //
+        //  2. The conversion RAISES the taxable portion of Social Security
+        //     (Pub 915 combined income), and that extra taxable SS consumes
+        //     bracket room the conversion was about to use. Pricing it from the
+        //     PRE-conversion taxable SS (one pass) overshot into the next
+        //     bracket by roughly the taxable-SS amount for anyone collecting SS.
+        //
+        // Capital gains are deliberately kept OUT of the ordinary base: they
+        // stack ABOVE ordinary income at preferential rates and consume no
+        // ordinary bracket space. They do raise Pub 915 combined income, so they
+        // stay in the taxable-SS base below.
+        // (Not modeled: filling the ordinary bracket can push stacked gains from
+        // the 0%/15% LTCG rate into 15%/20%. The bracket label refers to the
+        // ordinary bracket, as the UI presents it.)
         const baseBrackets = FEDERAL_TAX_BRACKETS_2026[effectiveFilingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
-        const baseDeduction = STANDARD_DEDUCTION_2026[effectiveFilingStatus] || STANDARD_DEDUCTION_2026.married_joint;
-        const adjDeduction = baseDeduction * inflationFactor;
+        // Full federal deduction including the 65+ amounts — every extra dollar of
+        // deduction is another dollar of cheap conversion headroom. The senior
+        // deduction's own phaseout depends on the conversion, so it is evaluated
+        // inside the solve below rather than fixed here.
+        const deductionAt = (magiForPhaseout) =>
+          getFederalDeduction(effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(magiForPhaseout));
 
-        // Full non-SS income base: everything taxable EXCEPT SS and the conversion itself.
-        // RMDs are ordinary income but tracked in totalRMD separately from preTaxWithdrawals
-        // (which only holds additional voluntary pre-tax withdrawals beyond the RMD).
-        const fullNonSSIncome = nonSSIncomeAfterDeduction + totalRMD + preTaxWithdrawals;
-        // Recalculate SS taxable with the full income base (withdrawals push more SS into taxable range)
-        const taxableSSWithWithdrawals = calculateSocialSecurityTaxableAmount(totalSocialSecurity, fullNonSSIncome, effectiveFilingStatus);
-        const currentTaxable = Math.max(0, fullNonSSIncome + taxableSSWithWithdrawals - adjDeduction);
+        // Ordinary income already recognized this year, EXCLUDING SS and the
+        // conversion itself. RMDs are ordinary income but tracked in totalRMD
+        // separately from preTaxWithdrawals (which holds only the additional
+        // voluntary pre-tax withdrawals beyond the RMD).
+        const ordinaryBeforeConversion = nonSSIncomeAfterDeduction + totalRMD + preTaxWithdrawals;
 
         const bracketIdx = RATE_TO_BRACKET_IDX[conversionBracket];
         if (bracketIdx === undefined) {
@@ -3336,7 +3595,41 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           targetConversion = 0;
         } else {
           const bracketCap = baseBrackets[bracketIdx].max * inflationFactor;
-          targetConversion = Math.max(0, bracketCap - currentTaxable);
+          // Taxable income produced by converting X: the conversion plus the
+          // extra taxable SS it drags in, less the deduction that X's own MAGI
+          // supports. Capital gains are in the Pub 915 combined-income base (they
+          // raise taxable SS) but not in the result (they stack above ordinary
+          // income at preferential rates).
+          const taxableAt = (X) => {
+            const nonSS = ordinaryBeforeConversion + X + brokerageCapitalGains;
+            const ssT = calculateSocialSecurityTaxableAmount(totalSocialSecurity, nonSS, effectiveFilingStatus);
+            return ordinaryBeforeConversion + X + ssT - deductionAt(nonSS + ssT + preTaxDeduction);
+          };
+          // taxableAt is continuous and strictly increasing in X: each converted
+          // dollar adds itself, up to $0.85 of newly taxable SS, and (inside the
+          // senior-deduction phaseout band) up to $0.06 per person of lost
+          // deduction. So the bracket top is found by bisection. A fixed-point
+          // iteration alternates across the SS tier boundaries and converges too
+          // slowly to land on the cent.
+          // Upper bound: the answer with no taxable SS and the largest deduction
+          // (both of which only move against the conversion as X grows).
+          const hiBound = Math.max(0, bracketCap
+            + deductionAt(ordinaryBeforeConversion + brokerageCapitalGains + preTaxDeduction)
+            - ordinaryBeforeConversion);
+          if (hiBound <= 0 || taxableAt(0) >= bracketCap) {
+            targetConversion = 0; // already at or past the top of the bracket
+          } else if (taxableAt(hiBound) <= bracketCap) {
+            targetConversion = hiBound; // no SS in play — the bound is the answer
+          } else {
+            let lo = 0, hi = hiBound;
+            // Halve to sub-cent precision (typically ~30 steps; the 60-step bound
+            // covers any conceivable range and keeps the loop provably finite).
+            for (let i = 0; i < 60 && hi - lo > 0.005; i++) {
+              const mid = (lo + hi) / 2;
+              if (taxableAt(mid) > bracketCap) hi = mid; else lo = mid;
+            }
+            targetConversion = lo; // the side that never crosses the bracket top
+          }
         }
       } else if (conversionAmount > 0) {
         // Fixed-amount mode. By default the entered amount is in TODAY's dollars
@@ -3405,7 +3698,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             const preConvNonSS = nonSSIncomeAfterDeduction + totalRMD + spendingPreTax + brokerageCapitalGains;
             const preConvTaxableSS = calculateSocialSecurityTaxableAmount(totalSocialSecurity, preConvNonSS, effectiveFilingStatus);
             const preConvGross = preConvNonSS + preConvTaxableSS;
-            const preConvFed = calculateFederalTax(preConvGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
+            const preConvFed = calculateFederalTax(preConvGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(preConvGross + preTaxDeduction));
             const preConvState = calculateStateTax(preConvGross, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, preConvTaxableSS, totalPension, { federalTaxPaid: preConvFed, primaryAge: myAge, spouseAge: spouseAge });
 
             // IRMAA: under the 2-year lookback this year's surcharge is fixed by
@@ -3469,7 +3762,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
               const postConvNonSS = preConvNonSS + rothConversionThisYear + taxDrawTaxable;
               const postConvTaxableSS = calculateSocialSecurityTaxableAmount(totalSocialSecurity, postConvNonSS, effectiveFilingStatus);
               const postConvGross = postConvNonSS + postConvTaxableSS;
-              const postConvFed = calculateFederalTax(postConvGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
+              const postConvFed = calculateFederalTax(postConvGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(postConvGross + preTaxDeduction));
               const postConvState = calculateStateTax(postConvGross, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, postConvTaxableSS, totalPension, { federalTaxPaid: postConvFed, primaryAge: myAge, spouseAge: spouseAge });
               const postConvIRMAA = convMedicareEligible > 0
                 ? calculateIRMAASurcharge(postConvGross + preTaxDeduction, effectiveFilingStatus, yearsFromNow, pi.inflationRate, convMedicareEligible).totalSurcharge
@@ -3524,6 +3817,10 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
                   conversionTaxWithdrawal += w;
                   if (isPreTaxAccount(account.type)) {
                     preTaxWithdrawals += w;
+                    // Paying the conversion tax out of pre-tax dollars IS a
+                    // distribution, so it carries the §72(t) penalty even though
+                    // the conversion itself does not.
+                    penalizedWithdrawals += w * penaltyShareFor(account);
                   } else if (isBrokerageAccount(account.type)) {
                     brokerageWithdrawals += w;
                     const basisPct = (account.costBasisPercent !== undefined && account.costBasisPercent !== null)
@@ -3611,7 +3908,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // added separately below. (Previously the gains were left in this base AND taxed again
     // via calculateCapitalGainsTax — double taxation that materially overstated federal tax.)
     const federalOrdinaryTaxableIncome = Math.max(0, finalTotalTaxableIncome - capitalGainsFromWithdrawals);
-    federalTax = calculateFederalTax(federalOrdinaryTaxableIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
+    // MAGI ≈ AGI with certain deductions added back. finalTotalTaxableIncome already
+    // includes capital gains and the taxable portion of SS, with the pre-tax contribution
+    // deduction removed — so we add only that deduction back here. Derived BEFORE the
+    // federal tax because it drives the senior-deduction phaseout (and, further down,
+    // the NIIT threshold and the IRMAA lookback record).
+    const magi = finalTotalTaxableIncome + preTaxDeduction;
+    federalTax = calculateFederalTax(federalOrdinaryTaxableIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(magi));
     // Retirement income exempt in some states: pension only (401k/IRA withdrawals are NOT exempt)
     const finalRetirementIncome = totalPension;
     // For IL/MS/PA, ALL qualified retirement distributions (pre-tax 401k/IRA + RMDs) are also
@@ -3656,8 +3959,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // When ordinary income is less than the standard deduction, IRS Qualified Dividends and
     // Capital Gain Tax Worksheet absorbs the unused deduction against the gains (line 5 clamps
     // to 0). Mirror that by reducing the taxable-gains figure by any unused deduction.
-    const baseDeduction = STANDARD_DEDUCTION_2026[effectiveFilingStatus] || STANDARD_DEDUCTION_2026.married_joint;
-    const adjustedDeduction = baseDeduction * inflationFactor;
+    // Full federal deduction including the 65+ amounts — they reduce ordinary
+    // taxable income, so gains stack lower in the LTCG brackets.
+    const adjustedDeduction = getFederalDeduction(effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(magi));
     const unusedDeduction = Math.max(0, adjustedDeduction - federalOrdinaryTaxableIncome);
     const taxableGains = Math.max(0, capitalGainsFromWithdrawals - unusedDeduction);
     const taxableOrdinaryIncome = Math.max(0, federalOrdinaryTaxableIncome - adjustedDeduction);
@@ -3677,18 +3981,23 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // the entire brokerage portfolio (not just the withdrawn portion).
     // Use a 2% dividend/interest yield on the start-of-year brokerage balance
     // (totalBrokerageBalance was computed before withdrawals).
-    const dividendYieldEstimate = 0.02;
-    const totalInvestmentIncome = capitalGainsFromWithdrawals + (totalBrokerageBalance * dividendYieldEstimate);
-    // MAGI ≈ AGI with certain deductions added back. finalTotalTaxableIncome already
-    // includes capital gains and the taxable portion of SS, with the pre-tax contribution
-    // deduction removed — so we add only that deduction back here. (Capital gains are ALREADY
-    // in finalTotalTaxableIncome; the previous code added them a second time, overstating
-    // MAGI and pushing IRMAA tiers / NIIT too high whenever there were brokerage gains.)
-    const magi = finalTotalTaxableIncome + preTaxDeduction;
+    const totalInvestmentIncome = capitalGainsFromWithdrawals; // realized gains + dividends
+    // `magi` was derived above the federal ordinary tax (it drives the senior-
+    // deduction phaseout). Capital gains are ALREADY in finalTotalTaxableIncome;
+    // an earlier version added them a second time, overstating MAGI and pushing
+    // IRMAA tiers / NIIT too high whenever there were brokerage gains.
     // Record this year's MAGI so years t+2 onward can apply the IRMAA lookback.
     magiByYear[yearsFromNow] = magi;
     const niitTax = calculateNIIT(totalInvestmentIncome, magi, effectiveFilingStatus);
     federalTax += niitTax;
+
+    // ── §72(t) EARLY WITHDRAWAL PENALTY ────────────────────────────────────────
+    // 10% additional federal tax on pre-59½ distributions without an exception.
+    // Added here alongside the capital-gains tax and NIIT — i.e. AFTER the state
+    // tax was priced off `federalTaxPaid`, matching how those two are handled
+    // (Alabama's federal deductibility uses the ordinary tax only).
+    const earlyWithdrawalPenalty = penalizedWithdrawals * EARLY_WITHDRAWAL_PENALTY_RATE;
+    federalTax += earlyWithdrawalPenalty;
 
     // ── MEDICARE IRMAA SURCHARGE ──────────────────────────────────────────────
     // IRMAA adds surcharges to Part B and Part D premiums for high-income beneficiaries.
@@ -3698,9 +4007,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // Each Medicare-eligible person (age 65+) pays their own surcharge.
     let irmaaSurcharge = 0;
     let irmaaInfo = null; // IRMAA tier detail for display components
-    let numMedicareEligible = 0;
-    if (primaryAlive && myAge >= 65) numMedicareEligible++;
-    if (effectiveFilingStatus === 'married_joint' && spouseAlive && spouseAge >= 65) numMedicareEligible++;
+    const numMedicareEligible = age65Count; // same predicate as the 65+ deductions
     if (numMedicareEligible > 0) {
       const irmaaMAGI = irmaaLookbackMAGI !== null ? irmaaLookbackMAGI : magi;
       const irmaaResult = calculateIRMAASurcharge(irmaaMAGI, effectiveFilingStatus, yearsFromNow, pi.inflationRate, numMedicareEligible);
@@ -3759,8 +4066,12 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Federal: gains-excluded ordinary base, with and without the excess RMD.
       // (nonSSWithoutExcess derives from finalNonSSIncome, which is already net of preTaxDeduction.)
       const fedOrdinaryWithoutExcess = Math.max(0, nonSSWithoutExcess - capitalGainsFromWithdrawals + taxableSSWithoutExcess);
-      const fedTaxWithoutExcess = calculateFederalTax(fedOrdinaryWithoutExcess, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
-      const fedTaxWithExcess = calculateFederalTax(federalOrdinaryTaxableIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
+      // Each side is priced at its OWN MAGI so the senior deduction's 6% phaseout
+      // shows up in the marginal rate — dropping the excess RMD restores deduction,
+      // which is a real part of what that RMD costs.
+      const magiWithoutExcess = Math.max(0, nonSSWithoutExcess + taxableSSWithoutExcess + preTaxDeduction);
+      const fedTaxWithoutExcess = calculateFederalTax(fedOrdinaryWithoutExcess, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(magiWithoutExcess));
+      const fedTaxWithExcess = calculateFederalTax(federalOrdinaryTaxableIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(magi));
       // State: gains-inclusive base, without the excess RMD (compare against the already-
       // computed `stateTax`, which is the gains-inclusive with-excess figure).
       const stateBaseWithoutExcess = Math.max(0, nonSSWithoutExcess + taxableSSWithoutExcess);
@@ -3899,9 +4210,15 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       otherIncome: Math.round(totalOtherIncome),
       totalGuaranteedIncome: Math.round(totalGuaranteedIncome),
       portfolioWithdrawal: Math.round(portfolioWithdrawal),
+      // Spending dollars the portfolio could not supply this year (0 in a funded
+      // plan). > 0 means the plan is short: netIncome below the spending target.
+      unfundedShortfall: Math.round(unfundedShortfall),
       rmd: Math.round(totalRMD),
       excessRMD: Math.round(excessRMD),
       qcd: Math.round(qcdAmount),
+      // Qualified dividends thrown off by taxable accounts this year. Taxable
+      // whether or not anything was sold; included in taxableIncome and magi.
+      brokerageDividends: Math.round(brokerageDividends),
       rothConversion: Math.round(rothConversionThisYear), // Planned Roth conversion executed this year
       conversionTaxWithdrawal: Math.round(conversionTaxWithdrawal), // Extra portfolio draw that paid the conversion's tax bill
       charitableGiving: Math.round(isRetired ? desiredIncome * (charitablePercent / 100) : 0),
@@ -3911,9 +4228,20 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       nonSSIncome: Math.round(nonSSIncome), // Non-SS income before pre-tax deduction (used for SS taxation display)
       taxableSS: Math.round(finalTaxableSS_out), // Taxable portion of SS benefits (IRS combined income formula)
       taxableIncome: Math.round(finalTotalTaxableIncome), // Federal taxable income (after pre-tax deduction, before standard deduction)
+      // The total federal deduction actually applied this year: standard deduction
+      // + the §63(f) 65+ amount + the OBBBA senior deduction net of its phaseout.
+      // Exposed so display components show the same figure the tax used instead of
+      // re-deriving a plain standard deduction and disagreeing with the engine.
+      federalDeduction: Math.round(adjustedDeduction),
+      age65Count, // people 65+ in the tax household (drives the deduction and IRMAA)
       magi: Math.round(magi), // Modified Adjusted Gross Income (gains-inclusive AGI with pre-tax deduction added back)
       stateTaxableIncome: Math.round(stateTaxableIncome), // State taxable income after SS/retirement exclusions and deduction
       federalTax: Math.round(federalTax),
+      // §72(t) additional tax, already included in federalTax above. Broken out
+      // so the UI can show it as its own line — it is the dominant cost of an
+      // early-retirement withdrawal plan and shouldn't hide inside "federal tax".
+      earlyWithdrawalPenalty: Math.round(earlyWithdrawalPenalty),
+      penalizedWithdrawals: Math.round(penalizedWithdrawals),
       stateTax: Math.round(stateTax),
       ficaTax: Math.round(totalFICA), // Employee FICA (SS + Medicare) on earned income
       irmaaSurcharge: Math.round(irmaaSurcharge), // Medicare IRMAA surcharge (Part B + Part D above standard)
@@ -3996,6 +4324,10 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
 
     // ── Federal income tax ────────────────────────────────────────────────
     FEDERAL_TAX_BRACKETS_2026, STANDARD_DEDUCTION_2026,
+    ADDITIONAL_STD_DEDUCTION_65_2026, SENIOR_DEDUCTION_AMOUNT,
+    SENIOR_DEDUCTION_FIRST_YEAR, SENIOR_DEDUCTION_LAST_YEAR,
+    SENIOR_DEDUCTION_PHASEOUT_RATE, SENIOR_DEDUCTION_PHASEOUT_START,
+    seniorDeduction, getFederalDeduction,
     calculateFederalTax, calculateSocialSecurityTaxableAmount,
     CAPITAL_GAINS_THRESHOLDS_2025, calculateCapitalGainsTax, calculateNIIT,
 
@@ -4017,6 +4349,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // ── Retirement accounts (RMD, Roth conversion windows) ────────────────
     RMD_FACTORS, calculateRMD, getRmdStartAge, getDefaultRothConversionWindow,
     QCD_ANNUAL_LIMIT, QCD_START_AGE,
+    EARLY_WITHDRAWAL_PENALTY_RATE, EARLY_WITHDRAWAL_AGE, RULE_OF_55_AGE,
+    PENALTY_EXEMPT_TYPES, RULE_OF_55_TYPES,
+    earlyWithdrawalPenaltyFraction, earlyWithdrawalPenaltyShare,
 
     // ── Social Security ───────────────────────────────────────────────────
     SS_FULL_RETIREMENT_AGE, SS_FRA_PRE_1943, getFullRetirementAge,
@@ -4042,6 +4377,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
 
     // ── Historical sequences + main projection entry point ────────────────
     HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
+    getPlanningHorizonYears,
     computeProjections,
   };
 });
