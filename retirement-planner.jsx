@@ -21,7 +21,7 @@ const {
   calculateAlabamaTax, FICA_SS_RATE, FICA_SS_WAGE_BASE_2025, FICA_MEDICARE_RATE,
   FICA_ADDITIONAL_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_THRESHOLD,
   calculateFICA, RMD_FACTORS, calculateRMD, getRmdStartAge,
-  getDefaultRothConversionWindow, QCD_ANNUAL_LIMIT, QCD_START_AGE,
+  getDefaultRothConversionWindow, QCD_ANNUAL_LIMIT, QCD_START_AGE, getPlanningHorizonYears,
   SS_FULL_RETIREMENT_AGE, SS_FRA_PRE_1943, getFullRetirementAge,
   SS_EARNINGS_TEST_LIMIT_2025, SS_EARNINGS_TEST_FRA_LIMIT_2025,
   calculateSSBenefit, calculateSSEarningsTestReduction, IRMAA_THRESHOLDS_2025,
@@ -343,6 +343,13 @@ const DEFAULT_PERSONAL_INFO = {
   rothConversionBracket: '',     // If set ('22%','24%','32%'), fill to this bracket instead of fixed amount
   rothConversionTaxSource: 'withdrawal', // 'withdrawal' = tax paid via normal withdrawal priority, 'brokerage' = tax paid from brokerage account
   rothConversionPreTaxFloor: 0,  // Preserve this much pre-tax balance (today's $); stop converting once pre-tax hits it (0 = no floor)
+  // §72(t) SEPP: substantially equal periodic payments let you tap a pre-tax
+  // account before 59½ without the 10% penalty, in exchange for locking the
+  // payment schedule until 59½ or 5 years, whichever is longer. Off by default —
+  // it's a deliberate strategy, not something to assume on a user's behalf.
+  // (The 457(b) exemption and the rule of 55 are applied automatically from
+  // account type and retirement age; they need no toggle.)
+  sepp72tEnabled: false,
   heirTaxRate: 0.25,             // Heirs' assumed ordinary rate on inherited PRE-TAX dollars (SECURE Act 10-year drain) — used by the Roth optimizer's after-tax legacy score
   legacyAge: 95,                 // Planning horizon / legacy target age
   // Spending phases (go-go / slow-go / no-go): staged multipliers on base
@@ -749,7 +756,7 @@ function FAQTab() {
         },
         {
           q: "What's the difference between Pre-Tax, Roth, and Brokerage accounts?",
-          a: "Pre-Tax accounts (401k, Traditional IRA, 457b): Contributions reduce taxable income (not modeled here), withdrawals are fully taxable, and Required Minimum Distributions (RMDs) apply at age 75. Roth accounts (Roth 401k, Roth IRA, Roth 457b): Withdrawals are tax-free, no RMDs required. Brokerage accounts: Taxable accounts with no special tax treatment in this model - withdrawals are added to taxable income (simplified assumption)."
+          a: "Pre-Tax accounts (401k, Traditional IRA, 403b, 457b): employee contributions are deducted from taxable income as an above-the-line deduction, withdrawals are fully taxable as ordinary income, and Required Minimum Distributions begin at age 73 or 75 depending on your birth year (SECURE 2.0: born 1951-1959 start at 73, born 1960 or later at 75). Withdrawals before age 59.5 also carry the 10% early withdrawal penalty unless an exception applies — see the early retirement question below. Roth accounts (Roth 401k, Roth IRA, Roth 457b): withdrawals are tax-free and no RMDs are required. Brokerage accounts: each account carries its own cost basis percentage, so only the gain portion of a withdrawal is taxed, at long-term capital gains rates (0%/15%/20%) rather than ordinary rates. Brokerage accounts also generate taxable dividends each year (2% of the balance by default) whether or not you sell anything. HSA withdrawals are treated as tax-free qualified medical spending."
         },
         {
           q: "How are Required Minimum Distributions (RMDs) calculated?",
@@ -765,8 +772,12 @@ function FAQTab() {
           a: "Federal taxes use the 2026 progressive tax brackets (per IRS Revenue Procedure 2025-32) for your selected filing status, with the standard deduction applied first. Both the standard deduction and tax brackets are adjusted for inflation each year using your specified inflation rate. The brackets are: 10%, 12%, 22%, 24%, 32%, 35%, and 37%. FICA payroll taxes (6.2% Social Security up to the wage base + 1.45% Medicare + 0.9% Additional Medicare Tax for high earners) are also applied to earned income."
         },
         {
+          q: "What happens if I retire before 59½?",
+          a: "Pre-tax withdrawals (401k, Traditional IRA, 403b) taken before age 59½ normally carry a 10% federal penalty on top of ordinary income tax — IRC §72(t). The projection applies it, and the withdrawal solver grosses up for it, so your spending target is still met (you just deplete the portfolio faster). Three exceptions are modeled: (1) Governmental 457(b) plans are exempt at any age, so 457(b) withdrawals are never penalized. (2) The 'rule of 55' — if you separate from your employer in or after the year you turn 55, distributions from THAT employer's 401(k)/403(b) are exempt; the projection applies this automatically when your retirement age is 55+ and the account type is 401k or 403b. Note it does NOT apply to IRAs, so if you rolled the money to an IRA, enter it as a Traditional IRA and the penalty will correctly apply. (3) A 72(t) SEPP plan — check the box under Withdrawal Priority. Because ages are whole years while the threshold falls mid-year, the year you are 59 is treated as half penalized. Not modeled: exceptions for disability, death, large medical expenses, health insurance while unemployed, first home, education, or birth/adoption; the Roth 5-year conversion clock; and state-level early-distribution penalties such as California's extra 2.5%."
+        },
+        {
           q: "What is the standard deduction?",
-          a: "The standard deduction is subtracted from your gross income before calculating taxes. 2026 base amounts: Single $16,100, Married Filing Jointly $32,200, Married Filing Separately $16,100, Head of Household $24,150. These amounts are adjusted upward each year by the inflation rate you specify."
+          a: "The standard deduction is subtracted from your gross income before calculating taxes. 2026 base amounts: Single $16,100, Married Filing Jointly $32,200, Married Filing Separately $16,100, Head of Household $24,150. These amounts are adjusted upward each year by the inflation rate you specify. Two extra deductions apply once you turn 65, and the projection applies both automatically. (1) The additional standard deduction for age 65+ (IRC §63(f)): $2,050 per person for Single/Head of Household, $1,650 per person if married — permanent, and inflation-adjusted like the base amount. (2) The 'senior deduction' created by the 2025 OBBBA tax law: $6,000 per person age 65+, on top of the standard deduction. It is NOT inflation-adjusted, it phases out at 6% of MAGI above $75,000 (Single) / $150,000 (Married Filing Jointly) — disappearing entirely at $175,000 / $250,000 — and under current law it applies only to tax years 2025 through 2028. The projection models that expiry, so you will see the deduction drop starting in 2029 unless Congress extends it. The Tax Year Snapshot shows the exact deduction used for any year."
         },
         {
           q: "How are state taxes calculated?",
@@ -815,7 +826,7 @@ function FAQTab() {
         },
         {
           q: "What if my portfolio runs out?",
-          a: "The projections will show a $0 or negative portfolio balance if withdrawals exceed available funds. This indicates you may need to reduce spending, work longer, save more, or adjust your plan. The model continues calculations but results become less meaningful once the portfolio is depleted."
+          a: "The projection stops withdrawing once the accounts are empty: the year-by-year table shows the portfolio at $0, the withdrawal drops to what was actually available, and the shortfall — the spending your portfolio could not fund — appears in red under the Portfolio Draw column. Net income falls to whatever guaranteed income (Social Security, pension) still provides. That is a signal to reduce spending, work longer, save more, delay Social Security, or adjust the plan."
         }
       ]
     },
@@ -1073,7 +1084,7 @@ function FAQTab() {
       items: [
         {
           q: "What are the main limitations of this tool?",
-          a: "This is a comprehensive but simplified planning tool. Key limitations: Uses standard deduction only (no itemized — so the engine doesn't model the 2026 OBBBA changes that capped charitable deductions at 35% for high earners or imposed the 0.5%-of-AGI floor for itemizers; QCDs are modeled separately as an above-the-line exclusion). Most states use simplified flat tax rates (Alabama has a full progressive engine with federal deductibility — other states use flat rate approximations). No tax-loss harvesting, no estate planning, brokerage cost basis is estimated at 50% (actual depends on your purchase history), no contribution limit enforcement. Features included: Configurable withdrawal priority ordering, Roth conversion modeling (fixed-amount and bracket-fill, with smart defaults for bridge-year windows), QCD optimization, FICA payroll taxes on earned income, tiered capital gains rates (0%/15%/20%), NIIT surtax, Medicare IRMAA surcharges (Part B + Part D based on MAGI), Social Security earnings test for early claimers still working, survivor modeling with SS benefit inheritance, one-time events (expenses and income), healthcare expense modeling (pre-65, Medicare, long-term care), charitable giving, non-liquid asset tracking, full-plan SS claiming age analysis with CAGR sensitivity and Monte Carlo stress testing, sequence-of-returns stress testing with historical scenarios, and dedicated Monte Carlo simulation. Results are estimates for planning purposes only."
+          a: "This is a comprehensive but simplified planning tool. Key limitations: Uses standard deduction only (no itemized — so the engine doesn't model the 2026 OBBBA changes that capped charitable deductions at 35% for high earners or imposed the 0.5%-of-AGI floor for itemizers; QCDs are modeled separately as an above-the-line exclusion). Most states use simplified flat tax rates (Alabama has a full progressive engine with federal deductibility — other states use flat rate approximations). No tax-loss harvesting, no estate planning, brokerage cost basis defaults to 50% per account but is editable on each account (actual depends on your purchase history), no contribution limit enforcement, no tracking of Roth contribution-vs-earnings basis or the 5-year conversion clock, and no state-level early-distribution penalties. Features included: the 10% early withdrawal penalty before 59.5 with the 457(b), rule-of-55 and 72(t) SEPP exceptions, the age-65 additional standard deduction and the 2025-2028 OBBBA senior deduction, annual taxable dividends on brokerage balances, configurable withdrawal priority ordering, Roth conversion modeling (fixed-amount and bracket-fill, with smart defaults for bridge-year windows), QCD optimization, FICA payroll taxes on earned income, tiered capital gains rates (0%/15%/20%), NIIT surtax, Medicare IRMAA surcharges (Part B + Part D based on MAGI), Social Security earnings test for early claimers still working, survivor modeling with SS benefit inheritance, one-time events (expenses and income), healthcare expense modeling (pre-65, Medicare, long-term care), charitable giving, non-liquid asset tracking, full-plan SS claiming age analysis with CAGR sensitivity and Monte Carlo stress testing, sequence-of-returns stress testing with historical scenarios, and dedicated Monte Carlo simulation. Results are estimates for planning purposes only."
         },
         {
           q: "Should I use this for actual financial decisions?",
@@ -1580,7 +1591,7 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
           </thead>
           <tbody>
             {tableData.map((row, idx) => (
-              <tr key={row.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${row.qcd > 0 ? 'bg-emerald-900/10' : ''} ${row.rothConversion > 0 ? 'bg-purple-900/10' : ''} ${row.survivorEvent ? 'bg-red-900/15 border-red-500/30' : ''} ${row.oneTimeEvents?.length ? 'bg-amber-900/10' : ''}`}>
+              <tr key={row.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${row.qcd > 0 ? 'bg-emerald-900/10' : ''} ${row.rothConversion > 0 ? 'bg-purple-900/10' : ''} ${row.survivorEvent ? 'bg-red-900/15 border-red-500/30' : ''} ${row.oneTimeEvents?.length ? 'bg-amber-900/10' : ''} ${row.unfundedShortfall > 0 ? 'bg-red-900/25' : ''}`}>
                 <td className="py-2 px-2 text-slate-100 font-medium">
                   {row.myAge}
                   {row.survivorEvent === 'spouse_died' && <span title="Spouse passed" className="ml-1">🕊️</span>}
@@ -1600,13 +1611,27 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
                 </td>
                 <td className="py-2 px-2 text-right text-purple-400">{formatCurrency(row.pension)}</td>
                 <td className="py-2 px-2 text-right text-cyan-400">{formatCurrency(row.otherIncome)}</td>
-                <td className="py-2 px-2 text-right text-yellow-400">{formatCurrency(row.portfolioWithdrawal)}</td>
+                <td className="py-2 px-2 text-right text-yellow-400">
+                  {formatCurrency(row.portfolioWithdrawal)}
+                  {row.unfundedShortfall > 0 && (
+                    <div className="text-xs text-red-400" title="Spending this year's portfolio could not fund — the plan is short by this much">
+                      short {formatCurrency(row.unfundedShortfall)}
+                    </div>
+                  )}
+                </td>
                 <td className="py-2 px-2 text-right text-orange-400">{row.rmd > 0 ? formatCurrency(row.rmd) : '—'}</td>
                 <td className="py-2 px-2 text-right text-emerald-400 font-medium">{row.qcd > 0 ? formatCurrency(row.qcd) : '—'}</td>
                 <td className="py-2 px-2 text-right text-purple-400 font-medium">{row.rothConversion > 0 ? formatCurrency(row.rothConversion) : '—'}</td>
                 <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.taxableIncome)}</td>
                 <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.magi)}</td>
-                <td className="py-2 px-2 text-right text-red-400">({formatCurrency(row.federalTax)})</td>
+                <td className="py-2 px-2 text-right text-red-400">
+                  ({formatCurrency(row.federalTax)})
+                  {row.earlyWithdrawalPenalty > 0 && (
+                    <div className="text-xs text-red-300" title="10% §72(t) additional tax on pre-tax withdrawals before age 59½ (included in the federal tax above)">
+                      incl. {formatCurrency(row.earlyWithdrawalPenalty)} 72(t)
+                    </div>
+                  )}
+                </td>
                 <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.stateTaxableIncome)}</td>
                 <td className="py-2 px-2 text-right text-red-400">({formatCurrency(row.stateTax)})</td>
                 <td className="py-2 px-2 text-right text-red-400">{row.ficaTax > 0 ? `(${formatCurrency(row.ficaTax)})` : '—'}</td>
@@ -1668,9 +1693,13 @@ function TaxYearSnapshot({ projections, personalInfo }) {
   const grossTaxableIncome = nonSSIncome + taxableSS;
   const agiAfterContribs = grossTaxableIncome - preTaxDeduction;
   
-  // Standard deduction (for display in breakdown)
-  const baseDeduction = STANDARD_DEDUCTION_2026[filingStatus] || STANDARD_DEDUCTION_2026.single;
-  const adjDeduction = Math.round(baseDeduction * inflationFactor);
+  // Federal deduction for display. Read the engine's own figure so the bracket
+  // walk-through reconciles with the tax it reports — it includes the age-65
+  // additional standard deduction and the OBBBA senior deduction, which a plain
+  // STANDARD_DEDUCTION_2026 lookup here would miss.
+  const adjDeduction = Math.round(
+    p.federalDeduction ?? ((STANDARD_DEDUCTION_2026[filingStatus] || STANDARD_DEDUCTION_2026.single) * inflationFactor)
+  );
   
   // Federal taxable income after standard deduction (for bracket walk-through)
   const federalTaxableIncome = Math.max(0, taxableIncome - adjDeduction);
@@ -2715,8 +2744,11 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
       const yearsFromNow = p.myAge - personalInfo.myAge;
       const inflationFactor = Math.pow(1 + personalInfo.inflationRate, yearsFromNow);
       const baseBrackets = FEDERAL_TAX_BRACKETS_2026[personalInfo.filingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
-      const baseDeduction = STANDARD_DEDUCTION_2026[personalInfo.filingStatus] || STANDARD_DEDUCTION_2026.married_joint;
-      const adjustedDeduction = baseDeduction * inflationFactor;
+      // The engine's own deduction for this year — includes the age-65 additional
+      // standard deduction and the OBBBA senior deduction, which a bare
+      // STANDARD_DEDUCTION_2026 lookup would miss for anyone 65+.
+      const adjustedDeduction = p.federalDeduction
+        ?? ((STANDARD_DEDUCTION_2026[personalInfo.filingStatus] || STANDARD_DEDUCTION_2026.married_joint) * inflationFactor);
       
       // Use the projection engine's actual taxableIncome — this already includes the real
       // taxable SS amount (not the flat 85% approximation), all portfolio withdrawals,
@@ -2724,7 +2756,15 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
       // Room figures are consistent with what the engine actually computed.
       const plannedConversion = p.rothConversion || 0;
       const conversionTaxDraw = p.conversionTaxWithdrawal || 0;
-      const taxableIncome = p.taxableIncome; // engine-computed, includes conversion
+      // NOTE: p.taxableIncome is AGI — BEFORE the deduction and INCLUDING capital
+      // gains and dividends. Bracket tops are post-deduction ORDINARY taxable
+      // income, so comparing the two directly (as this did) placed users a bracket
+      // or more too high and understated every "room to" figure. Build the right
+      // basis here: strip preferential income, then subtract the deduction.
+      const taxableIncome = p.taxableIncome; // AGI — used for the gross-income chart only
+      const preferentialIncome = (p.brokerageDividends || 0)
+        + Math.max(0, (p.taxableIncome || 0) - (p.nonSSIncome || 0) - (p.taxableSS || 0));
+      const ordinaryTaxable = Math.max(0, (p.taxableIncome || 0) - preferentialIncome - adjustedDeduction);
 
       // Gross income for chart display (SS shown at 85% is a display approximation only).
       // Includes the extra draw that pays the conversion's tax bill — it's ordinary
@@ -2755,28 +2795,28 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
       let currentBracket = '10%';
       let roomInBracket = 0;
       // roomTo22: additional income before entering the 22% bracket (0 if already in 22%+)
-      const roomTo22 = Math.max(0, cap12 - taxableIncome);
+      const roomTo22 = Math.max(0, cap12 - ordinaryTaxable);
       // roomTo24: additional income before entering the 24% bracket (0 if already in 24%+)
-      const roomTo24 = Math.max(0, cap24 - taxableIncome);
+      const roomTo24 = Math.max(0, cap24 - ordinaryTaxable);
 
-      if (taxableIncome <= cap10) {
+      if (ordinaryTaxable <= cap10) {
         currentBracket = '10%';
-        roomInBracket = cap10 - taxableIncome;
-      } else if (taxableIncome <= cap12) {
+        roomInBracket = cap10 - ordinaryTaxable;
+      } else if (ordinaryTaxable <= cap12) {
         currentBracket = '12%';
-        roomInBracket = cap12 - taxableIncome;
-      } else if (taxableIncome <= cap22) {
+        roomInBracket = cap12 - ordinaryTaxable;
+      } else if (ordinaryTaxable <= cap22) {
         currentBracket = '22%';
-        roomInBracket = cap22 - taxableIncome;
-      } else if (taxableIncome <= cap24) {
+        roomInBracket = cap22 - ordinaryTaxable;
+      } else if (ordinaryTaxable <= cap24) {
         currentBracket = '24%';
-        roomInBracket = cap24 - taxableIncome;
-      } else if (taxableIncome <= cap32) {
+        roomInBracket = cap24 - ordinaryTaxable;
+      } else if (ordinaryTaxable <= cap32) {
         currentBracket = '32%';
-        roomInBracket = cap32 - taxableIncome;
-      } else if (taxableIncome <= cap35) {
+        roomInBracket = cap32 - ordinaryTaxable;
+      } else if (ordinaryTaxable <= cap35) {
         currentBracket = '35%';
-        roomInBracket = cap35 - taxableIncome;
+        roomInBracket = cap35 - ordinaryTaxable;
       } else {
         currentBracket = '37%';
         roomInBracket = 0;
@@ -2796,8 +2836,10 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
         pension: p.pension,
         otherIncome: p.otherIncome,
         portfolioWithdrawal: p.portfolioWithdrawal,
-        // Split for the chart: the RMD is the mandatory slice of portfolioWithdrawal
-        // (the engine sets portfolioWithdrawal = max(RMD, need), so RMD ≤ withdrawal).
+        // Split for the chart: the RMD is the mandatory slice of portfolioWithdrawal.
+        // Both figures are amounts actually distributed, and the engine builds the
+        // withdrawal as RMD + voluntary draw, so RMD ≤ withdrawal always holds —
+        // including in a year where the portfolio ran short of the spending target.
         rmd: Math.round(p.rmd || 0),
         voluntaryWithdrawal: Math.round(Math.max(0, p.portfolioWithdrawal - (p.rmd || 0))),
         plannedConversion: Math.round(plannedConversion),
@@ -3117,6 +3159,10 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
     guardrails: { enabled: false, bandPct: 0.20, adjustPct: 0.10 },
   });
   const [simResults, setSimResults] = useState(null);
+  // Nominal vs today's dollars. Each sim draws its own inflation path, so pooled
+  // nominal percentiles mix currencies; the worker also returns each sim deflated
+  // by its own path. Default to today's dollars — it is the figure users can judge.
+  const [showRealDollars, setShowRealDollars] = useState(true);
   const [simError, setSimError] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
   
@@ -3531,16 +3577,23 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
               </div>
             </div>
             <div className={cardStyle}>
-              <div className="text-slate-400 text-sm mb-1">Starting Portfolio</div>
+              <div className="text-slate-400 text-sm mb-1">Portfolio at Start</div>
+              {/* The worker reports the sum of today's account balances, which is
+                  NOT the balance at simSettings.startAge — labelling it "at age 65"
+                  showed today's money against a future age. Use the deterministic
+                  projection's own balance at that age, in that year's dollars. */}
               <div className="text-2xl font-bold text-emerald-400">
-                {formatCurrency(simResults.startingPortfolio)}
+                {formatCurrency(startingPortfolio || simResults.startingPortfolio)}
               </div>
-              <div className="text-sm text-slate-500">at age {simResults.startAge}</div>
+              <div className="text-sm text-slate-500">
+                at age {simResults.startAge}
+                {startingPortfolio ? '' : ' (current balances)'}
+              </div>
             </div>
             <div className={cardStyle}>
               <div className="text-slate-400 text-sm mb-1">Median Final Portfolio</div>
               <div className="text-2xl font-bold text-amber-400">
-                {formatCurrency(simResults.percentile50)}
+                {formatCurrency(showRealDollars && simResults.real ? simResults.real.percentile50 : simResults.percentile50)}
               </div>
               <div className="text-sm text-slate-500">at age {endAge}</div>
             </div>
@@ -3555,31 +3608,46 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
           
           {/* Percentile Distribution */}
           <div className={cardStyle}>
-            <h4 className="text-lg font-semibold text-slate-100 mb-4">Portfolio Outcome Distribution (at Age 95)</h4>
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+              <h4 className="text-lg font-semibold text-slate-100">Portfolio Outcome Distribution (at Age {endAge})</h4>
+              {simResults.real && (
+                <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-400">
+                  <input
+                    type="checkbox"
+                    checked={showRealDollars}
+                    onChange={e => setShowRealDollars(e.target.checked)}
+                    className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-amber-500 focus:ring-amber-500/50"
+                  />
+                  <span title="Every simulation draws its own inflation path, so raw future-dollar results from different simulations are not comparable. Deflating each run by its own inflation makes these figures directly comparable and expresses them in money you can judge today.">
+                    Show in today's dollars
+                  </span>
+                </label>
+              )}
+            </div>
             <div className="grid grid-cols-5 gap-4 text-center">
               <div>
                 <div className="text-red-400 text-sm mb-1">5th Percentile</div>
-                <div className="text-lg font-semibold text-slate-100">{formatCurrency(simResults.percentile5)}</div>
+                <div className="text-lg font-semibold text-slate-100">{formatCurrency(showRealDollars && simResults.real ? simResults.real.percentile5 : simResults.percentile5)}</div>
                 <div className="text-xs text-slate-500">Worst case</div>
               </div>
               <div>
                 <div className="text-orange-400 text-sm mb-1">25th Percentile</div>
-                <div className="text-lg font-semibold text-slate-100">{formatCurrency(simResults.percentile25)}</div>
+                <div className="text-lg font-semibold text-slate-100">{formatCurrency(showRealDollars && simResults.real ? simResults.real.percentile25 : simResults.percentile25)}</div>
                 <div className="text-xs text-slate-500">Poor scenario</div>
               </div>
               <div>
                 <div className="text-amber-400 text-sm mb-1">50th Percentile</div>
-                <div className="text-lg font-semibold text-slate-100">{formatCurrency(simResults.percentile50)}</div>
+                <div className="text-lg font-semibold text-slate-100">{formatCurrency(showRealDollars && simResults.real ? simResults.real.percentile50 : simResults.percentile50)}</div>
                 <div className="text-xs text-slate-500">Median outcome</div>
               </div>
               <div>
                 <div className="text-green-400 text-sm mb-1">75th Percentile</div>
-                <div className="text-lg font-semibold text-slate-100">{formatCurrency(simResults.percentile75)}</div>
+                <div className="text-lg font-semibold text-slate-100">{formatCurrency(showRealDollars && simResults.real ? simResults.real.percentile75 : simResults.percentile75)}</div>
                 <div className="text-xs text-slate-500">Good scenario</div>
               </div>
               <div>
                 <div className="text-emerald-400 text-sm mb-1">95th Percentile</div>
-                <div className="text-lg font-semibold text-slate-100">{formatCurrency(simResults.percentile95)}</div>
+                <div className="text-lg font-semibold text-slate-100">{formatCurrency(showRealDollars && simResults.real ? simResults.real.percentile95 : simResults.percentile95)}</div>
                 <div className="text-xs text-slate-500">Best case</div>
               </div>
             </div>
@@ -3711,7 +3779,7 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
             <h4 className="text-lg font-semibold text-slate-100 mb-4">Portfolio Projection Bands</h4>
             <div className="h-80">
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={simResults.percentileBands}>
+                <ComposedChart data={showRealDollars && simResults.percentileBandsReal ? simResults.percentileBandsReal : simResults.percentileBands}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                   <XAxis dataKey="age" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
                   <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8' }} tickFormatter={v => `$${(v/1e6).toFixed(1)}M`} />
@@ -4007,7 +4075,7 @@ function ScenarioComparisonTab({ activeScenarioId, assets, computeProjections, c
 // ============================================
 // StressTestTab — Lifted to module scope
 // ============================================
-function StressTestTab({ accounts, currentYear, incomeStreams, personalInfo, projections, recurringExpenses }) {
+function StressTestTab({ accounts, assets, currentYear, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses }) {
   const retirementAge = personalInfo.myRetirementAge;
   const endAge = personalInfo.legacyAge || 95;
   const retirementProjection = projections.find(p => p.myAge === retirementAge);
@@ -4098,154 +4166,70 @@ function StressTestTab({ accounts, currentYear, incomeStreams, personalInfo, pro
     const baselineCAGR = retirementProjection?.weightedCAGR || 0.07;
     
     const results = scenarios.map(scenario => {
-      // Clone account balances at retirement
-      const accountBalances = {};
-      accounts.forEach(a => {
-        const retBal = retirementProjection?.perAccountBalances?.[a.id] || a.balance;
-        accountBalances[a.id] = retBal;
-      });
-      
-      const yearData = [];
-      let portfolioSurvived = true;
-      let failureAge = null;
-      
-      for (let year = 0; year <= endAge - retirementAge; year++) {
-        const myAge = retirementAge + year;
-        const spouseAge = personalInfo.spouseAge + (retirementAge - personalInfo.myAge) + year;
-        const yearsFromNow = retirementAge - personalInfo.myAge + year;
-        const inflationFactor = Math.pow(1 + personalInfo.inflationRate, yearsFromNow);
-        
-        // Determine this year's return: use scenario returns for early years, then revert to CAGR
-        let yearReturn;
-        if (year < scenario.returns.length) {
-          yearReturn = scenario.returns[year] / 100; // Convert percentage to decimal
-        } else {
-          yearReturn = baselineCAGR; // Revert to normal returns after scenario period
-        }
-        
-        // Calculate income
-        let totalSS = 0, totalPension = 0, totalOther = 0, earned = 0, nonSSIncome = 0;
-        incomeStreams.forEach(stream => {
-          const ownerAge = stream.owner === 'me' ? myAge : spouseAge;
-          if (ownerAge >= stream.startAge && ownerAge <= stream.endAge) {
-            // todaysDollars: COLA compounds from today, not the stream's start age
-            const colaFrom = stream.colaStartAge ? Math.max(stream.startAge, stream.colaStartAge) : stream.startAge;
-            const colaYears = stream.todaysDollars ? (myAge - personalInfo.myAge) : Math.max(0, ownerAge - colaFrom);
-            const adj = stream.amount * Math.pow(1 + (stream.cola || 0), colaYears);
-            if (stream.type === 'social_security') totalSS += adj;
-            else if (stream.type === 'pension') { totalPension += adj; nonSSIncome += adj; }
-            else if (stream.type === 'earned_income') { earned += adj; nonSSIncome += adj; }
-            else { totalOther += adj; nonSSIncome += adj; }
-          }
-        });
-        
-        // RMDs
-        let totalRMD = 0;
-        accounts.forEach(account => {
-          const ownerAge = account.owner === 'me' ? myAge : account.owner === 'spouse' ? spouseAge : Math.max(myAge, spouseAge);
-          const ownerBirthYear = account.owner === 'me' ? personalInfo.myBirthYear : personalInfo.spouseBirthYear || personalInfo.myBirthYear;
-          if (isPreTaxAccount(account.type)) {
-            totalRMD += calculateRMD(accountBalances[account.id] || 0, ownerAge, ownerBirthYear);
-          }
-        });
-        
-        // Desired income
-        const desiredIncome = personalInfo.desiredRetirementIncome * inflationFactor;
-        const healthcare = calculateHealthcareExpenses(personalInfo, myAge, spouseAge, yearsFromNow, true, personalInfo.filingStatus === 'married_joint');
-        const recurring = calculateRecurringExpenses(recurringExpenses, myAge, spouseAge, yearsFromNow, personalInfo.inflationRate);
-        const adjustedDesired = desiredIncome + healthcare.total + recurring.total;
-        
-        // Simplified withdrawal calculation (use flat tax estimate for speed)
-        const totalGuaranteed = totalSS + totalPension + totalOther;
-        const taxableSS = calculateSocialSecurityTaxableAmount(totalSS, nonSSIncome, personalInfo.filingStatus);
-        const grossIncome = nonSSIncome + taxableSS;
-        const fedTax = calculateFederalTax(grossIncome, personalInfo.filingStatus, yearsFromNow, personalInfo.inflationRate);
-        const stTax = calculateStateTax(grossIncome, personalInfo.state, personalInfo.filingStatus, yearsFromNow, personalInfo.inflationRate, taxableSS, totalPension, { federalTaxPaid: fedTax, primaryAge: myAge, spouseAge: spouseAge });
-        const netGuaranteed = totalGuaranteed + earned - fedTax - stTax;
-        const gap = Math.max(0, adjustedDesired - netGuaranteed);
-        
-        // Gross-up for taxes on withdrawal
-        const marginalRate = grossIncome > 0 ? Math.min(0.40, (fedTax + stTax) / grossIncome * 1.3) : 0.25;
-        const portfolioWithdrawal = gap > 0 ? Math.max(totalRMD, gap / (1 - marginalRate * 0.7)) : totalRMD;
-        
-        // Withdraw from accounts (priority order)
-        let remaining = portfolioWithdrawal;
-        // RMDs first
-        accounts.forEach(account => {
-          if (isPreTaxAccount(account.type) && remaining > 0) {
-            const rmd = calculateRMD(accountBalances[account.id] || 0, 
-              account.owner === 'me' ? myAge : spouseAge,
-              account.owner === 'me' ? personalInfo.myBirthYear : personalInfo.spouseBirthYear || personalInfo.myBirthYear);
-            const draw = Math.min(accountBalances[account.id] || 0, rmd);
-            accountBalances[account.id] -= draw;
-            remaining -= draw;
-          }
-        });
-        
-        // Then priority order
-        const priority = personalInfo.withdrawalPriority || ['pretax', 'brokerage', 'roth'];
-        const getTypes = (cat) => {
-          if (cat === 'pretax') return PRE_TAX_TYPES;
-          if (cat === 'roth') return ROTH_TYPES;
-          return [...BROKERAGE_TYPES, ...HSA_TYPES];
+      // Run the REAL engine with this scenario's returns injected per year via
+      // opts.yearOverrides. This tab used to re-implement the whole projection
+      // inline — income streams, RMDs, healthcare, withdrawal priority, and a
+      // hand-rolled tax gross-up (gap divided by 1 − marginalRate × 0.7) — which meant
+      // it silently disagreed with every other tab and modelled none of IRMAA,
+      // ACA, NIIT, capital gains, Roth conversions, QCDs, the early-withdrawal
+      // penalty, survivor rules, or one-time events. Everything now comes from
+      // the one engine, and new engine features show up here automatically.
+      //
+      // Walk-up years (today to retirement) keep their slot empty so each
+      // account grows at its own CAGR; the crash lands the year retirement
+      // starts, which is the sequence-of-returns risk this tab exists to show.
+      const walkUpYears = Math.max(0, retirementAge - personalInfo.myAge);
+      const horizon = getPlanningHorizonYears(personalInfo) + 1;
+      const overrides = new Array(horizon);
+      for (let y = walkUpYears; y < horizon; y++) {
+        const idx = y - walkUpYears;
+        overrides[y] = {
+          marketReturn: idx < scenario.returns.length ? scenario.returns[idx] / 100 : baselineCAGR,
+          inflation: personalInfo.inflationRate,
         };
-        for (const cat of priority) {
-          if (remaining <= 0) break;
-          accounts.forEach(account => {
-            if (getTypes(cat).includes(account.type) && remaining > 0) {
-              const draw = Math.min(accountBalances[account.id] || 0, remaining);
-              accountBalances[account.id] -= draw;
-              remaining -= draw;
-            }
-          });
-        }
-        
-        // Apply this year's return
-        accounts.forEach(account => {
-          accountBalances[account.id] = Math.max(0, accountBalances[account.id] || 0) * (1 + yearReturn);
-        });
-        
-        const totalPortfolio = Object.values(accountBalances).reduce((s, b) => s + Math.max(0, b), 0);
-        
-        if (totalPortfolio <= 0 && portfolioSurvived) {
-          portfolioSurvived = false;
-          failureAge = myAge;
-        }
-        
-        yearData.push({
-          age: myAge,
-          year: currentYear + yearsFromNow,
-          portfolio: Math.round(totalPortfolio),
-          yearReturn: yearReturn,
-          withdrawal: Math.round(portfolioWithdrawal),
-          isScenarioYear: year < scenario.returns.length
-        });
       }
-      
+
+      const proj = computeProjections(
+        personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
+        undefined, { yearOverrides: overrides }
+      );
+
+      const yearData = proj
+        .filter(p => p.myAge >= retirementAge)
+        .map((p, idx) => ({
+          age: p.myAge,
+          year: p.year,
+          portfolio: p.totalPortfolio,
+          yearReturn: idx < scenario.returns.length ? scenario.returns[idx] / 100 : baselineCAGR,
+          withdrawal: p.portfolioWithdrawal,
+          shortfall: p.unfundedShortfall || 0,
+          isScenarioYear: idx < scenario.returns.length,
+        }));
+
+      const failure = yearData.find(y => y.portfolio <= 0);
+      const trough = yearData.length > 0 ? Math.min(...yearData.map(y => y.portfolio)) : 0;
+
       return {
         ...scenario,
         yearData,
-        survived: portfolioSurvived,
-        failureAge,
+        survived: !failure,
+        failureAge: failure ? failure.age : null,
         finalPortfolio: yearData[yearData.length - 1]?.portfolio || 0,
-        worstDrawdown: Math.min(...yearData.map(y => y.portfolio)) - retirementPortfolio,
-        maxDrawdownPct: retirementPortfolio > 0 ? ((Math.min(...yearData.map(y => y.portfolio)) - retirementPortfolio) / retirementPortfolio * 100) : 0
+        worstDrawdown: trough - retirementPortfolio,
+        maxDrawdownPct: retirementPortfolio > 0 ? ((trough - retirementPortfolio) / retirementPortfolio * 100) : 0,
       };
     });
     
-    // Also run baseline (steady returns)
-    const baseAccountBalances = {};
-    accounts.forEach(a => {
-      baseAccountBalances[a.id] = retirementProjection?.perAccountBalances?.[a.id] || a.balance;
-    });
+    // Baseline: the deterministic plan, straight off the shared projection.
     const baseYearData = projections
-      .filter(p => p.myAge >= retirementAge && p.myAge <= endAge)
+      .filter(p => p.myAge >= retirementAge)
       .map(p => ({
         age: p.myAge,
         year: p.year,
         portfolio: p.totalPortfolio,
         yearReturn: baselineCAGR,
         withdrawal: p.portfolioWithdrawal,
+        shortfall: p.unfundedShortfall || 0,
         isScenarioYear: false
       }));
     
@@ -4290,11 +4274,18 @@ function StressTestTab({ accounts, currentYear, incomeStreams, personalInfo, pro
           </div>
           <div>
             <div className="text-xs text-slate-500">Annual Spending Goal</div>
-            <div className="text-lg font-bold text-amber-400">{formatCurrency(personalInfo.desiredRetirementIncome)}</div>
+            {/* Both figures below are in the dollars of the retirement YEAR. Showing
+                today's desiredRetirementIncome against a future portfolio balance
+                mixed real and nominal dollars and understated the withdrawal rate
+                by the whole inflation factor — a plan drawing 6.7% displayed as
+                1.5%, which made stress-test failures look impossible. */}
+            <div className="text-lg font-bold text-amber-400">{formatCurrency(retirementProjection?.desiredIncome || personalInfo.desiredRetirementIncome)}</div>
+            <div className="text-[10px] text-slate-500">in age-{retirementAge} dollars</div>
           </div>
           <div>
             <div className="text-xs text-slate-500">Withdrawal Rate</div>
-            <div className="text-lg font-bold text-slate-200">{retirementPortfolio > 0 ? ((personalInfo.desiredRetirementIncome / retirementPortfolio) * 100).toFixed(1) : '—'}%</div>
+            <div className="text-lg font-bold text-slate-200">{retirementPortfolio > 0 ? ((retirementProjection?.portfolioWithdrawal || 0) / retirementPortfolio * 100).toFixed(1) : '—'}%</div>
+            <div className="text-[10px] text-slate-500">first-year draw ÷ portfolio</div>
           </div>
           <div>
             <div className="text-xs text-slate-500">Planning Horizon</div>
@@ -7311,8 +7302,32 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
               }).join('')
             } last.
           </p>
+
+          {/* §72(t) early withdrawal penalty — only relevant if you retire before 59½ */}
+          {(localInfo.myRetirementAge < 60 || localInfo.spouseRetirementAge < 60) && (
+            <div className="mt-4 p-3 bg-slate-800/40 border border-slate-700/50 rounded-lg">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={localInfo.sepp72tEnabled || false}
+                  onChange={e => handleChange('sepp72tEnabled', e.target.checked)}
+                  className="w-4 h-4 mt-0.5 rounded border-slate-600 bg-slate-800 text-amber-500 focus:ring-amber-500/50"
+                />
+                <span className="text-sm text-slate-300">
+                  I'm using a 72(t) SEPP plan (no 10% early withdrawal penalty)
+                  <span className="block text-xs text-slate-500 mt-1">
+                    You're retiring before 59½, so pre-tax withdrawals normally carry a 10% IRS
+                    penalty. The projection already waives it for 457(b) accounts, and for a
+                    401(k)/403(b) when you separate at 55 or later (the "rule of 55"). Check this
+                    box only if you've committed to substantially equal periodic payments — they
+                    must continue until 59½ or 5 years, whichever is longer.
+                  </span>
+                </span>
+              </label>
+            </div>
+          )}
         </div>
-        
+
         {/* Spending Phases Section (go-go / slow-go / no-go) */}
         <div className="border-t border-slate-700/50 mt-5 pt-5">
           <h4 className="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wide">Spending Phases</h4>
@@ -11092,11 +11107,13 @@ function buildNextYearActions(projections, personalInfo, accounts, incomeStreams
     });
   }
 
-  // Taxable income after the standard deduction — the basis the federal brackets
-  // and the LTCG 0% threshold are measured against. Current year => no inflation
-  // indexing (yearsFromNow = 0), matching calculateFederalTax at year 0.
+  // Taxable income after the federal deduction — the basis the federal brackets
+  // and the LTCG 0% threshold are measured against. Uses the engine's own
+  // deduction (standard + any age-65 amounts) so the headroom advice below
+  // matches the tax the plan actually computed.
   const brackets = (FEDERAL_TAX_BRACKETS_2026 && (FEDERAL_TAX_BRACKETS_2026[fs] || FEDERAL_TAX_BRACKETS_2026.married_joint)) || null;
-  const stdDed = (STANDARD_DEDUCTION_2026 && (STANDARD_DEDUCTION_2026[fs] || STANDARD_DEDUCTION_2026.married_joint)) || 0;
+  const stdDed = y.federalDeduction
+    ?? ((STANDARD_DEDUCTION_2026 && (STANDARD_DEDUCTION_2026[fs] || STANDARD_DEDUCTION_2026.married_joint)) || 0);
   const taxableAfterStdDed = Math.max(0, (y.taxableIncome || 0) - stdDed);
 
   // 3. Headroom to the top of the current federal bracket (Roth conversion room).
@@ -11764,6 +11781,60 @@ function GuidedTour({ onFinish }) {
     </div>
   );
 }
+const Logo = ({ size = 'large' }) => {
+  const dimensions = size === 'large' ? 'w-14 h-14' : 'w-10 h-10';
+  
+  return (
+    <div className={`${dimensions} flex items-center justify-center`}>
+      <svg viewBox="0 0 32 32" className="w-full h-full">
+        <circle cx="16" cy="16" r="16" fill="#3b82f6"/>
+        <g transform="translate(2.5, 4.1) scale(0.165)" fill="#FFFFFF" stroke="none">
+          <path d="M50.82 136.87 c-0.55 -0.51 -0.55 -0.52 -0.55 -1.71 0 -1.32 0.19 -1.77 1.08 -2.35 0.37 -0.25 3.81 -1.51 14.56 -5.32 l1.54 -0.55 0.34 -1.33 c0.70 -2.71 1.56 -4.81 3.64 -9 4.72 -9.50 11.81 -20.99 19.58 -31.72 0.52 -0.75 0.94 -1.36 0.93 -1.38 -0.01 -0.01 -0.70 0.10 -1.53 0.25 -3.94 0.72 -5.24 0.16 -5.24 -2.26 0 -0.91 0.06 -1.23 0.34 -1.68 0.61 -0.99 1.15 -1.20 3.67 -1.42 2.47 -0.21 7.40 -1.03 7.72 -1.29 0.12 -0.09 0.96 -1.14 1.86 -2.34 2.83 -3.72 9.12 -11.52 17.80 -22.08 2.02 -2.46 3.78 -4.61 3.90 -4.79 0.19 -0.30 0.19 -0.31 0 -0.16 -0.81 0.58 -5.26 3.73 -7.19 5.08 -2.56 1.78 -2.50 1.75 -9.44 6.52 -18.65 12.82 -23.97 16.67 -34.91 25.24 -10.74 8.43 -14.31 10.88 -17.51 12.08 -1.08 0.40 -1.50 0.49 -2.64 0.49 -1.57 0.01 -2.32 -0.27 -2.89 -1.12 -0.31 -0.46 -0.34 -0.64 -0.30 -1.86 0.04 -1.24 0.10 -1.48 0.78 -2.97 0.93 -2.04 4.31 -8.40 6.02 -11.31 0.72 -1.21 3.04 -4.82 5.15 -8.05 2.11 -3.21 4.37 -6.68 5.03 -7.72 0.64 -1.03 1.89 -3.01 2.77 -4.42 0.88 -1.39 1.59 -2.56 1.56 -2.59 -0.03 -0.04 -1.66 1.12 -7.19 5.11 -2.34 1.69 -5.65 4.05 -8.33 5.92 -0.85 0.60 -3.10 2.17 -5 3.51 -1.89 1.32 -4.66 3.25 -6.14 4.28 -9.09 6.31 -15.55 10.98 -21.39 15.49 -2.13 1.65 -4.19 3.15 -4.60 3.36 -1.51 0.76 -3.51 0.36 -4.31 -0.88 -0.36 -0.54 -0.40 -0.75 -0.40 -1.83 0 -1.08 0.04 -1.30 0.37 -1.77 0.21 -0.30 1.63 -1.60 3.15 -2.91 4.24 -3.63 9.24 -8.64 20.38 -20.42 6.26 -6.62 12.46 -13.86 16.66 -19.40 2.37 -3.13 4.03 -6.07 4.60 -8.16 0.61 -2.19 0.40 -2.55 -1.30 -2.25 -3.51 0.60 -9.30 2.35 -20.03 6.07 -12.45 4.30 -21.80 7.75 -24.18 8.87 -0.97 0.48 -1.20 0.52 -1.98 0.45 -1.60 -0.13 -2.23 -0.90 -2.23 -2.67 0 -1.44 0.30 -1.93 1.54 -2.52 2.17 -1.03 6.44 -2.62 16.73 -6.26 10.07 -3.55 13.42 -4.69 18.95 -6.41 7.87 -2.44 10.56 -3.07 13.29 -3.07 2.73 0 3.91 0.57 4.76 2.31 0.42 0.84 0.49 1.17 0.55 2.53 0.13 2.59 -0.36 4.97 -1.56 7.34 -1.98 3.96 -11.18 15.45 -20.33 25.41 -4.05 4.40 -3.87 4.12 -1.65 2.58 1.06 -0.73 3.39 -2.34 5.15 -3.55 6.28 -4.31 14.05 -9.87 23.45 -16.76 7.61 -5.57 6.82 -5.08 8.24 -5.15 1.47 -0.06 2.02 0.18 2.47 1.11 0.66 1.35 0.27 3.15 -1.36 6.41 -1.30 2.59 -2.74 4.91 -6.49 10.52 -9.57 14.29 -11.52 17.38 -13.84 22.05 -0.78 1.59 -1.39 2.92 -1.35 2.97 0.10 0.10 5.11 -3.22 8.14 -5.42 1.48 -1.08 4.85 -3.55 7.49 -5.50 10.77 -7.96 13.95 -10.22 25.09 -17.92 10.16 -7.01 12.11 -8.36 13.93 -9.65 15.16 -10.61 19.46 -14.08 33.18 -26.85 4.25 -3.94 7.85 -7.57 9.57 -9.62 0.72 -0.87 1.36 -1.48 1.68 -1.62 0.63 -0.27 1.87 -0.27 2.50 0 1.38 0.57 2.02 2.67 1.30 4.25 -0.46 1.02 -0.57 1.12 -10.26 10.05 -3.69 3.40 -7.21 6.82 -8.70 8.42 -0.57 0.63 -2.46 2.82 -4.18 4.87 -1.72 2.05 -3.99 4.70 -5.02 5.90 -2.41 2.77 -5.18 6.04 -9.60 11.31 -1.93 2.31 -5.11 6.08 -7.04 8.39 -3.79 4.51 -7.97 9.66 -7.90 9.74 0.03 0.03 1.36 -0.18 2.97 -0.46 11.96 -2.10 22.71 -3.66 25.21 -3.66 2.47 0 3.72 1.32 3.51 3.70 -0.06 0.51 -0.22 1.20 -0.39 1.53 -0.70 1.35 -3.06 3.67 -6.23 6.13 -1.30 1 -6.01 4.24 -7.01 4.81 -0.25 0.15 -1.39 0.82 -2.50 1.47 -1.98 1.17 -4.36 2.47 -14.61 8.02 -5.72 3.10 -6.88 3.79 -6.73 4.05 0.15 0.22 4.57 2.35 8.52 4.09 7.34 3.22 7.82 3.48 8.25 4.28 0.31 0.63 0.43 2.01 0.22 2.77 -0.24 0.88 -0.93 1.75 -1.93 2.44 -3.34 2.26 -15.12 7.33 -25.35 10.91 -2.68 0.94 -4.25 1.48 -11.91 4.09 -1.98 0.67 -3.66 1.29 -3.73 1.35 -0.19 0.19 0.28 0.85 0.85 1.21 0.39 0.25 0.64 0.28 1.38 0.21 0.49 -0.04 1.48 -0.12 2.19 -0.16 1.23 -0.09 1.30 -0.07 1.54 0.25 0.27 0.40 0.33 1.78 0.09 2.23 -0.24 0.45 -0.60 0.58 -2.79 0.99 -1.57 0.30 -2.40 0.37 -3.60 0.33 -1.42 -0.04 -1.57 -0.07 -2.17 -0.49 -0.75 -0.54 -1.56 -1.66 -1.81 -2.52 -0.09 -0.34 -0.18 -0.64 -0.21 -0.67 -0.01 -0.03 -0.72 0.22 -1.57 0.55 -4.39 1.66 -10.20 3.76 -11.01 3.97 -0.51 0.13 -1.51 0.24 -2.22 0.24 -1.26 0 -1.30 -0.01 -1.86 -0.51z m27.70 -13.71 c10.80 -3.73 15.04 -5.32 20.43 -7.61 3.58 -1.53 7.42 -3.55 7.16 -3.79 -0.06 -0.06 -2.28 -1.03 -4.91 -2.17 -5.75 -2.47 -10.26 -4.57 -11.09 -5.14 -0.87 -0.61 -1.27 -1.39 -1.27 -2.52 0 -1.39 0.54 -2.32 1.87 -3.22 1.20 -0.79 9.75 -5.50 17.06 -9.38 7.54 -4 9.95 -5.41 13.12 -7.67 1.69 -1.20 4.28 -3.25 4.63 -3.67 0.21 -0.24 0.18 -0.25 -0.30 -0.18 -0.28 0.04 -2.19 0.33 -4.25 0.61 -4.13 0.58 -11.66 1.81 -17.30 2.83 -2.02 0.36 -4.02 0.70 -4.45 0.76 l-0.78 0.10 -1.53 2.11 c-2.80 3.88 -5.83 8.22 -8.36 12.02 -7.30 10.95 -11.13 18.13 -15.25 28.51 -0.04 0.09 -0.04 0.18 -0.01 0.18 0.04 0 2.40 -0.81 5.23 -1.78z"/>
+        </g>
+      </svg>
+    </div>
+  );
+};
+
+// Sidebar navigation. At module scope so React keeps one component identity —
+// defined inside RetirementPlanner these were re-created on every render, which
+// remounted the whole sidebar subtree each time any state changed.
+const NavItem = ({ id, label, icon, activeTab, setActiveTab, sidebarCollapsed }) => (
+  <button
+    onClick={() => setActiveTab(id)}
+    className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all ${
+      activeTab === id
+        ? 'bg-amber-500/20 text-amber-400 border-l-2 border-amber-500'
+        : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
+    }`}
+  >
+    <span className="text-base">{icon}</span>
+    {!sidebarCollapsed && <span className="font-medium">{label}</span>}
+  </button>
+);
+
+const NavGroup = ({ group, activeTab, setActiveTab, sidebarCollapsed }) => (
+  // data-tour is derived from the group label ('PLAN SETUP' -> 'nav-plan-setup')
+  // and is what GuidedTour's spotlight anchors to.
+  <div className="mb-4" data-tour={`nav-${group.label.toLowerCase().replace(/\s+/g, '-')}`}>
+    {!sidebarCollapsed && (
+      <div className="flex items-center gap-2 px-3 py-2 text-xs font-bold text-slate-300 uppercase tracking-wider border-b border-slate-700/50 pb-2 mb-1">
+        <span>{group.icon}</span>
+        <span>{group.label}</span>
+      </div>
+    )}
+    {sidebarCollapsed && (
+      <div className="flex justify-center py-2 text-slate-600">
+        <span className="text-lg">{group.icon}</span>
+      </div>
+    )}
+    <div className="space-y-1">
+      {group.items.map(item => (
+        <NavItem key={item.id} {...item} activeTab={activeTab} setActiveTab={setActiveTab} sidebarCollapsed={sidebarCollapsed} />
+      ))}
+    </div>
+  </div>
+);
 
 function RetirementPlanner() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -11795,20 +11866,10 @@ function RetirementPlanner() {
   const [hasSavedPlan, setHasSavedPlan] = useState(() => !!savedData);
 
   // Logo Component - MB makers mark on blue circle
-  const Logo = ({ size = 'large' }) => {
-    const dimensions = size === 'large' ? 'w-14 h-14' : 'w-10 h-10';
-    
-    return (
-      <div className={`${dimensions} flex items-center justify-center`}>
-        <svg viewBox="0 0 32 32" className="w-full h-full">
-          <circle cx="16" cy="16" r="16" fill="#3b82f6"/>
-          <g transform="translate(2.5, 4.1) scale(0.165)" fill="#FFFFFF" stroke="none">
-            <path d="M50.82 136.87 c-0.55 -0.51 -0.55 -0.52 -0.55 -1.71 0 -1.32 0.19 -1.77 1.08 -2.35 0.37 -0.25 3.81 -1.51 14.56 -5.32 l1.54 -0.55 0.34 -1.33 c0.70 -2.71 1.56 -4.81 3.64 -9 4.72 -9.50 11.81 -20.99 19.58 -31.72 0.52 -0.75 0.94 -1.36 0.93 -1.38 -0.01 -0.01 -0.70 0.10 -1.53 0.25 -3.94 0.72 -5.24 0.16 -5.24 -2.26 0 -0.91 0.06 -1.23 0.34 -1.68 0.61 -0.99 1.15 -1.20 3.67 -1.42 2.47 -0.21 7.40 -1.03 7.72 -1.29 0.12 -0.09 0.96 -1.14 1.86 -2.34 2.83 -3.72 9.12 -11.52 17.80 -22.08 2.02 -2.46 3.78 -4.61 3.90 -4.79 0.19 -0.30 0.19 -0.31 0 -0.16 -0.81 0.58 -5.26 3.73 -7.19 5.08 -2.56 1.78 -2.50 1.75 -9.44 6.52 -18.65 12.82 -23.97 16.67 -34.91 25.24 -10.74 8.43 -14.31 10.88 -17.51 12.08 -1.08 0.40 -1.50 0.49 -2.64 0.49 -1.57 0.01 -2.32 -0.27 -2.89 -1.12 -0.31 -0.46 -0.34 -0.64 -0.30 -1.86 0.04 -1.24 0.10 -1.48 0.78 -2.97 0.93 -2.04 4.31 -8.40 6.02 -11.31 0.72 -1.21 3.04 -4.82 5.15 -8.05 2.11 -3.21 4.37 -6.68 5.03 -7.72 0.64 -1.03 1.89 -3.01 2.77 -4.42 0.88 -1.39 1.59 -2.56 1.56 -2.59 -0.03 -0.04 -1.66 1.12 -7.19 5.11 -2.34 1.69 -5.65 4.05 -8.33 5.92 -0.85 0.60 -3.10 2.17 -5 3.51 -1.89 1.32 -4.66 3.25 -6.14 4.28 -9.09 6.31 -15.55 10.98 -21.39 15.49 -2.13 1.65 -4.19 3.15 -4.60 3.36 -1.51 0.76 -3.51 0.36 -4.31 -0.88 -0.36 -0.54 -0.40 -0.75 -0.40 -1.83 0 -1.08 0.04 -1.30 0.37 -1.77 0.21 -0.30 1.63 -1.60 3.15 -2.91 4.24 -3.63 9.24 -8.64 20.38 -20.42 6.26 -6.62 12.46 -13.86 16.66 -19.40 2.37 -3.13 4.03 -6.07 4.60 -8.16 0.61 -2.19 0.40 -2.55 -1.30 -2.25 -3.51 0.60 -9.30 2.35 -20.03 6.07 -12.45 4.30 -21.80 7.75 -24.18 8.87 -0.97 0.48 -1.20 0.52 -1.98 0.45 -1.60 -0.13 -2.23 -0.90 -2.23 -2.67 0 -1.44 0.30 -1.93 1.54 -2.52 2.17 -1.03 6.44 -2.62 16.73 -6.26 10.07 -3.55 13.42 -4.69 18.95 -6.41 7.87 -2.44 10.56 -3.07 13.29 -3.07 2.73 0 3.91 0.57 4.76 2.31 0.42 0.84 0.49 1.17 0.55 2.53 0.13 2.59 -0.36 4.97 -1.56 7.34 -1.98 3.96 -11.18 15.45 -20.33 25.41 -4.05 4.40 -3.87 4.12 -1.65 2.58 1.06 -0.73 3.39 -2.34 5.15 -3.55 6.28 -4.31 14.05 -9.87 23.45 -16.76 7.61 -5.57 6.82 -5.08 8.24 -5.15 1.47 -0.06 2.02 0.18 2.47 1.11 0.66 1.35 0.27 3.15 -1.36 6.41 -1.30 2.59 -2.74 4.91 -6.49 10.52 -9.57 14.29 -11.52 17.38 -13.84 22.05 -0.78 1.59 -1.39 2.92 -1.35 2.97 0.10 0.10 5.11 -3.22 8.14 -5.42 1.48 -1.08 4.85 -3.55 7.49 -5.50 10.77 -7.96 13.95 -10.22 25.09 -17.92 10.16 -7.01 12.11 -8.36 13.93 -9.65 15.16 -10.61 19.46 -14.08 33.18 -26.85 4.25 -3.94 7.85 -7.57 9.57 -9.62 0.72 -0.87 1.36 -1.48 1.68 -1.62 0.63 -0.27 1.87 -0.27 2.50 0 1.38 0.57 2.02 2.67 1.30 4.25 -0.46 1.02 -0.57 1.12 -10.26 10.05 -3.69 3.40 -7.21 6.82 -8.70 8.42 -0.57 0.63 -2.46 2.82 -4.18 4.87 -1.72 2.05 -3.99 4.70 -5.02 5.90 -2.41 2.77 -5.18 6.04 -9.60 11.31 -1.93 2.31 -5.11 6.08 -7.04 8.39 -3.79 4.51 -7.97 9.66 -7.90 9.74 0.03 0.03 1.36 -0.18 2.97 -0.46 11.96 -2.10 22.71 -3.66 25.21 -3.66 2.47 0 3.72 1.32 3.51 3.70 -0.06 0.51 -0.22 1.20 -0.39 1.53 -0.70 1.35 -3.06 3.67 -6.23 6.13 -1.30 1 -6.01 4.24 -7.01 4.81 -0.25 0.15 -1.39 0.82 -2.50 1.47 -1.98 1.17 -4.36 2.47 -14.61 8.02 -5.72 3.10 -6.88 3.79 -6.73 4.05 0.15 0.22 4.57 2.35 8.52 4.09 7.34 3.22 7.82 3.48 8.25 4.28 0.31 0.63 0.43 2.01 0.22 2.77 -0.24 0.88 -0.93 1.75 -1.93 2.44 -3.34 2.26 -15.12 7.33 -25.35 10.91 -2.68 0.94 -4.25 1.48 -11.91 4.09 -1.98 0.67 -3.66 1.29 -3.73 1.35 -0.19 0.19 0.28 0.85 0.85 1.21 0.39 0.25 0.64 0.28 1.38 0.21 0.49 -0.04 1.48 -0.12 2.19 -0.16 1.23 -0.09 1.30 -0.07 1.54 0.25 0.27 0.40 0.33 1.78 0.09 2.23 -0.24 0.45 -0.60 0.58 -2.79 0.99 -1.57 0.30 -2.40 0.37 -3.60 0.33 -1.42 -0.04 -1.57 -0.07 -2.17 -0.49 -0.75 -0.54 -1.56 -1.66 -1.81 -2.52 -0.09 -0.34 -0.18 -0.64 -0.21 -0.67 -0.01 -0.03 -0.72 0.22 -1.57 0.55 -4.39 1.66 -10.20 3.76 -11.01 3.97 -0.51 0.13 -1.51 0.24 -2.22 0.24 -1.26 0 -1.30 -0.01 -1.86 -0.51z m27.70 -13.71 c10.80 -3.73 15.04 -5.32 20.43 -7.61 3.58 -1.53 7.42 -3.55 7.16 -3.79 -0.06 -0.06 -2.28 -1.03 -4.91 -2.17 -5.75 -2.47 -10.26 -4.57 -11.09 -5.14 -0.87 -0.61 -1.27 -1.39 -1.27 -2.52 0 -1.39 0.54 -2.32 1.87 -3.22 1.20 -0.79 9.75 -5.50 17.06 -9.38 7.54 -4 9.95 -5.41 13.12 -7.67 1.69 -1.20 4.28 -3.25 4.63 -3.67 0.21 -0.24 0.18 -0.25 -0.30 -0.18 -0.28 0.04 -2.19 0.33 -4.25 0.61 -4.13 0.58 -11.66 1.81 -17.30 2.83 -2.02 0.36 -4.02 0.70 -4.45 0.76 l-0.78 0.10 -1.53 2.11 c-2.80 3.88 -5.83 8.22 -8.36 12.02 -7.30 10.95 -11.13 18.13 -15.25 28.51 -0.04 0.09 -0.04 0.18 -0.01 0.18 0.04 0 2.40 -0.81 5.23 -1.78z"/>
-          </g>
-        </svg>
-      </div>
-    );
-  };
+  // Logo, NavItem and NavGroup were moved to module scope (above RetirementPlanner).
+  // Defined inline they got a new component identity on every render, so React
+  // unmounted and remounted those subtrees each time any state changed — the same
+  // problem the modals were lifted out for.
   
   // savedData was hoisted above the wizard check (B9). State initializers below
   // re-use the same snapshot — one localStorage read per mount, not two.
@@ -11965,6 +12026,27 @@ function RetirementPlanner() {
     reader.onload = (e) => {
       try {
         const data = JSON.parse(e.target?.result);
+        // Shape check before anything is applied. JSON.parse succeeds on any valid
+        // JSON, so without this an unrelated (or hand-edited) file could put a
+        // string where the app expects an array and crash a tab past the point
+        // where the try/catch can help — with the bad data already in state and
+        // auto-saved over the user's real plan.
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+          throw new Error('not a retirement plan file');
+        }
+        const listFields = ['accounts', 'incomeStreams', 'assets', 'oneTimeEvents', 'recurringExpenses', 'scenarios'];
+        for (const f of listFields) {
+          if (data[f] !== undefined && !Array.isArray(data[f])) {
+            throw new Error(`"${f}" should be a list but is ${typeof data[f]}`);
+          }
+        }
+        if (data.personalInfo !== undefined
+            && (typeof data.personalInfo !== 'object' || data.personalInfo === null || Array.isArray(data.personalInfo))) {
+          throw new Error('"personalInfo" should be an object');
+        }
+        if (!data.personalInfo && !listFields.some(f => data[f])) {
+          throw new Error('no plan data found in this file');
+        }
         // Merge imported personalInfo with defaults to ensure new fields are present
         // This handles imports from older versions that may be missing newer fields
         if (data.personalInfo) {
@@ -11988,7 +12070,8 @@ function RetirementPlanner() {
         setSaveStatus('Imported!');
         setTimeout(() => setSaveStatus(''), 2000);
       } catch (err) {
-        alert('Error importing file. Please make sure it\'s a valid retirement plan export.');
+        alert('Could not import this file: ' + ((err && err.message) || 'unreadable')
+          + '.\n\nPick a JSON file exported from this planner. Your current plan has not been changed.');
       }
     };
     reader.readAsText(file);
@@ -12013,7 +12096,8 @@ function RetirementPlanner() {
     setRecurringExpenses(DEFAULT_RECURRING_EXPENSES);
     setDashboardVisibility(DEFAULT_DASHBOARD_VISIBILITY);
     setScenarios([]);
-    
+    setActiveScenarioId(null); // scenarios are gone; don't keep pointing at one
+
     setShowResetConfirm(false);
     setShowImportExport(false);
     setSaveStatus('Data Cleared!');
@@ -12131,43 +12215,10 @@ function RetirementPlanner() {
     }
   ];
   
-  const NavItem = ({ id, label, icon }) => (
-    <button 
-      onClick={() => setActiveTab(id)} 
-      className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all ${
-        activeTab === id 
-          ? 'bg-amber-500/20 text-amber-400 border-l-2 border-amber-500' 
-          : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
-      }`}
-    >
-      <span className="text-base">{icon}</span>
-      {!sidebarCollapsed && <span className="font-medium">{label}</span>}
-    </button>
-  );
-  
-  const NavGroup = ({ group }) => (
-    // data-tour is derived from the group label ('PLAN SETUP' -> 'nav-plan-setup')
-    // and is what GuidedTour's spotlight anchors to.
-    <div className="mb-4" data-tour={`nav-${group.label.toLowerCase().replace(/\s+/g, '-')}`}>
-      {!sidebarCollapsed && (
-        <div className="flex items-center gap-2 px-3 py-2 text-xs font-bold text-slate-300 uppercase tracking-wider border-b border-slate-700/50 pb-2 mb-1">
-          <span>{group.icon}</span>
-          <span>{group.label}</span>
-        </div>
-      )}
-      {sidebarCollapsed && (
-        <div className="flex justify-center py-2 text-slate-600">
-          <span className="text-lg">{group.icon}</span>
-        </div>
-      )}
-      <div className="space-y-1">
-        {group.items.map(item => (
-          <NavItem key={item.id} {...item} />
-        ))}
-      </div>
-    </div>
-  );
-  
+  // NavItem / NavGroup live at module scope (above RetirementPlanner) so they
+  // keep stable component identities across renders. They take the sidebar state
+  // as props rather than closing over it.
+
   const handleSaveAsset = (asset) => {
     if (asset.id) setAssets(prev => prev.map(a => a.id === asset.id ? asset : a));
     else setAssets(prev => [...prev, { ...asset, id: Date.now() + Math.random() }]);
@@ -12971,7 +13022,7 @@ function RetirementPlanner() {
         {/* Navigation */}
         <nav className="flex-1 p-3 overflow-y-auto">
           {navGroups.map((group, idx) => (
-            <NavGroup key={idx} group={group} />
+            <NavGroup key={idx} group={group} activeTab={activeTab} setActiveTab={setActiveTab} sidebarCollapsed={sidebarCollapsed} />
           ))}
           
           {/* Utility buttons - right after nav groups */}
@@ -13051,7 +13102,7 @@ function RetirementPlanner() {
             {activeTab === 'taxplanning' && <TaxPlanningTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'withdrawal' && <WithdrawalStrategiesTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} />}
             {activeTab === 'montecarlo' && <MonteCarloTab accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
-            {activeTab === 'stresstest' && <StressTestTab accounts={accounts} currentYear={currentYear} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'stresstest' && <StressTestTab accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'sensitivity' && <SensitivityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'faq' && <FAQTab />}
           </div>

@@ -61,7 +61,22 @@ All libraries (React, Tailwind, Recharts, Babel) are vendored in `vendor/` and l
 ```
 node tests/run-tests.cjs
 ```
-The suite exercises the shared calc engine (`engine.js`) — federal/state tax brackets, RMD, Social Security taxation, IRMAA, and full projection integration tests.
+The suite exercises the shared calc engine (`engine.js`) — federal/state tax brackets, RMD, Social Security taxation, IRMAA, the early-withdrawal penalty, the age-65 deductions, Roth bracket-fill, and full projection integration tests.
+
+### Speeding up page load (optional)
+```
+node tools/build.cjs
+```
+There is still no bundler: `index.html` fetches the JSX and compiles it with the
+vendored Babel. That costs a few seconds of CPU per load for ~780 KB of source.
+This command precompiles it to `retirement-planner.compiled.js`, which the page
+uses instead when present.
+
+It is a pure cache and cannot go stale: the compiled file records a hash of the
+source it came from, and the page only uses it when that matches the `.jsx` it
+actually fetched. Edit the JSX without rebuilding and the browser quietly falls
+back to compiling from source — slower, never wrong. Deleting the compiled file
+is always safe. Re-run the command before committing a release.
 
 ## Architecture
 

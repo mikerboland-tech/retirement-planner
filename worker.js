@@ -82,7 +82,11 @@ function runMonteCarlo(jobId, payload) {
   } = payload;
 
   const piWithLifeExp = { ...personalInfo, legacyAge: personalInfo.legacyAge || 95 };
-  const yearsFromCurrent = piWithLifeExp.legacyAge - piWithLifeExp.myAge + 1;
+  // Must match the engine's horizon exactly. It covers a younger spouse, so a
+  // myAge-only count would leave the tail years without overrides — and the
+  // engine would quietly run those on deterministic returns, understating risk
+  // in precisely the late years the simulation exists to stress.
+  const yearsFromCurrent = E.getPlanningHorizonYears(piWithLifeExp) + 1;
   const walkUpYears = Math.max(0, simSettings.startAge - piWithLifeExp.myAge);
   const stochasticYears = yearsFromCurrent - walkUpYears;
 
@@ -118,8 +122,12 @@ function runMonteCarlo(jobId, payload) {
   // Per-year portfolio samples across ALL sims, for the percentile fan chart.
   // (Previously the bands were computed from only the first `numPathsToStore`
   // stored paths while the headline stats used every sim.)
-  const yearsToReport = (piWithLifeExp.legacyAge - simSettings.startAge) + 1;
+  // One entry per reported path year — derived from the same horizon so the fan
+  // chart spans the whole projection rather than stopping at the primary's age.
+  const yearsToReport = Math.max(1, yearsFromCurrent - walkUpYears);
   const bandData = Array.from({ length: yearsToReport }, () => []);
+  // Same samples deflated to today's dollars (see the path build below).
+  const bandDataReal = Array.from({ length: yearsToReport }, () => []);
 
   for (let sim = 0; sim < totalSims; sim++) {
     const histStartYear = isHistorical
@@ -150,10 +158,21 @@ function runMonteCarlo(jobId, payload) {
     );
 
     // Build per-sim portfolio path from simSettings.startAge onward.
+    // Each sim draws its OWN inflation sequence, so nominal balances from
+    // different sims are denominated in different currencies — pooling them
+    // produces percentile bands whose p10 and p90 are not comparable. Deflate by
+    // this sim's own cumulative inflation to get today's dollars, which is the
+    // figure a user can actually reason about.
     const path = [];
-    for (const p of proj) {
+    let cumInflation = 1;
+    for (let y = 0; y < proj.length; y++) {
+      const p = proj[y];
+      if (y > 0) {
+        const prev = overrides[y - 1];
+        cumInflation *= (1 + (prev ? prev.inflation : piWithLifeExp.inflationRate));
+      }
       if (p.myAge >= simSettings.startAge) {
-        path.push({ age: p.myAge, portfolio: p.totalPortfolio });
+        path.push({ age: p.myAge, portfolio: p.totalPortfolio, real: p.totalPortfolio / cumInflation });
       }
     }
 
@@ -179,6 +198,7 @@ function runMonteCarlo(jobId, payload) {
 
     results.push({
       finalPortfolio: path.length > 0 ? path[path.length - 1].portfolio : 0,
+      finalPortfolioReal: path.length > 0 ? path[path.length - 1].real : 0,
       survived: portfolioSurvived,
       failureAge,
       portfolioAt75: path.find(p => p.age === 75)?.portfolio || 0,
@@ -188,6 +208,7 @@ function runMonteCarlo(jobId, payload) {
     if (sim < numPathsToStore) portfolioPathsToStore.push(path);
     for (let y = 0; y < yearsToReport; y++) {
       bandData[y].push(path[y]?.portfolio || 0);
+      bandDataReal[y].push(path[y]?.real || 0);
     }
 
     if ((sim + 1) % BATCH === 0 || sim + 1 === totalSims) {
@@ -207,6 +228,7 @@ function runMonteCarlo(jobId, payload) {
   const successCount = results.filter(r => r.survived).length;
   const successRate = successCount / totalSims;
   const finalPortfolios = results.map(r => r.finalPortfolio).sort((a, b) => a - b);
+  const finalPortfoliosReal = results.map(r => r.finalPortfolioReal).sort((a, b) => a - b);
   const percentile = (arr, p) => arr[Math.min(arr.length - 1, Math.floor(arr.length * p))];
   const failureAges = results.filter(r => !r.survived).map(r => r.failureAge);
   const avgFailureAge = failureAges.length > 0
@@ -215,9 +237,11 @@ function runMonteCarlo(jobId, payload) {
 
   // Percentile fan chart from ALL sims (bandData), not just the stored sample paths.
   const percentileBands = [];
+  const percentileBandsReal = [];
   for (let year = 0; year < yearsToReport; year++) {
     const age = simSettings.startAge + year;
     const portfoliosAtYear = bandData[year].sort((a, b) => a - b);
+    const realAtYear = bandDataReal[year].sort((a, b) => a - b);
     percentileBands.push({
       age,
       p10: percentile(portfoliosAtYear, 0.10),
@@ -225,6 +249,14 @@ function runMonteCarlo(jobId, payload) {
       p50: percentile(portfoliosAtYear, 0.50),
       p75: percentile(portfoliosAtYear, 0.75),
       p90: percentile(portfoliosAtYear, 0.90),
+    });
+    percentileBandsReal.push({
+      age,
+      p10: percentile(realAtYear, 0.10),
+      p25: percentile(realAtYear, 0.25),
+      p50: percentile(realAtYear, 0.50),
+      p75: percentile(realAtYear, 0.75),
+      p90: percentile(realAtYear, 0.90),
     });
   }
 
@@ -281,6 +313,17 @@ function runMonteCarlo(jobId, payload) {
       percentile50: percentile(finalPortfolios, 0.50),
       percentile75: percentile(finalPortfolios, 0.75),
       percentile95: percentile(finalPortfolios, 0.95),
+      // Same statistics in today's dollars — each sim deflated by its OWN
+      // inflation path before pooling, so these are directly comparable across
+      // sims in a way the nominal figures above are not.
+      real: {
+        percentile5:  percentile(finalPortfoliosReal, 0.05),
+        percentile25: percentile(finalPortfoliosReal, 0.25),
+        percentile50: percentile(finalPortfoliosReal, 0.50),
+        percentile75: percentile(finalPortfoliosReal, 0.75),
+        percentile95: percentile(finalPortfoliosReal, 0.95),
+      },
+      percentileBandsReal,
       avgFailureAge,
       percentileBands,
       portfolioPaths: portfolioPathsToStore.slice(0, 50),
@@ -350,13 +393,31 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
     rothConversion: p.rothConversion || 0,
   }));
 
-  const runMcSimulation = (modifiedStreams, sharedShock) => {
-    // Same -1 clamp as above. With mcVolatility defaulting to 0.15, the previous
-    // Math.max(0, ...) floor bound on roughly a third of draws — negative-return
-    // shocks were truncated to 0% while positive shocks passed through untouched,
-    // inflating every cell's MC success rate.
-    const mcAccounts = adjustedAccounts.map(a => ({ ...a, cagr: Math.max(-1, (a.cagr || 0) + sharedShock) }));
-    const proj = computeProjections(piWithLifeExp, mcAccounts, modifiedStreams, assets, oneTimeEvents, recurringExpenses);
+  // Balance-weighted expected return, used as the mean of the per-year draws.
+  const totalBal = adjustedAccounts.reduce((s, a) => s + (a.balance || 0), 0);
+  const meanReturn = totalBal > 0
+    ? adjustedAccounts.reduce((s, a) => s + (a.balance || 0) * (a.cagr || 0), 0) / totalBal
+    : 0.06;
+  const horizonYears = E.getPlanningHorizonYears(piWithLifeExp) + 1;
+
+  const runMcSimulation = (modifiedStreams) => {
+    // Draw an INDEPENDENT return for each projection year, the same way
+    // runMonteCarlo does. The previous version applied one constant shock to the
+    // CAGR for the entire projection, which models uncertainty in the expected
+    // return but removes sequence-of-returns risk entirely — so this tab reported
+    // a materially different (and more optimistic) "success rate" than the Monte
+    // Carlo tab for the same plan. Inflation is left deterministic here; this
+    // grid varies the claiming age, and 36 cells x N sims is already the most
+    // expensive job in the app.
+    const overrides = new Array(horizonYears);
+    for (let y = 0; y < horizonYears; y++) {
+      overrides[y] = {
+        marketReturn: Math.max(-1, randomNormalSS() * mcVolatility + meanReturn),
+        inflation: piWithLifeExp.inflationRate,
+      };
+    }
+    const proj = computeProjections(piWithLifeExp, adjustedAccounts, modifiedStreams, assets,
+      oneTimeEvents, recurringExpenses, undefined, { yearOverrides: overrides });
     const atLegacy = proj.find(p => p.myAge === legacyAge);
     const survived = atLegacy && atLegacy.totalPortfolio > 0;
     let failureAge = null;
@@ -391,8 +452,7 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
         const finalPortfolios = [];
         const failureAges = [];
         for (let sim = 0; sim < mcRunsPerScenario; sim++) {
-          const shock = randomNormalSS() * mcVolatility;
-          const r = runMcSimulation(modifiedStreams, shock);
+          const r = runMcSimulation(modifiedStreams);
           if (r.survived) survivedCount++;
           else if (r.failureAge !== null) failureAges.push(r.failureAge);
           finalPortfolios.push(r.portfolioAtLegacy);
@@ -415,7 +475,13 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
         portfolioAt85: at85?.totalPortfolio || 0,
         portfolioAtLegacy: atLegacy?.totalPortfolio || 0,
         lifetimeTax, lifetimeWithdrawals, lifetimeSS, lifetimeRothConversions,
-        netLifetimeWealth: (atLegacy?.totalPortfolio || 0) + lifetimeSS,
+        // Terminal wealth at the planning age. This ALREADY reflects the claiming
+        // decision: benefits received reduced portfolio withdrawals dollar for
+        // dollar, so they are embedded in the balance. Adding lifetimeSS on top
+        // (as this once did) counted every benefit dollar twice and tilted the
+        // ranking toward late claiming. lifetimeSS is reported separately for
+        // breakeven analysis, where the gross total is the right figure.
+        netLifetimeWealth: (atLegacy?.totalPortfolio || 0),
         projections: slimProj(proj),
         mcResults,
       });

@@ -54,7 +54,7 @@
            the value off its own Worker URL search params)
        So one edit per release, in both index.html AND mobile.html.
        ============================================================ -->
-  <script>window.APP_VERSION = '1.18.1';</script>
+  <script>window.APP_VERSION = '1.19.0';</script>
   <!-- engine.js is loaded dynamically from the body IIFE (after the library
        check) using `appendChild` so its ?v= comes from APP_VERSION without any
        hardcoded version in a <script> tag. -->
@@ -219,11 +219,49 @@
             throw new Error('engine.js loaded but window.PlannerEngine is undefined.');
           }
           document.getElementById('load-status').textContent = 'Fetching app code...';
-          var resp = await fetch(APP_FILE);
+          // Fetch source and precompiled bundle together. The bundle (written by
+          // `node tools/build.cjs`) is optional: it carries a hash of the source
+          // it was built from, and we use it ONLY when that matches the source we
+          // just fetched. Any edit to the .jsx changes the hash, so a forgotten
+          // rebuild costs speed, never correctness — the compiled file is a pure
+          // cache. Deleting it is always safe.
+          var compiledFile = APP_FILE.replace(/\.jsx$/, '.compiled.js');
+          var results = await Promise.all([
+            fetch(APP_FILE),
+            fetch(compiledFile + '?v=' + window.APP_VERSION).catch(function () { return null; })
+          ]);
+          var resp = results[0];
           if (!resp.ok) throw new Error('Failed to load ' + APP_FILE + ': HTTP ' + resp.status);
           var jsxSource = await resp.text();
-          document.getElementById('load-status').textContent = 'Compiling (' + Math.round(jsxSource.length/1024) + ' KB)...';
-          var transformed = Babel.transform(jsxSource, { presets: ['react'] });
+          var compiledSource = (results[1] && results[1].ok) ? await results[1].text() : null;
+
+          // FNV-1a 32-bit — must match hashSource() in tools/build.cjs.
+          function hashSource(str) {
+            var h = 0x811c9dc5;
+            for (var i = 0; i < str.length; i++) {
+              h ^= str.charCodeAt(i);
+              h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+            }
+            return h.toString(16);
+          }
+
+          var code = null;
+          if (compiledSource) {
+            var stamped = /^\/\/# planner-src-hash=([0-9a-f]+)/.exec(compiledSource);
+            if (stamped && stamped[1] === hashSource(jsxSource)) {
+              document.getElementById('load-status').textContent = 'Loading precompiled app...';
+              code = compiledSource;
+            }
+          }
+          if (code === null) {
+            document.getElementById('load-status').textContent = 'Compiling (' + Math.round(jsxSource.length/1024) + ' KB)...';
+            var transformed = Babel.transform(jsxSource, { presets: ['react'] });
+            code = transformed.code;
+            // Strip any const destructuring of React/Recharts from compiled code
+            // (the precompiled bundle already has this applied by the build script).
+            code = code.replace(/^.*useState.*useMemo.*useEffect.*=\s*React;?\s*$/m, '');
+            code = code.replace(/^.*LineChart.*BarChart.*=\s*Recharts;?\s*$/m, '');
+          }
           document.getElementById('load-status').textContent = 'Initializing...';
           // Provide React hooks and Recharts components as var globals (hoisted)
           var globals = 'var useState=React.useState,useMemo=React.useMemo,useEffect=React.useEffect,useCallback=React.useCallback,useRef=React.useRef,memo=React.memo;'
@@ -232,10 +270,6 @@
             + 'Tooltip=Recharts.Tooltip,Legend=Recharts.Legend,ResponsiveContainer=Recharts.ResponsiveContainer,'
             + 'ComposedChart=Recharts.ComposedChart,Area=Recharts.Area,AreaChart=Recharts.AreaChart,'
             + 'ReferenceLine=Recharts.ReferenceLine,Cell=Recharts.Cell,PieChart=Recharts.PieChart,Pie=Recharts.Pie;';
-          // Strip any const destructuring of React/Recharts from compiled code
-          var code = transformed.code;
-          code = code.replace(/^.*useState.*useMemo.*useEffect.*=\s*React;?\s*$/m, '');
-          code = code.replace(/^.*LineChart.*BarChart.*=\s*Recharts;?\s*$/m, '');
           // Execute in global scope
           (0, eval)(globals + '\n' + code);
           document.getElementById('load-status').textContent = 'Rendering...';
