@@ -11752,12 +11752,14 @@ const TOUR_STEPS = [
   {
     target: null,
     title: 'Welcome to your plan',
-    body: "Your numbers are in. This quick tour explains what each part of the app answers — about a minute. Leave whenever you like; you can restart it from the sidebar.",
+    // Worded for someone who may be taking this at any time, not only straight
+    // out of the wizard — the tour is offered now rather than auto-launched.
+    body: "This quick tour explains what each part of the app answers — about a minute. Leave whenever you like; you can restart it from the sidebar.",
   },
   {
     target: 'nav-overview',
     title: 'Dashboard — start here',
-    body: "Your plan at a glance: portfolio balance year by year, whether the money lasts, and the point where it gets tight. After you change any input, this is where you check what it did.",
+    body: "Your plan at a glance: portfolio balance year by year, whether the money lasts, and the point where it gets tight. After you change any input, this is where you check what it did. If setup estimated any figures for you, this is also where it offers to help you replace them with your real ones.",
   },
   {
     target: 'nav-plan-setup',
@@ -11778,7 +11780,7 @@ const TOUR_STEPS = [
       ['Social Security', 'what claiming age is worth most to you?'],
       ['Tax Planning', 'should you do Roth conversions, and how much?'],
       ['Withdrawals', 'which accounts should you spend down first?'],
-      ['Monte Carlo', 'how does the plan hold up across 1,000 random markets?'],
+      ['Monte Carlo', 'how does the plan hold up across 1,000 random markets? (results shown in today’s dollars)'],
       ['Stress Test', 'what happens in a specific bad event — a crash, high inflation?'],
       ['Sensitivity', 'which single assumption changes the outcome most?'],
     ],
@@ -11786,12 +11788,12 @@ const TOUR_STEPS = [
   {
     target: 'nav-tools',
     title: 'Tools — compare and verify',
-    body: "Scenarios saves a full copy of your plan so you can compare alternatives side by side — retire at 62 vs. 67, for instance. Assumptions lists every tax bracket, limit and rate the engine uses, so you can check the math rather than trust it.",
+    body: "Scenarios saves a full copy of your plan so you can compare alternatives side by side — retire at 62 vs. 67, for instance. Assumptions lists every bracket, limit and rate the engine uses, so you can check the math rather than trust it. Worth a look for the things it applies on your behalf: the 10% penalty on pre-tax withdrawals before 59½, the extra deductions that start at 65, and the tax on dividends a taxable account throws off each year.",
   },
   {
     target: 'tour-guided-setup',
     title: 'Guided Setup, anytime',
-    body: "The setup wizard you just finished stays here. Re-run it to walk through your whole plan again — it loads your current numbers, so it's a fast way to review everything without hunting tab to tab.",
+    body: "The setup wizard lives here for good. Re-run it to walk your whole plan again — it loads your current numbers, so it's a fast way to review everything without hunting tab to tab. It also explains why each figure matters, and can fill in anything you don't have to hand from typical numbers for your age and income.",
   },
   {
     target: 'tour-reports',
