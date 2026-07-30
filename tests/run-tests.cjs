@@ -2621,6 +2621,36 @@ section("P19 — Coast FIRE and spending-at-age keep one dollar basis");
   eq(Number.isFinite(grim.coastNumberToday), true, 'and the figure stays finite');
 }
 
+// ── P20 — recovering PIA from an already-adjusted benefit ─────────────────────
+section('P20 — inferPiaFromBenefit inverts the claiming adjustment');
+{
+  const { inferPiaFromBenefit, calculateSSBenefit, getFullRetirementAge } = engine;
+  const birthYear = 1975; // FRA 67
+
+  // Round trip: any claim age must recover the PIA it came from.
+  [62, 64, 65, 67, 68, 70].forEach(claimAge => {
+    const monthly = calculateSSBenefit(3000, claimAge, birthYear);
+    approx(inferPiaFromBenefit(monthly, claimAge, birthYear), 3000,
+      `claiming at ${claimAge} round-trips back to a $3,000 PIA`, 0.002);
+  });
+
+  // At FRA the benefit IS the PIA, so nothing changes.
+  eq(inferPiaFromBenefit(3000, 67, birthYear), 3000, 'no adjustment at full retirement age');
+
+  // The direction that matters: a benefit entered for age 62 is REDUCED, so the
+  // underlying PIA must be higher. Treating it as the PIA (the old behaviour)
+  // understated every delayed-claiming comparison in the Social Security tab.
+  const at62 = calculateSSBenefit(3000, 62, birthYear);
+  lt(at62, 3000, 'a 62 benefit is below PIA');
+  gt(inferPiaFromBenefit(at62, 62, birthYear), at62, 'so the inferred PIA is above the entered benefit');
+  // And a delayed benefit is inflated, so its PIA must be lower.
+  const at70 = calculateSSBenefit(3000, 70, birthYear);
+  gt(at70, 3000, 'a 70 benefit is above PIA');
+  lt(inferPiaFromBenefit(at70, 70, birthYear), at70, 'so the inferred PIA is below the entered benefit');
+
+  eq(inferPiaFromBenefit(0, 62, birthYear), 0, 'no benefit yields no PIA');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

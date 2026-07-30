@@ -1880,6 +1880,25 @@ const calculateSSBenefit = (pia, claimAge, birthYear) => {
   return Math.round(pia * adjustmentFactor);
 };
 
+// Recover the PIA (the benefit at Full Retirement Age) from a benefit the user
+// entered for a SPECIFIC claiming age, by inverting calculateSSBenefit's
+// adjustment factor.
+//
+// This matters wherever the app re-prices a benefit at a different claiming age.
+// A stream entered as "$2,400/mo starting at 62" is already reduced ~30%; using
+// that figure AS the PIA understates every alternative the Social Security tab
+// offers, because each one is then computed off a PIA that is 30% too low. The
+// error is silent and always in the same direction.
+const inferPiaFromBenefit = (monthlyBenefit, claimAge, birthYear) => {
+  if (!(monthlyBenefit > 0)) return 0;
+  // calculateSSBenefit(pia, ...) is linear in pia, so probe it with 1000 and
+  // scale. That keeps the two functions inverse by construction — the reduction
+  // and delayed-credit rules live in exactly one place.
+  const probe = calculateSSBenefit(1000, claimAge, birthYear);
+  if (!(probe > 0)) return monthlyBenefit;
+  return monthlyBenefit * 1000 / probe;
+};
+
 // SECURE 2.0 RMD start age based on birth year.
 // The age at which Required Minimum Distributions begin from traditional pre-tax
 // retirement accounts (401k, traditional IRA, etc.). This affects:
@@ -1915,6 +1934,34 @@ const getRmdStartAge = (birthYear) => {
 //
 // The end age is INCLUSIVE (the engine does `myAge <= conversionEndAge`), so
 // rmdStartAge - 1 means "the last full year before RMDs."
+// ── INCOME STREAM COLA ───────────────────────────────────────────────────────
+// COLA base for an income stream. Default: the entered amount is nominal at the
+// stream's startAge (COLA compounds from start). With todaysDollars: true, the
+// amount is in TODAY's dollars and COLA compounds from the current year — so a
+// future-dated stream (SS from an SSA statement, future rental) is indexed
+// between now and its start instead of paying today's number in future dollars.
+//
+// At module scope, not inside computeProjections, because the Withdrawals tab
+// needs the identical rule. It used to carry its own copy, which had drifted:
+// it omitted the (stream.cola || 0) guard, so a stream saved without a COLA
+// produced NaN and silently poisoned that tab's income figures.
+const streamColaYears = (stream, ownerAge, yearsFromNow) => {
+  if (stream.todaysDollars) return yearsFromNow;
+  // Standard: COLA compounds from the start age. A colaStartAge delays the first
+  // adjustment — the benefit stays frozen at its start-age value until the owner
+  // reaches that age (FERS pensions receive NO COLA before 62). Undefined/0 →
+  // colaFrom = startAge, i.e. unchanged behavior for every non-FERS stream.
+  const colaFrom = stream.colaStartAge ? Math.max(stream.startAge, stream.colaStartAge) : stream.startAge;
+  return Math.max(0, ownerAge - colaFrom);
+};
+
+// What a stream actually pays when its owner is ownerAge, yearsFromNow from today.
+// Returns 0 outside the stream's age window so callers don't repeat that test.
+const streamAmountAtAge = (stream, ownerAge, yearsFromNow) => {
+  if (!stream || ownerAge < stream.startAge || ownerAge > stream.endAge) return 0;
+  return (stream.amount || 0) * Math.pow(1 + (stream.cola || 0), streamColaYears(stream, ownerAge, yearsFromNow));
+};
+
 // ── REAL vs NOMINAL DOLLARS ──────────────────────────────────────────────────
 // The engine works in NOMINAL dollars: every projected figure is in the dollars
 // of its own year. User inputs like desiredRetirementIncome are in TODAY's
@@ -2804,20 +2851,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   const primarySSAmount = primarySSStream ? primarySSStream.amount : 0;
   const spouseSSAmount = spouseSSStream ? spouseSSStream.amount : 0;
 
-  // COLA base for an income stream. Default: the entered amount is nominal at the
-  // stream's startAge (COLA compounds from start). With todaysDollars: true, the
-  // amount is in TODAY's dollars and COLA compounds from the current year — so a
-  // future-dated stream (SS from an SSA statement, future rental) is indexed
-  // between now and its start instead of paying today's number in future dollars.
-  const streamColaYears = (stream, ownerAge, yearsFromNow) => {
-    if (stream.todaysDollars) return yearsFromNow;
-    // Standard: COLA compounds from the start age. A colaStartAge delays the first
-    // adjustment — the benefit stays frozen at its start-age value until the owner
-    // reaches that age (FERS pensions receive NO COLA before 62). Undefined/0 →
-    // colaFrom = startAge, i.e. unchanged behavior for every non-FERS stream.
-    const colaFrom = stream.colaStartAge ? Math.max(stream.startAge, stream.colaStartAge) : stream.startAge;
-    return Math.max(0, ownerAge - colaFrom);
-  };
+  // streamColaYears / streamAmountAtAge are at module scope (see above) so the
+  // Withdrawals tab can share the exact same COLA rule instead of re-deriving it.
 
   // MAGI by projection year (index = yearsFromNow). IRMAA in year t is based on
   // MAGI from year t−2 (the real Medicare lookback); for the first two years we
@@ -4476,7 +4511,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // ── Social Security ───────────────────────────────────────────────────
     SS_FULL_RETIREMENT_AGE, SS_FRA_PRE_1943, getFullRetirementAge,
     SS_EARNINGS_TEST_LIMIT_2025, SS_EARNINGS_TEST_FRA_LIMIT_2025,
-    calculateSSBenefit, calculateSSEarningsTestReduction,
+    calculateSSBenefit, calculateSSEarningsTestReduction, inferPiaFromBenefit,
 
     // ── Medicare / IRMAA / healthcare ─────────────────────────────────────
     IRMAA_THRESHOLDS_2025, MEDICARE_PART_B_STANDARD_2025,
@@ -4499,6 +4534,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
     getPlanningHorizonYears,
     realReturn, inflateToAge, deflateToToday, coastFire,
+    streamColaYears, streamAmountAtAge,
     SAVINGS_MULTIPLE_BY_AGE, savingsMultipleForAge, TYPICAL_DEFERRAL_RATE,
     TYPICAL_MATCH_RATE, SS_REPLACEMENT_RATE, SS_MAX_ANNUAL_AT_FRA,
     estimateRetirementSavings, estimateAnnualSocialSecurity,

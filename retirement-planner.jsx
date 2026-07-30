@@ -23,7 +23,8 @@ const {
   calculateFICA, RMD_FACTORS, calculateRMD, getRmdStartAge,
   getDefaultRothConversionWindow, QCD_ANNUAL_LIMIT, QCD_START_AGE, getPlanningHorizonYears,
   estimateRetirementSavings, estimateAnnualSocialSecurity, savingsMultipleForAge,
-  realReturn, inflateToAge, deflateToToday, coastFire,
+  realReturn, inflateToAge, deflateToToday, coastFire, streamColaYears, streamAmountAtAge,
+  inferPiaFromBenefit,
   TYPICAL_DEFERRAL_RATE, TYPICAL_MATCH_RATE,
   SS_FULL_RETIREMENT_AGE, SS_FRA_PRE_1943, getFullRetirementAge,
   SS_EARNINGS_TEST_LIMIT_2025, SS_EARNINGS_TEST_FRA_LIMIT_2025,
@@ -1548,7 +1549,19 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
             </tbody>
             <tfoot>
               <tr className="border-t-2 border-slate-600 bg-slate-800/50">
-                <td colSpan="3" className="py-3 px-1 text-slate-300 font-semibold">Total Annual Income</td>
+                {/* This is the column sum, NOT household income in any year — the
+                    streams above start and stop at different ages, so a salary
+                    ending at 65 is being added to a benefit starting at 67. It is
+                    also a mix of dollar bases: each amount is in today's dollars
+                    or nominal at its own start age depending on that stream's
+                    "Today's $" setting. Labelled for what it is; the Dashboard's
+                    income chart is the figure to read for any given year. */}
+                <td colSpan="3" className="py-3 px-1 text-slate-300 font-semibold">
+                  Sum of all entries
+                  <span className="block text-xs font-normal text-slate-500">
+                    Not income in any one year — these start and stop at different ages
+                  </span>
+                </td>
                 <td className="py-3 px-1 text-right text-emerald-400 font-bold">{formatCurrency(totalAnnualIncome)}</td>
                 <td colSpan="4"></td>
               </tr>
@@ -4567,11 +4580,12 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
     
     incomeStreams.forEach(stream => {
       const ownerAge = stream.owner === 'me' ? age : age - (personalInfo.myAge - personalInfo.spouseAge);
-      if (ownerAge >= stream.startAge && ownerAge <= stream.endAge) {
-        // todaysDollars: COLA compounds from today, not the stream's start age
-        const colaFrom = stream.colaStartAge ? Math.max(stream.startAge, stream.colaStartAge) : stream.startAge;
-        const colaYears = stream.todaysDollars ? (age - personalInfo.myAge) : Math.max(0, ownerAge - colaFrom);
-        const amount = stream.amount * Math.pow(1 + stream.cola, colaYears);
+      {
+        // Use the engine's own COLA rule rather than a local copy. The copy that
+        // was here omitted the (cola || 0) guard, so any stream saved without a
+        // COLA rate turned this tab's income into NaN.
+        const amount = streamAmountAtAge(stream, ownerAge, age - personalInfo.myAge);
+        if (amount === 0) return;
         if (stream.type === 'social_security') {
           ssIncome += amount;
         } else if (stream.type === 'pension' || stream.type === 'annuity') {
@@ -5299,8 +5313,14 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
   const mySSStream = incomeStreams.find(s => s.type === 'social_security' && s.owner === 'me');
   const spouseSSStream = incomeStreams.find(s => s.type === 'social_security' && s.owner === 'spouse');
   
-  const [myPIA, setMyPIA] = useState(() => mySSStream?.pia || 2500);
-  const [spousePIA, setSpousePIA] = useState(() => spouseSSStream?.pia || 1800);
+  // Seed from the stream's own PIA when it has one; otherwise infer it from the
+  // entered benefit and that stream's claiming age, so the whole 62-70 grid is
+  // built on the right base rather than on a benefit that already has a claiming
+  // adjustment baked in.
+  const [myPIA, setMyPIA] = useState(() => mySSStream?.pia
+    || (mySSStream ? Math.round(inferPiaFromBenefit(mySSStream.amount / 12, mySSStream.startAge, personalInfo.myBirthYear || (new Date().getFullYear() - personalInfo.myAge))) : 2500));
+  const [spousePIA, setSpousePIA] = useState(() => spouseSSStream?.pia
+    || (spouseSSStream ? Math.round(inferPiaFromBenefit(spouseSSStream.amount / 12, spouseSSStream.startAge, personalInfo.spouseBirthYear || (new Date().getFullYear() - personalInfo.spouseAge))) : 1800));
   const [lifeExpectancy, setLifeExpectancy] = useState(90);
   const [spouseLifeExpectancy, setSpouseLifeExpectancy] = useState(92);
   
@@ -6110,6 +6130,21 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
 function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses }) {
   const retirementAge = personalInfo.myRetirementAge;
   const endAge = personalInfo.legacyAge || 95;
+
+  // This year's dollar contribution to an account, in either entry mode. Percent
+  // mode stores rates, not dollars, so reading `contribution` alone reports $0 for
+  // a percentage saver. Mirrors what computeProjections does with the same fields:
+  // employee deferral plus employer match, off the owner's current salary.
+  const salaryOf = (owner) => incomeStreams
+    .filter(s => s.type === 'earned_income' && s.owner === owner)
+    .reduce((sum, s) => sum + (s.amount || 0), 0);
+  const annualContributionOf = (a) => {
+    if (a.contributionMode === 'percent') {
+      const salary = a.owner === 'spouse' ? salaryOf('spouse') : salaryOf('me');
+      return salary * ((a.employeePercent || 0) + (a.employerMatchPercent || 0));
+    }
+    return a.contribution || 0;
+  };
   const baseRetirementProj = projections.find(p => p.myAge === retirementAge);
   const baseEndProj = projections.find(p => p.myAge === endAge);
   
@@ -6225,7 +6260,11 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
         const modifiedStreams = incomeStreams.map(s => {
           if (s.type === 'social_security' && s.owner === 'me') {
             // Recalculate benefit amount based on new claiming age
-            const pia = s.pia || Math.round(s.amount / 12);
+            // Back the PIA out of the entered benefit rather than assuming the
+            // benefit IS the PIA. A stream entered for age 62 is already ~30%
+            // reduced; treating it as the FRA figure understated every alternative
+            // claiming age this lever tests, always in the same direction.
+            const pia = s.pia || inferPiaFromBenefit(s.amount / 12, s.startAge, personalInfo.myBirthYear || (new Date().getFullYear() - personalInfo.myAge));
             const birthYear = personalInfo.myBirthYear || (new Date().getFullYear() - personalInfo.myAge);
             const newAnnualBenefit = calculateSSBenefit(pia, claimAge, birthYear) * 12;
             return { ...s, startAge: claimAge, amount: newAnnualBenefit };
@@ -6239,7 +6278,10 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
       id: 'contributions',
       label: 'Annual Contributions',
       baseLabel: 'Current total',
-      baseValue: accounts.reduce((sum, a) => sum + (a.contribution || 0), 0),
+      // Percent-mode accounts keep their rate in employeePercent, so their dollar
+      // contribution has to be derived from the owner's salary — otherwise a saver
+      // who deferred by percentage showed a /usr/bin/bash base and this whole lever did nothing.
+      baseValue: accounts.reduce((sum, a) => sum + annualContributionOf(a), 0),
       steps: [-80000, -60000, -40000, -20000, 0, 20000, 40000, 60000, 80000],
       formatStep: (base, delta) => formatCurrency(base + delta),
       formatDelta: (delta) => `${delta > 0 ? '+' : ''}${formatCurrency(delta)}`,
@@ -6280,11 +6322,12 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
         
         // Distribute delta proportionally across accounts with contributions,
         // capped at IRS limits for employee contributions
-        const totalContrib = accounts.reduce((sum, a) => sum + (a.contribution || 0), 0);
+        const totalContrib = accounts.reduce((sum, a) => sum + annualContributionOf(a), 0);
         const modifiedAccounts = accounts.map(a => {
-          if (a.contribution > 0 && totalContrib > 0) {
-            const share = a.contribution / totalContrib;
-            let newContrib = Math.max(0, a.contribution + delta * share);
+          const current = annualContributionOf(a);
+          if (current > 0 && totalContrib > 0) {
+            const share = current / totalContrib;
+            let newContrib = Math.max(0, current + delta * share);
             
             // Only enforce limits on employee contributions (contributor = 'me')
             // 'employer' and 'both' include match which has its own 415(c) total limit
@@ -6294,7 +6337,9 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
               newContrib = Math.min(newContrib, limit);
             }
             
-            return { ...a, contribution: newContrib };
+            // Also pin the account to fixed mode: left in percent mode the engine
+            // would recompute from employeePercent and ignore the value we just set.
+            return { ...a, contribution: newContrib, contributionMode: 'fixed' };
           }
           return a;
         });
