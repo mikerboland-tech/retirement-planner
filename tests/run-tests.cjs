@@ -2775,6 +2775,20 @@ section('P22 — Preserve Pre-Tax Floor survives withdrawals, so QCDs keep worki
   eq(lastYears.every(r => (r.unfundedShortfall || 0) === 0), true,
     'once other accounts are gone the floor yields instead of faking a shortfall');
 
+  // The solver sizes the gross withdrawal from a PREDICTION of which accounts it
+  // will come out of. That prediction has to model the floor too — otherwise it
+  // forecasts a big taxable pre-tax draw, grosses up for tax that never gets
+  // charged (execution takes tax-free Roth instead), and over-withdraws by the
+  // difference. Net income must land ON the spending target, not above it.
+  const onTarget = (rows) => rows.filter(r => r.myAge >= 70 && (r.unfundedShortfall || 0) === 0
+    && (r.excessRMD || 0) === 0)
+    .every(r => {
+      const target = r.desiredIncome + r.healthcareExpense + r.recurringExpenses + r.oneTimeExpense;
+      return Math.abs(r.netIncome - target) <= Math.max(60, target * 0.005);
+    });
+  eq(onTarget(withFloor), true, 'with a floor the solver still lands on the spending target, not above it');
+  eq(onTarget(noFloor), true, 'and without one');
+
   // Non-regression: a plan with no floor set behaves exactly as before.
   eq(noFloor.every(r => Number.isFinite(r.totalPortfolio)), true, 'no-floor plan still projects cleanly');
   // And the floor is inert when pre-tax is drawn last anyway.
@@ -2840,6 +2854,82 @@ section('P23 — contribution limits checked across EVERY account, not per slot'
   ];
   eq(checkContributionLimits(clean, { myAge: 53, spouseAge: 51, filingStatus: 'married_joint' }, salaries).length, 0,
     'a compliant plan is silent, and a brokerage has no limit at all');
+}
+
+// ── P24 — a surviving spouse keeps their own age-65 status ────────────────────
+section('P24 — the survivor is still 65+ after the other spouse dies');
+{
+  // Primary dies at 78; the spouse (2 years younger) lives to 92 and files single.
+  // age65Count used to be written as "primary, plus spouse IF married filing
+  // jointly" — so once the survivor switched to single they satisfied neither
+  // branch and silently lost the age-65 additional standard deduction, along with
+  // Medicare/IRMAA eligibility, for the rest of their life.
+  const s = baseScenario({
+    myAge: 70, spouseAge: 68, myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 68,
+    myRetirementAge: 70, spouseRetirementAge: 70, legacyAge: 92,
+    survivorModelEnabled: true, myLifeExpectancy: 78, spouseLifeExpectancy: 92,
+    state: 'Florida', inflationRate: 0, desiredRetirementIncome: 90000,
+  });
+  s.accts = [{ id: 1, name: '401k', type: '401k', balance: 1200000, contribution: 0,
+    contributionGrowth: 0, cagr: 0.05, startAge: 70, stopAge: 70, owner: 'me', contributor: 'me' }];
+  s.streams = [
+    { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 70, endAge: 95, cola: 0, owner: 'me' },
+    { id: 2, name: 'Spouse SS', type: 'social_security', amount: 24000, startAge: 70, endAge: 95, cola: 0, owner: 'spouse' },
+  ];
+  const proj = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+
+  const bothAlive = proj.find(r => r.myAge === 75);
+  eq(bothAlive.age65Count, 2, 'both spouses over 65 counts as two');
+
+  // After the death the survivor still exists and is still over 65.
+  const survivorYears = proj.filter(r => !r.primaryAlive && r.spouseAlive && r.spouseAge >= 65);
+  gt(survivorYears.length, 5, 'the survivor lives on for years past the death');
+  eq(survivorYears.every(r => r.age65Count === 1), true,
+    'and is counted as one person aged 65+, not zero');
+  // The death year itself still files jointly (the final joint return); the switch
+  // to single happens the year after, so only those years are asserted here.
+  eq(survivorYears.filter(r => r.survivorEvent === undefined).every(r => r.filingStatus === 'single'), true,
+    'and files single from the year after the death');
+  eq(survivorYears.some(r => r.survivorEvent !== undefined && r.filingStatus === 'married_joint'), true,
+    'while the death year itself keeps the joint return');
+
+  // The single 65+ deduction is 16,100 + 2,050 = 18,150 (2026, no inflation here);
+  // the buggy version handed them the bare 16,100.
+  const y = survivorYears.find(r => r.year > 2028) || survivorYears[survivorYears.length - 1];
+  gt(y.federalDeduction, 16100 * 1.01, 'the survivor keeps the age-65 additional deduction');
+
+  // Mirror case: spouse dies first, primary survives.
+  const s2 = baseScenario({
+    myAge: 68, spouseAge: 70, myBirthYear: TODAY_YEAR - 68, spouseBirthYear: TODAY_YEAR - 70,
+    myRetirementAge: 68, spouseRetirementAge: 68, legacyAge: 92,
+    survivorModelEnabled: true, myLifeExpectancy: 92, spouseLifeExpectancy: 78,
+    state: 'Florida', inflationRate: 0, desiredRetirementIncome: 90000,
+  });
+  s2.accts = s.accts; s2.streams = s.streams;
+  const proj2 = computeProjections(s2.pi, s2.accts, s2.streams, [], [], [], TODAY_YEAR);
+  const survivors2 = proj2.filter(r => r.primaryAlive && !r.spouseAlive && r.myAge >= 65);
+  gt(survivors2.length, 5, 'primary survives the spouse for years');
+  eq(survivors2.every(r => r.age65Count === 1), true, 'and is likewise counted as one');
+
+  // The year of death still files a JOINT return, and that return still covers the
+  // decedent — so their age-65 additional deduction applies for that final year.
+  // Counting only the living silently dropped it. Medicare is the opposite case:
+  // a decedent is not billed premiums for a year they did not live through, so the
+  // two counts legitimately differ in exactly this one year.
+  const deathYear = proj.find(r => r.survivorEvent === 'primary_died');
+  eq(deathYear.filingStatus, 'married_joint', 'the death year files jointly');
+  eq(deathYear.age65OnReturn, 2, 'and the return covers both people for the deduction');
+  eq(deathYear.age65Count, 1, 'while only the survivor is billed by Medicare');
+  gt(deathYear.federalDeduction, proj.find(r => r.myAge === deathYear.myAge + 1).federalDeduction,
+    'so the final joint return deducts more than the survivor does the year after');
+
+  // A genuinely single plan must not pick up a phantom spouse from stale fields.
+  const solo = baseScenario({ myAge: 70, spouseAge: 70, filingStatus: 'single',
+    myRetirementAge: 70, legacyAge: 80, state: 'Florida', inflationRate: 0 });
+  solo.accts = s.accts; solo.streams = [s.streams[0]];
+  eq(computeProjections(solo.pi, solo.accts, solo.streams, [], [], [], TODAY_YEAR)
+      .every(r => r.age65Count === 1), true,
+    'a single filer counts only themselves even with stale spouse ages');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

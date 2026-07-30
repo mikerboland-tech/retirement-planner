@@ -3009,13 +3009,35 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // age-65 federal deductions and Medicare eligibility — the predicate is
     // identical, so it lives in one place rather than being re-derived at each
     // of the three sites that used to compute it independently.
+    // Count LIVING household members who have reached 65. Gated on whether the
+    // plan has a spouse at all (pi.filingStatus), NOT on the effective status:
+    // once the first spouse dies the survivor files single, and keying off the
+    // effective status meant they satisfied neither branch — a surviving spouse
+    // silently lost their own age-65 additional standard deduction and their
+    // Medicare/IRMAA eligibility for the rest of the projection.
+    const planHasSpouse = pi.filingStatus === 'married_joint' || pi.filingStatus === 'married_separate';
+    // Who Medicare is billing: only people actually alive. A decedent is not
+    // billed premiums for a year they did not live through.
     let age65Count = 0;
     if (primaryAlive && myAge >= 65) age65Count++;
-    if (effectiveFilingStatus === 'married_joint' && spouseAlive && spouseAge >= 65) age65Count++;
+    if (planHasSpouse && spouseAlive && spouseAge >= 65) age65Count++;
+
+    // Who the TAX RETURN covers, which is not the same set in the year of a
+    // death: the final return still includes the decedent, and their age-65
+    // additional standard deduction still applies. Counting only the living
+    // dropped it in that year. (The engine deliberately gives a decedent no
+    // income in their death year — see the survivor block above — so this affects
+    // the deduction alone, never their income.)
+    const diedThisYear = { primary: survivorEvent === 'primary_died' || survivorEvent === 'both_died',
+                           spouse: survivorEvent === 'spouse_died' || survivorEvent === 'both_died' };
+    let age65OnReturn = 0;
+    if ((primaryAlive || diedThisYear.primary) && myAge >= 65) age65OnReturn++;
+    if (planHasSpouse && (spouseAlive || diedThisYear.spouse) && spouseAge >= 65) age65OnReturn++;
+
     // Federal deduction opts for this year. `magi` is supplied per call site,
     // since the senior deduction phases out on MAGI and the various tax bases
     // (with/without capital gains, pre/post conversion) differ.
-    const fedOpts = (magiForPhaseout) => ({ age65Count, taxYear: year, magi: magiForPhaseout });
+    const fedOpts = (magiForPhaseout) => ({ age65Count: age65OnReturn, taxYear: year, magi: magiForPhaseout });
 
     // Penalized share of a distribution from a given account this year (§72(t)).
     // Resolves the owner's age and retirement age, then defers to the shared rule.
@@ -3492,6 +3514,14 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // solver books MAGI-driven premium movement as a delta, like IRMAA)
     const adjustedDesiredIncome = desiredIncome + oneTimeExpenseTotal + healthcareExpense + totalRecurringExpenses + estACANetPremium;
     
+    // Pre-tax floor, needed by BOTH the solver's composition estimate and the
+    // execution loop below. They have to agree: if the estimate ignores the floor
+    // it predicts a large taxable pre-tax draw, grosses the withdrawal up for tax
+    // that execution never incurs (it takes tax-free Roth instead), and the plan
+    // over-withdraws by the difference every year.
+    const preTaxFloorToday = pi.rothConversionPreTaxFloor || 0;
+    const preTaxFloorAdj = preTaxFloorToday > 0 ? preTaxFloorToday * inflationFactor : 0;
+
     // Retired: the portfolio funds the whole spending target. Not retired but with
     // a dated expense left unfunded after pausing contributions: the portfolio
     // funds that remainder, and nothing else. Both go through one solver so the
@@ -3560,13 +3590,24 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           bal[a.id] = accountBalances[a.id];
           if (isPreTaxAccount(a.type)) bal[a.id] = Math.max(0, bal[a.id] - (accountRMDs[a.id] || 0));
         });
+        // Mirror of the execution loop's floor logic — see the comment there. The
+        // two must stay in step or the gross-up is priced off the wrong accounts.
+        const simPreTaxTotal = () => accts.reduce((sum, a) =>
+          sum + (isPreTaxAccount(a.type) ? Math.max(0, bal[a.id] || 0) : 0), 0);
+        const simAllowance = (respectFloor) =>
+          respectFloor && preTaxFloorAdj > 0 ? Math.max(0, simPreTaxTotal() - preTaxFloorAdj) : Infinity;
         let pool = excessReinvestmentPool;
+        for (const respectFloor of [true, false]) {
+        if (need <= 0) break;
+        if (!respectFloor && preTaxFloorAdj <= 0) break;
         for (const category of solverPriority) {
           if (need <= 0) break;
           const types = solverAccountTypes(category);
           accts.forEach(a => {
             if (types.includes(a.type) && need > 0) {
-              const w = Math.min(bal[a.id], need);
+              const cap = isPreTaxAccount(a.type) ? simAllowance(respectFloor) : Infinity;
+              const w = Math.min(bal[a.id], need, cap);
+              if (w <= 0) return;
               bal[a.id] -= w; need -= w;
               if (isPreTaxAccount(a.type)) {
                 preTax += w;
@@ -3586,6 +3627,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             gains += pw * 0.20; // reinvestment pool is basis-heavy (≈80% basis)
           }
         }
+        } // end floor pass
         return { preTax, gains, penalized };
       };
 
@@ -3785,8 +3827,6 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // year, abandoned when they cannot. A hard floor would invent an unfunded
     // shortfall for a household that actually has the money, just in the wrong
     // bucket. RMDs are never held back — they are mandatory regardless.
-    const preTaxFloorToday = pi.rothConversionPreTaxFloor || 0;
-    const preTaxFloorAdj = preTaxFloorToday > 0 ? preTaxFloorToday * inflationFactor : 0;
     const totalPreTaxNow = () => accts.reduce((sum, a) =>
       sum + (isPreTaxAccount(a.type) ? (accountBalances[a.id] || 0) : 0), 0);
     // How much pre-tax may still be drawn this pass before touching the floor.
@@ -4586,7 +4626,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Exposed so display components show the same figure the tax used instead of
       // re-deriving a plain standard deduction and disagreeing with the engine.
       federalDeduction: Math.round(adjustedDeduction),
-      age65Count, // people 65+ in the tax household (drives the deduction and IRMAA)
+      age65Count, // living people 65+ (drives Medicare/IRMAA billing)
+      age65OnReturn, // people 65+ the tax return covers (includes a decedent in their final year)
       magi: Math.round(magi), // Modified Adjusted Gross Income (gains-inclusive AGI with pre-tax deduction added back)
       stateTaxableIncome: Math.round(stateTaxableIncome), // State taxable income after SS/retirement exclusions and deduction
       federalTax: Math.round(federalTax),
