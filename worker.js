@@ -400,22 +400,33 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
     : 0.06;
   const horizonYears = E.getPlanningHorizonYears(piWithLifeExp) + 1;
 
-  const runMcSimulation = (modifiedStreams) => {
-    // Draw an INDEPENDENT return for each projection year, the same way
-    // runMonteCarlo does. The previous version applied one constant shock to the
-    // CAGR for the entire projection, which models uncertainty in the expected
-    // return but removes sequence-of-returns risk entirely — so this tab reported
-    // a materially different (and more optimistic) "success rate" than the Monte
-    // Carlo tab for the same plan. Inflation is left deterministic here; this
-    // grid varies the claiming age, and 36 cells x N sims is already the most
-    // expensive job in the app.
-    const overrides = new Array(horizonYears);
+  // ── COMMON RANDOM NUMBERS ──────────────────────────────────────────────────
+  // One set of market sequences, drawn ONCE and replayed identically for every
+  // cell in the grid. That is the whole point of this tab: the user is comparing
+  // claiming ages, so the claiming age should be the ONLY thing that differs
+  // between cells. Previously each cell drew its own sequences, and at a few
+  // dozen runs the sampling error (±8 points at 40 runs) swamped the signal — the
+  // same claim age came back anywhere from 43% to 73% across repeated runs, and
+  // which age looked "best" changed every time. Sharing the draws removes that
+  // noise at no cost: a difference between two cells is now attributable to the
+  // decision rather than to the dice.
+  //
+  // Each YEAR still gets an independent return, so sequence-of-returns risk is
+  // preserved within a run. Inflation is left deterministic: this grid varies the
+  // claiming age, and 36 cells x N sims is already the most expensive job here.
+  const sharedSequences = [];
+  for (let run = 0; run < (mcRunsPerScenario || 0); run++) {
+    const seq = new Array(horizonYears);
     for (let y = 0; y < horizonYears; y++) {
-      overrides[y] = {
+      seq[y] = {
         marketReturn: Math.max(-1, randomNormalSS() * mcVolatility + meanReturn),
         inflation: piWithLifeExp.inflationRate,
       };
     }
+    sharedSequences.push(seq);
+  }
+
+  const runMcSimulation = (modifiedStreams, overrides) => {
     const proj = computeProjections(piWithLifeExp, adjustedAccounts, modifiedStreams, assets,
       oneTimeEvents, recurringExpenses, undefined, { yearOverrides: overrides });
     const atLegacy = proj.find(p => p.myAge === legacyAge);
@@ -452,7 +463,8 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
         const finalPortfolios = [];
         const failureAges = [];
         for (let sim = 0; sim < mcRunsPerScenario; sim++) {
-          const r = runMcSimulation(modifiedStreams);
+          // Same sequence index -> identical market path in every cell.
+          const r = runMcSimulation(modifiedStreams, sharedSequences[sim]);
           if (r.survived) survivedCount++;
           else if (r.failureAge !== null) failureAges.push(r.failureAge);
           finalPortfolios.push(r.portfolioAtLegacy);

@@ -3342,6 +3342,17 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
         </div>
         
         {simSettings.method === 'historical' && (
+          <p className="mt-3 text-xs text-slate-400 leading-relaxed bg-sky-500/5 border border-sky-500/20 rounded-lg p-3">
+            Historical replay uses the actual stock, bond and inflation figures for each year, so
+            your Expected Return, Volatility and Inflation settings above do <span className="text-slate-200">not</span> apply here.
+            That usually makes it look kinder than random mode: a 70/30 blend starting in 1966 —
+            through stagflation and two crashes — still averaged about 5% a year after inflation,
+            because the sequence runs into the 1980s and 90s. Random mode uses whatever real return
+            your settings imply, which at the defaults is nearer 3%. Read the two as different
+            questions, not as a second opinion on the same one.
+          </p>
+        )}
+        {simSettings.method === 'historical' && (
           <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4 p-4 bg-slate-900/50 rounded-lg border border-slate-700">
             <div>
               <label className="block text-sm text-slate-400 mb-1">Stock / Bond Mix</label>

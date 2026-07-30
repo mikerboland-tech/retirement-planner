@@ -2932,6 +2932,135 @@ section('P24 — the survivor is still 65+ after the other spouse dies');
     'a single filer counts only themselves even with stale spouse ages');
 }
 
+// ── P25 — worker.js (Monte Carlo + Social Security grid) ─────────────────────
+// worker.js had no test coverage at all, which is how a constant-CAGR Monte Carlo
+// and a noise-dominated claiming grid both survived. It cannot be require()d (it
+// uses importScripts), so it is loaded into a VM with the handful of Worker
+// globals shimmed — this exercises the shipped file, not a copy of it.
+section('P25 — the Web Worker jobs: Monte Carlo and the SS claiming grid');
+{
+  const vmMod = require('vm');
+  const fs = require('fs');
+  const pathMod = require('path');
+  const ROOT = pathMod.resolve(__dirname, '..');
+
+  const runJob = (type, payload) => {
+    const sb = {
+      console, Math, Date, JSON, Object, Array, Number, String, Boolean, Set, Map,
+      Infinity, NaN, isNaN, parseFloat, parseInt, Error, RegExp, Promise, undefined,
+      URLSearchParams, __out: [],
+    };
+    sb.self = sb; sb.globalThis = sb;
+    sb.location = { search: '?v=test' };
+    sb.importScripts = (spec) =>
+      vmMod.runInContext(fs.readFileSync(pathMod.join(ROOT, spec.split('?')[0]), 'utf8'), sb);
+    sb.postMessage = (m) => { if (m.type !== 'progress') sb.__out.push(m); };
+    vmMod.createContext(sb);
+    vmMod.runInContext(fs.readFileSync(pathMod.join(ROOT, 'worker.js'), 'utf8'), sb);
+    sb.onmessage({ data: { jobId: 1, type, payload } });
+    const err = sb.__out.find(m => m.type === 'error');
+    if (err) throw new Error(type + ': ' + err.error);
+    return sb.__out.find(m => m.type === 'result').data;
+  };
+
+  const s = baseScenario({
+    myAge: 60, spouseAge: 58, myBirthYear: TODAY_YEAR - 60, spouseBirthYear: TODAY_YEAR - 58,
+    myRetirementAge: 62, spouseRetirementAge: 62, legacyAge: 90, state: 'Florida',
+    desiredRetirementIncome: 90000,
+  });
+  // Comfortably funded on purpose: several assertions below concern what the
+  // simulation does with a plan that should NOT fail, so the fixture must not.
+  s.accts = [{ id: 1, name: '401k', type: '401k', balance: 2600000, contribution: 0,
+    contributionGrowth: 0, cagr: 0.06, startAge: 60, stopAge: 62, owner: 'me', contributor: 'me' }];
+  s.streams = [{ id: 2, name: 'SS', type: 'social_security', amount: 42000, startAge: 67,
+    endAge: 95, cola: 0.025, owner: 'me', pia: 3500, todaysDollars: true }];
+  const common = { personalInfo: s.pi, accounts: s.accts, incomeStreams: s.streams,
+    assets: [], oneTimeEvents: [], recurringExpenses: [] };
+
+  // With volatility switched off, the simulation must collapse onto the plain
+  // deterministic projection. If it doesn't, the yearOverrides plumbing is wrong.
+  {
+    const d = runJob('monteCarlo', { ...common, simSettings: { startAge: 62, numSimulations: 5,
+      method: 'random', meanReturn: 0.06, stdDev: 0, inflationMean: 0.03, inflationStdDev: 0 } });
+    const det = computeProjections(s.pi, s.accts.map(a => ({ ...a, cagr: 0.06 })), s.streams, [], [], [], TODAY_YEAR);
+    eq(d.percentile5, d.percentile95, 'zero volatility produces no spread between sims');
+    approx(d.percentile50, det[det.length - 1].totalPortfolio,
+      'and the median equals the deterministic projection', 0.02);
+    eq(d.successRate, 1, 'a funded plan at zero volatility never fails');
+  }
+
+  // Percentile bands must be ordered, cover the whole horizon, and the real series
+  // must be a genuine deflation of the nominal one (not a copy).
+  {
+    const d = runJob('monteCarlo', { ...common, simSettings: { startAge: 62, numSimulations: 150,
+      method: 'random', meanReturn: 0.06, stdDev: 0.15, inflationMean: 0.03, inflationStdDev: 0.01 } });
+    eq([d.percentile5, d.percentile25, d.percentile50, d.percentile75, d.percentile95]
+      .every((v, i, a) => i === 0 || v >= a[i - 1]), true, 'nominal percentiles are ordered');
+    eq(d.percentileBands.every(b => b.p10 <= b.p25 && b.p25 <= b.p50 && b.p50 <= b.p75 && b.p75 <= b.p90),
+      true, 'every band year is internally ordered');
+    lt(d.real.percentile50, d.percentile50, "today's-dollar median is below the nominal median");
+    gt(d.percentileBands[d.percentileBands.length - 1].age, 89,
+      'bands run to the planning horizon, not the primary’s age alone');
+    eq(d.percentileBands.length, d.percentileBandsReal.length, 'real and nominal bands align');
+  }
+
+  // Sanity at both extremes.
+  {
+    const sim = { startAge: 62, numSimulations: 80, method: 'random', meanReturn: 0.06,
+      stdDev: 0.15, inflationMean: 0.03, inflationStdDev: 0.01 };
+    const poor = runJob('monteCarlo', { ...common, personalInfo: { ...s.pi, desiredRetirementIncome: 400000 }, simSettings: sim });
+    const rich = runJob('monteCarlo', { ...common, personalInfo: { ...s.pi, desiredRetirementIncome: 20000 }, simSettings: sim });
+    lt(poor.successRate, 0.15, 'wild overspending reports near-zero success');
+    gt(rich.successRate, 0.95, 'trivial spending reports near-certain success');
+    gt(poor.avgFailureAge, 62, 'and a failing plan reports when it failed');
+  }
+
+  // A single historical start year is a replay, not a sample: running it many
+  // times would produce identical projections, so it must run once.
+  {
+    const d = runJob('monteCarlo', { ...common, simSettings: { startAge: 62, numSimulations: 500,
+      method: 'historical', historicalStartYear: 1966, assetMix: 0.7,
+      meanReturn: 0.06, stdDev: 0.15, inflationMean: 0.03, inflationStdDev: 0.01 } });
+    eq(d.totalSimulations, 1, 'a single historical sequence runs once, not 500 times');
+  }
+
+  // ── The claiming grid ──
+  const ssPayload = { ...common, legacyAge: 90, cagrDelta: 0, myPIA: 3500, spousePIA: 0,
+    myBirthYear: TODAY_YEAR - 60, spouseBirthYear: TODAY_YEAR - 58, isMarried: false,
+    mcRunsPerScenario: 0, mcVolatility: 0.15 };
+  {
+    const cells = runJob('ssGrid', ssPayload).allScenarios;
+    eq(cells.length, 6, 'a single filer gets one row of six claiming ages');
+    const ss = cells.map(c => c.myAnnualSS);
+    eq(ss.every((v, i) => i === 0 || v > ss[i - 1]), true, 'the benefit rises with every later claim age');
+    approx(ss[0] / (3500 * 12), 0.70, 'claiming at 62 pays ~70% of PIA (FRA 67)', 0.02);
+    approx(ss[ss.length - 1] / (3500 * 12), 1.24, 'claiming at 70 pays ~124%', 0.02);
+    // netLifetimeWealth must be terminal wealth only — benefits are already
+    // embedded in it via reduced withdrawals, so adding them again double-counts.
+    eq(cells.every(c => c.netLifetimeWealth === c.portfolioAtLegacy), true,
+      'netLifetimeWealth is terminal wealth, with no double-counted Social Security');
+  }
+
+  // Common random numbers: every cell must be scored on the SAME market paths, or
+  // the comparison is dominated by sampling noise rather than the decision.
+  {
+    const d = runJob('ssMonteCarlo', { ...ssPayload, mcRunsPerScenario: 30 });
+    const rates = d.allScenarios.map(c => c.mcResults.successRate);
+    // Count places where a later claim age scores WORSE than an earlier one.
+    // Shared paths make the sequence essentially sorted: the only difference
+    // between cells is the Social Security stream, so later claiming shows up as
+    // a real (if small) improvement. With independent draws per cell this was
+    // routinely 2-4 inversions and the "best" age changed on every run. One is
+    // allowed here because an unlucky early sequence can genuinely punish a
+    // delayed claim — the assertion is aimed at noise, not at that.
+    const inversions = rates.filter((v, i) => i > 0 && v < rates[i - 1] - 1e-9).length;
+    lt(inversions, 2, 'success rate is essentially monotonic in claim age (' + inversions + ' inversions)');
+    eq(d.allScenarios.every(c => c.mcResults.runs === 30), true, 'every cell reports its run count');
+    eq(d.allScenarios.every(c => c.mcResults.p10 <= c.mcResults.p50 && c.mcResults.p50 <= c.mcResults.p90),
+      true, 'per-cell MC percentiles are ordered');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
