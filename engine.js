@@ -1915,6 +1915,64 @@ const getRmdStartAge = (birthYear) => {
 //
 // The end age is INCLUSIVE (the engine does `myAge <= conversionEndAge`), so
 // rmdStartAge - 1 means "the last full year before RMDs."
+// ── SETUP ESTIMATES ──────────────────────────────────────────────────────────
+// Benchmarks the Guided Setup uses to fill a number the user doesn't have to
+// hand. The point is to get someone to a working plan instead of losing them at
+// a field they can't answer — so every one of these is a published, citable
+// median or rule of thumb, NOT a guess, and the UI tags any value it fills so
+// the user knows to replace it.
+//
+// They live in the engine (not the wizard) so the test suite can pin them and so
+// the citation sits next to the number.
+
+// Fidelity's savings-milestone ladder: total retirement savings as a multiple of
+// CURRENT salary, by age. Interpolated between the published anchors, flat
+// outside them. This is a whole-household retirement total, not a per-account
+// figure — the wizard divides it across the accounts the user actually has.
+const SAVINGS_MULTIPLE_BY_AGE = [
+  { age: 30, x: 1 }, { age: 35, x: 2 }, { age: 40, x: 3 }, { age: 45, x: 4 },
+  { age: 50, x: 6 }, { age: 55, x: 7 }, { age: 60, x: 8 }, { age: 67, x: 10 },
+];
+
+const savingsMultipleForAge = (age) => {
+  const pts = SAVINGS_MULTIPLE_BY_AGE;
+  if (!(age > 0)) return 0;
+  if (age <= pts[0].age) return pts[0].x;
+  if (age >= pts[pts.length - 1].age) return pts[pts.length - 1].x;
+  for (let i = 1; i < pts.length; i++) {
+    if (age <= pts[i].age) {
+      const a = pts[i - 1], b = pts[i];
+      return a.x + (b.x - a.x) * ((age - a.age) / (b.age - a.age));
+    }
+  }
+  return pts[pts.length - 1].x;
+};
+
+// Typical employee deferral rate. Vanguard's "How America Saves" has reported
+// participant deferrals a little over 7% for years; 8% is the round figure in
+// that range. Deliberately not 10% — an optimistic default would flatter the
+// projection of the very users who need it to be honest.
+const TYPICAL_DEFERRAL_RATE = 0.08;
+
+// The most common employer formula is 50% of pay deferred up to 6%, i.e. 3% of
+// salary once the employee defers at least 6%.
+const TYPICAL_MATCH_RATE = 0.03;
+
+// Social Security replaces roughly 40% of pre-retirement earnings for a median
+// worker claiming at full retirement age (SSA). Capped by the maximum benefit.
+const SS_REPLACEMENT_RATE = 0.40;
+const SS_MAX_ANNUAL_AT_FRA = 45600;
+
+// Estimated total retirement savings for a household, in today's dollars.
+const estimateRetirementSavings = (age, householdSalary) =>
+  Math.max(0, Math.round(savingsMultipleForAge(age) * (householdSalary || 0) / 1000) * 1000);
+
+// Estimated annual Social Security benefit at full retirement age.
+const estimateAnnualSocialSecurity = (salary) => {
+  if (!(salary > 0)) return 0;
+  return Math.round(Math.min(salary * SS_REPLACEMENT_RATE, SS_MAX_ANNUAL_AT_FRA) / 600) * 600;
+};
+
 // ── PLANNING HORIZON ─────────────────────────────────────────────────────────
 // How many projection years a plan needs. `legacyAge` means "plan until this
 // age" — and for a married household that has to hold for BOTH people, not just
@@ -4378,6 +4436,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // ── Historical sequences + main projection entry point ────────────────
     HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
     getPlanningHorizonYears,
+    SAVINGS_MULTIPLE_BY_AGE, savingsMultipleForAge, TYPICAL_DEFERRAL_RATE,
+    TYPICAL_MATCH_RATE, SS_REPLACEMENT_RATE, SS_MAX_ANNUAL_AT_FRA,
+    estimateRetirementSavings, estimateAnnualSocialSecurity,
     computeProjections,
   };
 });

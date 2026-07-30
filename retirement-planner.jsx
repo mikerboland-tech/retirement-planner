@@ -22,6 +22,8 @@ const {
   FICA_ADDITIONAL_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_THRESHOLD,
   calculateFICA, RMD_FACTORS, calculateRMD, getRmdStartAge,
   getDefaultRothConversionWindow, QCD_ANNUAL_LIMIT, QCD_START_AGE, getPlanningHorizonYears,
+  estimateRetirementSavings, estimateAnnualSocialSecurity, savingsMultipleForAge,
+  TYPICAL_DEFERRAL_RATE, TYPICAL_MATCH_RATE,
   SS_FULL_RETIREMENT_AGE, SS_FRA_PRE_1943, getFullRetirementAge,
   SS_EARNINGS_TEST_LIMIT_2025, SS_EARNINGS_TEST_FRA_LIMIT_2025,
   calculateSSBenefit, calculateSSEarningsTestReduction, IRMAA_THRESHOLDS_2025,
@@ -9196,7 +9198,10 @@ function LifestyleVsLegacy({ projections, personalInfo, accounts, incomeStreams,
 // ============================================
 // DashboardTab — Lifted to module scope
 // ============================================
-function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setDashboardVisibility, setShowDashboardSettings, showDashboardSettings }) {
+function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setActiveTab, setDashboardVisibility, setShowDashboardSettings, showDashboardSettings }) {
+  // Session-only: the banner should stop nagging once acknowledged, but must come
+  // back next visit while real numbers are still missing.
+  const [estimatesDismissed, setEstimatesDismissed] = useState(false);
   const current = projections[0];
   
   // Use dashboardVisibility from parent state (passed via closure)
@@ -9255,8 +9260,45 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
     [projections, incomeRange.start, incomeRange.end]
   );
   
+  // Values the Guided Setup filled from a benchmark rather than from the user.
+  // Surfaced here because the Dashboard is where someone judges their plan — the
+  // moment to know which numbers are still ours. Dismissing hides the banner for
+  // the session; clearing a field's flag (by entering a real number) is what
+  // removes it for good.
+  const estimated = (personalInfo.estimatedFields || []).filter(f => ESTIMATE_LABELS[f]);
+
   return (
     <div className="space-y-4">
+      {estimated.length > 0 && !estimatesDismissed && (
+        <div className="p-4 bg-amber-500/5 border border-amber-500/30 rounded-xl">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 space-y-2">
+              <div className="text-sm font-semibold text-amber-300">
+                {estimated.length} {estimated.length === 1 ? 'number is' : 'numbers are'} still our estimate
+              </div>
+              <p className="text-xs text-slate-400 leading-relaxed max-w-2xl">
+                Setup filled these from typical figures for your age and income so you could see a plan straight away.
+                They're reasonable, but they aren't yours — swap in real numbers and everything below sharpens up.
+              </p>
+              <div className="flex flex-wrap gap-1.5 pt-0.5">
+                {estimated.map(f => (
+                  <button key={f} onClick={() => setActiveTab && setActiveTab(ESTIMATE_TAB(f))}
+                    className="px-2 py-1 rounded text-[11px] bg-slate-800 text-slate-300 border border-slate-700 hover:border-amber-500/50 hover:text-amber-300 transition-colors"
+                    title={`Fix this on the ${ESTIMATE_TAB(f)} tab`}>
+                    {ESTIMATE_LABELS[f]} →
+                  </button>
+                ))}
+              </div>
+            </div>
+            <button onClick={() => setEstimatesDismissed(true)}
+              className="shrink-0 text-xs text-slate-500 hover:text-slate-300 px-2 py-1"
+              title="Hide until next visit">
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* View Settings Toggle Button */}
       <div className="flex justify-end">
         <button
@@ -11538,6 +11580,32 @@ const NavGroup = ({ group, activeTab, setActiveTab, sidebarCollapsed }) => (
     </div>
   </div>
 );
+// Human-readable names for the wizard fields the Guided Setup can estimate.
+// Used by the wizard's preview summary and by the Dashboard review banner, so a
+// user is told "401(k) balance", never "balance401k". Also doubles as the
+// authoritative list of which fields are estimable, and where to go to fix each.
+const ESTIMATE_LABELS = {
+  balance401k: '401(k) balance', contrib401k: '401(k) contribution', match401k: 'Employer match',
+  balanceRoth401k: 'Roth 401(k) balance', contribRoth401k: 'Roth 401(k) contribution',
+  balanceRothIRA: 'Roth IRA balance', contribRothIRA: 'Roth IRA contribution',
+  balanceTraditionalIRA: 'Traditional IRA balance', contribTraditionalIRA: 'Traditional IRA contribution',
+  balanceHSA: 'HSA balance', contribHSA: 'HSA contribution',
+  balanceBrokerage: 'Brokerage balance', contribBrokerage: 'Brokerage contribution',
+  spouseBalance401k: "Spouse's 401(k) balance", spouseContrib401k: "Spouse's 401(k) contribution",
+  spouseMatch401k: "Spouse's employer match",
+  spouseBalanceRoth401k: "Spouse's Roth 401(k) balance", spouseContribRoth401k: "Spouse's Roth 401(k) contribution",
+  spouseBalanceRothIRA: "Spouse's Roth IRA balance", spouseContribRothIRA: "Spouse's Roth IRA contribution",
+  ssMonthly: 'Your Social Security benefit', spouseSSMonthly: "Spouse's Social Security benefit",
+  desiredSpending: 'Retirement spending goal',
+};
+
+// Which tab fixes each estimated field, for the Dashboard banner's deep link.
+const ESTIMATE_TAB = (field) => {
+  if (field === 'desiredSpending') return 'personal';
+  if (field === 'ssMonthly' || field === 'spouseSSMonthly') return 'income';
+  return 'accounts';
+};
+
 // ============================================
 // GUIDED TOUR — post-setup orientation
 //
@@ -12170,6 +12238,7 @@ function RetirementPlanner() {
   // the highlighted item meaningless.
   const startTour = () => {
     setSidebarCollapsed(false);
+    setShowSetupWizard(false); // the two overlays must never be live together
     setShowTour(true);
   };
   
@@ -12319,6 +12388,11 @@ function RetirementPlanner() {
       // True only when the user chose "Update My Plan" (loadExisting ran). On "Start Fresh"
       // this stays false so we DON'T carry old accounts/assets forward.
       editingExisting: false,
+      // Field names this wizard filled from a published benchmark rather than from
+      // the user's own knowledge. Drives the [ESTIMATE] tags, the preview-step
+      // summary, and the review banner in the app after launch. A field drops off
+      // this list the moment the user types over it.
+      estimatedFields: [],
     });
 
     // On the "Update My Plan" path we show EVERY account/asset as an editable list
@@ -12354,10 +12428,9 @@ function RetirementPlanner() {
     const salaryAtRetire = mySalary * Math.pow(1 + num(w.mySalaryGrowth) / 100, yearsToRetire);
     const suggestedSpending = Math.round(householdIncome * 0.75 / 1000) * 1000;
 
-    const estimateSSMonthly = (salary) => {
-      if (salary <= 0) return 0;
-      return Math.round(Math.min(salary * 0.40, 45600) / 12 / 50) * 50;
-    };
+    // Monthly figure derived from the engine's cited annual replacement-rate
+    // estimate, so the wizard and the engine can't drift on what "typical" means.
+    const estimateSSMonthly = (salary) => Math.round(estimateAnnualSocialSecurity(salary) / 12 / 50) * 50;
 
     const loadExisting = () => {
       const pi = existingData.personalInfo;
@@ -12443,6 +12516,12 @@ function RetirementPlanner() {
         consumedAccountIds: [my401,myRoth401,myRoth,myIRA,myBrok,myHSA,matchAcct,sp401,spRoth401,spRoth,spMatch]
           .filter(Boolean).map(a => a.id),
         editingExisting: true,
+        // loadExisting() replaces the whole wizard state object, so every field the
+        // initial state declares has to be re-declared here or it becomes undefined.
+        // Re-entering the wizard on an existing plan carries forward whatever was
+        // still an estimate, so the flags survive a review pass instead of being
+        // silently dropped (which would have hidden the review banner for good).
+        estimatedFields: (pi.estimatedFields || []).slice(),
       });
       // Seed the full editable lists with working copies of every account/asset/income.
       setWizAccounts((existingData.accounts || []).map(a => ({ ...a })));
@@ -12464,7 +12543,11 @@ function RetirementPlanner() {
         myBirthYear: yr-myAge, spouseBirthYear: yr-(w.hasSpouse?spouseAge:myAge),
         filingStatus, state: w.state, desiredRetirementIncome: num(w.desiredSpending)||suggestedSpending||60000,
         inflationRate: basePI.inflationRate || 0.03,
-        withdrawalPriority: basePI.withdrawalPriority || ['pretax','brokerage','roth'] };
+        withdrawalPriority: basePI.withdrawalPriority || ['pretax','brokerage','roth'],
+        // Fields the Guided Setup filled from a benchmark. Persisted so the review
+        // banner survives a reload and travels with an export; cleared as the user
+        // replaces each one. An empty array means every number is the user's own.
+        estimatedFields: (w.estimatedFields||[]).slice() };
       const accts = []; let aid = 1;
       // Workplace plans keep their real type (401k/403b/457b) captured at load time so a
       // 403(b)/457(b) round-trips instead of being rewritten as a 401k.
@@ -12568,14 +12651,106 @@ function RetirementPlanner() {
           guaranteed = ssAnn+spSSAnn+pensionAnn+pension2Ann+otherIncAnn;
         }
         const gap = Math.max(0, spending-guaranteed);
-        const wr = proj>0 ? gap/proj*100 : 0;
-        return { proj, spending, guaranteed, gap, wr, totalSaved, totalContrib };
+        // The withdrawal rate has to compare like with like. `proj` is a FUTURE
+        // balance while `spending` and `guaranteed` are in today's dollars, so
+        // dividing one by the other understated the rate by the whole inflation
+        // factor — a plan drawing 6% showed as 1.6%, which made the preview look
+        // safe for someone who is not. Inflate the gap to the retirement year.
+        const inflToRet = Math.pow(1.03, years);
+        const gapAtRet = gap * inflToRet;
+        const wr = proj>0 ? gapAtRet/proj*100 : 0;
+        return { proj, spending, guaranteed, gap, gapAtRet, wr, totalSaved, totalContrib };
       } catch(e) { return null; }
     };
 
     const inputStyle = "w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-slate-100 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all";
     const cardBtn = (active) => `p-4 rounded-xl border-2 text-left transition-all cursor-pointer ${active ? 'border-amber-500 bg-amber-500/10' : 'border-slate-700 bg-slate-800/50 hover:border-slate-500'}`;
     const dollarInput = (value, onChange, placeholder) => (<div className="relative"><span className="absolute left-3 top-2.5 text-slate-500">$</span><input type="text" inputMode="numeric" value={num(value)>0?num(value).toLocaleString():''} onChange={e=>onChange(e.target.value.replace(/[^0-9]/g,''))} placeholder={placeholder} className={`${inputStyle} pl-7`} /></div>);
+
+    // ── "WHY WE ASK" ──────────────────────────────────────────────────────────
+    // One line per step explaining what the projection does with the answer.
+    // People abandon a form when it feels like an interrogation; knowing WHY a
+    // field matters is what turns it back into a conversation. `more` holds the
+    // detail for anyone who wants it, behind a disclosure so it never adds noise.
+    const whyBox = (why, more) => (
+      <details className="group bg-sky-500/5 border border-sky-500/20 rounded-lg">
+        <summary className="flex items-start gap-2 p-3 cursor-pointer list-none">
+          <span className="text-sky-400 text-sm mt-px shrink-0">💡</span>
+          <span className="text-xs text-sky-200/90 leading-relaxed flex-1">{why}</span>
+          {more && <span className="text-[10px] text-sky-400/70 shrink-0 mt-0.5 group-open:hidden">more</span>}
+        </summary>
+        {more && <div className="px-3 pb-3 pl-9 text-xs text-slate-400 leading-relaxed">{more}</div>}
+      </details>
+    );
+
+    // ── ESTIMATE-THIS-FOR-ME ──────────────────────────────────────────────────
+    // A user who knows they HAVE a 401(k) but not what's in it should not be
+    // stuck. These buttons fill a published benchmark (see engine.js) and record
+    // the field in `estimatedFields`, which drives the [estimate] tag here, the
+    // summary on the preview step, and a review banner in the app afterwards.
+    // Typing over a field clears its flag — the moment a real number arrives, it
+    // stops being an estimate.
+    // Typical annual amounts for an owner earning `salary`, rounded to $100.
+    // Workplace deferral and employer match come from the engine's cited rates;
+    // an IRA estimate is the same deferral rate but can't exceed the annual limit.
+    const deferralEstimate = (salary) => Math.round(salary * TYPICAL_DEFERRAL_RATE / 100) * 100;
+    const matchEstimate = (salary) => Math.round(salary * TYPICAL_MATCH_RATE / 100) * 100;
+    const iraEstimate = (salary) => Math.min(deferralEstimate(salary), 7000);
+
+    const isEstimated = (key) => (w.estimatedFields||[]).includes(key);
+    // Write a value and mark it as ours.
+    const applyEstimate = (field, value, key) => {
+      setW(prev => ({
+        ...prev,
+        [field]: String(value),
+        estimatedFields: (prev.estimatedFields||[]).includes(key || field)
+          ? prev.estimatedFields : [...(prev.estimatedFields||[]), key || field],
+      }));
+    };
+    // Wrap update() so any hand-edit drops the estimate flag for that field.
+    const updateOwned = (field, value) => {
+      setW(prev => ({
+        ...prev,
+        [field]: value,
+        estimatedFields: (prev.estimatedFields||[]).filter(k => k !== field),
+      }));
+    };
+
+    // Retirement-savings benchmark for this household, less whatever balances the
+    // user has already filled in — so clicking "estimate" on a second account
+    // splits the benchmark rather than double-counting it.
+    const BALANCE_FIELDS = ['balance401k','balanceRoth401k','balanceRothIRA','balanceTraditionalIRA','balanceHSA',
+      'spouseBalance401k','spouseBalanceRoth401k','spouseBalanceRothIRA'];
+    const savingsBenchmark = estimateRetirementSavings(num(w.myAge), householdIncome);
+    const balancesEnteredExcept = (field) => BALANCE_FIELDS
+      .filter(f => f !== field)
+      .reduce((s, f) => s + num(w[f]), 0);
+    const remainingBenchmark = (field) =>
+      Math.max(0, Math.round((savingsBenchmark - balancesEnteredExcept(field)) / 1000) * 1000);
+
+    // The button + tag + rationale that sits under an estimable money field.
+    // `amount` is what clicking will fill; null/0 hides the offer (we never
+    // invent a number we can't justify — home value, for instance, has no
+    // defensible benchmark and is made skippable instead).
+    const estimateRow = (field, amount, rationale) => {
+      if (isEstimated(field)) {
+        return (
+          <div className="flex items-start gap-2 mt-1.5">
+            <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40">ESTIMATE</span>
+            <span className="text-xs text-slate-500 leading-relaxed">
+              {rationale} Replace it with your real number whenever you have it — we'll remind you.
+            </span>
+          </div>
+        );
+      }
+      if (!(amount > 0)) return null;
+      return (
+        <button type="button" onClick={() => applyEstimate(field, amount, field)}
+          className="mt-1.5 text-xs text-sky-400 hover:text-sky-300 underline decoration-dotted transition-colors">
+          Not sure? Estimate it (${amount.toLocaleString()})
+        </button>
+      );
+    };
 
     // Keyboard-accessible selectable account card (Enter/Space toggles).
     const AccountCard = ({active, onToggle, title, desc}) => (
@@ -12592,9 +12767,13 @@ function RetirementPlanner() {
 
     // Employer-match input with a $ / % of-salary toggle. In % mode the match
     // becomes a percent-of-salary account (scales with the owner's salary COLA).
-    const matchInput = ({label, modeKey, dollarKey, pctKey, dollarPlaceholder, pctPlaceholder='4',
+    // `estimate` (optional): dollar amount to offer under the $ field when the
+    // user doesn't know it. Percent mode needs no offer — the hint already names
+    // the typical range and a percent is easier to guess than a dollar figure.
+    const matchInput = ({label, modeKey, dollarKey, pctKey, dollarPlaceholder, estimate=0, pctPlaceholder='4',
         pctHint='Most employers match 3–6% of salary; it grows with your pay.',
-        dollarHint='Total dollar amount your employer contributes per year.', border='border-sky-500/30'}) => {
+        dollarHint='Total dollar amount your employer contributes per year.',
+        estimateRationale='A typical figure for your salary.', border='border-sky-500/30'}) => {
       const isPct = w[modeKey] === 'percent';
       return (
         <div className={`pl-4 border-l-2 ${border}`}>
@@ -12605,7 +12784,7 @@ function RetirementPlanner() {
           </div>
           {isPct
             ? <div className="relative"><input type="number" step="0.5" value={w[pctKey]} onChange={e=>update(pctKey,e.target.value)} placeholder={pctPlaceholder} className={`${inputStyle} pr-8`} /><span className="absolute right-3 top-2.5 text-slate-500">%</span></div>
-            : dollarInput(w[dollarKey],v=>update(dollarKey,v),dollarPlaceholder)}
+            : <>{dollarInput(w[dollarKey],v=>updateOwned(dollarKey,v),dollarPlaceholder)}{estimateRow(dollarKey,estimate,estimateRationale)}</>}
           <p className="text-xs text-slate-500 mt-0.5">{isPct?pctHint:dollarHint}</p>
         </div>
       );
@@ -12685,15 +12864,63 @@ function RetirementPlanner() {
           </div>
 
           <div style={{flex:'1 1 0%',minHeight:0,overflowY:'auto',padding:'1.25rem 1.5rem'}}>
-            {step===0 && (<div className="text-center py-4 space-y-5"><div className="text-5xl">📊</div><h3 className="text-2xl font-bold text-slate-100">{hasExisting?'Update Your Plan':'Plan Your Retirement'}</h3><p className="text-slate-400 max-w-sm mx-auto text-sm">{hasExisting?'Walk through your plan to make changes, or start fresh.':'Answer a few simple questions and get a personalized retirement projection in about 3 minutes.'}</p>
-              <div className="grid grid-cols-1 gap-3 max-w-sm mx-auto pt-2">
+            {/* ── STEP 0: WELCOME + PREFLIGHT ──────────────────────────────────
+                A blank first question is where people bail. Showing the whole
+                route up front — how many topics, roughly how long, and that
+                nothing has to be exact or final — turns "how much of my life do
+                I have to reconstruct?" into a known, finite task. */}
+            {step===0 && (<div className="py-2 space-y-5">
+              <div className="text-center space-y-3">
+                <div className="text-5xl">📊</div>
+                <h3 className="text-2xl font-bold text-slate-100">{hasExisting?'Update Your Plan':'Plan Your Retirement'}</h3>
+                <p className="text-slate-400 max-w-md mx-auto text-sm">{hasExisting?'Walk through your plan to make changes, or start fresh.':'Seven short topics and you\'ll have a real projection. Here\'s the whole route, so you know what\'s coming.'}</p>
+              </div>
+
+              {!hasExisting && (
+                <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4 space-y-2.5">
+                  {[
+                    ['👤','About you','Your age and state'],
+                    ['💼','Income','What you earn now'],
+                    ['🏖️','Retirement date','When you want to stop working'],
+                    ['💰','Savings','Which accounts you have, and roughly what\'s in them'],
+                    ['🏛️','Social Security','Your estimated benefit, or ours'],
+                    ['🎯','Spending','What you want retirement to cost'],
+                    ['🏠','Home','Optional — only affects your net worth'],
+                  ].map(([icon,name,detail],i)=>(
+                    <div key={name} className="flex items-start gap-3">
+                      <span className="text-slate-600 text-xs font-mono w-3 shrink-0 pt-0.5">{i+1}</span>
+                      <span className="shrink-0">{icon}</span>
+                      <div className="min-w-0">
+                        <span className="text-sm text-slate-200">{name}</span>
+                        <span className="text-xs text-slate-500"> — {detail}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {!hasExisting && (
+                <div className="bg-emerald-500/5 border border-emerald-500/25 rounded-xl p-4 space-y-2">
+                  <div className="text-sm font-semibold text-emerald-300">You don't need your statements</div>
+                  <ul className="text-xs text-slate-400 space-y-1.5 leading-relaxed">
+                    <li><span className="text-slate-300">Don't know a balance or contribution?</span> Tell us the account exists and hit “Estimate it” — we'll fill in a typical figure for your age and income and mark it so you can fix it later.</li>
+                    <li><span className="text-slate-300">Nothing here is final.</span> Every number is editable afterwards, and this wizard is always in the sidebar to walk through again.</li>
+                    <li><span className="text-slate-300">Nothing leaves your device.</span> The plan is saved in this browser only.</li>
+                  </ul>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 gap-3 max-w-sm mx-auto pt-1">
                 {hasExisting && <button onClick={()=>{loadExisting();setStep(1);}} className="px-5 py-4 bg-amber-600 hover:bg-amber-500 text-white font-semibold rounded-xl transition-colors"><div className="text-lg">✏️ Update My Plan</div><div className="text-sm text-amber-200/80 font-normal">Walk through with current data</div></button>}
-                <button onClick={()=>setStep(1)} className={`px-5 py-4 ${hasExisting?'bg-slate-700 hover:bg-slate-600 text-slate-200':'bg-amber-600 hover:bg-amber-500 text-white'} font-semibold rounded-xl transition-colors`}><div className="text-lg">{hasExisting?'🆕 Start Fresh':'🚀 Get Started'}</div><div className={`text-sm ${hasExisting?'text-slate-400':'text-amber-200/80'} font-normal`}>~3 minutes</div></button>
+                <button onClick={()=>setStep(1)} className={`px-5 py-4 ${hasExisting?'bg-slate-700 hover:bg-slate-600 text-slate-200':'bg-amber-600 hover:bg-amber-500 text-white'} font-semibold rounded-xl transition-colors`}><div className="text-lg">{hasExisting?'🆕 Start Fresh':'🚀 Let\'s go'}</div><div className={`text-sm ${hasExisting?'text-slate-400':'text-amber-200/80'} font-normal`}>about 3 minutes</div></button>
                 <button onClick={onExplore} className="px-5 py-3 text-slate-400 hover:text-slate-200 transition-colors text-sm">{hasExisting?'← Keep current plan':'🔍 Explore with sample data first'}</button>
               </div></div>)}
 
             {step===1 && (<div className="space-y-5">
-              <p className="text-sm text-slate-400">Let's start with the basics.</p>
+              {whyBox(
+                'Your age sets the length of the projection, and your state sets the income tax it pays in retirement.',
+                'Age also drives Required Minimum Distributions — the IRS forces withdrawals from pre-tax accounts starting at 73 or 75 depending on your birth year — and when Medicare and its income surcharges begin at 65. State matters more than people expect: nine states tax no income at all, and most of the rest exempt some or all retirement income.'
+              )}
               <div><label className="text-sm font-medium text-slate-300 mb-1 block">How old are you?</label><input type="number" value={w.myAge} onChange={e=>update('myAge',e.target.value)} placeholder="45" className={inputStyle} /></div>
               <label className="flex items-center gap-3 cursor-pointer py-2"><input type="checkbox" checked={w.hasSpouse} onChange={e=>update('hasSpouse',e.target.checked)} className="w-5 h-5 rounded border-slate-600 text-amber-500 focus:ring-amber-500/50" /><span className="text-slate-200">I'm planning with a spouse or partner</span></label>
               {w.hasSpouse && <div className="pl-4 border-l-2 border-amber-500/30"><label className="text-sm font-medium text-slate-300 mb-1 block">Spouse's age?</label><input type="number" value={w.spouseAge} onChange={e=>update('spouseAge',e.target.value)} placeholder="43" className={inputStyle} /></div>}
@@ -12701,7 +12928,11 @@ function RetirementPlanner() {
             </div>)}
 
             {step===2 && (<div className="space-y-5">
-              <p className="text-sm text-slate-400">What's your current annual income before taxes?</p>
+              {whyBox(
+                'Your salary is what your savings grow out of between now and retirement, and it anchors the Social Security estimate.',
+                "It also sets the payroll tax you pay while working, and it's the base your raise percentage compounds on. If your income swings a lot, use a normal year rather than your best or worst one."
+              )}
+              <p className="text-sm text-slate-400">Your current annual income, before taxes.</p>
               <div><label className="text-sm font-medium text-slate-300 mb-1 block">My annual salary</label>{dollarInput(w.mySalary,v=>update('mySalary',v),'85,000')}</div>
               {w.hasSpouse && <div><label className="text-sm font-medium text-slate-300 mb-1 block">Spouse's annual salary</label>{dollarInput(w.spouseSalary,v=>update('spouseSalary',v),'60,000')}</div>}
               <div><label className="text-sm font-medium text-slate-300 mb-1 block">My expected annual raises (%)</label><input type="number" step="0.5" value={w.mySalaryGrowth} onChange={e=>update('mySalaryGrowth',e.target.value)} className={`${inputStyle} w-24`} /><p className="text-xs text-slate-500 mt-1">Most people get 2–4% annual raises.</p></div>
@@ -12710,6 +12941,10 @@ function RetirementPlanner() {
             </div>)}
 
             {step===3 && (<div className="space-y-5">
+              {whyBox(
+                'This is the switch from saving to spending — the single input that moves the outcome most.',
+                "On this date contributions stop and withdrawals start, so moving it later adds earning years AND removes spending years from the same pot. It also decides whether you'd face the 10% penalty for tapping pre-tax accounts before 59½, and whether you need to buy your own health insurance before Medicare starts at 65. Put your honest target here — you can compare alternatives side by side later in Scenarios."
+              )}
               <p className="text-sm text-slate-400">When do you want to stop working?</p>
               <div><input type="range" min="50" max="75" value={w.myRetirementAge} onChange={e=>update('myRetirementAge',Number(e.target.value))} className="w-full accent-amber-500" /><div className="flex justify-between text-sm mt-1"><span className="text-slate-500">50</span><span className="text-2xl font-bold text-amber-400">Age {w.myRetirementAge}</span><span className="text-slate-500">75</span></div></div>
               {num(w.myAge)>0 && <div className="grid grid-cols-2 gap-3"><div className="p-3 bg-slate-800/60 rounded-lg text-center"><div className="text-xs text-slate-500">Years to go</div><div className="text-xl font-bold text-slate-200">{yearsToRetire}</div></div>{mySalary>0&&<div className="p-3 bg-slate-800/60 rounded-lg text-center"><div className="text-xs text-slate-500">Salary at retirement</div><div className="text-lg font-bold text-slate-200">${Math.round(salaryAtRetire).toLocaleString()}</div></div>}</div>}
@@ -12736,45 +12971,53 @@ function RetirementPlanner() {
                 <button onClick={()=>{setEditingWizAccount(null);setShowWizAccountModal(true);}} className="mt-2 px-4 py-2 text-sm bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg transition-colors">+ Add Account</button>
               </div>)}
               {!w.editingExisting && (<>
-              <p className="text-sm text-slate-400">Check each account type you have. Estimates are fine to start.</p>
+              {whyBox(
+                'Account TYPE matters as much as the balance — each one is taxed differently in retirement, and that changes what order to spend them in.',
+                "Pre-tax accounts (401(k), Traditional IRA) are taxed as income when withdrawn and are forced out by RMDs later. Roth accounts come out tax-free with no RMDs. Brokerage accounts pay lower capital-gains rates on their growth. That's why the same total, split differently, produces a different after-tax retirement — and it's what the Withdrawals and Tax Planning tabs are for. So getting the types right is the important part; the balances you can refine any time."
+              )}
+              <p className="text-sm text-slate-400">Check off the accounts you have. If you don't know a balance or contribution, use <span className="text-sky-400">Estimate it</span> — a rough plan today beats a perfect one you never finish.</p>
               <AccountCard active={w.has401k} onToggle={()=>update('has401k',!w.has401k)} title="Traditional 401(k) / 403(b)" desc="Pre-tax contributions, taxed on withdrawal" />
               {w.has401k && <div className="space-y-3">
-                <div className="pl-4 border-l-2 border-amber-500/30"><label className="text-xs text-slate-400 mb-0.5 block">Current balance</label>{dollarInput(w.balance401k,v=>update('balance401k',v),'100,000')}</div>
-                {matchInput({label:'My annual contribution',modeKey:'contrib401kMode',dollarKey:'contrib401k',pctKey:'contrib401kPercent',dollarPlaceholder:'10,000',pctPlaceholder:'10',pctHint:'Percent of your salary you defer each year; grows with your pay.',dollarHint:'Fixed dollar amount you contribute per year.',border:'border-amber-500/30'})}
-                {matchInput({label:'Employer match (covers both Traditional & Roth)',modeKey:'match401kMode',dollarKey:'match401k',pctKey:'match401kPercent',dollarPlaceholder:'5,000'})}
+                <div className="pl-4 border-l-2 border-amber-500/30"><label className="text-xs text-slate-400 mb-0.5 block">Current balance</label>{dollarInput(w.balance401k,v=>updateOwned('balance401k',v),'100,000')}{estimateRow('balance401k',remainingBenchmark('balance401k'),"Typical total retirement savings for your age and income, per Fidelity's savings-milestone guideline, minus anything you've already entered.")}</div>
+                {matchInput({label:'My annual contribution',modeKey:'contrib401kMode',dollarKey:'contrib401k',pctKey:'contrib401kPercent',dollarPlaceholder:'10,000',estimate:deferralEstimate(mySalary),estimateRationale:"About 8% of salary — roughly what the average participant defers (Vanguard, How America Saves).",pctPlaceholder:'10',pctHint:'Percent of your salary you defer each year; grows with your pay.',dollarHint:'Fixed dollar amount you contribute per year.',border:'border-amber-500/30'})}
+                {matchInput({label:'Employer match (covers both Traditional & Roth)',modeKey:'match401kMode',dollarKey:'match401k',pctKey:'match401kPercent',dollarPlaceholder:'5,000',estimate:matchEstimate(mySalary),estimateRationale:"3% of salary — the most common formula is 50% of what you put in, up to 6% of pay."})}
               </div>}
               <AccountCard active={w.hasRoth401k} onToggle={()=>update('hasRoth401k',!w.hasRoth401k)} title="Roth 401(k) / Roth 403(b)" desc="After-tax contributions, tax-free in retirement" />
-              {w.hasRoth401k && <div className="pl-4 border-l-2 border-emerald-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Current balance</label>{dollarInput(w.balanceRoth401k,v=>update('balanceRoth401k',v),'50,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">My annual contribution</label>{dollarInput(w.contribRoth401k,v=>update('contribRoth401k',v),'10,000')}</div></div>}
+              {w.hasRoth401k && <div className="pl-4 border-l-2 border-emerald-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Current balance</label>{dollarInput(w.balanceRoth401k,v=>updateOwned('balanceRoth401k',v),'50,000')}{estimateRow('balanceRoth401k',remainingBenchmark('balanceRoth401k'),"Typical total retirement savings for your age and income, per Fidelity's savings-milestone guideline, minus anything you've already entered.")}</div><div><label className="text-xs text-slate-400 mb-0.5 block">My annual contribution</label>{dollarInput(w.contribRoth401k,v=>updateOwned('contribRoth401k',v),'10,000')}{estimateRow('contribRoth401k',deferralEstimate(mySalary),"About 8% of salary — roughly what the average participant defers (Vanguard, How America Saves).")}</div></div>}
               {/* Roth-only savers still get a match (it lands in a pre-tax bucket); shown here only when there's no Traditional 401(k) block to host it above. */}
-              {w.hasRoth401k && !w.has401k && matchInput({label:'Employer match',modeKey:'match401kMode',dollarKey:'match401k',pctKey:'match401kPercent',dollarPlaceholder:'5,000'})}
+              {w.hasRoth401k && !w.has401k && matchInput({label:'Employer match',modeKey:'match401kMode',dollarKey:'match401k',pctKey:'match401kPercent',dollarPlaceholder:'5,000',estimate:matchEstimate(mySalary),estimateRationale:"3% of salary — the most common formula is 50% of what you put in, up to 6% of pay."})}
               {limitWarning(check401kLimits({age:w.myAge,salary:mySalary,has401k:w.has401k,c401Mode:w.contrib401kMode,c401Pct:w.contrib401kPercent,c401Fixed:w.contrib401k,hasRoth401k:w.hasRoth401k,rothFixed:w.contribRoth401k,matchMode:w.match401kMode,matchPct:w.match401kPercent,matchFixed:w.match401k}))}
               <AccountCard active={w.hasRothIRA} onToggle={()=>update('hasRothIRA',!w.hasRothIRA)} title="Roth IRA" desc="Tax-free withdrawals in retirement" />
-              {w.hasRothIRA && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.balanceRothIRA,v=>update('balanceRothIRA',v),'25,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Annual contribution</label>{dollarInput(w.contribRothIRA,v=>update('contribRothIRA',v),'7,000')}</div></div>}
+              {w.hasRothIRA && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.balanceRothIRA,v=>updateOwned('balanceRothIRA',v),'25,000')}{estimateRow('balanceRothIRA',remainingBenchmark('balanceRothIRA'),"Typical total retirement savings for your age and income, per Fidelity's savings-milestone guideline, minus anything you've already entered.")}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Annual contribution</label>{dollarInput(w.contribRothIRA,v=>updateOwned('contribRothIRA',v),'7,000')}{estimateRow('contribRothIRA',iraEstimate(mySalary),"About 8% of salary, capped at the annual IRA limit.")}</div></div>}
               <AccountCard active={w.hasTraditionalIRA} onToggle={()=>update('hasTraditionalIRA',!w.hasTraditionalIRA)} title="Traditional IRA" desc="Tax-deductible now, taxed on withdrawal" />
-              {w.hasTraditionalIRA && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.balanceTraditionalIRA,v=>update('balanceTraditionalIRA',v),'50,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Annual contribution</label>{dollarInput(w.contribTraditionalIRA,v=>update('contribTraditionalIRA',v),'7,000')}</div></div>}
+              {w.hasTraditionalIRA && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.balanceTraditionalIRA,v=>updateOwned('balanceTraditionalIRA',v),'50,000')}{estimateRow('balanceTraditionalIRA',remainingBenchmark('balanceTraditionalIRA'),"Typical total retirement savings for your age and income, per Fidelity's savings-milestone guideline, minus anything you've already entered.")}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Annual contribution</label>{dollarInput(w.contribTraditionalIRA,v=>updateOwned('contribTraditionalIRA',v),'7,000')}{estimateRow('contribTraditionalIRA',iraEstimate(mySalary),"About 8% of salary, capped at the annual IRA limit.")}</div></div>}
               <AccountCard active={w.hasBrokerage} onToggle={()=>update('hasBrokerage',!w.hasBrokerage)} title="Brokerage / Taxable Savings" desc="Regular investment account" />
               {w.hasBrokerage && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.balanceBrokerage,v=>update('balanceBrokerage',v),'30,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Annual contribution</label>{dollarInput(w.contribBrokerage,v=>update('contribBrokerage',v),'5,000')}</div></div>}
               {w.hasSpouse && <><div className="border-t border-slate-700/50 pt-3 mt-3"><p className="text-xs text-amber-400 font-semibold mb-3">SPOUSE'S ACCOUNTS</p></div>
                 <AccountCard active={w.spouseHas401k} onToggle={()=>update('spouseHas401k',!w.spouseHas401k)} title="Spouse's Traditional 401(k)" />
                 {w.spouseHas401k && <div className="space-y-3">
-                  <div className="pl-4 border-l-2 border-amber-500/30"><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.spouseBalance401k,v=>update('spouseBalance401k',v),'50,000')}</div>
-                  {matchInput({label:'Spouse annual contribution',modeKey:'spouseContrib401kMode',dollarKey:'spouseContrib401k',pctKey:'spouseContrib401kPercent',dollarPlaceholder:'8,000',pctPlaceholder:'10',pctHint:'Percent of salary deferred each year; grows with pay.',dollarHint:'Fixed dollar amount contributed per year.',border:'border-amber-500/30'})}
-                  {matchInput({label:'Spouse employer match (covers both Traditional & Roth)',modeKey:'spouseMatch401kMode',dollarKey:'spouseMatch401k',pctKey:'spouseMatch401kPercent',dollarPlaceholder:'3,000'})}
+                  <div className="pl-4 border-l-2 border-amber-500/30"><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.spouseBalance401k,v=>updateOwned('spouseBalance401k',v),'50,000')}{estimateRow('spouseBalance401k',remainingBenchmark('spouseBalance401k'),"Typical total retirement savings for your age and income, per Fidelity's savings-milestone guideline, minus anything you've already entered.")}</div>
+                  {matchInput({label:'Spouse annual contribution',modeKey:'spouseContrib401kMode',dollarKey:'spouseContrib401k',pctKey:'spouseContrib401kPercent',dollarPlaceholder:'8,000',estimate:deferralEstimate(spouseSalary),estimateRationale:"About 8% of salary — roughly what the average participant defers (Vanguard, How America Saves).",pctPlaceholder:'10',pctHint:'Percent of salary deferred each year; grows with pay.',dollarHint:'Fixed dollar amount contributed per year.',border:'border-amber-500/30'})}
+                  {matchInput({label:'Spouse employer match (covers both Traditional & Roth)',modeKey:'spouseMatch401kMode',dollarKey:'spouseMatch401k',pctKey:'spouseMatch401kPercent',dollarPlaceholder:'3,000',estimate:matchEstimate(spouseSalary),estimateRationale:"3% of salary — the most common formula is 50% of what you put in, up to 6% of pay."})}
                 </div>}
                 <AccountCard active={w.spouseHasRoth401k} onToggle={()=>update('spouseHasRoth401k',!w.spouseHasRoth401k)} title="Spouse's Roth 401(k)" />
-                {w.spouseHasRoth401k && <div className="pl-4 border-l-2 border-emerald-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.spouseBalanceRoth401k,v=>update('spouseBalanceRoth401k',v),'25,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Contribution</label>{dollarInput(w.spouseContribRoth401k,v=>update('spouseContribRoth401k',v),'5,000')}</div></div>}
-                {w.spouseHasRoth401k && !w.spouseHas401k && matchInput({label:'Spouse employer match',modeKey:'spouseMatch401kMode',dollarKey:'spouseMatch401k',pctKey:'spouseMatch401kPercent',dollarPlaceholder:'3,000'})}
+                {w.spouseHasRoth401k && <div className="pl-4 border-l-2 border-emerald-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.spouseBalanceRoth401k,v=>updateOwned('spouseBalanceRoth401k',v),'25,000')}{estimateRow('spouseBalanceRoth401k',remainingBenchmark('spouseBalanceRoth401k'),"Typical total retirement savings for your age and income, per Fidelity's savings-milestone guideline, minus anything you've already entered.")}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Contribution</label>{dollarInput(w.spouseContribRoth401k,v=>updateOwned('spouseContribRoth401k',v),'5,000')}{estimateRow('spouseContribRoth401k',deferralEstimate(spouseSalary),"About 8% of salary — roughly what the average participant defers (Vanguard, How America Saves).")}</div></div>}
+                {w.spouseHasRoth401k && !w.spouseHas401k && matchInput({label:'Spouse employer match',modeKey:'spouseMatch401kMode',dollarKey:'spouseMatch401k',pctKey:'spouseMatch401kPercent',dollarPlaceholder:'3,000',estimate:matchEstimate(spouseSalary),estimateRationale:"3% of salary — the most common formula is 50% of what you put in, up to 6% of pay."})}
                 {limitWarning(check401kLimits({age:w.spouseAge,salary:spouseSalary,has401k:w.spouseHas401k,c401Mode:w.spouseContrib401kMode,c401Pct:w.spouseContrib401kPercent,c401Fixed:w.spouseContrib401k,hasRoth401k:w.spouseHasRoth401k,rothFixed:w.spouseContribRoth401k,matchMode:w.spouseMatch401kMode,matchPct:w.spouseMatch401kPercent,matchFixed:w.spouseMatch401k}))}
                 <AccountCard active={w.spouseHasRothIRA} onToggle={()=>update('spouseHasRothIRA',!w.spouseHasRothIRA)} title="Spouse's Roth IRA" />
-                {w.spouseHasRothIRA && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.spouseBalanceRothIRA,v=>update('spouseBalanceRothIRA',v),'15,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Contribution</label>{dollarInput(w.spouseContribRothIRA,v=>update('spouseContribRothIRA',v),'7,000')}</div></div>}
+                {w.spouseHasRothIRA && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.spouseBalanceRothIRA,v=>updateOwned('spouseBalanceRothIRA',v),'15,000')}{estimateRow('spouseBalanceRothIRA',remainingBenchmark('spouseBalanceRothIRA'),"Typical total retirement savings for your age and income, per Fidelity's savings-milestone guideline, minus anything you've already entered.")}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Contribution</label>{dollarInput(w.spouseContribRothIRA,v=>updateOwned('spouseContribRothIRA',v),'7,000')}{estimateRow('spouseContribRothIRA',iraEstimate(spouseSalary),"About 8% of salary, capped at the annual IRA limit.")}</div></div>}
               </>}
               <AccountCard active={w.hasHSA} onToggle={()=>update('hasHSA',!w.hasHSA)} title="Health Savings Account (HSA)" desc="Triple tax advantage — tax-free for medical expenses in retirement" />
-              {w.hasHSA && <div className="pl-4 border-l-2 border-teal-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.balanceHSA,v=>update('balanceHSA',v),'10,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Annual contribution</label>{dollarInput(w.contribHSA,v=>update('contribHSA',v),'4,150')}</div></div>}
+              {w.hasHSA && <div className="pl-4 border-l-2 border-teal-500/30 grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Balance</label>{dollarInput(w.balanceHSA,v=>updateOwned('balanceHSA',v),'10,000')}{estimateRow('balanceHSA',remainingBenchmark('balanceHSA'),"Typical total retirement savings for your age and income, per Fidelity's savings-milestone guideline, minus anything you've already entered.")}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Annual contribution</label>{dollarInput(w.contribHSA,v=>update('contribHSA',v),'4,150')}</div></div>}
               <p className="text-xs text-slate-500">You can add 457(b) and other account types later from the Accounts tab.</p>
               </>)}
             </div>)}
 
             {step===5 && (<div className="space-y-5">
+              {whyBox(
+                "Guaranteed income covers part of your spending for life, which decides how much has to come out of your portfolio.",
+                "Every dollar of Social Security or pension is a dollar you don't have to withdraw — that's why the claiming age is worth real money, and why there's a whole tab for comparing every age from 62 to 70. Don't have your figure handy? Use our estimate now and replace it later from your ssa.gov statement, which is the accurate source."
+              )}
               {w.editingExisting && (<div className="space-y-2">
                 <p className="text-sm text-slate-400">Every income stream from your plan — Social Security, pensions, salary, rental, etc. Edit, remove, or add, same as the Income tab.</p>
                 {wizIncomes.map(i => (
@@ -12795,9 +13038,9 @@ function RetirementPlanner() {
               {!w.editingExisting && (<>
               <p className="text-sm text-slate-400">Social Security is the foundation of most retirement plans. Check your estimate at <span className="text-amber-400">ssa.gov/myaccount</span>.</p>
               <label className="flex items-center gap-3 cursor-pointer py-1"><input type="checkbox" checked={w.expectSS} onChange={e=>update('expectSS',e.target.checked)} className="w-5 h-5 rounded border-slate-600 text-amber-500 focus:ring-amber-500/50" /><span className="text-slate-200">I expect Social Security</span></label>
-              {w.expectSS && <div className="pl-4 border-l-2 border-amber-500/30 space-y-2"><div className="grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">My monthly benefit at Full Retirement Age (67)</label>{dollarInput(w.ssMonthly,v=>update('ssMonthly',v),estimateSSMonthly(mySalary)>0?estimateSSMonthly(mySalary).toLocaleString():'2,500')}{mySalary>0&&!num(w.ssMonthly)&&<button onClick={()=>update('ssMonthly',String(estimateSSMonthly(mySalary)))} className="text-xs text-emerald-400/70 hover:text-emerald-400 mt-0.5 underline cursor-pointer">Don't know? Use estimate: ~${estimateSSMonthly(mySalary).toLocaleString()}/mo</button>}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Claiming age</label><select value={w.ssClaimAge} onChange={e=>update('ssClaimAge',e.target.value)} className={inputStyle}>{[62,63,64,65,66,67,68,69,70].map(a=><option key={a} value={a}>{a}{a===62?' (earliest)':a===67?' (FRA)':a===70?' (max)':''}</option>)}</select></div></div><p className="text-xs text-slate-500">For your actual estimate, log in to <a href="https://www.ssa.gov/myaccount/" target="_blank" rel="noopener noreferrer" className="text-amber-400 underline">ssa.gov/myaccount</a> — look for "Estimated monthly benefit at age 67."</p></div>}
+              {w.expectSS && <div className="pl-4 border-l-2 border-amber-500/30 space-y-2"><div className="grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">My monthly benefit at Full Retirement Age (67)</label>{dollarInput(w.ssMonthly,v=>updateOwned('ssMonthly',v),estimateSSMonthly(mySalary)>0?estimateSSMonthly(mySalary).toLocaleString():'2,500')}{estimateRow('ssMonthly',estimateSSMonthly(mySalary),"About 40% of your salary, which is roughly what Social Security replaces for a median earner claiming at Full Retirement Age. Your ssa.gov statement is the accurate figure.")}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Claiming age</label><select value={w.ssClaimAge} onChange={e=>update('ssClaimAge',e.target.value)} className={inputStyle}>{[62,63,64,65,66,67,68,69,70].map(a=><option key={a} value={a}>{a}{a===62?' (earliest)':a===67?' (FRA)':a===70?' (max)':''}</option>)}</select></div></div><p className="text-xs text-slate-500">For your actual estimate, log in to <a href="https://www.ssa.gov/myaccount/" target="_blank" rel="noopener noreferrer" className="text-amber-400 underline">ssa.gov/myaccount</a> — look for "Estimated monthly benefit at age 67."</p></div>}
               {w.hasSpouse && <><div className="border-t border-slate-700/30 pt-3"><label className="flex items-center gap-3 cursor-pointer py-1"><input type="checkbox" checked={w.spouseExpectSS} onChange={e=>update('spouseExpectSS',e.target.checked)} className="w-5 h-5 rounded border-slate-600 text-amber-500 focus:ring-amber-500/50" /><span className="text-slate-200">Spouse expects Social Security</span></label></div>
-                {w.spouseExpectSS && <div className="pl-4 border-l-2 border-amber-500/30 space-y-2"><div className="grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Spouse monthly benefit at Full Retirement Age (67)</label>{dollarInput(w.spouseSSMonthly,v=>update('spouseSSMonthly',v),estimateSSMonthly(spouseSalary)>0?estimateSSMonthly(spouseSalary).toLocaleString():'1,800')}{spouseSalary>0&&!num(w.spouseSSMonthly)&&<button onClick={()=>update('spouseSSMonthly',String(estimateSSMonthly(spouseSalary)))} className="text-xs text-emerald-400/70 hover:text-emerald-400 mt-0.5 underline cursor-pointer">Don't know? Use estimate: ~${estimateSSMonthly(spouseSalary).toLocaleString()}/mo</button>}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Claiming age</label><select value={w.spouseSSClaimAge} onChange={e=>update('spouseSSClaimAge',e.target.value)} className={inputStyle}>{[62,63,64,65,66,67,68,69,70].map(a=><option key={a} value={a}>{a}</option>)}</select></div></div></div>}
+                {w.spouseExpectSS && <div className="pl-4 border-l-2 border-amber-500/30 space-y-2"><div className="grid grid-cols-2 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Spouse monthly benefit at Full Retirement Age (67)</label>{dollarInput(w.spouseSSMonthly,v=>updateOwned('spouseSSMonthly',v),estimateSSMonthly(spouseSalary)>0?estimateSSMonthly(spouseSalary).toLocaleString():'1,800')}{estimateRow('spouseSSMonthly',estimateSSMonthly(spouseSalary),"About 40% of your salary, which is roughly what Social Security replaces for a median earner claiming at Full Retirement Age. Your ssa.gov statement is the accurate figure.")}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Claiming age</label><select value={w.spouseSSClaimAge} onChange={e=>update('spouseSSClaimAge',e.target.value)} className={inputStyle}>{[62,63,64,65,66,67,68,69,70].map(a=><option key={a} value={a}>{a}</option>)}</select></div></div></div>}
               </>}
               <div className="border-t border-slate-700/30 pt-3"><label className="flex items-center gap-3 cursor-pointer py-1"><input type="checkbox" checked={w.hasPension} onChange={e=>update('hasPension',e.target.checked)} className="w-5 h-5 rounded border-slate-600 text-amber-500 focus:ring-amber-500/50" /><span className="text-slate-200">I or my spouse have a pension</span></label></div>
               {w.hasPension && <div className="pl-4 border-l-2 border-amber-500/30 grid grid-cols-3 gap-3"><div><label className="text-xs text-slate-400 mb-0.5 block">Annual amount</label>{dollarInput(w.pensionAmount,v=>update('pensionAmount',v),'24,000')}</div><div><label className="text-xs text-slate-400 mb-0.5 block">Starts at age</label><input type="number" value={w.pensionStartAge} onChange={e=>update('pensionStartAge',e.target.value)} className={inputStyle} /></div>{w.hasSpouse&&<div><label className="text-xs text-slate-400 mb-0.5 block">Whose?</label><select value={w.pensionOwner} onChange={e=>update('pensionOwner',e.target.value)} className={inputStyle}><option value="me">Mine</option><option value="spouse">Spouse</option></select></div>}</div>}
@@ -12834,8 +13077,12 @@ function RetirementPlanner() {
             </div>)}
 
             {step===6 && (<div className="space-y-5">
+              {whyBox(
+                "This is the target the whole projection is measured against: can your money cover this, every year, for life?",
+                "Enter it in today's dollars — the engine inflates it for you each year. It's what you want to SPEND after tax, not withdraw: the solver works backwards to find the gross withdrawal that leaves you this much once taxes are paid. Most people land near 70–80% of their current income, since payroll taxes and retirement saving both stop."
+              )}
               <p className="text-sm text-slate-400">How much annual income do you want in retirement? (Today's dollars — inflation is automatic.)</p>
-              <div><label className="text-sm font-medium text-slate-300 mb-1 block">Desired annual retirement income</label>{dollarInput(w.desiredSpending,v=>update('desiredSpending',v),suggestedSpending>0?suggestedSpending.toLocaleString():'60,000')}</div>
+              <div><label className="text-sm font-medium text-slate-300 mb-1 block">Desired annual retirement income</label>{dollarInput(w.desiredSpending,v=>updateOwned('desiredSpending',v),suggestedSpending>0?suggestedSpending.toLocaleString():'60,000')}{estimateRow('desiredSpending',suggestedSpending,"75% of your current household income — the usual starting point, since payroll taxes and retirement saving both stop when you retire.")}</div>
               {householdIncome>0 && <div className="p-4 bg-slate-800/60 rounded-lg border border-slate-700/50 space-y-2">
                 <p className="text-xs text-slate-500 font-semibold">RULE OF THUMB</p>
                 <p className="text-sm text-slate-300">Most planners suggest <strong className="text-amber-400">70–80%</strong> of pre-retirement income.</p>
@@ -12845,6 +13092,10 @@ function RetirementPlanner() {
             </div>)}
 
             {step===7 && (<div className="space-y-5">
+              {whyBox(
+                "Optional. A home changes your net worth and what you leave behind, but not the income your plan has to produce.",
+                "The projection never sells your house to fund retirement, so skipping this won't distort whether your money lasts. It's here so the net-worth chart and legacy figure are complete, and so a mortgage shows up as the debt it is until it's paid off. Skip it and add it from the Assets tab later if you'd rather."
+              )}
               {w.editingExisting && (<div className="space-y-2">
                 <p className="text-sm text-slate-400">Every asset from your plan. Edit, remove, or add — same as the Assets tab.</p>
                 {wizAssets.map(a => (
@@ -12872,13 +13123,34 @@ function RetirementPlanner() {
 
             {step===8 && (()=>{const pv=getQuickPreview();return(<div className="space-y-4">
               <p className="text-sm text-slate-400">Here's your plan at a glance. You can refine everything from the tabs after launch.</p>
+              {/* Close the loop on anything we filled in. Telling the user exactly
+                  which numbers are ours is what makes the estimates safe to offer:
+                  they know what to trust and what to come back to. */}
+              {(w.estimatedFields||[]).length>0 && (
+                <div className="p-3 bg-amber-500/5 border border-amber-500/30 rounded-lg space-y-2">
+                  <div className="text-xs font-semibold text-amber-400">
+                    {(w.estimatedFields||[]).length} {(w.estimatedFields||[]).length===1?'value is':'values are'} our estimate, not yours
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(w.estimatedFields||[]).map(f=>(
+                      <span key={f} className="px-2 py-0.5 rounded text-[11px] bg-slate-800 text-slate-300 border border-slate-700">
+                        {ESTIMATE_LABELS[f]||f}
+                      </span>
+                    ))}
+                  </div>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Good enough to see the shape of your plan. They'll stay flagged on the Dashboard so you can
+                    swap in real figures as you find them — that's when the projection becomes yours.
+                  </p>
+                </div>
+              )}
               {pv&&pv.proj>0 && <div className="p-4 bg-gradient-to-br from-emerald-900/30 to-slate-800/60 rounded-xl border border-emerald-700/30">
                 <div className="text-xs text-emerald-400 font-semibold mb-3">📊 QUICK PROJECTION (7% avg return)</div>
                 <div className="grid grid-cols-2 gap-3">
                   <div><div className="text-xs text-slate-500">Portfolio at retirement</div><div className="text-xl font-bold text-emerald-400">${pv.proj.toLocaleString()}</div></div>
                   <div><div className="text-xs text-slate-500">Spending goal</div><div className="text-xl font-bold text-amber-400">${(num(w.desiredSpending)||suggestedSpending).toLocaleString()}/yr</div></div>
                   <div><div className="text-xs text-slate-500">Guaranteed income (SS+pension)</div><div className="text-lg font-bold text-sky-400">${pv.guaranteed.toLocaleString()}/yr</div></div>
-                  <div><div className="text-xs text-slate-500">Gap from portfolio</div><div className="text-lg font-bold text-slate-200">${pv.gap.toLocaleString()}/yr</div></div>
+                  <div><div className="text-xs text-slate-500">Gap from portfolio</div><div className="text-lg font-bold text-slate-200">${Math.round(pv.gapAtRet).toLocaleString()}/yr</div><div className="text-[10px] text-slate-500">in age-{num(w.myRetirementAge)||65} dollars</div></div>
                 </div>
                 {pv.wr>0&&<div className="mt-3 pt-3 border-t border-emerald-700/30"><span className={`text-sm font-semibold ${pv.wr<=4?'text-emerald-400':pv.wr<=5?'text-amber-400':'text-red-400'}`}>{pv.wr.toFixed(1)}% withdrawal rate</span><span className="text-xs text-slate-500 ml-2">{pv.wr<=4?'— Safe range':pv.wr<=5?'— Monitor closely':'— Consider adjustments'}</span></div>}
               </div>}
@@ -12997,7 +13269,10 @@ function RetirementPlanner() {
         />
       )}
 
-      {showTour && <GuidedTour onFinish={() => setShowTour(false)} />}
+      {/* Never render the tour over the wizard: the tour keeps a capture-phase
+          scroll listener and smooth-scrolls its target, which fights the wizard's
+          own scrolling panel and locks up the main thread. */}
+      {showTour && !showSetupWizard && <GuidedTour onFinish={() => setShowTour(false)} />}
 
       {/* Sidebar Navigation */}
       <aside className={`${sidebarCollapsed ? 'w-16' : 'w-56'} flex-shrink-0 bg-slate-900/95 border-r border-slate-700/50 backdrop-blur-sm transition-all duration-300 flex flex-col`}>
@@ -13028,7 +13303,7 @@ function RetirementPlanner() {
           {/* Utility buttons - right after nav groups */}
           <div className="mt-4 pt-4 border-t border-slate-700/50">
             <button
-              onClick={() => setShowSetupWizard(true)}
+              onClick={() => { setShowTour(false); setShowSetupWizard(true); }}
               data-tour="tour-guided-setup"
               className="w-full flex items-center gap-3 px-3 py-2 text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 rounded-lg transition-all"
             >
@@ -13092,7 +13367,7 @@ function RetirementPlanner() {
         {/* Main Content */}
         <main className="flex-1 overflow-y-auto p-6">
           <div className="max-w-7xl mx-auto">
-            {activeTab === 'dashboard' && <DashboardTab accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} />}
+            {activeTab === 'dashboard' && <DashboardTab accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} />}
             {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
             {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} contributorTypes={CONTRIBUTOR_TYPES} personalInfo={personalInfo} projections={projections} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}

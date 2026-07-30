@@ -2518,6 +2518,58 @@ section('P17 — brokerage dividends are annual taxable income, not tax-deferred
     'tax-sheltered accounts generate no taxable dividends');
 }
 
+// ── P18 — Guided Setup estimate benchmarks ───────────────────────────────────
+section('P18 — the benchmarks the setup wizard offers when a user has no figure');
+{
+  const { savingsMultipleForAge, estimateRetirementSavings, estimateAnnualSocialSecurity,
+          TYPICAL_DEFERRAL_RATE, TYPICAL_MATCH_RATE, SAVINGS_MULTIPLE_BY_AGE } = engine;
+
+  // Fidelity's published anchors must come back exactly — these are the numbers
+  // shown to users as "typical for your age", so they can't drift silently.
+  SAVINGS_MULTIPLE_BY_AGE.forEach(({ age, x }) =>
+    eq(savingsMultipleForAge(age), x, `savings multiple at ${age} is ${x}x salary`));
+  eq(savingsMultipleForAge(47.5), 5, 'interpolates between the 45 (4x) and 50 (6x) anchors');
+  eq(savingsMultipleForAge(25), 1, 'flat below the first anchor');
+  eq(savingsMultipleForAge(80), 10, 'flat above the last anchor');
+  eq(savingsMultipleForAge(0), 0, 'no age yields no estimate rather than NaN');
+
+  eq(estimateRetirementSavings(45, 95000), 380000, '45 on $95k -> 4x = $380,000');
+  eq(estimateRetirementSavings(35, 150000), 300000, '35 on $150k -> 2x = $300,000');
+  eq(estimateRetirementSavings(45, 0), 0, 'no salary yields no estimate');
+
+  // Social Security replacement, and the cap that stops it running away.
+  eq(estimateAnnualSocialSecurity(95000), 37800, '$95k -> ~40% replacement');
+  eq(estimateAnnualSocialSecurity(400000), 45600, 'capped at the maximum benefit');
+  eq(estimateAnnualSocialSecurity(0), 0, 'no salary yields no benefit estimate');
+
+  // Deliberately conservative: an optimistic default would flatter the very
+  // plans that most need an honest number.
+  lt(TYPICAL_DEFERRAL_RATE, 0.10, 'the typical deferral rate is not an aspirational 10%');
+  gt(TYPICAL_DEFERRAL_RATE, 0.05, 'but it is not defeatist either');
+  eq(TYPICAL_MATCH_RATE, 0.03, 'match is 3% of salary (50% up to 6% deferred)');
+
+  // The estimates have to produce a projection that actually runs — a wizard that
+  // fills benchmarks and then yields a broken plan is worse than no wizard.
+  const salary = 95000, age = 45;
+  const s = baseScenario({
+    myAge: age, spouseAge: age, myBirthYear: TODAY_YEAR - age, spouseBirthYear: TODAY_YEAR - age,
+    myRetirementAge: 65, spouseRetirementAge: 65, filingStatus: 'single', state: 'Florida',
+    desiredRetirementIncome: Math.round(salary * 0.75),
+  });
+  s.accts = [{ id: 1, name: '401k', type: '401k', balance: estimateRetirementSavings(age, salary),
+    contribution: Math.round(salary * TYPICAL_DEFERRAL_RATE + salary * TYPICAL_MATCH_RATE),
+    contributionGrowth: 0.03, cagr: 0.07, startAge: age, stopAge: 65, owner: 'me', contributor: 'me' }];
+  s.streams = [
+    { id: 1, name: 'Salary', type: 'earned_income', amount: salary, startAge: age, endAge: 65, cola: 0.03, owner: 'me' },
+    { id: 2, name: 'SS', type: 'social_security', amount: estimateAnnualSocialSecurity(salary), startAge: 67, endAge: 95, cola: 0.025, owner: 'me', todaysDollars: true },
+  ];
+  const proj = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  gt(proj.length, 40, 'a fully estimated household produces a full-length projection');
+  gt(proj.find(p => p.myAge === 65).totalPortfolio, 0, 'and a positive portfolio at retirement');
+  eq(proj.every(p => Number.isFinite(p.totalPortfolio) && Number.isFinite(p.totalTax)), true,
+    'with no NaN leaking into any year');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
