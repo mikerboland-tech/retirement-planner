@@ -9198,7 +9198,7 @@ function LifestyleVsLegacy({ projections, personalInfo, accounts, incomeStreams,
 // ============================================
 // DashboardTab — Lifted to module scope
 // ============================================
-function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setActiveTab, setDashboardVisibility, setShowDashboardSettings, showDashboardSettings }) {
+function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections, recurringExpenses, setActiveTab, setDashboardVisibility, setShowDashboardSettings, showDashboardSettings, showTourOffer }) {
   // Session-only: the banner should stop nagging once acknowledged, but must come
   // back next visit while real numbers are still missing.
   const [estimatesDismissed, setEstimatesDismissed] = useState(false);
@@ -9269,6 +9269,26 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
 
   return (
     <div className="space-y-4">
+      {/* Offer the tour rather than launching it. Kept to a single slim line so
+          that a first-time user who also has estimates outstanding gets a nudge,
+          not a wall of banners. */}
+      {showTourOffer && (
+        <div className="flex items-center gap-3 flex-wrap px-4 py-2.5 bg-sky-500/5 border border-sky-500/25 rounded-lg">
+          <span className="text-sm text-slate-300 flex-1 min-w-[14rem]">
+            New here? A one-minute tour explains what each tab answers.
+          </span>
+          <button onClick={onTakeTour}
+            className="px-3 py-1.5 text-xs font-medium bg-sky-600 hover:bg-sky-500 text-white rounded-lg transition-colors">
+            Take the tour
+          </button>
+          <button onClick={onDismissTour}
+            className="px-2 py-1.5 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+            title="You can still start it any time from the sidebar">
+            No thanks
+          </button>
+        </div>
+      )}
+
       {estimated.length > 0 && !estimatesDismissed && (
         <div className="p-4 bg-amber-500/5 border border-amber-500/30 rounded-xl">
           <div className="flex items-start justify-between gap-3">
@@ -11918,11 +11938,15 @@ function RetirementPlanner() {
 
   const [showSetupWizard, setShowSetupWizard] = useState(() => !savedData);
 
-  // The tour is offered once per browser. A brand-new user gets it when the
-  // wizard finishes (see onComplete below); someone whose plan predates the
-  // tour gets it on load. Gated on savedData so it never stacks on top of the
-  // wizard — a first-time user would otherwise get both modals at once.
-  const [showTour, setShowTour] = useState(() => !!savedData && !hasSeenTour());
+  // The tour never launches itself. Finishing a nine-step wizard and then being
+  // handed a nine-step tour is eighteen screens before you ever see your own
+  // plan — the reward for setting up should be your numbers, not another modal.
+  // So it is OFFERED once per browser by a dismissible prompt on the Dashboard,
+  // and stays in the sidebar for whenever someone actually wants it.
+  const [showTour, setShowTour] = useState(false);
+  // Whether that offer is still outstanding. Shares the tour's per-browser
+  // seen-state, so taking it OR declining it both stop the asking.
+  const [tourPromptOpen, setTourPromptOpen] = useState(() => !hasSeenTour());
 
   // Whether this browser holds a plan the user actually entered. The wizard's
   // opening screen keys off this to decide between its first-run copy and its
@@ -12239,8 +12263,14 @@ function RetirementPlanner() {
   const startTour = () => {
     setSidebarCollapsed(false);
     setShowSetupWizard(false); // the two overlays must never be live together
+    setTourPromptOpen(false);  // taking it up answers the offer
     setShowTour(true);
   };
+
+  // Accepting or declining the Dashboard offer both count as asked-and-answered,
+  // so the prompt does not return on the next visit. The sidebar entry remains.
+  const acceptTourOffer = () => { markTourSeen(); startTour(); };
+  const declineTourOffer = () => { markTourSeen(); setTourPromptOpen(false); };
   
   // Navigation structure with groups
   const navGroups = [
@@ -13260,10 +13290,8 @@ function RetirementPlanner() {
             setHasSavedPlan(true);
             setSaveStatus('Plan updated!');
             setTimeout(() => setSaveStatus(''), 3000);
-            // Hand a first-time user straight from "here are your numbers" to
-            // "here's what the app does with them". Re-running the wizard later
-            // won't re-trigger it, since the tour marks itself seen.
-            if (!hasSeenTour()) setShowTour(true);
+            // Deliberately does NOT launch the tour — land them on their own
+            // plan. The Dashboard offers the tour, to take or dismiss.
           }}
           onExplore={() => setShowSetupWizard(false)}
         />
@@ -13367,7 +13395,7 @@ function RetirementPlanner() {
         {/* Main Content */}
         <main className="flex-1 overflow-y-auto p-6">
           <div className="max-w-7xl mx-auto">
-            {activeTab === 'dashboard' && <DashboardTab accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} />}
+            {activeTab === 'dashboard' && <DashboardTab accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
             {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
             {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} contributorTypes={CONTRIBUTOR_TYPES} personalInfo={personalInfo} projections={projections} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
