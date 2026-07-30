@@ -2570,6 +2570,57 @@ section('P18 — the benchmarks the setup wizard offers when a user has no figur
     'with no NaN leaking into any year');
 }
 
+// ── P19 — real vs nominal dollars are never mixed ─────────────────────────────
+section("P19 — Coast FIRE and spending-at-age keep one dollar basis");
+{
+  const { realReturn, inflateToAge, deflateToToday, coastFire } = engine;
+
+  // The two primitives every fixed site now goes through.
+  approx(realReturn(0.07, 0.03), (1.07 / 1.03) - 1, 'real return is the Fisher ratio, not a subtraction', 1e-12);
+  lt(realReturn(0.07, 0.03), 0.04, 'and is therefore slightly below the naive 7% − 3%');
+  eq(realReturn(0.03, 0.03), 0, 'growth equal to inflation is zero real return');
+
+  approx(inflateToAge(100000, 45, 65, 0.03), 100000 * Math.pow(1.03, 20),
+    'inflateToAge compounds from the CURRENT age, matching the engine', 1e-9);
+  eq(inflateToAge(100000, 45, 45, 0.03), 100000, 'no drift at the current age');
+  approx(deflateToToday(inflateToAge(100000, 45, 65, 0.03), 45, 65, 0.03), 100000,
+    'deflateToToday is its exact inverse', 1e-9);
+
+  // Coast FIRE, entirely in today's dollars.
+  // Spend $80k, $30k of it guaranteed → $50k from the portfolio → 25x = $1.25M
+  // target in today's dollars. 20 years of REAL growth at (1.07/1.03 − 1):
+  const c = coastFire({
+    spendingToday: 80000, guaranteedIncomeToday: 30000,
+    yearsToRetirement: 20, nominalReturn: 0.07, inflationRate: 0.03, withdrawalRate: 0.04,
+  });
+  eq(c.portfolioSpendingToday, 50000, 'guaranteed income offsets spending in the same dollars');
+  eq(c.targetToday, 1250000, 'target is 25x the portfolio-funded slice');
+  const expected = 1250000 / Math.pow(1 + ((1.07 / 1.03) - 1), 20);
+  approx(c.coastNumberToday, expected, 'coast number discounts the target at the REAL return', 1e-6);
+  // Discounting a real target at a NOMINAL rate — the old bug — understates the
+  // number you need today by a wide margin. Confirm we are on the right side.
+  gt(c.coastNumberToday, 1250000 / Math.pow(1.07, 20),
+    'and is larger than the nominal-discounted figure the old formula produced');
+
+  // Guaranteed income can exceed spending; the portfolio slice floors at zero.
+  const none = coastFire({ spendingToday: 40000, guaranteedIncomeToday: 60000,
+    yearsToRetirement: 10, nominalReturn: 0.07, inflationRate: 0.03 });
+  eq(none.portfolioSpendingToday, 0, 'fully-covered spending needs no portfolio');
+  eq(none.coastNumberToday, 0, 'so the coast number is zero, not negative');
+
+  // Already retired / zero horizon: the target IS the number.
+  const now = coastFire({ spendingToday: 60000, guaranteedIncomeToday: 0,
+    yearsToRetirement: 0, nominalReturn: 0.07, inflationRate: 0.03 });
+  eq(now.coastNumberToday, 1500000, 'with no years left there is no discount');
+
+  // Real return can be negative (inflation above growth) — the number must grow,
+  // not blow up or go negative.
+  const grim = coastFire({ spendingToday: 60000, guaranteedIncomeToday: 0,
+    yearsToRetirement: 20, nominalReturn: 0.02, inflationRate: 0.05 });
+  gt(grim.coastNumberToday, grim.targetToday, 'negative real return means you need MORE than the target today');
+  eq(Number.isFinite(grim.coastNumberToday), true, 'and the figure stays finite');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

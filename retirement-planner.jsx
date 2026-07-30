@@ -23,6 +23,7 @@ const {
   calculateFICA, RMD_FACTORS, calculateRMD, getRmdStartAge,
   getDefaultRothConversionWindow, QCD_ANNUAL_LIMIT, QCD_START_AGE, getPlanningHorizonYears,
   estimateRetirementSavings, estimateAnnualSocialSecurity, savingsMultipleForAge,
+  realReturn, inflateToAge, deflateToToday, coastFire,
   TYPICAL_DEFERRAL_RATE, TYPICAL_MATCH_RATE,
   SS_FULL_RETIREMENT_AGE, SS_FRA_PRE_1943, getFullRetirementAge,
   SS_EARNINGS_TEST_LIMIT_2025, SS_EARNINGS_TEST_FRA_LIMIT_2025,
@@ -3512,7 +3513,7 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
               <div className="text-lg font-semibold text-slate-100">
                 {formatCurrency(personalInfo.desiredRetirementIncome)}
               </div>
-              <div className="text-xs text-slate-400">Grows with inflation</div>
+              <div className="text-xs text-slate-400">Today&rsquo;s dollars &mdash; grows with inflation</div>
             </div>
             <div>
               <div className="text-xs text-slate-500 mb-1">Guaranteed Income Streams</div>
@@ -3540,20 +3541,17 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
             <div>
               <div className="text-xs text-slate-500 mb-1">Est. Portfolio Withdrawal</div>
               <div className="text-lg font-semibold text-amber-400">
-                {formatCurrency(
-                  Math.max(0, personalInfo.desiredRetirementIncome - 
-                    incomeStreams
-                      .filter(s => {
-                        const ownerAge = s.owner === 'me' 
-                          ? simSettings.startAge 
-                          : personalInfo.spouseAge + (simSettings.startAge - personalInfo.myAge);
-                        return ownerAge >= s.startAge && ownerAge <= s.endAge;
-                      })
-                      .reduce((sum, s) => sum + s.amount, 0)
-                  )
-                )}
+                {/* Read the engine's own first-year draw rather than re-deriving
+                    it. The old expression subtracted raw stream amounts from
+                    today's-dollar spending and labelled the result as the gap at
+                    a FUTURE age — three different dollar bases in one figure, and
+                    it also ignored taxes, healthcare and RMDs, all of which the
+                    solver already accounts for. */}
+                {formatCurrency(startProjection?.portfolioWithdrawal || 0)}
               </div>
-              <div className="text-xs text-slate-400">Initial gap to fill from savings</div>
+              <div className="text-xs text-slate-400">
+                First-year draw at age {simSettings.startAge}, in that year&rsquo;s dollars
+              </div>
             </div>
           </div>
           <div className="bg-blue-900/20 border border-blue-700/30 rounded p-3">
@@ -4587,11 +4585,15 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
     return { ssIncome, pensionIncome, otherIncome, total: ssIncome + pensionIncome + otherIncome };
   };
   
-  // Calculate desired spending (inflation-adjusted retirement income)
-  const getDesiredSpending = (age) => {
-    const yearsFromRetirement = age - settings.retirementAge;
-    return personalInfo.desiredRetirementIncome * Math.pow(1 + personalInfo.inflationRate, yearsFromRetirement);
-  };
+  // Desired spending in the dollars of the year the household is `age`.
+  // Compounds from the CURRENT age, not the retirement age. Measuring from
+  // retirement made spending equal today's figure AT retirement, understating it
+  // by the whole accumulation phase — 1.03^20 = 1.8x for someone retiring in 20
+  // years — while getOtherIncomeForAge below already inflates income from the
+  // current age. Every strategy here compares those two, so the mismatch made
+  // all of them look far more sustainable than they are.
+  const getDesiredSpending = (age) =>
+    inflateToAge(personalInfo.desiredRetirementIncome, personalInfo.myAge, age, personalInfo.inflationRate);
   
   // Strategy implementations
   const strategies = useMemo(() => {
@@ -6433,7 +6435,7 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
             <div className="text-lg font-bold text-amber-400">{formatCurrency(baseEndProj?.totalPortfolio)}</div>
           </div>
           <div>
-            <div className="text-xs text-slate-500">Spending Goal</div>
+            <div className="text-xs text-slate-500">Spending Goal (today&rsquo;s $)</div>
             <div className="text-lg font-bold text-slate-200">{formatCurrency(personalInfo.desiredRetirementIncome)}/yr</div>
           </div>
           <div>
@@ -8740,32 +8742,57 @@ function CoastFireSection({ accounts, personalInfo, retirementProjection, openIn
     ? scenario.yearsToRetirement
     : Math.max(0, personalInfo.myRetirementAge - personalInfo.myAge);
   
+  // EVERYTHING in this component is in TODAY's dollars, discounted at the REAL
+  // return. The engine's guaranteed-income figure is nominal at the retirement
+  // year, so it has to be deflated before it can be netted against a today's-
+  // dollar spending target. Previously it was subtracted as-is, which understated
+  // the portfolio's job, and the resulting real target was then discounted at the
+  // NOMINAL return — three mixed bases compounding in the same direction.
+  const inflation = personalInfo.inflationRate ?? 0.03;
   const guaranteedAtRetirement = useTestData ? 0 : (retirementProjection?.totalGuaranteedIncome || 0);
-  
-  const spendingFromPortfolio = useTestData && scenario?.annualSpending
+  const guaranteedIncomeToday = useTestData ? 0
+    : deflateToToday(guaranteedAtRetirement, personalInfo.myAge, personalInfo.myRetirementAge, inflation);
+
+  const spendingToday = useTestData && scenario?.annualSpending
     ? scenario.annualSpending
-    : Math.max(0, personalInfo.desiredRetirementIncome - guaranteedAtRetirement);
-  
+    : personalInfo.desiredRetirementIncome;
+
   const weightedCAGR = useTestData && scenario?.returnRate
     ? scenario.returnRate
     : (currentYearData?.weightedCAGR || 0.07);
-  
-  // Core calculations
-  const targetPortfolioAtRetirement = spendingFromPortfolio / 0.04; // 4% rule (25x)
-  const targetPortfolioAt3Pct = spendingFromPortfolio / 0.03; // Conservative 3%
-  const growthFactor = Math.pow(1 + weightedCAGR, yearsToRetirement);
-  const coastFireNumber4Pct = targetPortfolioAtRetirement / growthFactor;
-  const coastFireNumber3Pct = targetPortfolioAt3Pct / growthFactor;
+
+  // Test scenarios are stated as self-contained real figures, so they carry no
+  // inflation of their own; use a zero rate for them to keep the math identical
+  // to what those fixtures expect.
+  const coastInflation = useTestData ? 0 : inflation;
+  const coast4 = coastFire({ spendingToday, guaranteedIncomeToday, yearsToRetirement,
+    nominalReturn: weightedCAGR, inflationRate: coastInflation, withdrawalRate: 0.04 });
+  const coast3 = coastFire({ spendingToday, guaranteedIncomeToday, yearsToRetirement,
+    nominalReturn: weightedCAGR, inflationRate: coastInflation, withdrawalRate: 0.03 });
+
+  const spendingFromPortfolio = coast4.portfolioSpendingToday;
+  const targetPortfolioAtRetirement = coast4.targetToday;
+  const targetPortfolioAt3Pct = coast3.targetToday;
+  // Real growth, matching the discount used inside coastFire.
+  const growthFactor = Math.pow(1 + realReturn(weightedCAGR, coastInflation), yearsToRetirement);
+  const coastFireNumber4Pct = coast4.coastNumberToday;
+  const coastFireNumber3Pct = coast3.coastNumberToday;
   const coastProgress4Pct = coastFireNumber4Pct > 0 ? (currentPortfolio / coastFireNumber4Pct) * 100 : 0;
   const coastProgress3Pct = coastFireNumber3Pct > 0 ? (currentPortfolio / coastFireNumber3Pct) * 100 : 0;
   const reachedCoast4Pct = currentPortfolio >= coastFireNumber4Pct;
+  // Real growth of today's balance, so this stays comparable to targetToday.
   const projectedCoasting = currentPortfolio * growthFactor;
-  const projectedWithContributions = retirementProjection?.totalPortfolio || projectedCoasting;
+  // The engine's at-retirement balance is NOMINAL; deflate it to sit alongside
+  // the real figures above rather than towering over them by the inflation factor.
+  const projectedWithContributions = retirementProjection?.totalPortfolio
+    ? deflateToToday(retirementProjection.totalPortfolio, personalInfo.myAge, personalInfo.myRetirementAge, coastInflation)
+    : projectedCoasting;
   const coastSurplus = projectedCoasting - targetPortfolioAtRetirement;
-  
+
   let earlyRetirementAge = null;
   if (reachedCoast4Pct && !useTestData) {
-    const yearsNeeded = Math.log(targetPortfolioAtRetirement / currentPortfolio) / Math.log(1 + weightedCAGR);
+    // Target is in today's dollars, so the growth that closes the gap is real too.
+    const yearsNeeded = Math.log(targetPortfolioAtRetirement / currentPortfolio) / Math.log(1 + realReturn(weightedCAGR, coastInflation));
     earlyRetirementAge = Math.ceil(personalInfo.myAge + yearsNeeded);
   }
   
@@ -8969,6 +8996,7 @@ function CoastFireSection({ accounts, personalInfo, retirementProjection, openIn
             </div>
             <div className="text-emerald-400">
               = {formatCurrency(targetPortfolioAtRetirement)} ÷ {growthFactor.toFixed(3)} = <strong>{formatCurrency(coastFireNumber4Pct)}</strong>
+              <span className="block text-xs text-slate-500 mt-1">Every figure here is in today&rsquo;s dollars, so the growth factor is the REAL return ({(realReturn(weightedCAGR, coastInflation)*100).toFixed(2)}% = {(weightedCAGR*100).toFixed(1)}% growth net of {(coastInflation*100).toFixed(1)}% inflation), not the nominal one.</span>
             </div>
           </div>
         </div>
@@ -9012,7 +9040,7 @@ function CoastFireSection({ accounts, personalInfo, retirementProjection, openIn
         <div className="border rounded-lg px-4 py-3 bg-sky-500/20 border-sky-500/50">
           <div className="text-slate-400 text-xs mb-0.5">Target at Retirement</div>
           <div className="text-xl font-bold text-sky-400">{formatCurrency(targetPortfolioAtRetirement)}</div>
-          <div className="text-xs text-slate-500">To support {formatCurrency(spendingFromPortfolio)}/yr</div>
+          <div className="text-xs text-slate-500">To support {formatCurrency(spendingFromPortfolio)}/yr &middot; today&rsquo;s $</div>
         </div>
       </div>
       

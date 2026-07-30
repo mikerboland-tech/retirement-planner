@@ -1915,6 +1915,68 @@ const getRmdStartAge = (birthYear) => {
 //
 // The end age is INCLUSIVE (the engine does `myAge <= conversionEndAge`), so
 // rmdStartAge - 1 means "the last full year before RMDs."
+// ── REAL vs NOMINAL DOLLARS ──────────────────────────────────────────────────
+// The engine works in NOMINAL dollars: every projected figure is in the dollars
+// of its own year. User inputs like desiredRetirementIncome are in TODAY's
+// dollars. Mixing the two has been the most repeated bug in this codebase — a
+// today's-dollar spend divided by a future portfolio produced a 6.7% withdrawal
+// rate displayed as 1.5%, and the same shape of error appeared in the Stress
+// Test header, the setup preview, the Monte Carlo percentiles, Coast FIRE and
+// the withdrawal-strategy comparison.
+//
+// These three primitives exist so the conversion is named at every call site
+// instead of being open-coded (and mis-coded) again.
+
+// Growth net of inflation. Note this is the Fisher ratio, not `nominal -
+// inflation`: at 7% and 3% the true real return is 3.88%, not 4%. Small per year,
+// ~2% of the answer over 20 years.
+const realReturn = (nominalReturn, inflationRate) =>
+  ((1 + (nominalReturn || 0)) / (1 + (inflationRate || 0))) - 1;
+
+// Carry a today's-dollar amount forward to the dollars of the year the household
+// is `atAge`. Compounds from `currentAge` — the same epoch computeProjections
+// uses (yearsFromNow = 0 at the current age), which is the detail the withdrawal
+// tab got wrong by compounding from the retirement age instead.
+const inflateToAge = (amountToday, currentAge, atAge, inflationRate) =>
+  (amountToday || 0) * Math.pow(1 + (inflationRate || 0), Math.max(0, (atAge || 0) - (currentAge || 0)));
+
+// Inverse: express a figure from the year the household is `atAge` in today's
+// dollars, so it can be compared with a user input or another deflated figure.
+const deflateToToday = (amountAtAge, currentAge, atAge, inflationRate) =>
+  (amountAtAge || 0) / Math.pow(1 + (inflationRate || 0), Math.max(0, (atAge || 0) - (currentAge || 0)));
+
+// ── COAST FIRE ───────────────────────────────────────────────────────────────
+// The balance you need TODAY for growth alone — no further contributions — to
+// fund retirement. Everything here is in TODAY's dollars, discounted at the REAL
+// return, which is the only internally consistent way to state it and the form a
+// user can actually judge against their current balance.
+//
+// The previous version mixed all three bases at once: it subtracted a nominal
+// at-retirement guaranteed income from a today's-dollar spend, took 25x of the
+// result as a FUTURE portfolio target, then discounted that real target at the
+// NOMINAL return. Each step pushed the answer the same way, so the reported
+// coast number was far too low and the progress bar far too flattering.
+const coastFire = ({
+  spendingToday = 0,
+  guaranteedIncomeToday = 0,
+  yearsToRetirement = 0,
+  nominalReturn = 0.07,
+  inflationRate = 0.03,
+  withdrawalRate = 0.04,
+} = {}) => {
+  const portfolioSpendingToday = Math.max(0, spendingToday - guaranteedIncomeToday);
+  const targetToday = withdrawalRate > 0 ? portfolioSpendingToday / withdrawalRate : 0;
+  const rr = realReturn(nominalReturn, inflationRate);
+  // A real return of exactly -100% would divide by zero; clamp just above it.
+  const growth = Math.pow(1 + Math.max(-0.9999, rr), Math.max(0, yearsToRetirement));
+  return {
+    portfolioSpendingToday,
+    targetToday: Math.round(targetToday),
+    realReturn: rr,
+    coastNumberToday: Math.round(targetToday / growth),
+  };
+};
+
 // ── SETUP ESTIMATES ──────────────────────────────────────────────────────────
 // Benchmarks the Guided Setup uses to fill a number the user doesn't have to
 // hand. The point is to get someone to a working plan instead of losing them at
@@ -4436,6 +4498,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // ── Historical sequences + main projection entry point ────────────────
     HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
     getPlanningHorizonYears,
+    realReturn, inflateToAge, deflateToToday, coastFire,
     SAVINGS_MULTIPLE_BY_AGE, savingsMultipleForAge, TYPICAL_DEFERRAL_RATE,
     TYPICAL_MATCH_RATE, SS_REPLACEMENT_RATE, SS_MAX_ANNUAL_AT_FRA,
     estimateRetirementSavings, estimateAnnualSocialSecurity,
