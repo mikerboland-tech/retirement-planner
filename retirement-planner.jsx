@@ -829,6 +829,10 @@ function FAQTab() {
           a: "Withdrawals follow the priority order you set in Personal Info (under Withdrawal Priority). The default is: Pre-Tax first, then Brokerage & HSA, then Roth. Pre-tax withdrawals are fully taxable, brokerage withdrawals use a 50% cost basis estimate taxed at capital gains rates, and Roth withdrawals are tax-free. You can drag to reorder the priority — for example, drawing from Roth first to keep taxable income low in early retirement."
         },
         {
+          q: "How are expenses dated before I retire handled?",
+          a: "An expense with a date range that starts before your retirement age is on top of your ordinary living costs, which your salary is assumed to cover. So it is funded the way most households actually fund one: first by pausing that year's retirement saving, and then — if the expense is larger than what you were contributing — by withdrawing from the portfolio, grossed up for income tax and for the 10% early withdrawal penalty if you are under 59½. The year-by-year table shows how much saving was paused. Healthcare is deliberately excluded from this: before 65 while you are still working, coverage is normally through your employer and paid from salary, so it is not treated as a portfolio cost. Note the projection does not model your CURRENT spending, so it cannot tell whether you would really cut saving or cut spending — pausing contributions is the assumption, and it is the conservative one for your retirement balance."
+        },
+        {
           q: "What if my portfolio runs out?",
           a: "The projection stops withdrawing once the accounts are empty: the year-by-year table shows the portfolio at $0, the withdrawal drops to what was actually available, and the shortfall — the spending your portfolio could not fund — appears in red under the Portfolio Draw column. Net income falls to whatever guaranteed income (Social Security, pension) still provides. That is a signal to reduce spending, work longer, save more, delay Social Security, or adjust the plan."
         }
@@ -1629,6 +1633,11 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
                 <td className="py-2 px-2 text-right text-cyan-400">{formatCurrency(row.otherIncome)}</td>
                 <td className="py-2 px-2 text-right text-yellow-400">
                   {formatCurrency(row.portfolioWithdrawal)}
+                  {row.contributionsPaused > 0 && (
+                    <div className="text-xs text-sky-300" title="Saving paused this year to pay for an expense dated before retirement">
+                      paused {formatCurrency(row.contributionsPaused)} saving
+                    </div>
+                  )}
                   {row.unfundedShortfall > 0 && (
                     <div className="text-xs text-red-400" title="Spending this year's portfolio could not fund — the plan is short by this much">
                       short {formatCurrency(row.unfundedShortfall)}
@@ -7770,7 +7779,7 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
               <div className="flex justify-between text-xs text-slate-400 px-2">
                 <span>Column: Name | Category | Annual $ | Start Age | → | End Age | Inflation | ✕</span>
                 <span className="text-amber-400 font-medium">
-                  These add to your base retirement spending ({formatCurrency(personalInfo.desiredRetirementIncome)}/yr)
+                  These add to your base retirement spending ({formatCurrency(personalInfo.desiredRetirementIncome)}/yr). Dated before retirement? Paid by pausing saving, then drawing.
                 </span>
               </div>
             </div>
@@ -7779,7 +7788,7 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
           {recurringExpenses.length === 0 && (
             <p className="text-xs text-slate-500 italic">
               No recurring expenses defined. Your retirement spending is based solely on the Desired Retirement Income ({formatCurrency(personalInfo.desiredRetirementIncome)}/yr) above. 
-              Add expenses here for things like car payments (ages 55-60), college tuition (ages 54-58), or travel budgets (ages 65-80).
+              Add expenses here for things like car payments (ages 55-60), college tuition (ages 54-58), or travel budgets (ages 65-80). Expenses dated BEFORE you retire are paid by pausing that year's saving first, then by drawing from the portfolio (with tax, and the 10% penalty if you're under 59½) — so an expense in your working years now reduces the plan, as it should.
             </p>
           )}
         </div>

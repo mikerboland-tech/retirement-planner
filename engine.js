@@ -3127,11 +3127,38 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // pre-tax contribution deduction (which reduces AGI, and therefore the IRS
     // Pub 915 combined-income base) isn't known until contributions are tallied.
 
+    // Determine if we're in retirement based on age (not earned income).
+    // Hoisted above the contributions loop: a dated expense before retirement is
+    // paid by pausing that year's saving, which means the loop below has to know.
+    const isRetired = myAge >= pi.myRetirementAge;
+
+    // ── RECURRING EXPENSES (categorized, with per-item inflation) ───────────────
+    // spendFactor applies the survivor step-down to these household line items,
+    // matching the haircut already applied to desiredIncome above. Computed here,
+    // above the contributions loop, because the pre-retirement funding rule below
+    // needs the total before contributions are committed.
+    const recurringResult = calculateRecurringExpenses(recurringExpensesList, myAge, spouseAge, yearsFromNow, pi.inflationRate, spendFactor);
+    const totalRecurringExpenses = recurringResult.total;
+
+    // ── PRE-RETIREMENT DATED EXPENSES ──────────────────────────────────────────
+    // Before retirement the engine assumes salary covers ordinary living — there
+    // is no current-spending input to net against. But an expense the user
+    // explicitly DATED (tuition at 55, a wedding at 58) is on top of ordinary
+    // living and has to come from somewhere, and previously it came from nowhere:
+    // the projection reported the figure and the portfolio was untouched, so a
+    // $200k pre-retirement expense cost the plan exactly zero.
+    //
+    // Funding order is what households actually do: pause saving first, then draw.
+    // Healthcare is deliberately excluded — pre-65 coverage while working is
+    // employer/salary-funded, so treating it as unfunded is correct there.
+    const preRetirementExpenseNeed = isRetired ? 0 : (totalRecurringExpenses + oneTimeExpenseTotal);
+
     // First pass: add contributions and calculate RMDs (before growth)
     let totalRMD = 0;
     const accountRMDs = {}; // Track RMD per account
     let preTaxContributions = 0; // Track pre-tax (401k/403b/457b/IRA) contributions for tax deduction
     const accountContributions = {}; // Track contribution per account for display
+    const deductibleShareOf = {};    // id -> fraction of the contribution that was deductible
     
     accts.forEach(account => {
       accountContributions[account.id] = 0; // Initialize
@@ -3176,6 +3203,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         const contributorRole = account.contributor || 'me';
         if (isPreTaxAccount(account.type) && adjustedContribution > 0) {
           let deductible = 0;
+          // eslint-disable-next-line no-unused-vars -- captured below for the clawback
           if (account.contributionMode === 'percent') {
             const eePct = account.employeePercent || 0;
             const erPct = account.employerMatchPercent || 0;
@@ -3184,6 +3212,10 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             deductible = adjustedContribution;
           }
           preTaxContributions += deductible;
+          // Remember the deductible share so pausing this contribution can
+          // reverse the deduction proportionally — you cannot deduct money you
+          // did not end up contributing.
+          deductibleShareOf[account.id] = adjustedContribution > 0 ? deductible / adjustedContribution : 0;
         }
       }
       
@@ -3205,6 +3237,33 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       }
     });
     
+    // ── FUND PRE-RETIREMENT DATED EXPENSES: PAUSE SAVING FIRST ─────────────────
+    // Reduce this year's contributions to cover a dated pre-retirement expense
+    // before touching the portfolio, proportionally across every account that was
+    // contributing. Reversing a contribution also reverses its deduction, which
+    // raises taxable income — that is real, and it is why this cannot simply be
+    // netted off the balance.
+    let contributionsPaused = 0;
+    let preRetirementDrawNeed = 0;
+    if (preRetirementExpenseNeed > 0) {
+      const contributingIds = accts.map(a => a.id).filter(id => (accountContributions[id] || 0) > 0);
+      const totalContributed = contributingIds.reduce((sum, id) => sum + accountContributions[id], 0);
+      const toPause = Math.min(preRetirementExpenseNeed, totalContributed);
+      if (toPause > 0 && totalContributed > 0) {
+        contributingIds.forEach(id => {
+          const share = accountContributions[id] / totalContributed;
+          const cut = toPause * share;
+          accountBalances[id] = Math.max(0, accountBalances[id] - cut);
+          accountContributions[id] = Math.round(accountContributions[id] - cut);
+          preTaxContributions -= cut * (deductibleShareOf[id] || 0);
+          contributionsPaused += cut;
+        });
+      }
+      preTaxContributions = Math.max(0, preTaxContributions);
+      // Whatever pausing could not cover has to be withdrawn.
+      preRetirementDrawNeed = Math.max(0, preRetirementExpenseNeed - contributionsPaused);
+    }
+
     // ── PRE-TAX CONTRIBUTION DEDUCTION ──────────────────────────────────────────
     // Pre-tax 401k/403b/457b/IRA contributions are above-the-line deductions that
     // reduce AGI and therefore federal/state taxable income.
@@ -3295,9 +3354,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     let finalTotalTaxableIncome = totalTaxableIncome_adjusted; // Updated inside isRetired block with actual withdrawal income
     let finalTaxableSS_out = taxableSS; // Updated inside isRetired block when withdrawals change SS taxation
     
-    // Determine if we're in retirement based on age (not earned income)
-    // This allows for part-time work during retirement while still supplementing from portfolio
-    const isRetired = myAge >= pi.myRetirementAge;
+    // isRetired is computed above the contributions loop (see there).
     
     // Adjust desired income for one-time events:
     // - Expenses increase what we need to withdraw
@@ -3331,19 +3388,19 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     const baseACAMagi = totalTaxableIncome_adjusted + (totalSocialSecurity - taxableSS);
     const estACANetPremium = acaGrossPremium > 0 ? acaCredit(baseACAMagi).netPremium : 0;
     
-    // ── RECURRING EXPENSES (categorized, with per-item inflation) ───────────────
-    // spendFactor applies the survivor step-down to these household line items,
-    // matching the haircut already applied to desiredIncome above.
-    const recurringResult = calculateRecurringExpenses(recurringExpensesList, myAge, spouseAge, yearsFromNow, pi.inflationRate, spendFactor);
-    const totalRecurringExpenses = recurringResult.total;
+    // recurringResult / totalRecurringExpenses are computed above (see there).
     
     // Adjusted desired income includes: base retirement spending + one-time expenses
     // + healthcare + recurring expense items + estimated ACA net premium (the
     // solver books MAGI-driven premium movement as a delta, like IRMAA)
     const adjustedDesiredIncome = desiredIncome + oneTimeExpenseTotal + healthcareExpense + totalRecurringExpenses + estACANetPremium;
     
-    // If retired, calculate portfolio withdrawal needs to meet desired income
-    if (isRetired) {
+    // Retired: the portfolio funds the whole spending target. Not retired but with
+    // a dated expense left unfunded after pausing contributions: the portfolio
+    // funds that remainder, and nothing else. Both go through one solver so the
+    // gross-up for tax, capital gains, NIIT and the early-withdrawal penalty is
+    // identical in each case.
+    if (isRetired || preRetirementDrawNeed > 0) {
       // Calculate taxes on guaranteed income + any earned income first
       const baseGrossIncome = totalTaxableIncome_adjusted; // Adjusted for pre-tax contributions
       const baseFederalTax = calculateFederalTax(baseGrossIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(baseGrossIncome + preTaxDeduction));
@@ -3366,9 +3423,14 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         estimatedIRMAA = calculateIRMAASurcharge(baseMAGI, effectiveFilingStatus, yearsFromNow, pi.inflationRate, estMedicareEligible).totalSurcharge;
       }
       
-      // How much more do we need after taxes to hit desired income?
-      // Include IRMAA as an additional cost that must be covered
-      const afterTaxGap = Math.max(0, adjustedDesiredIncome + estimatedIRMAA - netCurrentIncome);
+      // How much the portfolio must deliver AFTER tax this year.
+      //  - retired: the whole spending target, less what guaranteed income covers
+      //  - still working: only the dated expense that pausing contributions could
+      //    not absorb. Salary is NOT netted here — it is already spoken for by
+      //    ordinary living, which this engine does not model as a line item.
+      const afterTaxGap = isRetired
+        ? Math.max(0, adjustedDesiredIncome + estimatedIRMAA - netCurrentIncome)
+        : preRetirementDrawNeed;
       
       // Calculate QCD parameters for this year (needed for tax estimation)
       // Note: charitablePercent is declared in outer scope for pre-retirement year access
@@ -3536,9 +3598,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Store actual withdrawal needed for excess RMD calculation
       actualWithdrawalNeeded = withdrawalNeeded;
     } else {
-      // Still pre-retirement - just ensure RMDs are taken if required, no extra withdrawals
+      // Still pre-retirement AND no dated expense needing a draw — take any RMD
+      // that applies and nothing more. (Someone still working past 73/75 can owe
+      // an RMD; the branch above handles the dated-expense case.)
       requestedWithdrawal = totalRMD;
-      actualWithdrawalNeeded = 0; // Pre-retirement, we don't need portfolio withdrawals for spending
+      actualWithdrawalNeeded = 0;
       // Taxes will be calculated after actual withdrawals are made
     }
 
@@ -3570,7 +3634,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
 
     // Step 2: If RETIRED and we need more than RMD, withdraw based on user's priority
     // Pre-retirement, we do NOT withdraw extra even if income < desired spending
-    const additionalRequested = isRetired ? Math.max(0, actualWithdrawalNeeded - totalRMD) : 0;
+    // Pre-retirement this is 0 unless a dated expense went unfunded by pausing
+    // contributions — in which case the solver above sized a real draw for it.
+    const additionalRequested = Math.max(0, actualWithdrawalNeeded - totalRMD);
     let additionalNeeded = additionalRequested;
 
     // Get withdrawal priority (default: pretax, brokerage, roth)
@@ -4379,6 +4445,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       charitableGiving: Math.round(isRetired ? desiredIncome * (charitablePercent / 100) : 0),
       totalIncome: Math.round(earnedIncome + totalGuaranteedIncome + portfolioWithdrawal + conversionTaxWithdrawal),
       // Tax computation intermediate values (for display components to consume)
+      // Contributions NOT made this year because a dated pre-retirement expense
+      // consumed them. > 0 means saving was paused to pay for something.
+      contributionsPaused: Math.round(contributionsPaused),
       preTaxDeduction: Math.round(preTaxDeduction), // Pre-tax retirement contributions (above-the-line deduction)
       nonSSIncome: Math.round(nonSSIncome), // Non-SS income before pre-tax deduction (used for SS taxation display)
       taxableSS: Math.round(finalTaxableSS_out), // Taxable portion of SS benefits (IRS combined income formula)

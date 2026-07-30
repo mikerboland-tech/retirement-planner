@@ -2651,6 +2651,76 @@ section('P20 — inferPiaFromBenefit inverts the claiming adjustment');
   eq(inferPiaFromBenefit(0, 62, birthYear), 0, 'no benefit yields no PIA');
 }
 
+// ── P21 — pre-retirement dated expenses are actually funded ───────────────────
+section('P21 — expenses dated before retirement pause saving, then draw');
+{
+  // Working household: $120k salary, $30k/yr going into the 401(k), retires at 65.
+  const mk = (recurring = [], events = [], over = {}) => {
+    const s = baseScenario({
+      myAge: 50, spouseAge: 50, myBirthYear: TODAY_YEAR - 50, spouseBirthYear: TODAY_YEAR - 50,
+      myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 70,
+      filingStatus: 'single', state: 'Florida', inflationRate: 0,
+      desiredRetirementIncome: 60000, ...over,
+    });
+    s.accts = [{ id: 1, name: '401k', type: '401k', balance: 1000000, contribution: 30000,
+      contributionGrowth: 0, cagr: 0, startAge: 50, stopAge: 65, owner: 'me', contributor: 'me' }];
+    s.streams = [{ id: 1, name: 'Salary', type: 'earned_income', amount: 120000,
+      startAge: 50, endAge: 64, cola: 0, owner: 'me' }];
+    return computeProjections(s.pi, s.accts, s.streams, [], events, recurring, TODAY_YEAR);
+  };
+
+  const at = (p, age) => p.find(r => r.myAge === age);
+  const base = mk();
+
+  // ── Small expense: fully absorbed by pausing contributions ──
+  const small = mk([{ id: 1, name: 'Car', category: 'transportation', amount: 12000,
+    startAge: 55, endAge: 55, inflationRate: 0, owner: 'me' }]);
+  eq(at(small, 55).contributionsPaused, 12000, 'a $12k expense pauses $12k of contributions');
+  eq(at(small, 55).portfolioWithdrawal, 0, 'and needs no withdrawal');
+  lt(at(small, 56).totalPortfolio, at(base, 56).totalPortfolio,
+    'the portfolio is genuinely smaller than with no expense at all');
+  approx(at(base, 56).totalPortfolio - at(small, 56).totalPortfolio, 12000,
+    'by exactly the contributions that were not made', 0.01);
+
+  // ── Large expense: contributions run out, so it draws too ──
+  const large = mk([{ id: 1, name: 'Tuition', category: 'education', amount: 50000,
+    startAge: 55, endAge: 55, inflationRate: 0, owner: 'me' }]);
+  eq(at(large, 55).contributionsPaused, 30000, 'a $50k expense pauses the whole $30k contribution');
+  gt(at(large, 55).portfolioWithdrawal, 20000,
+    'and withdraws the $20k remainder, grossed up for tax and the 10% penalty');
+  // Age 55 with retirement at 65 gets no rule-of-55 relief, so §72(t) applies.
+  gt(at(large, 55).earlyWithdrawalPenalty, 0, 'the pre-59½ penalty is charged on that draw');
+
+  // ── One-time events get the same treatment ──
+  const evt = mk([], [{ id: 1, name: 'Wedding', type: 'expense', age: 55,
+    amount: 200000, owner: 'me', inflationAdjusted: false }]);
+  eq(at(evt, 55).contributionsPaused, 30000, 'a one-time expense also pauses contributions');
+  gt(at(evt, 55).portfolioWithdrawal, 170000, 'and draws the rest');
+  lt(at(evt, 56).totalPortfolio, at(base, 56).totalPortfolio - 190000,
+    'a $200k pre-retirement expense now costs the plan real money');
+
+  // Pausing a deductible contribution raises taxable income — you cannot deduct
+  // what you did not contribute.
+  gt(at(large, 55).federalTax, at(base, 55).federalTax,
+    'lost deduction on the paused contribution increases federal tax');
+
+  // ── Nothing changes where there is no dated pre-retirement expense ──
+  eq(base.every(r => (r.contributionsPaused || 0) === 0), true,
+    'a plan with no pre-retirement expenses pauses nothing');
+  const afterOnly = mk([{ id: 1, name: 'Travel', category: 'travel', amount: 20000,
+    startAge: 66, endAge: 68, inflationRate: 0, owner: 'me' }]);
+  eq(afterOnly.filter(r => r.myAge < 65).every(r => (r.contributionsPaused || 0) === 0), true,
+    'an expense dated after retirement leaves the accumulation phase alone');
+  approx(at(afterOnly, 60).totalPortfolio, at(base, 60).totalPortfolio,
+    'and the pre-retirement portfolio is unchanged', 1e-9);
+
+  // Healthcare deliberately does NOT follow this rule — pre-retirement coverage is
+  // employer/salary, so modelling it as unfunded is correct, not a gap.
+  const hc = mk([], [], { healthcareModel: 'moderate', pre65HealthcareAnnual: 15000 });
+  eq(hc.filter(r => r.myAge < 65).every(r => (r.contributionsPaused || 0) === 0), true,
+    'pre-retirement healthcare does not pause contributions');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
