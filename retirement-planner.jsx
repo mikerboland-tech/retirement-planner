@@ -21,7 +21,7 @@ const {
   calculateAlabamaTax, FICA_SS_RATE, FICA_SS_WAGE_BASE_2025, FICA_MEDICARE_RATE,
   FICA_ADDITIONAL_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_THRESHOLD,
   calculateFICA, RMD_FACTORS, calculateRMD, getRmdStartAge,
-  getDefaultRothConversionWindow, QCD_ANNUAL_LIMIT, QCD_START_AGE, getPlanningHorizonYears,
+  getDefaultRothConversionWindow, QCD_ANNUAL_LIMIT, QCD_START_AGE, getPlanningHorizonYears, checkContributionLimits,
   estimateRetirementSavings, estimateAnnualSocialSecurity, savingsMultipleForAge,
   realReturn, inflateToAge, deflateToToday, coastFire, streamColaYears, streamAmountAtAge,
   inferPiaFromBenefit,
@@ -1191,6 +1191,21 @@ function AssetsTab({ assetTypes, assets, setAssets, setEditingAsset, setShowAsse
   
   return (
     <div className="space-y-6">
+      {limitBreaches.length > 0 && (
+        <div className="p-4 bg-red-500/5 border border-red-500/40 rounded-xl space-y-2">
+          <div className="text-sm font-semibold text-red-300">
+            {limitBreaches.length === 1 ? 'A contribution is over the IRS limit' : 'Some contributions are over IRS limits'}
+          </div>
+          {limitBreaches.map((b, i) => (
+            <p key={i} className="text-xs text-slate-300 leading-relaxed">{b.message}</p>
+          ))}
+          <p className="text-xs text-slate-500 leading-relaxed">
+            The projection uses these numbers exactly as entered — it does not silently cap them —
+            so until this is corrected the plan assumes contributions the IRS would not allow, and
+            every balance downstream is optimistic. Percent-of-salary rows are sized from current salary.
+          </p>
+        </div>
+      )}
       <div className="flex justify-between items-center">
         <div>
           <h3 className="text-xl font-semibold text-slate-100">Non-Liquid Assets</h3>
@@ -1399,6 +1414,21 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
   
   return (
     <div className="space-y-6">
+      {limitBreaches.length > 0 && (
+        <div className="p-4 bg-red-500/5 border border-red-500/40 rounded-xl space-y-2">
+          <div className="text-sm font-semibold text-red-300">
+            {limitBreaches.length === 1 ? 'A contribution is over the IRS limit' : 'Some contributions are over IRS limits'}
+          </div>
+          {limitBreaches.map((b, i) => (
+            <p key={i} className="text-xs text-slate-300 leading-relaxed">{b.message}</p>
+          ))}
+          <p className="text-xs text-slate-500 leading-relaxed">
+            The projection uses these numbers exactly as entered — it does not silently cap them —
+            so until this is corrected the plan assumes contributions the IRS would not allow, and
+            every balance downstream is optimistic. Percent-of-salary rows are sized from current salary.
+          </p>
+        </div>
+      )}
       <div className="flex justify-between items-center">
         <h3 className="text-xl font-semibold text-slate-100">Income Streams</h3>
         <div className="flex items-center gap-2">
@@ -6883,11 +6913,97 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
       }
     }
     
+
+    // ── Retiring before Medicare with healthcare modelling switched off ────────
+    // The single largest silent omission a plan can have. Someone retiring at 60
+    // has five years to cover before Medicare, and for a couple that is six
+    // figures. 'none' zeroes it out, and the pre-65 amount the user already typed
+    // sits there doing nothing — so this points at their OWN number.
+    {
+      const earliestRet = Math.min(info.myRetirementAge || 65,
+        (info.filingStatus === 'married_joint' && info.spouseRetirementAge) ? info.spouseRetirementAge : 999);
+      if (info.healthcareModel === 'none' && earliestRet < 65) {
+        const gapYears = 65 - earliestRet;
+        const people = info.filingStatus === 'married_joint' ? 2 : 1;
+        const perYear = (info.pre65HealthcareAnnual || 0) * people;
+        warnings.push({
+          type: 'no_healthcare_before_medicare',
+          severity: 'warning',
+          message: `You retire at ${earliestRet}, which is ${gapYears} year${gapYears === 1 ? '' : 's'} before Medicare starts at 65 — but healthcare modelling is set to "Not Modeled", so the projection charges $0 for it.`,
+          details: [
+            perYear > 0
+              ? `Your own pre-65 figure is ${formatCurrency(info.pre65HealthcareAnnual)}/person, which for ${people === 2 ? 'two people' : 'one person'} would be about ${formatCurrency(perYear)}/year before medical inflation — currently ignored.`
+              : 'No pre-65 amount is set either, so there is nothing for the projection to use.',
+            'Medicare Part B and Part D premiums ARE still charged from 65 onward, so only the pre-65 gap is missing.',
+          ],
+          action: 'Either switch Healthcare Modeling to Basic/Moderate/Comprehensive so the gap is costed, or make sure your Desired Retirement Income already includes premiums you will pay yourself. Leaving it as-is overstates what the portfolio can support.'
+        });
+      }
+    }
+
+    // ── Planning horizon shorter than a life expectancy ───────────────────────
+    // legacyAge ends the projection. If someone is expected to outlive it, the
+    // plan simply stops modelling their last years.
+    {
+      const legacy = info.legacyAge || 95;
+      const overshoot = [];
+      if ((info.myLifeExpectancy || 0) > legacy) overshoot.push(`yours (${info.myLifeExpectancy})`);
+      if (info.filingStatus === 'married_joint' && (info.spouseLifeExpectancy || 0) > legacy) {
+        overshoot.push(`your spouse's (${info.spouseLifeExpectancy})`);
+      }
+      if (overshoot.length) {
+        warnings.push({
+          type: 'horizon_shorter_than_life_expectancy',
+          severity: 'warning',
+          message: `Your planning horizon ends at age ${legacy}, but a life expectancy you entered is higher: ${overshoot.join(' and ')}.`,
+          details: ['The projection stops at the planning age, so any years beyond it are not modelled at all — including the spending they would need.'],
+          action: `Raise Planning / Legacy Age to at least ${Math.max(info.myLifeExpectancy || 0, info.spouseLifeExpectancy || 0)} so the plan covers the whole time you expect to need it.`
+        });
+      }
+    }
+
+    // ── A pre-tax floor that spending will fight ──────────────────────────────
+    // The floor now holds spending back, but if pre-tax is FIRST in the priority
+    // order the two settings are working against each other every single year.
+    {
+      const floor = info.rothConversionPreTaxFloor || 0;
+      const priority = info.withdrawalPriority || ['pretax', 'brokerage', 'roth'];
+      if (floor > 0 && priority[0] === 'pretax') {
+        warnings.push({
+          type: 'pretax_floor_vs_priority',
+          severity: 'info',
+          message: `You asked to preserve ${formatCurrency(floor)} of pre-tax balance, but your withdrawal order spends pre-tax accounts FIRST.`,
+          details: ['The floor is honoured — spending stops at it and moves on to brokerage or Roth — so the two settings do not conflict outright.'],
+          action: 'If the floor exists to keep QCD capacity at 70+, consider moving pre-tax later in the withdrawal order so the balance grows rather than sitting at the floor.'
+        });
+      }
+    }
+
     return warnings;
   };
   
   // dataWarnings state is in parent RetirementPlanner scope (survives re-renders)
-  
+
+  // Run the checks when the tab opens and whenever the plan materially changes —
+  // not only on Save. Warnings used to be produced solely inside savePersonalInfo,
+  // so a plan that was imported, restored from storage, or built by the wizard
+  // never showed them: the user had to happen to re-save this tab to learn their
+  // plan had a problem. Keyed on a signature of the fields the checks read, so
+  // dismissing a warning sticks until something relevant actually changes.
+  const warningSig = JSON.stringify([
+    personalInfo.myAge, personalInfo.spouseAge, personalInfo.myRetirementAge,
+    personalInfo.spouseRetirementAge, personalInfo.filingStatus, personalInfo.legacyAge,
+    personalInfo.myLifeExpectancy, personalInfo.spouseLifeExpectancy,
+    personalInfo.healthcareModel, personalInfo.pre65HealthcareAnnual,
+    personalInfo.rothConversionPreTaxFloor, personalInfo.withdrawalPriority,
+    accounts.map(a => [a.id, a.type, a.owner, a.stopAge, a.contribution]),
+    incomeStreams.map(s => [s.id, s.type, s.owner, s.endAge, s.amount]),
+  ]);
+  useEffect(() => {
+    setDataWarnings(getDataWarnings(personalInfo));
+  }, [warningSig]);
+
+
   const savePersonalInfo = () => {
     const currentYear = new Date().getFullYear();
     const updates = { ...localInfo };
@@ -7922,7 +8038,7 @@ function employerContribShare(account, amount) {
 // ============================================
 // AccountsTab — Lifted to module scope
 // ============================================
-function AccountsTab({ accountTypes, accounts, contributorTypes, personalInfo, projections, setAccounts, setEditingAccount, setShowAccountModal }) {
+function AccountsTab({ accountTypes, accounts, contributorTypes, incomeStreams, personalInfo, projections, setAccounts, setEditingAccount, setShowAccountModal }) {
   const [acctInfoOpen, setAcctInfoOpen] = useState(null);
   const [showIndividualAccounts, setShowIndividualAccounts] = useState(false);
   const [showIndividualContribs, setShowIndividualContribs] = useState(false);
@@ -7952,6 +8068,16 @@ function AccountsTab({ accountTypes, accounts, contributorTypes, personalInfo, p
     setDirty(false);
   };
   
+  // IRS limits, checked across EVERY account at once. Per-account or per-wizard-slot
+  // checks miss the common case: a deferral split over a traditional 401(k), a Roth
+  // 401(k) and a percent-mode plan, each reasonable alone but together over 402(g).
+  // Runs on the LIVE edited list so it appears as you type, not only after saving.
+  const salariesForLimits = { me: 0, spouse: 0 };
+  (incomeStreams || []).forEach(st => {
+    if (st.type === 'earned_income') salariesForLimits[st.owner === 'spouse' ? 'spouse' : 'me'] += (st.amount || 0);
+  });
+  const limitBreaches = checkContributionLimits(localAccounts, personalInfo, salariesForLimits);
+
   const totalBalance = localAccounts.reduce((sum, a) => sum + a.balance, 0);
   // Savings rate: use projection engine data for current year (same source as the table)
   const currentYearProjection = projections.find(p => p.myAge === personalInfo.myAge);
@@ -7979,6 +8105,21 @@ function AccountsTab({ accountTypes, accounts, contributorTypes, personalInfo, p
   
   return (
     <div className="space-y-6">
+      {limitBreaches.length > 0 && (
+        <div className="p-4 bg-red-500/5 border border-red-500/40 rounded-xl space-y-2">
+          <div className="text-sm font-semibold text-red-300">
+            {limitBreaches.length === 1 ? 'A contribution is over the IRS limit' : 'Some contributions are over IRS limits'}
+          </div>
+          {limitBreaches.map((b, i) => (
+            <p key={i} className="text-xs text-slate-300 leading-relaxed">{b.message}</p>
+          ))}
+          <p className="text-xs text-slate-500 leading-relaxed">
+            The projection uses these numbers exactly as entered — it does not silently cap them —
+            so until this is corrected the plan assumes contributions the IRS would not allow, and
+            every balance downstream is optimistic. Percent-of-salary rows are sized from current salary.
+          </p>
+        </div>
+      )}
       <div className="flex justify-between items-center">
         <h3 className="text-xl font-semibold text-slate-100">Investment Accounts</h3>
         <div className="flex items-center gap-2">
@@ -13489,7 +13630,7 @@ function RetirementPlanner() {
           <div className="max-w-7xl mx-auto">
             {activeTab === 'dashboard' && <DashboardTab accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
             {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
-            {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} contributorTypes={CONTRIBUTOR_TYPES} personalInfo={personalInfo} projections={projections} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
+            {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
             {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={projections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
             {activeTab === 'socialsecurity' && <SocialSecurityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}

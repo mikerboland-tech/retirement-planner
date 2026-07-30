@@ -2721,6 +2721,127 @@ section('P21 — expenses dated before retirement pause saving, then draw');
     'pre-retirement healthcare does not pause contributions');
 }
 
+// ── P22 — the pre-tax floor is honoured by spending draws, not just conversions ─
+section('P22 — Preserve Pre-Tax Floor survives withdrawals, so QCDs keep working');
+{
+  // Retired couple drawing pre-tax FIRST, giving 5% to charity, with a floor set.
+  // The floor exists so an IRA balance survives for QCDs at 70+; before this it
+  // only constrained conversions and spending drained straight through it.
+  const mk = (floor, priority = ['pretax', 'brokerage', 'roth']) => {
+    const s = baseScenario({
+      myAge: 70, spouseAge: 70, myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 70,
+      myRetirementAge: 70, spouseRetirementAge: 70, legacyAge: 85,
+      state: 'Florida', inflationRate: 0, desiredRetirementIncome: 120000,
+      charitableGivingPercent: 5, withdrawalPriority: priority,
+      rothConversionAmount: 0, rothConversionBracket: '', rothConversionPreTaxFloor: floor,
+    });
+    s.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 600000, contribution: 0, contributionGrowth: 0, cagr: 0.04, startAge: 70, stopAge: 70, owner: 'me', contributor: 'me' },
+      { id: 2, name: 'Brokerage', type: 'brokerage', balance: 900000, contribution: 0, contributionGrowth: 0, cagr: 0.04, startAge: 70, stopAge: 70, owner: 'joint', contributor: 'me', costBasisPercent: 0.7 },
+      { id: 3, name: 'Roth', type: 'roth_ira', balance: 900000, contribution: 0, contributionGrowth: 0, cagr: 0.04, startAge: 70, stopAge: 70, owner: 'me', contributor: 'me' },
+    ];
+    s.streams = [{ id: 1, name: 'SS', type: 'social_security', amount: 50000, startAge: 70, endAge: 95, cola: 0, owner: 'me' }];
+    return computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  };
+
+  // With no floor the IRA drains and QCD capacity dies with it (the old behaviour).
+  const noFloor = mk(0);
+  const drained = noFloor.find(r => r.preTaxBalance === 0);
+  gt(drained ? drained.myAge : 999, 0, 'with no floor the pre-tax account does drain to zero');
+
+  // With a $300k floor, VOLUNTARY spending draws must stop at it. RMDs are a
+  // separate matter: they are mandatory, cannot be held back, and once the balance
+  // is sitting at the floor an RMD slightly larger than that year's growth erodes
+  // it a little each year. So the invariant is "never drained", not "never moves".
+  const withFloor = mk(300000);
+  const withMoneyLeft = withFloor.filter(r => (r.brokerageBalance + r.rothBalance) > 50000);
+  eq(withMoneyLeft.every(r => r.preTaxBalance > 0), true,
+    'the pre-tax account is never drained to zero while other money remains');
+  eq(withMoneyLeft.every(r => r.preTaxBalance > 300000 * 0.85), true,
+    'and stays close to the floor — only RMDs erode it, gradually');
+  // Contrast with no floor, where spending drains it outright.
+  lt(Math.min(...noFloor.map(r => r.preTaxBalance)), 1,
+    'without a floor the same plan empties the pre-tax account completely');
+
+  // And the point of the floor: QCDs keep working for the whole plan.
+  const wantedButNoQcd = withFloor.filter(r => r.myAge >= 70 && r.charitableGiving > 0 && r.qcd === 0
+    && (r.brokerageBalance + r.rothBalance) > 50000);
+  eq(wantedButNoQcd.length, 0, 'charity is still funded by QCD in every year with money left');
+
+  // The floor must be SOFT: when nothing else is left it has to yield rather than
+  // manufacture a shortfall the household does not actually have.
+  const tight = mk(300000);
+  const lastYears = tight.filter(r => (r.brokerageBalance + r.rothBalance) <= 1000 && r.preTaxBalance > 0);
+  eq(lastYears.every(r => (r.unfundedShortfall || 0) === 0), true,
+    'once other accounts are gone the floor yields instead of faking a shortfall');
+
+  // Non-regression: a plan with no floor set behaves exactly as before.
+  eq(noFloor.every(r => Number.isFinite(r.totalPortfolio)), true, 'no-floor plan still projects cleanly');
+  // And the floor is inert when pre-tax is drawn last anyway.
+  const rothFirst = mk(300000, ['roth', 'brokerage', 'pretax']);
+  eq(rothFirst.every(r => Number.isFinite(r.preTaxBalance)), true, 'floor with pretax-last is harmless');
+}
+
+// ── P23 — plan-wide contribution limit check ──────────────────────────────────
+section('P23 — contribution limits checked across EVERY account, not per slot');
+{
+  const { checkContributionLimits } = engine;
+  const salaries = { me: 200000, spouse: 70000 };
+
+  // The real case this was written for: an elective deferral spread over three
+  // accounts, each individually reasonable, together over the 402(g) limit. A
+  // per-account or per-wizard-slot check cannot see this.
+  const spread = [
+    { id: 1, name: 'My 401(k)', type: '401k', contribution: 24500, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'My Roth 401(k)', type: 'roth_401k', contribution: 8000, owner: 'me', contributor: 'me' },
+    { id: 3, name: 'ESOP', type: '401k', contribution: 0, owner: 'me', contributor: 'employer',
+      contributionMode: 'percent', employeePercent: 0.03, employerMatchPercent: 0.15 },
+  ];
+  const w = checkContributionLimits(spread, { myAge: 53, spouseAge: 51, filingStatus: 'married_joint' }, salaries);
+  gt(w.length, 0, 'the spread-across-accounts overage is caught');
+  eq(w.some(m => /elective.deferral/i.test(m.message)), true, 'and named as an elective-deferral breach');
+  eq(w[0].owner, 'me', 'attributed to the right person');
+  // 24,500 + 8,000 + (3% of 200k = 6,000) = 38,500 against 24,500 + 8,000 = 32,500.
+  approx(w[0].amount, 38500, 'totals traditional + Roth + the percent-mode employee slice', 0.001);
+  approx(w[0].limit, 32500, 'against the age-53 limit including the catch-up', 0.001);
+
+  // Roth 401(k) shares the limit with traditional — a common misunderstanding.
+  const rothOnly = [{ id: 1, name: 'Roth 401k', type: 'roth_401k', contribution: 40000, owner: 'me', contributor: 'me' }];
+  gt(checkContributionLimits(rothOnly, { myAge: 53, spouseAge: 51, filingStatus: 'married_joint' }, salaries).length, 0,
+    'a Roth-only over-contribution is still a 402(g) breach');
+
+  // Each spouse has their own limit; one person's overage must not implicate the other.
+  const perPerson = [
+    { id: 1, name: 'Mine', type: '401k', contribution: 32500, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Theirs', type: '401k', contribution: 32500, owner: 'spouse', contributor: 'spouse' },
+  ];
+  eq(checkContributionLimits(perPerson, { myAge: 53, spouseAge: 51, filingStatus: 'married_joint' }, salaries).length, 0,
+    'two people each at their own limit is fine');
+
+  // Employer money counts only toward the combined 415(c) limit, not 402(g).
+  const bigMatch = [
+    { id: 1, name: 'Mine', type: '401k', contribution: 24500, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Match', type: '401k', contribution: 60000, owner: 'me', contributor: 'employer' },
+  ];
+  const bm = checkContributionLimits(bigMatch, { myAge: 53, spouseAge: 51, filingStatus: 'married_joint' }, salaries);
+  eq(bm.some(m => /combined/i.test(m.message)), true, 'a large employer match trips the combined limit');
+  eq(bm.some(m => /elective.deferral/i.test(m.message)), false, 'but not the elective-deferral limit');
+
+  // IRA limits are separate from workplace plans.
+  const iras = [{ id: 1, name: 'Roth IRA', type: 'roth_ira', contribution: 20000, owner: 'me', contributor: 'me' }];
+  gt(checkContributionLimits(iras, { myAge: 53, spouseAge: 51, filingStatus: 'married_joint' }, salaries).length, 0,
+    'an over-funded IRA is flagged on its own limit');
+
+  // A clean plan produces nothing.
+  const clean = [
+    { id: 1, name: 'My 401(k)', type: '401k', contribution: 24000, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Roth IRA', type: 'roth_ira', contribution: 7000, owner: 'me', contributor: 'me' },
+    { id: 3, name: 'Brokerage', type: 'brokerage', contribution: 50000, owner: 'me', contributor: 'me' },
+  ];
+  eq(checkContributionLimits(clean, { myAge: 53, spouseAge: 51, filingStatus: 'married_joint' }, salaries).length, 0,
+    'a compliant plan is silent, and a brokerage has no limit at all');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

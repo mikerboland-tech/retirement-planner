@@ -1962,6 +1962,103 @@ const streamAmountAtAge = (stream, ownerAge, yearsFromNow) => {
   return (stream.amount || 0) * Math.pow(1 + (stream.cola || 0), streamColaYears(stream, ownerAge, yearsFromNow));
 };
 
+// ── CONTRIBUTION LIMITS ──────────────────────────────────────────────────────
+// 2026 IRS limits. Sources: Notice 2025-67 / IR-2025-111 for retirement plans,
+// Rev. Proc. 2025-19 for the HSA.
+//   402(g) elective deferral   $24,500  — shared across traditional AND Roth
+//                                         401(k)/403(b)/457(b) for one person
+//   415(c) annual additions    $72,000  — employee + employer, per employer plan
+//   age-50 catch-up            $8,000
+//   ages 60-63 super catch-up  $11,250  (SECURE 2.0; replaces the age-50 amount)
+//   IRA (traditional + Roth)   $7,500 + $1,100 catch-up at 50+
+//   HSA                        $4,400 self / $8,750 family + $1,000 at 55+
+const LIMIT_402G = 24500;
+const LIMIT_415C = 72000;
+const LIMIT_CATCHUP_50 = 8000;
+const LIMIT_CATCHUP_60_63 = 11250;
+const LIMIT_IRA = 7500;
+const LIMIT_IRA_CATCHUP = 1100;
+const LIMIT_HSA_SELF = 4400;
+const LIMIT_HSA_FAMILY = 8750;
+const LIMIT_HSA_CATCHUP_55 = 1000;
+
+const workplaceCatchUp = (age) => age >= 60 && age <= 63 ? LIMIT_CATCHUP_60_63 : (age >= 50 ? LIMIT_CATCHUP_50 : 0);
+
+// Types that share one person's 402(g) elective-deferral limit.
+const DEFERRAL_TYPES = new Set(['401k', '403b', '457b', 'roth_401k', 'roth_403b', 'roth_457b']);
+const IRA_TYPES = new Set(['traditional_ira', 'roth_ira']);
+
+// Check a WHOLE account list against the per-person limits and return an array of
+// { owner, kind, amount, limit, message }.
+//
+// This is plan-wide on purpose. The wizard's original check looked at its own
+// fixed slots one person at a time, so a deferral spread across three accounts —
+// a traditional 401(k), a Roth 401(k), and a percent-mode ESOP added later on the
+// Accounts tab — could each look reasonable while together breaching 402(g). That
+// is a real configuration, and nothing in the app caught it.
+//
+// salaries: { me, spouse } current earned income, needed to size percent-mode
+// contributions. Percent-mode rows are skipped when the relevant salary is 0,
+// since their dollar amount cannot be known.
+const checkContributionLimits = (accounts, pi, salaries = {}) => {
+  const out = [];
+  if (!accounts || !accounts.length) return out;
+  const owners = ['me', 'spouse'];
+  const ageOf = (o) => o === 'spouse' ? (pi.spouseAge || 0) : (pi.myAge || 0);
+  const salaryOf = (o) => (o === 'spouse' ? salaries.spouse : salaries.me) || 0;
+
+  // Dollar contribution for a row, split into the employee and employer slices.
+  const split = (a) => {
+    if (a.contributionMode === 'percent') {
+      const sal = salaryOf(a.owner === 'spouse' ? 'spouse' : 'me');
+      if (sal <= 0) return null; // unknowable without a salary
+      return {
+        employee: sal * (a.employeePercent || 0),
+        employer: sal * (a.employerMatchPercent || 0),
+      };
+    }
+    const amt = a.contribution || 0;
+    // 'employer' rows are all employer money; 'both' lumps the two together and
+    // cannot be split, so it is counted as employee (the conservative reading for
+    // a deferral check).
+    return (a.contributor === 'employer') ? { employee: 0, employer: amt } : { employee: amt, employer: 0 };
+  };
+
+  for (const owner of owners) {
+    if (owner === 'spouse' && pi.filingStatus !== 'married_joint' && pi.filingStatus !== 'married_separate') continue;
+    const mine = accounts.filter(a => (a.owner === 'spouse' ? 'spouse' : 'me') === owner);
+    if (!mine.length) continue;
+    const age = ageOf(owner);
+    const who = owner === 'spouse' ? "Spouse's" : 'Your';
+
+    let deferral = 0, additions = 0, ira = 0, hsa = 0;
+    for (const a of mine) {
+      const s = split(a);
+      if (!s) continue;
+      if (DEFERRAL_TYPES.has(a.type)) { deferral += s.employee; additions += s.employee + s.employer; }
+      else if (IRA_TYPES.has(a.type)) ira += s.employee;
+      else if (a.type === 'hsa') hsa += s.employee + s.employer;
+    }
+
+    const cu = workplaceCatchUp(age);
+    const deferralCap = LIMIT_402G + cu;
+    const additionsCap = LIMIT_415C + cu;
+    const note = cu > 0 ? ` (including the $${cu.toLocaleString()} age-${age >= 60 && age <= 63 ? '60–63 super' : '50'} catch-up)` : '';
+
+    if (deferral > deferralCap + 1) out.push({ owner, kind: 'deferral', amount: deferral, limit: deferralCap,
+      message: `${who} 401(k)/403(b)/457(b) contributions total $${Math.round(deferral).toLocaleString()}/yr, above the $${deferralCap.toLocaleString()} IRS elective-deferral limit${note}. Traditional and Roth share this one limit.` });
+    if (additions > additionsCap + 1) out.push({ owner, kind: 'additions', amount: additions, limit: additionsCap,
+      message: `${who} combined employee + employer workplace contributions total $${Math.round(additions).toLocaleString()}/yr, above the $${additionsCap.toLocaleString()} IRS annual-additions limit${note}.` });
+    const iraCap = LIMIT_IRA + (age >= 50 ? LIMIT_IRA_CATCHUP : 0);
+    if (ira > iraCap + 1) out.push({ owner, kind: 'ira', amount: ira, limit: iraCap,
+      message: `${who} IRA contributions total $${Math.round(ira).toLocaleString()}/yr, above the $${iraCap.toLocaleString()} limit. Traditional and Roth IRAs share it.` });
+    const hsaCap = (pi.filingStatus === 'married_joint' ? LIMIT_HSA_FAMILY : LIMIT_HSA_SELF) + (age >= 55 ? LIMIT_HSA_CATCHUP_55 : 0);
+    if (hsa > hsaCap + 1) out.push({ owner, kind: 'hsa', amount: hsa, limit: hsaCap,
+      message: `${who} HSA contributions total $${Math.round(hsa).toLocaleString()}/yr, above the $${hsaCap.toLocaleString()} limit.` });
+  }
+  return out;
+};
+
 // ── REAL vs NOMINAL DOLLARS ──────────────────────────────────────────────────
 // The engine works in NOMINAL dollars: every projected figure is in the dollars
 // of its own year. User inputs like desiredRetirementIncome are in TODAY's
@@ -3676,12 +3773,38 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     let brokerageBasisRecovered = 0;
     // HSA withdrawals for qualified medical expenses are tax-free (not tracked for tax)
     
+    // ── PRESERVE PRE-TAX FLOOR ────────────────────────────────────────────────
+    // pi.rothConversionPreTaxFloor is labelled "Preserve Pre-Tax Floor" and the
+    // app SUGGESTS a value sized from lifetime QCD giving plus low-bracket room.
+    // It used to constrain conversions only, so with a pretax-first withdrawal
+    // order spending drained straight through it — the balance the user asked to
+    // preserve hit zero and QCDs (which need a live IRA at 70+) stopped working
+    // for the rest of the plan. The floor now also holds back spending draws.
+    //
+    // It is deliberately SOFT: honoured while other categories can still fund the
+    // year, abandoned when they cannot. A hard floor would invent an unfunded
+    // shortfall for a household that actually has the money, just in the wrong
+    // bucket. RMDs are never held back — they are mandatory regardless.
+    const preTaxFloorToday = pi.rothConversionPreTaxFloor || 0;
+    const preTaxFloorAdj = preTaxFloorToday > 0 ? preTaxFloorToday * inflationFactor : 0;
+    const totalPreTaxNow = () => accts.reduce((sum, a) =>
+      sum + (isPreTaxAccount(a.type) ? (accountBalances[a.id] || 0) : 0), 0);
+    // How much pre-tax may still be drawn this pass before touching the floor.
+    const preTaxDrawAllowance = (respectFloor) =>
+      respectFloor && preTaxFloorAdj > 0 ? Math.max(0, totalPreTaxNow() - preTaxFloorAdj) : Infinity;
+
+    // Pass 1 honours the floor; pass 2 only runs if pass 1 left the year short.
+    for (const respectFloor of [true, false]) {
+      if (additionalNeeded <= 0) break;
+      if (!respectFloor && preTaxFloorAdj <= 0) break; // no floor -> nothing to retry
     for (const category of priority) {
       if (additionalNeeded <= 0) break;
       const categoryAccountTypes = getAccountTypes(category);
       accts.forEach(account => {
         if (categoryAccountTypes.includes(account.type) && additionalNeeded > 0) {
-          const withdrawal = Math.min(accountBalances[account.id], additionalNeeded);
+          const cap = isPreTaxAccount(account.type) ? preTaxDrawAllowance(respectFloor) : Infinity;
+          const withdrawal = Math.min(accountBalances[account.id], additionalNeeded, cap);
+          if (withdrawal <= 0) return;
           accountBalances[account.id] -= withdrawal;
           additionalNeeded -= withdrawal;
           
@@ -3716,6 +3839,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         brokerageCapitalGains += poolWithdrawal * 0.20;
       }
     }
+    } // end floor pass
 
     // ── WHAT THE PORTFOLIO ACTUALLY DELIVERED ──────────────────────────────────
     // The solver sizes `requestedWithdrawal` from the spending target alone; it
@@ -4440,6 +4564,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Qualified dividends thrown off by taxable accounts this year. Taxable
       // whether or not anything was sold; included in taxableIncome and magi.
       brokerageDividends: Math.round(brokerageDividends),
+      // Realized long-term gains booked this year (brokerage draws x (1 - basis)).
+      // Exposed because without it the federal tax on a row cannot be reconciled:
+      // preferential income is taxed at 0/15/20%, and dividends alone don't
+      // account for it once a taxable account is being drawn down.
+      realizedCapitalGains: Math.round(Math.max(0, brokerageCapitalGains - brokerageDividends)),
       rothConversion: Math.round(rothConversionThisYear), // Planned Roth conversion executed this year
       conversionTaxWithdrawal: Math.round(conversionTaxWithdrawal), // Extra portfolio draw that paid the conversion's tax bill
       charitableGiving: Math.round(isRetired ? desiredIncome * (charitablePercent / 100) : 0),
@@ -4603,6 +4732,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
     getPlanningHorizonYears,
     realReturn, inflateToAge, deflateToToday, coastFire,
+    LIMIT_402G, LIMIT_415C, LIMIT_IRA, LIMIT_HSA_SELF, LIMIT_HSA_FAMILY,
+    DEFERRAL_TYPES, IRA_TYPES, workplaceCatchUp, checkContributionLimits,
     streamColaYears, streamAmountAtAge,
     SAVINGS_MULTIPLE_BY_AGE, savingsMultipleForAge, TYPICAL_DEFERRAL_RATE,
     TYPICAL_MATCH_RATE, SS_REPLACEMENT_RATE, SS_MAX_ANNUAL_AT_FRA,
