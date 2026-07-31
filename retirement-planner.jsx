@@ -6291,6 +6291,12 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
       steps: [-0.01, -0.005, 0, 0.005, 0.01],
       formatStep: (base, delta) => `${((base + delta) * 100).toFixed(1)}%`,
       formatDelta: (delta) => `${delta > 0 ? '+' : ''}${(delta * 100).toFixed(1)}%`,
+      // This is the one lever that moves the deflator itself, so each scenario has
+      // to be discounted at its OWN rate. Reporting these rows in nominal dollars
+      // understated this lever by 2.4x: +1% inflation showed as -19% of ending
+      // portfolio when the real purchasing-power loss is -44%, and the tornado
+      // chart ranked inflation well below where it belongs as a result.
+      scenarioInflation: (delta) => Math.max(0, personalInfo.inflationRate + delta),
       apply: (delta) => {
         const modifiedPI = { ...personalInfo, inflationRate: Math.max(0, personalInfo.inflationRate + delta) };
         return computeProjections(modifiedPI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
@@ -6338,7 +6344,7 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
       baseLabel: 'Current total',
       // Percent-mode accounts keep their rate in employeePercent, so their dollar
       // contribution has to be derived from the owner's salary — otherwise a saver
-      // who deferred by percentage showed a /usr/bin/bash base and this whole lever did nothing.
+      // who deferred by percentage showed a $0 base and this whole lever did nothing.
       baseValue: accounts.reduce((sum, a) => sum + annualContributionOf(a), 0),
       steps: [-80000, -60000, -40000, -20000, 0, 20000, 40000, 60000, 80000],
       formatStep: (base, delta) => formatCurrency(base + delta),
@@ -6453,25 +6459,38 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
           const atEnd = proj.find(p => p.myAge === endAge);
           const failureAge = proj.find(p => p.myAge >= scenarioRetAge && p.totalPortfolio <= 0);
           
-          // Calculate lifetime taxes over the full projection (not just post-retirement)
-          // This captures how retirement age shifts affect total tax burden
-          const lifetimeTax = proj.reduce((sum, p) => sum + (p.totalTax || 0), 0);
+          // Every figure below is reported in TODAY's dollars. The engine returns
+          // nominal amounts, and comparing nominal balances across scenarios is
+          // only valid while the deflator is held constant — which is exactly
+          // what the inflation lever breaks. Each scenario is therefore discounted
+          // at its own rate (scenarioInflation), falling back to the plan's rate.
+          const scenInflation = variable.scenarioInflation
+            ? variable.scenarioInflation(step)
+            : (personalInfo.inflationRate || 0);
+          const toToday = (amt, atAge) =>
+            deflateToToday(amt, personalInfo.myAge, atAge, scenInflation);
+
+          // Lifetime totals discount each year before summing. Adding nominal
+          // dollars from age 47 and age 85 together is not a meaningful quantity,
+          // and it inflated the later (larger, more-discounted) years the most.
+          const lifetimeTax = proj.reduce((sum, p) => sum + toToday(p.totalTax || 0, p.myAge), 0);
           const lifetimeWithdrawals = proj.filter(p => p.myAge >= scenarioRetAge)
-            .reduce((sum, p) => sum + (p.portfolioWithdrawal || 0), 0);
-          
+            .reduce((sum, p) => sum + toToday(p.portfolioWithdrawal || 0, p.myAge), 0);
+
           return {
             delta,
             step,
             label: variable.formatStep(variable.baseValue, step),
             deltaLabel: variable.formatDelta(step),
             isBase,
-            portfolioAtRetirement: atRetirement?.totalPortfolio || 0,
-            portfolioAtEnd: atEnd?.totalPortfolio || 0,
+            scenarioInflation: scenInflation,
+            portfolioAtRetirement: toToday(atRetirement?.totalPortfolio || 0, scenarioRetAge),
+            portfolioAtEnd: toToday(atEnd?.totalPortfolio || 0, endAge),
             survives: !failureAge,
             failureAge: failureAge?.myAge || null,
             lifetimeTax,
             lifetimeWithdrawals,
-            netIncomeAtRetirement: atRetirement?.netIncome || 0
+            netIncomeAtRetirement: toToday(atRetirement?.netIncome || 0, scenarioRetAge)
           };
         });
         
@@ -6573,7 +6592,7 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
           {/* Tornado chart: which variables matter most */}
           <div className={cardStyle}>
             <h4 className="text-lg font-semibold text-slate-200 mb-2">Impact Ranking: Which Variables Matter Most?</h4>
-            <p className="text-xs text-slate-500 mb-4">Shows the range of ending portfolio values when each variable is adjusted to its minimum and maximum test values. Wider bars = your plan is more sensitive to that variable.</p>
+            <p className="text-xs text-slate-500 mb-4">Shows the range of ending portfolio values, in today's dollars, when each variable is adjusted to its minimum and maximum test values. Wider bars = your plan is more sensitive to that variable.</p>
             
             {(() => {
               // Build tornado data: for each variable, get the min and max portfolio-at-end
@@ -6652,7 +6671,7 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
             <div key={variable.id} className={cardStyle}>
               <h4 className="text-lg font-semibold text-slate-200 mb-1">{variable.label}</h4>
               <p className="text-xs text-slate-500 mb-3">
-                Base: {variable.formatStep(variable.baseValue, 0)}
+                Base: {variable.formatStep(variable.baseValue, 0)} · all dollar figures in today's dollars
               </p>
               
               <div className="overflow-x-auto">
@@ -7011,8 +7030,8 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
           type: 'roth_conversion_no_destination',
           severity: 'warning',
           message: 'You have Roth conversions configured, but there is no Roth account for the money to go into — so no conversion is happening.',
-          details: ['The projection moves money from your largest pre-tax account into your largest Roth account. With no Roth account it converts /usr/bin/bash every year, silently.'],
-          action: 'Add a Roth IRA or Roth 401(k) on the Accounts tab (a /usr/bin/bash balance is fine) and the conversions will start running.'
+          details: ['The projection moves money from your largest pre-tax account into your largest Roth account. With no Roth account it converts $0 every year, silently.'],
+          action: 'Add a Roth IRA or Roth 401(k) on the Accounts tab (a $0 balance is fine) and the conversions will start running.'
         });
       }
     }

@@ -18,7 +18,8 @@ const { computeProjections, calculateFederalTax, calculateStateTax, calculateSoc
         SS_FULL_RETIREMENT_AGE, SS_EARNINGS_TEST_LIMIT_2025,
         ALABAMA_TAX_BRACKETS,
         PRE_TAX_TYPES, ROTH_TYPES, BROKERAGE_TYPES, HSA_TYPES,
-        isPreTaxAccount, isRothAccount, isBrokerageAccount, isHSAAccount } = engine;
+        isPreTaxAccount, isRothAccount, isBrokerageAccount, isHSAAccount,
+        realReturn, inflateToAge, deflateToToday, coastFire } = engine;
 const IS_MOBILE = false; // single shared engine — no desktop/mobile split
 
 const TODAY_YEAR = new Date().getFullYear();
@@ -3185,6 +3186,54 @@ section('P27 — ordinary taxable income is recoverable from a projection row');
   const brokenOrdinary = Math.max(0, r.taxableIncome - brokenPreferential - r.federalDeduction);
   lt(brokenOrdinary, 100800, 'the old derivation really did place this year in the 12% band');
   gt(ordinaryTaxable - brokenOrdinary, 150000, 'so the two differ by roughly the conversion');
+}
+
+section('P28 — the Sensitivity inflation lever must be judged in real dollars');
+{
+  // Every other lever in that tab leaves the deflator alone, so nominal balances
+  // are comparable between its scenarios. The inflation lever moves the deflator
+  // ITSELF, which makes a nominal comparison meaningless: the high-inflation
+  // scenario reports its (smaller) portfolio in (cheaper) dollars, so the two
+  // errors partly cancel and the lever looks far milder than it is. On the real
+  // plan this understated the lever 2.4x and pushed inflation down the tornado
+  // ranking. Each scenario has to be discounted at ITS OWN rate.
+  const build = (inflationRate) => {
+    const s = baseScenario({
+      myAge: 50, spouseAge: 50, myBirthYear: TODAY_YEAR - 50, spouseBirthYear: TODAY_YEAR - 50,
+      myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 85,
+      state: 'Florida', inflationRate, desiredRetirementIncome: 100000,
+    });
+    s.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 2000000, contribution: 0, contributionGrowth: 0, cagr: 0.06, startAge: 50, stopAge: 65, owner: 'me', contributor: 'me' },
+    ];
+    s.streams = [];
+    return computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  };
+  const AGE_NOW = 50, AGE_END = 85;
+  const endOf = (proj) => (proj.find(p => p.myAge === AGE_END) || {}).totalPortfolio || 0;
+
+  const lowNom = endOf(build(0.02));
+  const highNom = endOf(build(0.04));
+  gt(lowNom, highNom, 'higher inflation leaves a smaller nominal portfolio');
+
+  // Deflate each at its own rate — this is what the tab now reports.
+  const lowReal = deflateToToday(lowNom, AGE_NOW, AGE_END, 0.02);
+  const highReal = deflateToToday(highNom, AGE_NOW, AGE_END, 0.04);
+  gt(lowReal, highReal, 'and a smaller real one');
+
+  const nominalGap = 1 - highNom / lowNom;
+  const realGap = 1 - highReal / lowReal;
+  gt(realGap, nominalGap * 1.5,
+    'the real gap is far wider than the nominal gap — the nominal view hides most of the lever');
+
+  // The specific mistake: discounting BOTH scenarios at the plan's base rate.
+  // That is still wrong, because the high-inflation run was never in base-rate
+  // dollars to begin with; it collapses back to the nominal ordering.
+  const wrongHigh = deflateToToday(highNom, AGE_NOW, AGE_END, 0.02);
+  const wrongGap = 1 - wrongHigh / lowReal;
+  eq(wrongGap, nominalGap,
+    'using one shared deflator is just the nominal comparison rescaled — no better', 1e-9);
+  gt(realGap, wrongGap, 'only a per-scenario deflator shows the lever’s true size');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
