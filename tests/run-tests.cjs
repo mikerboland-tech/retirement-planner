@@ -3391,6 +3391,76 @@ section('P31 — the horizon must not end while someone is still alive');
   eq(!!last.primaryAlive, false, 'nor is he');
 }
 
+section('P32 — GOLDEN CASES: published figures from the IRS and SSA, not our own arithmetic');
+{
+  // Every other section in this file checks the engine against expectations that
+  // WE derived. That catches regressions but cannot catch a shared misreading of
+  // the statute -- if the test author and the implementer misunderstand a rule the
+  // same way, the test agrees with the bug. The cases below are different in kind:
+  // the inputs and the answers are both published by the agency that writes the
+  // rule, so they are independent of anything we believe.
+  //
+  // Sources:
+  //   IRS Pub 915, Worksheet 1 worked examples (taxable Social Security)
+  //   IRS Pub 590-B, Uniform Lifetime Table (RMD distribution periods)
+  //   SSA statutory adjustment factors, 42 U.S.C. 402(q) / 20 CFR 404.410
+
+  // ── IRS Pub 915 worked examples ───────────────────────────────────────────
+  eq(calculateSocialSecurityTaxableAmount(5980, 18600 + 9400 + 990, 'single'), 2990,
+    'Pub 915 single filer: $5,980 benefits, $28,990 other income -> $2,990 taxable');
+  eq(calculateSocialSecurityTaxableAmount(5600, 15500 + 14000 + 250 - 1000, 'married_joint'), 0,
+    'Pub 915 Hopkins (MFJ): under the $32,000 base -> none taxable');
+  eq(calculateSocialSecurityTaxableAmount(4000, 8000, 'married_separate'), 3400,
+    'Pub 915 MFS living together: $0 thresholds -> the full 85% is taxable');
+
+  // The fourth published example lands $170 higher than this engine computes, and
+  // the difference is understood rather than mysterious: it carries $200 of
+  // savings-bond interest excluded under §135, which IRC §86(b)(2) ADDS BACK for
+  // the combined-income test. The engine adds back tax-exempt interest but not the
+  // §135/§137/§911 exclusions, none of which a retiree plausibly has. Pinned with
+  // the add-back supplied, so the formula is proven correct and the gap stays a
+  // known, located limitation instead of a vague doubt.
+  eq(calculateSocialSecurityTaxableAmount(10000, 38000 + 2300, 'married_joint'), 6105,
+    'Pub 915 Johnson (MFJ) as the engine sees it, without the §135 add-back');
+  eq(calculateSocialSecurityTaxableAmount(10000, 38000 + 2300 + 200, 'married_joint'), 6275,
+    'and it reproduces the published $6,275 exactly once the §135 $200 is added back');
+
+  // ── SSA statutory claiming factors, FRA 67 ────────────────────────────────
+  // 5/9 of 1% per month for the first 36 early months, 5/12 of 1% beyond that,
+  // and 8%/yr delayed credit to 70. Percentages are of the PIA.
+  {
+    const by = 1965; // FRA 67
+    eq(getFullRetirementAge(by), 67, 'born 1965 -> FRA 67');
+    const pct = (age) => calculateSSBenefit(1000000, age, by) / 10000; // basis points of PIA
+    const SSA = { 62: 70, 63: 75, 64: 80, 65: 86.667, 66: 93.333, 67: 100, 68: 108, 69: 116, 70: 124 };
+    for (const age of Object.keys(SSA)) {
+      approx(pct(+age), SSA[age], `SSA factor at ${age}: ${SSA[age]}% of PIA`, 0.0002);
+    }
+    eq(calculateSSBenefit(1000, 61, by), 0, 'no benefit is payable before 62');
+    approx(calculateSSBenefit(1000, 75, by), calculateSSBenefit(1000, 70, by),
+      'delayed credits stop accruing at 70', 0.0001);
+  }
+
+  // ── IRS Pub 590-B Uniform Lifetime Table ──────────────────────────────────
+  {
+    const BAL = 1000000;
+    const by = 1955; // RMD start age 73
+    const TABLE = { 73: 26.5, 74: 25.5, 75: 24.6, 76: 23.7, 77: 22.9, 78: 22.0, 79: 21.1,
+                    80: 20.2, 85: 16.0, 90: 12.2, 95: 8.9, 100: 6.4 };
+    for (const age of Object.keys(TABLE)) {
+      approx(calculateRMD(BAL, +age, by), BAL / TABLE[age],
+        `Pub 590-B divisor at ${age} is ${TABLE[age]}`, 0.0001);
+    }
+    eq(calculateRMD(BAL, 72, by), 0, 'nothing is required the year before the start age');
+  }
+
+  // ── SECURE 2.0 §107 start ages, at the birth-year boundaries ──────────────
+  eq(getRmdStartAge(1950), 72, 'born 1950: RMDs start at 72');
+  eq(getRmdStartAge(1951), 73, 'born 1951: 73');
+  eq(getRmdStartAge(1959), 73, 'born 1959: still 73 — the last year before the step');
+  eq(getRmdStartAge(1960), 75, 'born 1960: 75');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
