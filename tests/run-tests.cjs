@@ -3061,6 +3061,132 @@ section('P25 — the Web Worker jobs: Monte Carlo and the SS claiming grid');
   }
 }
 
+// ── P26 — the Roth optimizer scores the plan you actually have ───────────────
+section('P26 — Roth optimizer: your current strategy, and no duplicate rows');
+{
+  const vmMod = require('vm');
+  const fsMod = require('fs');
+  const pathMod = require('path');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const runJob = (type, payload) => {
+    const sb = { console, Math, Date, JSON, Object, Array, Number, String, Boolean, Set, Map,
+      Infinity, NaN, isNaN, parseFloat, parseInt, Error, RegExp, Promise, undefined,
+      URLSearchParams, __out: [] };
+    sb.self = sb; sb.globalThis = sb; sb.location = { search: '?v=test' };
+    sb.importScripts = (spec) =>
+      vmMod.runInContext(fsMod.readFileSync(pathMod.join(ROOT, spec.split('?')[0]), 'utf8'), sb);
+    sb.postMessage = (m) => { if (m.type !== 'progress') sb.__out.push(m); };
+    vmMod.createContext(sb);
+    vmMod.runInContext(fsMod.readFileSync(pathMod.join(ROOT, 'worker.js'), 'utf8'), sb);
+    sb.onmessage({ data: { jobId: 1, type, payload } });
+    const err = sb.__out.find(m => m.type === 'error');
+    if (err) throw new Error(type + ': ' + err.error);
+    return sb.__out.find(m => m.type === 'result').data;
+  };
+
+  const mkPlan = (over = {}) => {
+    const s = baseScenario({
+      myAge: 58, spouseAge: 58, myBirthYear: TODAY_YEAR - 58, spouseBirthYear: TODAY_YEAR - 58,
+      myRetirementAge: 62, spouseRetirementAge: 62, legacyAge: 88, state: 'Florida',
+      desiredRetirementIncome: 110000, ...over,
+    });
+    s.accts = [
+      { id: 1, name: '401k', type: '401k', balance: 2000000, contribution: 0, contributionGrowth: 0, cagr: 0.06, startAge: 58, stopAge: 62, owner: 'me', contributor: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 200000, contribution: 0, contributionGrowth: 0, cagr: 0.06, startAge: 58, stopAge: 62, owner: 'me', contributor: 'me' },
+      { id: 3, name: 'Brokerage', type: 'brokerage', balance: 600000, contribution: 0, contributionGrowth: 0, cagr: 0.05, startAge: 58, stopAge: 62, owner: 'joint', contributor: 'me', costBasisPercent: 0.6 },
+    ];
+    s.streams = [{ id: 1, name: 'SS', type: 'social_security', amount: 45000, startAge: 67, endAge: 95, cola: 0.025, owner: 'me', pia: 3750, todaysDollars: true }];
+    return s;
+  };
+  const payloadFor = (s) => ({ personalInfo: s.pi, accounts: s.accts, incomeStreams: s.streams,
+    assets: [], oneTimeEvents: [], recurringExpenses: [], heirTaxRate: 0.25 });
+
+  // A plan that HAS a conversion strategy configured must be scored alongside the
+  // alternatives. Otherwise the user sees 20 options ranked against "do nothing"
+  // and cannot tell where their own plan sits — which is the one comparison they
+  // came for.
+  {
+    const s = mkPlan({ rothConversionAmount: 120000, rothConversionStartAge: 62,
+      rothConversionEndAge: 72, rothConversionInflationAdjust: true });
+    const d = runJob('rothOptimizer', payloadFor(s));
+    const current = d.results.find(r => r.isCurrent);
+    eq(!!current, true, 'the configured strategy appears as its own row');
+    gt(current.lifetimeConversions, 0, 'and it actually converted something');
+    eq(d.results[0].label.includes('baseline'), true, 'the no-conversion baseline is still first');
+    eq(d.results.filter(r => r.isCurrent).length, 1, 'exactly one current-plan row');
+  }
+
+  // With nothing configured, a "current plan" row would just duplicate the
+  // baseline, so it must not be added.
+  {
+    const s = mkPlan({ rothConversionAmount: 0, rothConversionBracket: '' });
+    const d = runJob('rothOptimizer', payloadFor(s));
+    eq(d.results.some(r => r.isCurrent), false, 'no current-plan row when no conversions are configured');
+  }
+
+  // Duplicate rows are noise. Two kinds occur: bracket targets already below the
+  // household's income (which convert $0 and are literally the baseline), and
+  // windows whose extra years do nothing because a pre-tax floor stops the
+  // conversions early. Neither should be listed as a distinct option.
+  {
+    const s = mkPlan({ rothConversionAmount: 0, rothConversionBracket: '' });
+    const d = runJob('rothOptimizer', payloadFor(s));
+    const nonBaseline = d.results.filter(r => !r.label.includes('baseline'));
+    eq(nonBaseline.every(r => r.lifetimeConversions > 0), true,
+      'strategies that cannot convert anything are not offered as options');
+    const sigs = d.results.map(r => r.afterTaxLegacy + '|' + r.lifetimeTax + '|' + r.lifetimeConversions);
+    eq(new Set(sigs).size, sigs.length, 'no two rows have identical outcomes');
+    gt(d.results.length, 2, 'and real alternatives still survive the deduplication');
+  }
+}
+
+// ── P27 — the row exposes enough to place a year in its tax bracket ──────────
+section('P27 — ordinary taxable income is recoverable from a projection row');
+{
+  // The Tax Planning tab reports which federal bracket each year lands in. It has
+  // to reconstruct ORDINARY taxable income from the row: total AGI, less income
+  // taxed at preferential rates, less the deduction. This pins the identity that
+  // reconstruction depends on — a year converting into the 24% bracket must not
+  // read as 12%, which is what happened when preferential income was derived by
+  // subtracting nonSSIncome (that also removes the conversion itself).
+  const s = baseScenario({
+    myAge: 62, spouseAge: 62, myBirthYear: TODAY_YEAR - 62, spouseBirthYear: TODAY_YEAR - 62,
+    myRetirementAge: 62, spouseRetirementAge: 62, legacyAge: 70,
+    state: 'Florida', inflationRate: 0, desiredRetirementIncome: 100000,
+    rothConversionAmount: 200000, rothConversionStartAge: 62, rothConversionEndAge: 70,
+    rothConversionInflationAdjust: false, withdrawalPriority: ['brokerage', 'pretax', 'roth'],
+  });
+  s.accts = [
+    { id: 1, name: 'IRA', type: 'traditional_ira', balance: 3000000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 62, stopAge: 62, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Brokerage', type: 'brokerage', balance: 800000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 62, stopAge: 62, owner: 'me', contributor: 'me', costBasisPercent: 0.5 },
+    // A Roth account must exist for a conversion to have anywhere to land.
+    { id: 3, name: 'Roth', type: 'roth_ira', balance: 50000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 62, stopAge: 62, owner: 'me', contributor: 'me' },
+  ];
+  s.streams = [];
+  const r = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR)[0];
+
+  gt(r.rothConversion, 150000, 'the year really does convert a large amount');
+  // Every dollar of AGI is either preferential or ordinary — nothing else.
+  const preferential = r.brokerageDividends + r.realizedCapitalGains;
+  const ordinaryAGI = r.taxableIncome - preferential;
+  gt(preferential, 0, 'a drawn-down taxable account produces preferential income');
+  gt(ordinaryAGI, r.rothConversion * 0.95,
+    'the conversion stays IN the ordinary base — it is ordinary income, not preferential');
+
+  const ordinaryTaxable = Math.max(0, ordinaryAGI - r.federalDeduction);
+  // MFJ 2026 bands: 12% ends at 100,800, 22% at 211,400. Spending here is funded
+  // brokerage-first, so ordinary income is essentially the conversion less the
+  // deduction — squarely in the 22% band, and nowhere near the 12%.
+  gt(ordinaryTaxable, 100800, 'the conversion year sits above the 12% band');
+  lt(ordinaryTaxable, 211400, 'and inside the 22% band');
+
+  // The derivation that was previously used would have removed the conversion.
+  const brokenPreferential = r.brokerageDividends + Math.max(0, r.taxableIncome - r.nonSSIncome - r.taxableSS);
+  const brokenOrdinary = Math.max(0, r.taxableIncome - brokenPreferential - r.federalDeduction);
+  lt(brokenOrdinary, 100800, 'the old derivation really did place this year in the 12% band');
+  gt(ordinaryTaxable - brokenOrdinary, 150000, 'so the two differ by roughly the conversion');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

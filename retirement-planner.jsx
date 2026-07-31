@@ -2817,8 +2817,16 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
       // or more too high and understated every "room to" figure. Build the right
       // basis here: strip preferential income, then subtract the deduction.
       const taxableIncome = p.taxableIncome; // AGI — used for the gross-income chart only
-      const preferentialIncome = (p.brokerageDividends || 0)
-        + Math.max(0, (p.taxableIncome || 0) - (p.nonSSIncome || 0) - (p.taxableSS || 0));
+      // Income taxed at preferential rates: qualified dividends plus realized
+      // long-term gains, both reported directly by the engine.
+      //
+      // This was previously DERIVED as taxableIncome − nonSSIncome − taxableSS,
+      // because realizedCapitalGains did not exist on the row yet. That
+      // expression actually equals (withdrawal ordinary income + preferential −
+      // preTaxDeduction), so it subtracted every dollar of pre-tax withdrawal and
+      // Roth conversion out of the ordinary base — a year converting $200k into
+      // the 24% bracket was reported as sitting in the 12%.
+      const preferentialIncome = (p.brokerageDividends || 0) + (p.realizedCapitalGains || 0);
       const ordinaryTaxable = Math.max(0, (p.taxableIncome || 0) - preferentialIncome - adjustedDeduction);
 
       // Gross income for chart display (SS shown at 85% is a display approximation only).
@@ -6990,6 +6998,24 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
       }
     }
 
+
+    // ── Conversions configured with nowhere to put them ───────────────────────
+    // The engine needs a Roth account to receive a conversion. Without one it
+    // silently converts nothing, so a user can configure a whole strategy, see it
+    // reflected nowhere, and have no idea why.
+    {
+      const wantsConversions = (info.rothConversionAmount || 0) > 0 || !!info.rothConversionBracket;
+      const hasRoth = accounts.some(a => ROTH_TYPES.includes(a.type));
+      if (wantsConversions && !hasRoth) {
+        warnings.push({
+          type: 'roth_conversion_no_destination',
+          severity: 'warning',
+          message: 'You have Roth conversions configured, but there is no Roth account for the money to go into — so no conversion is happening.',
+          details: ['The projection moves money from your largest pre-tax account into your largest Roth account. With no Roth account it converts /usr/bin/bash every year, silently.'],
+          action: 'Add a Roth IRA or Roth 401(k) on the Accounts tab (a /usr/bin/bash balance is fine) and the conversions will start running.'
+        });
+      }
+    }
     return warnings;
   };
   

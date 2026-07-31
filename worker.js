@@ -538,23 +538,65 @@ function runRothOptimizer(jobId, payload) {
   const brackets = ['10%', '12%', '22%', '24%', '32%'];
   const noConversionPI = { ...personalInfo, rothConversionAmount: 0, rothConversionBracket: '', rothConversionStartAge: 0, rothConversionEndAge: 0 };
   const strategies = [{ label: 'No conversions (baseline)', bracket: '', window: null, pi: noConversionPI }];
+
+  // Score the strategy the user ACTUALLY has configured, alongside the
+  // alternatives. Without it they get twenty options ranked against "do nothing"
+  // and no way to see where their own plan sits — which is the single comparison
+  // they opened this tab for. It matters most for a fixed-amount strategy, which
+  // the bracket sweep below can never reproduce.
+  const hasCurrent = (personalInfo.rothConversionAmount > 0) || !!personalInfo.rothConversionBracket;
+  if (hasCurrent) {
+    const amt = personalInfo.rothConversionAmount > 0
+      ? '$' + Math.round(personalInfo.rothConversionAmount).toLocaleString() + '/yr'
+      : 'fill to ' + personalInfo.rothConversionBracket;
+    const w = E.getDefaultRothConversionWindow(personalInfo);
+    const sAge = personalInfo.rothConversionStartAge > 0 ? personalInfo.rothConversionStartAge : w.startAge;
+    const eAge = personalInfo.rothConversionEndAge > 0 ? personalInfo.rothConversionEndAge : w.endAge;
+    strategies.push({
+      label: `Your current plan (${amt}, ages ${sAge}–${eAge})`,
+      bracket: personalInfo.rothConversionBracket || '',
+      window: { startAge: sAge, endAge: eAge },
+      pi: personalInfo,
+      isCurrent: true,
+    });
+  }
+
   windows.forEach(w => brackets.forEach(b => strategies.push({
     label: `Fill to ${b} bracket, ages ${w.startAge}–${w.endAge}`,
     bracket: b, window: w,
     pi: { ...personalInfo, rothConversionAmount: 0, rothConversionBracket: b, rothConversionStartAge: w.startAge, rothConversionEndAge: w.endAge },
   })));
 
-  const results = [];
+  const scored = [];
   strategies.forEach((s, i) => {
     const proj = computeProjections(s.pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
     const score = E.scoreRothStrategy(proj, { legacyAge, retirementAge, heirTaxRate });
-    results.push({
+    scored.push({
       label: s.label, bracket: s.bracket,
       startAge: s.window ? s.window.startAge : null,
       endAge: s.window ? s.window.endAge : null,
+      isCurrent: !!s.isCurrent,
       ...score,
     });
     postMessage({ jobId, type: 'progress', percent: Math.round(((i + 1) / strategies.length) * 100) });
+  });
+
+  // Strip rows that are not real alternatives. Two kinds show up routinely:
+  //   • a bracket target already below the household's income converts $0, so the
+  //     row IS the baseline wearing a different label
+  //   • widening the window changes nothing once a pre-tax floor (or an empty
+  //     pre-tax balance) has already stopped the conversions
+  // Listing eight identical rows buries the handful of genuine choices. The
+  // baseline and the user's own plan are always kept, even if they coincide.
+  const results = [];
+  const seen = new Set();
+  scored.forEach((r, idx) => {
+    const keepAlways = idx === 0 || r.isCurrent;
+    if (!keepAlways && r.lifetimeConversions === 0) return;
+    const sig = r.afterTaxLegacy + '|' + r.lifetimeTax + '|' + r.lifetimeConversions;
+    if (!keepAlways && seen.has(sig)) return;
+    seen.add(sig);
+    results.push(r);
   });
 
   postMessage({ jobId, type: 'result', data: { baseline: results[0], results } });
