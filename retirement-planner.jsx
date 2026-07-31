@@ -35,7 +35,7 @@ const {
   PRE_65_HEALTHCARE_ANNUAL_2025, MEDICAL_INFLATION_RATE,
   LTC_MONTHLY_ASSISTED_LIVING_2025, LTC_DEFAULT_DURATION_MONTHS, ACA_FPL_2025,
   calculateACASubsidy, calculateACAPremiumCredit, ACA_BENCHMARK_PREMIUM_2026,
-  calculateHealthcareExpenses, calculateRecurringExpenses,
+  calculateHealthcareExpenses, calculateRecurringExpenses, healthcareCostsModeled,
   GOV_PENSION_SYSTEMS, estimateGovernmentPension, estimateFersSupplement,
   HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
   computeProjections,
@@ -305,6 +305,7 @@ const DEFAULT_DASHBOARD_VISIBILITY = {
 // Healthcare modeling presets
 const HEALTHCARE_PRESETS = {
   none: { label: 'Not Modeled', description: 'Healthcare costs not included in projections' },
+  in_spending: { label: 'Already In My Spending', description: 'You budget healthcare yourself — e.g. retiree coverage through a spouse’s employer or pension system. Charges $0 separately, and stops the pre-65 gap warning.' },
   basic: { label: 'Basic', description: 'Medicare premiums + modest OOP after 65; flat estimate pre-65' },
   moderate: { label: 'Moderate', description: 'Medicare + supplemental + OOP; employer/ACA pre-65' },
   comprehensive: { label: 'Comprehensive', description: 'Full Medicare + Medigap + OOP + long-term care' },
@@ -6974,7 +6975,7 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
               : 'No pre-65 amount is set either, so there is nothing for the projection to use.',
             'Medicare Part B and Part D premiums ARE still charged from 65 onward, so only the pre-65 gap is missing.',
           ],
-          action: 'Either switch Healthcare Modeling to Basic/Moderate/Comprehensive so the gap is costed, or make sure your Desired Retirement Income already includes premiums you will pay yourself. Leaving it as-is overstates what the portfolio can support.'
+          action: 'If your Desired Retirement Income already covers these premiums — retiree coverage through a spouse’s employer or pension system, for instance — set Healthcare Modeling to "Already In My Spending" and this warning will stop. Otherwise switch it to Basic/Moderate/Comprehensive so the gap is costed. Leaving it on "Not Modeled" overstates what the portfolio can support.'
         });
       }
     }
@@ -7719,7 +7720,7 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
             </select>
           </div>
           
-          {localInfo.healthcareModel !== 'none' && (
+          {healthcareCostsModeled(localInfo) && (
             <div className="space-y-3">
               <div className="mb-3">
                 <label className={compactLabelStyle}>Pre-65 Coverage Model</label>
@@ -10503,7 +10504,7 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
       })()}
       
       {/* Healthcare Cost Projection Card */}
-      {personalInfo.healthcareModel !== 'none' && (() => {
+      {healthcareCostsModeled(personalInfo) && (() => {
         const retirementYears = projections.filter(p => p.myAge >= personalInfo.myRetirementAge);
         const lifetimeHealthcare = retirementYears.reduce((sum, p) => sum + (p.healthcareExpense || 0), 0);
         const lifetimePre65 = retirementYears.reduce((sum, p) => sum + (p.healthcarePre65 || 0), 0);

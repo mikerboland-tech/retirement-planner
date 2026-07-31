@@ -2303,11 +2303,25 @@ const calculateACASubsidy = (income, householdSize, filingStatus) => {
 };
 
 
+// Two settings mean "the engine charges no pre-65 healthcare", and they differ
+// only in what the user is asserting:
+//   'none'        — not accounted for anywhere. A pre-65 retirement is understated,
+//                   and getDataWarnings says so.
+//   'in_spending' — already inside Desired Retirement Income. Common and correct:
+//                   retiree coverage through a spouse's employer or pension system,
+//                   or a premium the user simply budgeted themselves. Nothing is
+//                   missing, so warning about it is noise.
+// Both take the same $0 pre-65 path below; keeping them behind one predicate stops
+// the next variant from being missed at one of the call sites that gate the UI.
+const HEALTHCARE_MODELS_UNPRICED = ['none', 'in_spending'];
+const healthcareCostsModeled = (pi) =>
+  !HEALTHCARE_MODELS_UNPRICED.includes((pi && pi.healthcareModel) || 'none');
+
 // ── HEALTHCARE EXPENSE CALCULATOR ───────────────────────────────────────────────
 // Unified function that computes annual healthcare costs for a given year.
 // Called by the projection engine for each year — results flow into the year data.
 const calculateHealthcareExpenses = (pi, myAge, spouseAge, yearsFromNow, primaryAlive, spouseAlive) => {
-  if (pi.healthcareModel === 'none') {
+  if (!healthcareCostsModeled(pi)) {
     // Even with healthcare modeling off, standard Medicare Part B + Part D
     // premiums are charged for each person 65+. The engine always charges
     // IRMAA surcharges (they're income-driven, like a tax), and a surcharge
@@ -4764,6 +4778,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     getACAApplicablePercentage, calculateACAPremiumCredit,
     getSpendingPhaseMultiplier, scoreRothStrategy,
     calculateHealthcareExpenses, calculateRecurringExpenses,
+    healthcareCostsModeled, HEALTHCARE_MODELS_UNPRICED,
 
     // ── Government pension estimator ──────────────────────────────────────
     GOV_PENSION_SYSTEMS, estimateGovernmentPension, estimateFersSupplement,

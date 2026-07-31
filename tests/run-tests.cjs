@@ -19,7 +19,8 @@ const { computeProjections, calculateFederalTax, calculateStateTax, calculateSoc
         ALABAMA_TAX_BRACKETS,
         PRE_TAX_TYPES, ROTH_TYPES, BROKERAGE_TYPES, HSA_TYPES,
         isPreTaxAccount, isRothAccount, isBrokerageAccount, isHSAAccount,
-        realReturn, inflateToAge, deflateToToday, coastFire } = engine;
+        realReturn, inflateToAge, deflateToToday, coastFire,
+        healthcareCostsModeled } = engine;
 const IS_MOBILE = false; // single shared engine — no desktop/mobile split
 
 const TODAY_YEAR = new Date().getFullYear();
@@ -3234,6 +3235,46 @@ section('P28 — the Sensitivity inflation lever must be judged in real dollars'
   eq(wrongGap, nominalGap,
     'using one shared deflator is just the nominal comparison rescaled — no better', 1e-9);
   gt(realGap, wrongGap, 'only a per-scenario deflator shows the lever’s true size');
+}
+
+section('P29 — "healthcare is already in my spending" is priced like none, warned like handled');
+{
+  // A pre-65 retiree whose coverage comes through a spouse's pension system has
+  // nothing missing from the plan — the premium is inside desired spending. The
+  // engine must still charge $0 separately (double-charging it would be worse
+  // than the gap), but the pre-65 warning must stop firing.
+  const mk = (healthcareModel) => {
+    const s = baseScenario({
+      myAge: 58, spouseAge: 58, myBirthYear: TODAY_YEAR - 58, spouseBirthYear: TODAY_YEAR - 58,
+      myRetirementAge: 58, spouseRetirementAge: 58, legacyAge: 70,
+      state: 'Florida', inflationRate: 0, desiredRetirementIncome: 120000,
+      healthcareModel, pre65HealthcareAnnual: 12000,
+    });
+    s.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 3000000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 58, stopAge: 58, owner: 'me', contributor: 'me' },
+    ];
+    s.streams = [];
+    return computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  };
+
+  eq(healthcareCostsModeled({ healthcareModel: 'none' }), false, "'none' prices nothing");
+  eq(healthcareCostsModeled({ healthcareModel: 'in_spending' }), false, "'in_spending' also prices nothing");
+  eq(healthcareCostsModeled({ healthcareModel: 'moderate' }), true, "'moderate' does price healthcare");
+  eq(healthcareCostsModeled({}), false, 'a plan with no setting at all defaults to unpriced');
+
+  const none = mk('none')[0];
+  const inSpending = mk('in_spending')[0];
+  eq(inSpending.healthcareExpense || 0, none.healthcareExpense || 0,
+    'the two unpriced settings produce identical healthcare cost');
+  eq(inSpending.totalPortfolio, none.totalPortfolio,
+    'and therefore identical portfolios — this is a labelling change, not a money change');
+
+  // The pre-65 charge really is zero at 58, so the equality above is not vacuous.
+  eq(none.healthcarePre65 || 0, 0, 'no pre-65 premium is charged under either setting');
+
+  // And 'moderate' really would have charged something, so the setting matters.
+  gt(mk('moderate')[0].healthcareExpense || 0, 0,
+    'a priced model does charge a pre-65 premium at 58 — the branch is live');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
