@@ -1984,8 +1984,23 @@ const LIMIT_HSA_CATCHUP_55 = 1000;
 
 const workplaceCatchUp = (age) => age >= 60 && age <= 63 ? LIMIT_CATCHUP_60_63 : (age >= 50 ? LIMIT_CATCHUP_50 : 0);
 
+// SECURE 2.0 §603: from 2026, a participant whose PRIOR-YEAR FICA wages from the
+// employer sponsoring the plan exceeded this threshold may only make catch-up
+// contributions on a ROTH basis. Base figure $145,000 (2023 wages), indexed
+// annually; $150,000 applies to 2025 wages, which is what governs 2026 catch-up
+// treatment. Originally slated for 2024 and delayed by Notice 2023-62; final
+// regulations landed September 2025.
+//
+// Two caveats the app cannot see, so the warning is worded as "check", not "wrong":
+// the test is per-EMPLOYER wages rather than household or total earned income, and
+// it uses FICA wages, which exclude the pre-tax deferrals themselves. The app only
+// stores one salary per person, so it is used as the best available proxy.
+const ROTH_CATCHUP_WAGE_THRESHOLD = 150000;
+
 // Types that share one person's 402(g) elective-deferral limit.
 const DEFERRAL_TYPES = new Set(['401k', '403b', '457b', 'roth_401k', 'roth_403b', 'roth_457b']);
+// The Roth subset of those — the only place a mandated Roth catch-up may land.
+const ROTH_DEFERRAL_TYPES = new Set(['roth_401k', 'roth_403b', 'roth_457b']);
 const IRA_TYPES = new Set(['traditional_ira', 'roth_ira']);
 
 // Check a WHOLE account list against the per-person limits and return an array of
@@ -2031,11 +2046,12 @@ const checkContributionLimits = (accounts, pi, salaries = {}) => {
     const age = ageOf(owner);
     const who = owner === 'spouse' ? "Spouse's" : 'Your';
 
-    let deferral = 0, additions = 0, ira = 0, hsa = 0;
+    let deferral = 0, additions = 0, ira = 0, hsa = 0, rothDeferral = 0;
     for (const a of mine) {
       const s = split(a);
       if (!s) continue;
-      if (DEFERRAL_TYPES.has(a.type)) { deferral += s.employee; additions += s.employee + s.employer; }
+      if (DEFERRAL_TYPES.has(a.type)) { deferral += s.employee; additions += s.employee + s.employer;
+        if (ROTH_DEFERRAL_TYPES.has(a.type)) rothDeferral += s.employee; }
       else if (IRA_TYPES.has(a.type)) ira += s.employee;
       else if (a.type === 'hsa') hsa += s.employee + s.employer;
     }
@@ -2049,6 +2065,17 @@ const checkContributionLimits = (accounts, pi, salaries = {}) => {
       message: `${who} 401(k)/403(b)/457(b) contributions total $${Math.round(deferral).toLocaleString()}/yr, above the $${deferralCap.toLocaleString()} IRS elective-deferral limit${note}. Traditional and Roth share this one limit.` });
     if (additions > additionsCap + 1) out.push({ owner, kind: 'additions', amount: additions, limit: additionsCap,
       message: `${who} combined employee + employer workplace contributions total $${Math.round(additions).toLocaleString()}/yr, above the $${additionsCap.toLocaleString()} IRS annual-additions limit${note}.` });
+    // Mandated-Roth catch-up. Only meaningful once someone is actually USING
+    // catch-up room: deferrals above the $24,500 base are catch-up by definition.
+    // Deferrals beyond the cap are already reported as a violation above, so the
+    // catch-up actually in play is capped at the legal maximum.
+    const catchUpUsed = Math.max(0, Math.min(deferral, deferralCap) - LIMIT_402G);
+    if (cu > 0 && catchUpUsed > 0 && salaryOf(owner) > ROTH_CATCHUP_WAGE_THRESHOLD
+        && rothDeferral < catchUpUsed - 1) {
+      out.push({ owner, kind: 'roth_catchup', amount: rothDeferral, limit: catchUpUsed,
+        message: `${who} catch-up contributions are $${Math.round(catchUpUsed).toLocaleString()}/yr, but only $${Math.round(rothDeferral).toLocaleString()} of ${owner === 'spouse' ? 'their' : 'your'} workplace deferrals go to a Roth account. From 2026, SECURE 2.0 requires catch-up to be Roth for anyone whose prior-year wages from that employer exceeded $${ROTH_CATCHUP_WAGE_THRESHOLD.toLocaleString()} — check how your plan is set up.` });
+    }
+
     const iraCap = LIMIT_IRA + (age >= 50 ? LIMIT_IRA_CATCHUP : 0);
     if (ira > iraCap + 1) out.push({ owner, kind: 'ira', amount: ira, limit: iraCap,
       message: `${who} IRA contributions total $${Math.round(ira).toLocaleString()}/yr, above the $${iraCap.toLocaleString()} limit. Traditional and Roth IRAs share it.` });

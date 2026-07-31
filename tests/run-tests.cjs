@@ -20,7 +20,7 @@ const { computeProjections, calculateFederalTax, calculateStateTax, calculateSoc
         PRE_TAX_TYPES, ROTH_TYPES, BROKERAGE_TYPES, HSA_TYPES,
         isPreTaxAccount, isRothAccount, isBrokerageAccount, isHSAAccount,
         realReturn, inflateToAge, deflateToToday, coastFire,
-        healthcareCostsModeled } = engine;
+        healthcareCostsModeled, checkContributionLimits } = engine;
 const IS_MOBILE = false; // single shared engine — no desktop/mobile split
 
 const TODAY_YEAR = new Date().getFullYear();
@@ -2831,8 +2831,14 @@ section('P23 — contribution limits checked across EVERY account, not per slot'
     { id: 1, name: 'Mine', type: '401k', contribution: 32500, owner: 'me', contributor: 'me' },
     { id: 2, name: 'Theirs', type: '401k', contribution: 32500, owner: 'spouse', contributor: 'spouse' },
   ];
-  eq(checkContributionLimits(perPerson, { myAge: 53, spouseAge: 51, filingStatus: 'married_joint' }, salaries).length, 0,
+  const perPersonW = checkContributionLimits(perPerson, { myAge: 53, spouseAge: 51, filingStatus: 'married_joint' }, salaries);
+  eq(perPersonW.filter(m => ['deferral', 'additions', 'ira', 'hsa'].includes(m.kind)).length, 0,
     'two people each at their own limit is fine');
+  // This pair DOES trip the SECURE 2.0 Roth catch-up rule though: 'me' earns
+  // $200k and routes the whole $32,500 — catch-up included — to a traditional
+  // 401(k). The spouse at $70k is under the wage threshold, so only one fires.
+  eq(perPersonW.filter(m => m.kind === 'roth_catchup').length, 1,
+    'and the high earner alone is flagged for taking catch-up pre-tax');
 
   // Employer money counts only toward the combined 415(c) limit, not 402(g).
   const bigMatch = [
@@ -3275,6 +3281,63 @@ section('P29 — "healthcare is already in my spending" is priced like none, war
   // And 'moderate' really would have charged something, so the setting matters.
   gt(mk('moderate')[0].healthcareExpense || 0, 0,
     'a priced model does charge a pre-65 premium at 58 — the branch is live');
+}
+
+section('P30 — combined deferral limits, catch-up tiers, and the SECURE 2.0 Roth catch-up');
+{
+  const acct = (o) => ({ id: o.id, name: o.name, type: o.type, balance: 0, contribution: o.contribution || 0,
+    contributionGrowth: 0, cagr: 0, startAge: 40, stopAge: 70, owner: o.owner || 'me',
+    contributor: o.contributor || 'me', contributionMode: o.contributionMode,
+    employeePercent: o.employeePercent, employerMatchPercent: o.employerMatchPercent });
+  const pi = (age) => ({ myAge: age, spouseAge: age, filingStatus: 'single' });
+  const SAL = { me: 200000 };
+
+  // 402(g) pools traditional and Roth into ONE limit. $24,500 + $8,000 = $32,500.
+  const atLimit = [acct({ id: 1, name: 'T', type: '401k', contribution: 24500 }),
+                   acct({ id: 2, name: 'R', type: 'roth_401k', contribution: 8000 })];
+  eq(checkContributionLimits(atLimit, pi(53), SAL).filter(w => w.kind === 'deferral').length, 0,
+    'exactly $32,500 across traditional + Roth is within the age-53 limit');
+
+  const over = atLimit.concat([acct({ id: 3, name: 'ESOP', type: '401k', contributionMode: 'percent',
+    employeePercent: 0.03, employerMatchPercent: 0.15, contributor: 'employer' })]);
+  const overW = checkContributionLimits(over, pi(53), SAL).filter(w => w.kind === 'deferral');
+  eq(overW.length, 1, 'a percent-mode 3% employee slice pushes the same person over 402(g)');
+  eq(Math.round(overW[0].amount), 38500, 'and the total counts every deferral source');
+
+  // Percent mode splits by the two rates; contributor:'employer' does NOT suppress
+  // the employee slice. Pinned because the account form used to offer that dropdown
+  // in percent mode, implying it would.
+  eq(checkContributionLimits(
+      [acct({ id: 1, name: 'E', type: '401k', contributionMode: 'percent',
+              employeePercent: 0.03, employerMatchPercent: 0.15, contributor: 'employer' })],
+      pi(53), SAL).filter(w => w.kind === 'deferral').length, 0,
+    '3% of $200k alone is only $6,000 — under the limit, so no false alarm either');
+
+  // 415(c) pools employee + employer, and catch-up sits ON TOP of the $72,000.
+  const additions = checkContributionLimits(over, pi(53), SAL).filter(w => w.kind === 'additions');
+  eq(additions.length, 0, '$68,500 of combined additions is inside the $80,000 annual-additions cap');
+
+  // Catch-up tiers: none under 50, $8,000 at 50-59, $11,250 at 60-63, back to $8,000 at 64.
+  const defer = (age, amt) => checkContributionLimits(
+    [acct({ id: 1, name: 'T', type: '401k', contribution: amt })], pi(age), SAL)
+    .filter(w => w.kind === 'deferral');
+  eq(defer(49, 24500).length, 0, 'under 50: the $24,500 base is the whole limit');
+  eq(defer(49, 25000).length, 1, 'under 50: no catch-up room exists');
+  eq(defer(53, 32500).length, 0, 'age 50-59: $8,000 catch-up applies');
+  eq(defer(61, 35750).length, 0, 'ages 60-63: the $11,250 super catch-up applies');
+  eq(defer(64, 35750).length, 1, 'age 64: the super catch-up is gone again, back to $8,000');
+
+  // SECURE 2.0 Roth catch-up: high earner using catch-up must route it to Roth.
+  const rothCU = (accts, salary) => checkContributionLimits(accts, pi(53), { me: salary })
+    .filter(w => w.kind === 'roth_catchup');
+  eq(rothCU(atLimit, 200000).length, 0,
+    'catch-up already sitting in a Roth 401(k) satisfies the rule');
+  eq(rothCU([acct({ id: 1, name: 'T', type: '401k', contribution: 32500 })], 200000).length, 1,
+    'the same $32,500 entirely in a traditional 401(k) does not');
+  eq(rothCU([acct({ id: 1, name: 'T', type: '401k', contribution: 32500 })], 90000).length, 0,
+    'and below the wage threshold the rule does not apply at all');
+  eq(rothCU([acct({ id: 1, name: 'T', type: '401k', contribution: 20000 })], 200000).length, 0,
+    'nor to a high earner who is not using catch-up room yet');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

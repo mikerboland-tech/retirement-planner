@@ -10930,7 +10930,22 @@ function AccountModal({ editingAccount, personalInfo, incomeStreams, onClose, on
               }
               setFormData(next);
             }} className={inputStyle}><option value="me">Me</option><option value="spouse">Spouse</option><option value="joint">Joint</option></select></div>
-            <div><label className={labelStyle}>Contributor</label><select value={formData.contributor || 'me'} onChange={e => setFormData({...formData, contributor: e.target.value})} className={inputStyle}>{CONTRIBUTOR_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
+            {/* In percent mode the employee/employer split IS the two percentages
+                below, so this dropdown has no effect — the engine ignores it. It
+                used to render anyway, which let a row say "Contributor: Employer"
+                while its 3% employee rate was still counted as the saver's own
+                elective deferral against 402(g) and deducted from AGI. Showing the
+                split read-only states what the engine will actually do. */}
+            {isPercentMode ? (
+              <div>
+                <label className={labelStyle}>Contributor</label>
+                <div className="text-sm text-slate-400 bg-slate-800/60 border border-slate-700/50 rounded px-3 py-2">
+                  Set by the % split below
+                </div>
+              </div>
+            ) : (
+              <div><label className={labelStyle}>Contributor</label><select value={formData.contributor || 'me'} onChange={e => setFormData({...formData, contributor: e.target.value})} className={inputStyle}>{CONTRIBUTOR_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
+            )}
           </div>
           {percentEligible && (
             <div className="border-t border-slate-700/50 pt-3">
