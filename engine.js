@@ -2217,11 +2217,32 @@ const estimateAnnualSocialSecurity = (salary) => {
 // Returns the number of years AFTER the current one, so a projection has
 // getPlanningHorizonYears(pi) + 1 rows (survivor modeling may end it earlier,
 // once both spouses have died).
+// A second way the same truncation happened: with survivor modelling on, deaths
+// are scheduled at each person's LIFE EXPECTANCY, which is a separate input from
+// legacyAge. Set legacyAge 85 with a spouse expected to reach 87 and the
+// projection stopped with the widow still alive — her last two years, and every
+// dollar of spending in them, simply absent. legacyAge is where you measure the
+// legacy; it cannot also be allowed to cut a life short.
+//
+// Extending is self-limiting: the projection already stops the year both spouses
+// have died, so a longer horizon adds rows only while someone is still alive.
+// Capped at MAX_AGE so an implausible life-expectancy entry cannot run away.
 const getPlanningHorizonYears = (pi) => {
   const legacyAge = pi.legacyAge || MAX_AGE;
+  const isMarried = pi.filingStatus === 'married_joint';
   let years = legacyAge - pi.myAge;
-  if (pi.filingStatus === 'married_joint' && typeof pi.spouseAge === 'number') {
+  if (isMarried && typeof pi.spouseAge === 'number') {
     years = Math.max(years, legacyAge - pi.spouseAge);
+  }
+  // Mirrors the engine's own survivorEnabled condition — life expectancy only
+  // drives behaviour, and can only strand a living person, when this is on.
+  if (pi.survivorModelEnabled && isMarried) {
+    const cover = (lifeExp, currentAge) => {
+      if (typeof lifeExp !== 'number' || typeof currentAge !== 'number') return;
+      years = Math.max(years, Math.min(lifeExp, MAX_AGE) - currentAge);
+    };
+    cover(pi.myLifeExpectancy, pi.myAge);
+    cover(pi.spouseLifeExpectancy, pi.spouseAge);
   }
   return Math.max(0, years);
 };

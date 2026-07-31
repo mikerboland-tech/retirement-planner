@@ -6991,12 +6991,25 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
         overshoot.push(`your spouse's (${info.spouseLifeExpectancy})`);
       }
       if (overshoot.length) {
+        // With survivor modelling on, the horizon now stretches by itself to cover
+        // whoever lives longest, so nothing is missing — the two inputs merely
+        // disagree, and the ending balance is being read at a later age than the
+        // Planning / Legacy Age field claims. That is worth saying, but it is not
+        // the same defect as silently dropping years, so it is only info.
+        const autoExtends = !!info.survivorModelEnabled && info.filingStatus === 'married_joint';
+        const longest = Math.max(info.myLifeExpectancy || 0, info.spouseLifeExpectancy || 0);
         warnings.push({
           type: 'horizon_shorter_than_life_expectancy',
-          severity: 'warning',
+          severity: autoExtends ? 'info' : 'warning',
           message: `Your planning horizon ends at age ${legacy}, but a life expectancy you entered is higher: ${overshoot.join(' and ')}.`,
-          details: ['The projection stops at the planning age, so any years beyond it are not modelled at all — including the spending they would need.'],
-          action: `Raise Planning / Legacy Age to at least ${Math.max(info.myLifeExpectancy || 0, info.spouseLifeExpectancy || 0)} so the plan covers the whole time you expect to need it.`
+          details: [
+            autoExtends
+              ? `Survivor modelling is on, so the projection already runs to age ${longest} rather than stopping at ${legacy} and leaving someone alive with unfunded years. Your ending balance is therefore measured at ${longest}, not ${legacy}.`
+              : 'The projection stops at the planning age, so any years beyond it are not modelled at all — including the spending they would need.',
+          ],
+          action: autoExtends
+            ? `Set Planning / Legacy Age to ${longest} so the field matches the age the plan actually reports.`
+            : `Raise Planning / Legacy Age to at least ${longest} so the plan covers the whole time you expect to need it.`
         });
       }
     }

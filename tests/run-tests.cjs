@@ -3340,6 +3340,57 @@ section('P30 — combined deferral limits, catch-up tiers, and the SECURE 2.0 Ro
     'nor to a high earner who is not using catch-up room yet');
 }
 
+section('P31 — the horizon must not end while someone is still alive');
+{
+  const { getPlanningHorizonYears: H, MAX_AGE } = engine;
+  const married = { filingStatus: 'married_joint', myAge: 53, spouseAge: 51, legacyAge: 85,
+                    myLifeExpectancy: 85, spouseLifeExpectancy: 87 };
+
+  // Survivor modelling off: life expectancy drives nothing, so legacyAge governs
+  // and the younger spouse still sets the length (85 - 51 = 34, not 85 - 53 = 32).
+  eq(H({ ...married, survivorModelEnabled: false }), 34,
+    'survivor off: legacyAge applied to the YOUNGER spouse');
+
+  // Survivor on: deaths fire at life expectancy. The spouse reaches 87 four years
+  // after the primary dies at 85, so the horizon must reach 87 - 51 = 36.
+  eq(H({ ...married, survivorModelEnabled: true }), 36,
+    'survivor on: the horizon stretches to cover the longer-lived spouse');
+
+  // The primary being the longer-lived one works the same way.
+  eq(H({ ...married, survivorModelEnabled: true, myLifeExpectancy: 92, spouseLifeExpectancy: 80 }), 39,
+    'and stretches for the primary too (92 - 53)');
+
+  // A life expectancy INSIDE legacyAge must not shorten anything.
+  eq(H({ ...married, survivorModelEnabled: true, myLifeExpectancy: 70, spouseLifeExpectancy: 72 }), 34,
+    'short life expectancies never shrink the horizon below legacyAge');
+
+  // Runaway guard.
+  eq(H({ ...married, survivorModelEnabled: true, spouseLifeExpectancy: 130 }), MAX_AGE - 51,
+    'an implausible life expectancy is capped at MAX_AGE');
+
+  // Single filers are unaffected by any spouse field.
+  eq(H({ filingStatus: 'single', myAge: 53, legacyAge: 85, myLifeExpectancy: 92,
+         spouseAge: 51, spouseLifeExpectancy: 99, survivorModelEnabled: true }), 32,
+    'a single filer ignores spouse inputs entirely');
+
+  // The behavioural payoff: the projection no longer ends with a living person.
+  const s = baseScenario({
+    myAge: 53, spouseAge: 51, myBirthYear: TODAY_YEAR - 53, spouseBirthYear: TODAY_YEAR - 51,
+    myRetirementAge: 60, spouseRetirementAge: 60, legacyAge: 85,
+    myLifeExpectancy: 85, spouseLifeExpectancy: 87, survivorModelEnabled: true,
+    state: 'Florida', inflationRate: 0, desiredRetirementIncome: 90000,
+  });
+  s.accts = [
+    { id: 1, name: 'IRA', type: 'traditional_ira', balance: 2500000, contribution: 0, contributionGrowth: 0, cagr: 0.05, startAge: 53, stopAge: 60, owner: 'me', contributor: 'me' },
+  ];
+  s.streams = [];
+  const proj = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  const last = proj[proj.length - 1];
+  eq(last.spouseAge, 87, 'the final row reaches the spouse’s life expectancy');
+  eq(!!last.spouseAlive, false, 'and she is not left alive when the projection stops');
+  eq(!!last.primaryAlive, false, 'nor is he');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
