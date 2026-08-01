@@ -2738,6 +2738,35 @@ const calculateStateTax = (grossIncome, state, filingStatus, yearsFromNow = 0, i
 };
 
 // IMPROVED: RMD calculation with birth year consideration (SECURE 2.0 Act)
+// Does IRS Pub 590-B Table II (Joint and Last Survivor) govern instead of Table
+// III (Uniform Lifetime)? It does when the spouse is the SOLE designated
+// beneficiary and more than 10 years younger. Beneficiary designations are not
+// an input to this app, so a married plan assumes the spouse — overwhelmingly
+// the common case, and the assumption is stated in the warning this drives.
+const rmdUsesJointTable = (pi) =>
+  !!(pi && pi.filingStatus === 'married_joint' &&
+     typeof pi.myAge === 'number' && typeof pi.spouseAge === 'number' &&
+     (pi.myAge - pi.spouseAge) > 10);
+
+// KNOWN LIMITATION — Table II is not implemented, and the numbers are not
+// guessed at. Uniform Lifetime is applied to everyone.
+//
+// The two tables share a mortality basis, and Table III is exactly Table II
+// evaluated at a beneficiary 10 years younger — which is why the ">10 years"
+// rule exists at all. It follows that for a spouse more than 10 years younger
+// the true Table II divisor is strictly LARGER, so the true RMD is strictly
+// SMALLER than what this computes.
+//
+// The error is therefore in the safe direction for the user's real tax filing:
+// their custodian computes the actual RMD, and this over-projects rather than
+// under-projects forced distributions. It is NOT harmless for planning, though
+// — it overstates forced taxable income and lifetime tax, which biases the Roth
+// conversion analysis toward converting more than necessary. Households in that
+// situation are warned rather than left to discover it.
+//
+// Adding it needs the full two-dimensional table from Appendix B of Pub 590-B
+// (roughly 1,200 entries over the ages that matter). Interpolating or curve
+// fitting a statutory tax table would be worse than not having it.
 const calculateRMD = (balance, age, birthYear) => {
   // Determine RMD start age based on birth year (SECURE 2.0 Act rules)
   // Single source of truth — getRmdStartAge handles missing/unknown birthYear (defaults to 75).
@@ -4877,7 +4906,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     calculateFICA,
 
     // ── Retirement accounts (RMD, Roth conversion windows) ────────────────
-    RMD_FACTORS, calculateRMD, getRmdStartAge, getDefaultRothConversionWindow,
+    RMD_FACTORS, calculateRMD, getRmdStartAge, rmdUsesJointTable, getDefaultRothConversionWindow,
     QCD_ANNUAL_LIMIT, QCD_START_AGE,
     EARLY_WITHDRAWAL_PENALTY_RATE, EARLY_WITHDRAWAL_AGE, RULE_OF_55_AGE,
     PENALTY_EXEMPT_TYPES, RULE_OF_55_TYPES,

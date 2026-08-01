@@ -22,6 +22,7 @@ const {
   FICA_ADDITIONAL_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_THRESHOLD,
   calculateFICA, RMD_FACTORS, calculateRMD, getRmdStartAge,
   getDefaultRothConversionWindow, QCD_ANNUAL_LIMIT, QCD_START_AGE, getPlanningHorizonYears, checkContributionLimits,
+  rmdUsesJointTable,
   estimateRetirementSavings, estimateAnnualSocialSecurity, savingsMultipleForAge,
   realReturn, inflateToAge, deflateToToday, coastFire, streamColaYears, streamAmountAtAge,
   inferPiaFromBenefit,
@@ -7012,6 +7013,26 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
             : `Raise Planning / Legacy Age to at least ${longest} so the plan covers the whole time you expect to need it.`
         });
       }
+    }
+
+    // ── RMDs computed from the wrong IRS table ────────────────────────────────
+    // Table II (Joint and Last Survivor) governs when the spouse is sole
+    // beneficiary and more than 10 years younger; this engine applies Table III
+    // (Uniform Lifetime) to everyone. Stated plainly, with the direction of the
+    // error, rather than left for someone to trip over.
+    if (rmdUsesJointTable(info)) {
+      const gap = info.myAge - info.spouseAge;
+      warnings.push({
+        type: 'rmd_joint_table_not_modeled',
+        severity: 'info',
+        message: `Your spouse is ${gap} years younger, so your real RMDs will be smaller than this projection shows.`,
+        details: [
+          'IRS Pub 590-B Table II (Joint and Last Survivor) applies when a spouse is the sole beneficiary and more than 10 years younger. It gives a larger divisor, and so a smaller required distribution, than the Uniform Lifetime table this projection uses.',
+          'Your IRA custodian calculates the real figure, so nothing here puts you at risk of under-distributing.',
+          'The effect on planning is that forced taxable income and lifetime tax are overstated — which makes Roth conversions look more attractive than they are.',
+        ],
+        action: 'Treat the Roth conversion sizing as an upper bound, and check your custodian’s RMD figure before acting on the conversion amounts.'
+      });
     }
 
     // ── A spouse with no Social Security stream at all ────────────────────────

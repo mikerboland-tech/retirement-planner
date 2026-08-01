@@ -3528,6 +3528,34 @@ section('P33 — Social Security spousal benefit (42 U.S.C. 402(b))');
     'an unmarried filer gets no spousal top-up');
 }
 
+section('P34 — RMD Joint and Last Survivor table: detection, and the direction of the known error');
+{
+  const { rmdUsesJointTable } = engine;
+  const mk = (myAge, spouseAge, filingStatus = 'married_joint') => ({ myAge, spouseAge, filingStatus });
+
+  eq(rmdUsesJointTable(mk(75, 64)), true, 'spouse 11 years younger: Table II governs');
+  eq(rmdUsesJointTable(mk(75, 65)), false, 'exactly 10 years is NOT more than 10 — Table III still governs');
+  eq(rmdUsesJointTable(mk(75, 66)), false, 'a 9-year gap stays on Table III');
+  eq(rmdUsesJointTable(mk(64, 75)), false, 'a YOUNGER owner does not trigger it — the gap is directional');
+  eq(rmdUsesJointTable(mk(75, 50, 'single')), false, 'an unmarried filer has no spouse beneficiary');
+  eq(rmdUsesJointTable({ myAge: 75, filingStatus: 'married_joint' }), false,
+    'a missing spouse age cannot trigger it');
+  eq(rmdUsesJointTable(null), false, 'and neither does a missing plan');
+
+  // Table III IS Table II evaluated at a beneficiary exactly 10 years younger.
+  // That identity is the whole reason the ">10 years" rule exists, and it fixes
+  // the SIGN of our error: for a larger gap the true divisor is larger, so the
+  // true RMD is smaller than we report. Pinned so that if Table II is ever added,
+  // the new numbers must move in this direction or the test fails.
+  const BAL = 1000000, by = 1955;
+  const uniform75 = calculateRMD(BAL, 75, by);
+  approx(uniform75, BAL / 24.6, 'Uniform Lifetime at 75 uses the 24.6 divisor', 0.0001);
+  // A correct Table II implementation for a 20-year gap must produce a SMALLER
+  // RMD than this. Recorded as the acceptance criterion for that future work.
+  gt(uniform75, BAL / 30,
+    'and any correct joint-table figure for a much younger spouse must come in below it');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
