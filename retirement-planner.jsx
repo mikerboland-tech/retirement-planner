@@ -7023,15 +7023,14 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
     if (rmdUsesJointTable(info)) {
       const gap = info.myAge - info.spouseAge;
       warnings.push({
-        type: 'rmd_joint_table_not_modeled',
+        type: 'rmd_joint_table_assumption',
         severity: 'info',
-        message: `Your spouse is ${gap} years younger, so your real RMDs will be smaller than this projection shows.`,
+        message: `Your spouse is ${gap} years younger, so this plan uses the IRS joint life expectancy table for your RMDs — giving smaller required distributions than the standard table.`,
         details: [
-          'IRS Pub 590-B Table II (Joint and Last Survivor) applies when a spouse is the sole beneficiary and more than 10 years younger. It gives a larger divisor, and so a smaller required distribution, than the Uniform Lifetime table this projection uses.',
-          'Your IRA custodian calculates the real figure, so nothing here puts you at risk of under-distributing.',
-          'The effect on planning is that forced taxable income and lifetime tax are overstated — which makes Roth conversions look more attractive than they are.',
+          'IRS Pub 590-B Table II (Joint and Last Survivor) applies when a spouse is the sole designated beneficiary and more than 10 years younger. It uses a larger divisor, so less is forced out of your pre-tax accounts each year.',
+          'This app does not ask who your beneficiaries are, so it assumes your spouse is the sole beneficiary of your pre-tax accounts.',
         ],
-        action: 'Treat the Roth conversion sizing as an upper bound, and check your custodian’s RMD figure before acting on the conversion amounts.'
+        action: 'If someone other than your spouse is named as a beneficiary on those accounts — a trust or your children, for instance — the standard Uniform Lifetime table applies instead and your real RMDs will be larger than shown.'
       });
     }
 

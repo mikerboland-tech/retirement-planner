@@ -3528,7 +3528,7 @@ section('P33 — Social Security spousal benefit (42 U.S.C. 402(b))');
     'an unmarried filer gets no spousal top-up');
 }
 
-section('P34 — RMD Joint and Last Survivor table: detection, and the direction of the known error');
+section('P34 — RMD Joint and Last Survivor table (IRS Pub 590-B, Appendix B, Table II)');
 {
   const { rmdUsesJointTable } = engine;
   const mk = (myAge, spouseAge, filingStatus = 'married_joint') => ({ myAge, spouseAge, filingStatus });
@@ -3542,18 +3542,64 @@ section('P34 — RMD Joint and Last Survivor table: detection, and the direction
     'a missing spouse age cannot trigger it');
   eq(rmdUsesJointTable(null), false, 'and neither does a missing plan');
 
-  // Table III IS Table II evaluated at a beneficiary exactly 10 years younger.
-  // That identity is the whole reason the ">10 years" rule exists, and it fixes
-  // the SIGN of our error: for a larger gap the true divisor is larger, so the
-  // true RMD is smaller than we report. Pinned so that if Table II is ever added,
-  // the new numbers must move in this direction or the test fails.
+  const { getRmdJointFactor, RMD_FACTORS } = engine;
   const BAL = 1000000, by = 1955;
-  const uniform75 = calculateRMD(BAL, 75, by);
-  approx(uniform75, BAL / 24.6, 'Uniform Lifetime at 75 uses the 24.6 divisor', 0.0001);
-  // A correct Table II implementation for a 20-year gap must produce a SMALLER
-  // RMD than this. Recorded as the acceptance criterion for that future work.
-  gt(uniform75, BAL / 30,
-    'and any correct joint-table figure for a much younger spouse must come in below it');
+
+  // ── The publication's own worked example ──────────────────────────────────
+  // Pub 590-B: "your spouse ... is 11 years younger ... You turn 75 in 2026 and
+  // your spouse turns 64. You use Table II. Your applicable denominator is 25.3.
+  // Your required minimum distribution for 2026 would be $3,953 ($100,000/25.3)."
+  eq(getRmdJointFactor(75, 64), 25.3, 'Pub 590-B: owner 75, spouse 64 -> divisor 25.3');
+  approx(calculateRMD(100000, 75, by, 64), 3953, 'and an RMD of $3,953 on $100,000', 0.0002);
+  // The immediately preceding example in the same publication, 6 years younger.
+  approx(calculateRMD(100000, 75, by, 69), 4065, 'a 6-year gap stays on Table III: $4,065', 0.0002);
+
+  // ── The structural identity that validates the whole extraction ───────────
+  // Uniform Lifetime IS Table II at a beneficiary exactly 10 years younger. Any
+  // row/column misalignment in parsing 4,640 values out of the PDF would break
+  // this at once, which is why it is worth asserting across the age range.
+  for (const age of [73, 75, 80, 85, 90, 95]) {
+    approx(getRmdJointFactor(age, age - 10), RMD_FACTORS[age],
+      `Table II(${age}, ${age - 10}) equals the Uniform Lifetime divisor`, 0.001);
+  }
+
+  // Symmetry: a joint life expectancy cannot depend on which spouse is the owner.
+  for (const [a, b] of [[80, 60], [90, 55], [100, 40]]) {
+    eq(getRmdJointFactor(a, b), getRmdJointFactor(b, a) ?? getRmdJointFactor(a, b),
+      `Table II is symmetric at (${a}, ${b})`);
+  }
+
+  // ── Behaviour at the statutory boundary ───────────────────────────────────
+  const rmdAt = (spouseAge) => calculateRMD(BAL, 75, by, spouseAge);
+  eq(rmdAt(65), calculateRMD(BAL, 75, by), 'exactly 10 years younger: Uniform Lifetime');
+  eq(rmdAt(66), calculateRMD(BAL, 75, by), 'nine years younger: Uniform Lifetime');
+  lt(rmdAt(64), calculateRMD(BAL, 75, by), 'eleven years younger: a SMALLER distribution');
+  lt(rmdAt(55), rmdAt(64), 'and the wider the gap, the smaller still');
+  eq(calculateRMD(BAL, 75, by, undefined), calculateRMD(BAL, 75, by),
+    'no spouse age supplied falls back to Uniform Lifetime');
+  eq(calculateRMD(BAL, 72, by, 40), 0, 'and nothing is due before the start age regardless');
+
+  // Out-of-range pairs must fall back rather than invent a divisor.
+  eq(getRmdJointFactor(75, 10), undefined, 'a spouse below the stored range returns undefined');
+  eq(calculateRMD(BAL, 75, by, 10), calculateRMD(BAL, 75, by),
+    'and the RMD falls back to Uniform Lifetime instead of NaN');
+
+  // ── End to end: the projection actually uses it ───────────────────────────
+  const s = baseScenario({
+    myAge: 75, spouseAge: 55, myBirthYear: TODAY_YEAR - 75, spouseBirthYear: TODAY_YEAR - 55,
+    myRetirementAge: 75, spouseRetirementAge: 75, legacyAge: 78,
+    state: 'Florida', inflationRate: 0, desiredRetirementIncome: 40000,
+  });
+  s.accts = [{ id: 1, name: 'IRA', type: 'traditional_ira', balance: 1000000, contribution: 0,
+    contributionGrowth: 0, cagr: 0, startAge: 75, stopAge: 75, owner: 'me', contributor: 'me' }];
+  s.streams = [];
+  const wide = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR)[0];
+  const narrow = computeProjections({ ...s.pi, spouseAge: 70, spouseBirthYear: TODAY_YEAR - 70 },
+    s.accts, s.streams, [], [], [], TODAY_YEAR)[0];
+  lt(wide.rmd, narrow.rmd,
+    'a 20-year age gap forces less out of the IRA than a 5-year gap');
+  approx(wide.rmd, 1000000 / getRmdJointFactor(75, 55),
+    'and the projection uses exactly the Table II divisor', 0.0002);
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
