@@ -22,6 +22,12 @@
 // CONSTANTS - Extracted magic numbers and repeated arrays
 // ============================================
 const MAX_AGE = 95;
+// The oldest age any projection will model. Distinct from MAX_AGE, which is the
+// DEFAULT planning age when a plan does not set one. Conflating the two capped
+// an explicitly-entered life expectancy at 95, which was invisible until Monte
+// Carlo began sampling lifespans: draws above 95 were silently truncated and the
+// reported distribution of death ages piled up at a hard ceiling.
+const MAX_MODELED_AGE = 120;
 const BROKERAGE_COST_BASIS_ESTIMATE = 0.50; // Fallback default when account.costBasisPercent is not set
 const MAX_ITERATIONS_FOR_TAX_CALC = 15;
 const MONTE_CARLO_TAX_ESTIMATE = 0.15;
@@ -1666,6 +1672,69 @@ const calculateFICA = (earnedIncome, filingStatus, yearsFromNow = 0, inflationRa
 };
 
 // IRS Uniform Lifetime Table (updated per IRS Publication 590-B)
+// MORTALITY TABLE -- CDC/NCHS National Vital Statistics Reports vol. 74 no. 2,
+// Table 1: life table for the TOTAL population, United States, 2022. qx is the
+// probability of dying between age x and x+1.
+//
+// Total-population (unisex) rates are used because the app does not ask anyone
+// their sex, and inventing a field to collect it in order to run a simulation
+// would be a poor trade. Real male/female life expectancy at 65 differs by
+// roughly three years, so a single plan should be read as the household average.
+//
+// Two extraction details that materially affect the tail:
+//   - the CDC final row is "100 and over", an OPEN interval carrying a synthetic
+//     qx of 1 rather than a real one-year rate. Taken literally it truncates the
+//     hazard and cost 0.30 years of life expectancy at age 95, so it is discarded.
+//   - the table is extended to 115 with a Gompertz fit (log qx is near-linear in
+//     age) over ages 79-99, reaching certainty at 115.
+// Reconstructing ex from these rates reproduces the published life expectancy
+// column within 0.06 years from age 50 through 95; that check is a test.
+const MORTALITY_MIN_AGE = 50;
+const MORTALITY_QX = '0.004515,0.004833,0.005204,0.005647,0.006162,0.006709,0.007285,0.007930,0.008641,0.009392,0.010173,0.010960,0.011741,0.012524,0.013340,0.014218,0.015280,0.016329,0.017524,0.018824,0.020179,0.021711,0.023521,0.025618,0.028122,0.030467,0.034339,0.037380,0.041500,0.045247,0.050833,0.056254,0.062471,0.069526,0.076869,0.086054,0.094545,0.106195,0.118983,0.132946,0.148104,0.164457,0.181983,0.200630,0.220320,0.240942,0.262361,0.284411,0.306908,0.329650,0.394361,0.436526,0.483199,0.534862,0.592048,0.655349,0.725418,0.802979,0.888833,0.983865,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000';
+
+// Parsed once, not on every lookup — Monte Carlo calls this millions of times.
+const MORTALITY_QX_ARR = MORTALITY_QX.split(',').map(Number);
+
+// Probability of dying between `age` and age+1. Below the table everyone
+// survives (nobody runs a retirement projection from 30), above it nobody does.
+const mortalityQx = (age) => {
+  if (age < MORTALITY_MIN_AGE) return 0;
+  const q = MORTALITY_QX_ARR[age - MORTALITY_MIN_AGE];
+  return q === undefined ? 1 : q;
+};
+
+// Mean remaining years for someone alive at `age`, computed from the hazard.
+// Deaths are credited half a year, matching the convention the published ex
+// column uses — which is what lets the reconstruction be checked against it.
+const lifeExpectancyAt = (age) => {
+  let alive = 1, total = 0;
+  for (let a = Math.max(age, MORTALITY_MIN_AGE); ; a++) {
+    const p = mortalityQx(a);
+    total += alive * (1 - p) + alive * p * 0.5;
+    alive *= (1 - p);
+    if (alive < 1e-12 || a > 200) break;
+  }
+  return total;
+};
+
+// Draw an age at death for someone alive at `currentAge`.
+//
+// `shiftYears` slides the whole distribution so a plan's own life-expectancy
+// input still sets the central tendency. Someone who enters 95 on the strength
+// of family history should not have every simulation quietly re-centre on the
+// national average of ~83 — but they should still get the SHAPE of real
+// mortality around it, which is the entire point of sampling rather than
+// assuming. The shape is population data; the level is the user's judgement.
+const sampleAgeAtDeath = (currentAge, rand, shiftYears = 0) => {
+  const start = Math.max(Math.floor(currentAge), MORTALITY_MIN_AGE);
+  for (let a = start; a <= 200; a++) {
+    if (rand() < mortalityQx(a)) {
+      return Math.max(Math.floor(currentAge) + 1, a + Math.round(shiftYears));
+    }
+  }
+  return Math.max(Math.floor(currentAge) + 1, 200 + Math.round(shiftYears));
+};
+
 // IRS Pub 590-B, Appendix B, Table II (Joint and Last Survivor Life Expectancy).
 // Governs when the spouse is the sole designated beneficiary AND more than 10
 // years younger. Extracted directly from the publication PDF -- not transcribed
@@ -2405,7 +2474,7 @@ const getPlanningHorizonYears = (pi) => {
   if (pi.survivorModelEnabled && isMarried) {
     const cover = (lifeExp, currentAge) => {
       if (typeof lifeExp !== 'number' || typeof currentAge !== 'number') return;
-      years = Math.max(years, Math.min(lifeExp, MAX_AGE) - currentAge);
+      years = Math.max(years, Math.min(lifeExp, MAX_MODELED_AGE) - currentAge);
     };
     cover(pi.myLifeExpectancy, pi.myAge);
     cover(pi.spouseLifeExpectancy, pi.spouseAge);
@@ -5048,7 +5117,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
 
   return {
     // ── Generic constants ─────────────────────────────────────────────────
-    MAX_AGE, BROKERAGE_COST_BASIS_ESTIMATE, MAX_ITERATIONS_FOR_TAX_CALC,
+    MAX_AGE, MAX_MODELED_AGE, BROKERAGE_COST_BASIS_ESTIMATE, MAX_ITERATIONS_FOR_TAX_CALC,
     MONTE_CARLO_TAX_ESTIMATE, SAVE_DEBOUNCE_MS,
 
     // ── Account type taxonomy ─────────────────────────────────────────────
@@ -5092,6 +5161,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     SS_EARNINGS_TEST_LIMIT_2025, SS_EARNINGS_TEST_FRA_LIMIT_2025,
     calculateSSBenefit, calculateSSEarningsTestReduction, inferPiaFromBenefit,
     calculateSpousalBenefit,
+    mortalityQx, lifeExpectancyAt, sampleAgeAtDeath, MORTALITY_MIN_AGE,
     computeAssetSale, section121Exclusion, remainingMortgageAt,
     SECTION_121_EXCLUSION_SINGLE, SECTION_121_EXCLUSION_JOINT,
 

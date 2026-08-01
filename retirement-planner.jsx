@@ -3222,6 +3222,7 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
     // cut/raised by adjustPct (persistently). Turns MC pass/fail into "what
     // spending flexibility keeps this plan alive."
     guardrails: { enabled: false, bandPct: 0.20, adjustPct: 0.10 },
+    longevity: { enabled: false },
   });
   const [simResults, setSimResults] = useState(null);
   // Nominal vs today's dollars. Each sim draws its own inflation path, so pooled
@@ -3554,6 +3555,23 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
             </>
           )}
         </div>
+        {/* Longevity sampling — vary lifespan, not just markets */}
+        <div className="flex flex-wrap items-center gap-4 mb-4 p-3 bg-slate-800/40 border border-slate-700/50 rounded-lg">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={simSettings.longevity?.enabled || false}
+              onChange={e => setSimSettings({ ...simSettings, longevity: { enabled: e.target.checked } })}
+              className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-emerald-500 focus:ring-emerald-500/50"
+            />
+            <span className="text-sm text-slate-300">Vary lifespan too</span>
+          </label>
+          <span className="text-xs text-slate-500 max-w-2xl">
+            Without this, every scenario dies on the same birthday — a thousand market paths against exactly one lifespan.
+            Each run instead draws an age at death from CDC mortality data, centred on the life expectancies you entered.
+            Running out of money after you have died stops counting as a failure, and living to 100 starts counting as a risk.
+          </span>
+        </div>
         <div className="flex items-center gap-4">
           {isRunning ? (
             <button
@@ -3743,6 +3761,38 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
               </div>
             </div>
           </div>
+
+          {/* How long the household actually lived across the simulations */}
+          {simResults.longevityEnabled && simResults.longevityStats && (() => {
+            const L = simResults.longevityStats;
+            const cell = (label, value, sub) => (
+              <div className="bg-slate-800/60 rounded-lg p-3">
+                <div className="text-xs text-slate-400">{label}</div>
+                <div className="text-xl font-semibold text-slate-100">{value}</div>
+                {sub && <div className="text-xs text-slate-500 mt-0.5">{sub}</div>}
+              </div>
+            );
+            return (
+              <div className={cardStyle}>
+                <h4 className="text-lg font-semibold text-slate-100 mb-1">🕰️ How Long the Money Had to Last</h4>
+                <p className="text-xs text-slate-400 mb-3">
+                  Age of the last surviving member of the household, across every simulation. Success now means the
+                  portfolio outlasted the people — not that it reached a fixed birthday.
+                </p>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  {cell('Median', L.p50, 'half of scenarios go longer')}
+                  {cell('1 in 4 reach', L.p75)}
+                  {cell('1 in 10 reach', L.p90, 'the tail your plan must survive')}
+                  {cell('Longest drawn', L.max)}
+                </div>
+                <p className="text-xs text-slate-400 mt-3">
+                  In <span className="text-amber-400 font-medium">{Math.round(L.beyondPlanned * 100)}%</span> of scenarios
+                  the household outlived the fixed planning horizon this plan uses everywhere else — those are years the
+                  ordinary projection never models at all.
+                </p>
+              </div>
+            );
+          })()}
 
           {/* Guardrail spending outcomes — what flexibility the plan demanded */}
           {simResults.guardrailsEnabled && simResults.guardrailStats && (

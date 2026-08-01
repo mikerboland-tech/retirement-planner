@@ -3364,9 +3364,15 @@ section('P31 — the horizon must not end while someone is still alive');
   eq(H({ ...married, survivorModelEnabled: true, myLifeExpectancy: 70, spouseLifeExpectancy: 72 }), 34,
     'short life expectancies never shrink the horizon below legacyAge');
 
-  // Runaway guard.
-  eq(H({ ...married, survivorModelEnabled: true, spouseLifeExpectancy: 130 }), MAX_AGE - 51,
-    'an implausible life expectancy is capped at MAX_AGE');
+  // Runaway guard. Capped at MAX_MODELED_AGE (120), NOT at MAX_AGE (95) — the
+  // latter is merely the default planning age when a plan does not set one, and
+  // using it here silently truncated any life expectancy above 95. That was
+  // invisible until Monte Carlo started sampling lifespans and the drawn death
+  // ages piled up against a hard ceiling.
+  eq(H({ ...married, survivorModelEnabled: true, spouseLifeExpectancy: 130 }), engine.MAX_MODELED_AGE - 51,
+    'an implausible life expectancy is capped at MAX_MODELED_AGE');
+  eq(H({ ...married, survivorModelEnabled: true, spouseLifeExpectancy: 103 }), 103 - 51,
+    'but a merely long life is modelled in full, not clipped to 95');
 
   // Single filers are unaffected by any spouse field.
   eq(H({ filingStatus: 'single', myAge: 53, legacyAge: 85, myLifeExpectancy: 92,
@@ -3692,6 +3698,81 @@ section('P35 — IRC §121 primary residence exclusion and asset sales');
   const owedAt68 = remainingMortgageAt(mortgaged, 68, 4, s.pi);
   approx(mProj.find(r => r.myAge === 68).assetSaleProceeds, 1200000 - 72000 - owedAt68,
     'the sale pays off exactly the amortized balance shown on the balance sheet', 0.0001);
+}
+
+section('P36 — mortality table and longevity sampling');
+{
+  const { mortalityQx, lifeExpectancyAt, sampleAgeAtDeath, MORTALITY_MIN_AGE } = engine;
+
+  // ── GOLDEN: reconstruct the published ex column from the qx column ────────
+  // CDC/NCHS NVSR vol. 74 no. 2, Table 1 (total population, US, 2022). These
+  // life expectancies are published alongside the death probabilities we store,
+  // so recomputing one from the other is a genuine external check — a
+  // transcription slip anywhere in the table would break it.
+  for (const [age, published] of [[50, 30.95], [65, 18.91], [75, 11.95], [85, 6.39]]) {
+    approx(lifeExpectancyAt(age), published,
+      `CDC life expectancy at ${age} is ${published} years`, 0.011);
+  }
+  // Age 95 is held to a looser bound, and the reason is understood rather than
+  // fudged. The published figure there is computed partly from the "100 and
+  // over" OPEN interval, whose remaining lifetime the source expresses in its
+  // Lx/Tx columns rather than as a one-year rate. Our Gompertz extension of the
+  // hazard past 99 lands 0.06 years light. That gap only exists above 90, where
+  // fewer than 1 in 8 of a 65-year-old cohort remain.
+  approx(lifeExpectancyAt(95), 2.98,
+    'CDC life expectancy at 95 is 2.98 years (open-interval tail, looser bound)', 0.025);
+
+  // Shape sanity.
+  eq(mortalityQx(MORTALITY_MIN_AGE - 1), 0, 'below the table nobody dies');
+  eq(mortalityQx(200), 1, 'above it nobody survives');
+  gt(mortalityQx(90), mortalityQx(70), 'mortality rises with age');
+  gt(mortalityQx(70), mortalityQx(55), 'monotonically through the retirement years');
+  lt(lifeExpectancyAt(85), lifeExpectancyAt(65), 'remaining years fall as age rises');
+  gt(65 + lifeExpectancyAt(65), 85 + lifeExpectancyAt(85) - 20,
+    'but total expected age RISES with age — surviving to 85 is informative');
+
+  // ── Sampling reproduces the analytic distribution ─────────────────────────
+  // A fixed generator keeps this deterministic; a seeded LCG is enough.
+  let seed = 12345;
+  const rng = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const N = 60000, draws = [];
+  for (let i = 0; i < N; i++) draws.push(sampleAgeAtDeath(65, rng));
+  const mean = draws.reduce((a, b) => a + b, 0) / N;
+  // sampleAgeAtDeath returns whole ages; lifeExpectancyAt credits half a year in
+  // the year of death. The two therefore differ by about 0.5 by construction.
+  approx(mean, 65 + lifeExpectancyAt(65) - 0.5,
+    'sampled mean age at death matches the analytic expectation', 0.01);
+
+  draws.sort((a, b) => a - b);
+  const q = (p) => draws[Math.floor(p * N)];
+  gt(q(0.90), q(0.50), 'the distribution has real spread, not a point mass');
+  gt(q(0.90), 90, 'and a 65-year-old has a meaningful chance of reaching 90');
+  lt(q(0.10), 78, 'as well as a real chance of dying well before life expectancy');
+  eq(draws[draws.length - 1] <= 121, true, 'no draw exceeds the terminal age');
+  for (const d of draws) { if (d <= 65) { eq(d > 65, true, 'every draw is after the current age'); break; } }
+
+  // The shift moves the centre without destroying the shape.
+  const shifted = [];
+  for (let i = 0; i < N; i++) shifted.push(sampleAgeAtDeath(65, rng, 5));
+  const shiftedMean = shifted.reduce((a, b) => a + b, 0) / N;
+  approx(shiftedMean - mean, 5, 'a +5 year shift moves the mean by 5 years', 0.02);
+
+  // ── The horizon cap that used to clip this ────────────────────────────────
+  // Sampled ages above 95 were silently truncated by getPlanningHorizonYears
+  // until MAX_MODELED_AGE was separated from MAX_AGE. Pinned end to end: a
+  // 100-year life expectancy must actually produce a projection reaching 100.
+  const s = baseScenario({
+    myAge: 70, spouseAge: 70, myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 70,
+    myRetirementAge: 70, spouseRetirementAge: 70, legacyAge: 90,
+    myLifeExpectancy: 100, spouseLifeExpectancy: 100, survivorModelEnabled: true,
+    state: 'Florida', inflationRate: 0, desiredRetirementIncome: 50000,
+  });
+  s.accts = [{ id: 1, name: 'IRA', type: 'traditional_ira', balance: 2000000, contribution: 0,
+    contributionGrowth: 0, cagr: 0.05, startAge: 70, stopAge: 70, owner: 'me', contributor: 'me' }];
+  s.streams = [];
+  const proj = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  eq(proj[proj.length - 1].myAge, 100,
+    'a life expectancy of 100 is modelled to 100, not clipped at 95');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

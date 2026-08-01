@@ -82,11 +82,41 @@ function runMonteCarlo(jobId, payload) {
   } = payload;
 
   const piWithLifeExp = { ...personalInfo, legacyAge: personalInfo.legacyAge || 95 };
+
+  // ── LONGEVITY SAMPLING ──────────────────────────────────────────────────────
+  // Without this every simulation dies on the same birthday, so a thousand runs
+  // explore a thousand market paths against exactly one lifespan. That flatters
+  // plans in both directions at once: it hides the household that lives to 98,
+  // and it counts a "failure" at 94 against a household that was never going to
+  // see 94. Running out of money after you are dead is not a failure.
+  //
+  // Deaths only take effect when survivor modelling is on -- that is the switch
+  // the engine reads -- so enabling longevity implies it.
+  const longevity = !!(simSettings.longevity && simSettings.longevity.enabled);
+  const isMarried = piWithLifeExp.filingStatus === 'married_joint';
+  // Slide the sampled distribution so the plan's own life-expectancy input keeps
+  // setting the central tendency; only the SHAPE comes from population data.
+  const myShift = longevity
+    ? (piWithLifeExp.myLifeExpectancy || 85) - (piWithLifeExp.myAge + E.lifeExpectancyAt(piWithLifeExp.myAge))
+    : 0;
+  const spouseShift = longevity && isMarried
+    ? (piWithLifeExp.spouseLifeExpectancy || 87) - (piWithLifeExp.spouseAge + E.lifeExpectancyAt(piWithLifeExp.spouseAge))
+    : 0;
   // Must match the engine's horizon exactly. It covers a younger spouse, so a
   // myAge-only count would leave the tail years without overrides — and the
   // engine would quietly run those on deterministic returns, understating risk
   // in precisely the late years the simulation exists to stress.
-  const yearsFromCurrent = E.getPlanningHorizonYears(piWithLifeExp) + 1;
+  // With longevity on, each sim has its own horizon, so overrides and the fan
+  // chart must be sized for the LONGEST life anyone can draw rather than for
+  // legacyAge. MORTALITY_MAX_PLAN_AGE is the terminal age of the mortality
+  // table; a sim cannot outlive it, and the engine stops the year both spouses
+  // have died, so oversizing costs nothing but empty tail slots.
+  const MORTALITY_MAX_PLAN_AGE = 116;
+  const deterministicYears = E.getPlanningHorizonYears(piWithLifeExp) + 1;
+  const yearsFromCurrent = longevity
+    ? Math.max(deterministicYears,
+               MORTALITY_MAX_PLAN_AGE + Math.ceil(Math.max(myShift, spouseShift, 0)) - piWithLifeExp.myAge)
+    : deterministicYears;
   const walkUpYears = Math.max(0, simSettings.startAge - piWithLifeExp.myAge);
   const stochasticYears = yearsFromCurrent - walkUpYears;
 
@@ -152,8 +182,27 @@ function runMonteCarlo(jobId, payload) {
       }
     }
 
+    // Draw this simulation's lifespans. Sampling independently per person is the
+    // right default: joint mortality is correlated in reality (shared habits,
+    // environment, the "widowhood effect"), but modelling that needs a copula
+    // this app has no data to calibrate, and independence is the conventional
+    // and conservative choice for a couple.
+    let piForSim = piWithLifeExp;
+    if (longevity) {
+      const myDeath = E.sampleAgeAtDeath(piWithLifeExp.myAge, Math.random, myShift);
+      piForSim = {
+        ...piWithLifeExp,
+        myLifeExpectancy: myDeath,
+        survivorModelEnabled: true,   // deaths are inert without it
+      };
+      if (isMarried) {
+        piForSim.spouseLifeExpectancy =
+          E.sampleAgeAtDeath(piWithLifeExp.spouseAge, Math.random, spouseShift);
+      }
+    }
+
     const proj = computeProjections(
-      piWithLifeExp, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
+      piForSim, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
       undefined, { yearOverrides: overrides, spendingRule: guardrails || undefined }
     );
 
@@ -204,9 +253,20 @@ function runMonteCarlo(jobId, payload) {
       portfolioAt75: path.find(p => p.age === 75)?.portfolio || 0,
       portfolioAt85: path.find(p => p.age === 85)?.portfolio || 0,
       historicalStartYear: histStartYear,
+      // The lifespan this sim actually drew, so the UI can report the spread and
+      // the user can see WHY success moved rather than just that it did.
+      lastAge: longevity ? (path.length ? path[path.length - 1].age : piForSim.myAge) : undefined,
+      myDeathAge: longevity ? piForSim.myLifeExpectancy : undefined,
+      spouseDeathAge: longevity && isMarried ? piForSim.spouseLifeExpectancy : undefined,
     });
     if (sim < numPathsToStore) portfolioPathsToStore.push(path);
     for (let y = 0; y < yearsToReport; y++) {
+      // A sim whose household has died contributes NOTHING to later years —
+      // pushing a zero would drag the percentile bands toward the floor and read
+      // as "broke" when it means "no longer alive". The bands are therefore a
+      // distribution over households still living at that age, which is the only
+      // reading that stays honest once lifespans vary.
+      if (!path[y]) { if (longevity) continue; }
       bandData[y].push(path[y]?.portfolio || 0);
       bandDataReal[y].push(path[y]?.real || 0);
     }
@@ -234,6 +294,26 @@ function runMonteCarlo(jobId, payload) {
   const avgFailureAge = failureAges.length > 0
     ? failureAges.reduce((a, b) => a + b, 0) / failureAges.length
     : null;
+
+  // Spread of lifespans actually drawn. Reported so the user can see the range
+  // the success rate is now averaging over -- a number that moved because the
+  // household sometimes lives to 100 is a different claim from one that moved
+  // because the markets were unkind, and the two should not look alike.
+  let longevityStats = null;
+  if (longevity) {
+    const lastAges = results.map(r => r.lastAge).filter(a => typeof a === 'number').sort((a, b) => a - b);
+    if (lastAges.length) {
+      const q = (p) => lastAges[Math.min(lastAges.length - 1, Math.floor(lastAges.length * p))];
+      longevityStats = {
+        p10: q(0.10), p25: q(0.25), p50: q(0.50), p75: q(0.75), p90: q(0.90), p99: q(0.99),
+        mean: lastAges.reduce((a, b) => a + b, 0) / lastAges.length,
+        min: lastAges[0], max: lastAges[lastAges.length - 1],
+        // How often the household outlived the plan's own fixed assumption --
+        // the years the deterministic projection never models at all.
+        beyondPlanned: lastAges.filter(a => a > (deterministicYears - 1 + piWithLifeExp.myAge)).length / lastAges.length,
+      };
+    }
+  }
 
   // Percentile fan chart from ALL sims (bandData), not just the stored sample paths.
   const percentileBands = [];
@@ -308,6 +388,8 @@ function runMonteCarlo(jobId, payload) {
       totalSimulations: totalSims,
       startAge: simSettings.startAge,
       startingPortfolio,
+      longevityEnabled: longevity,
+      longevityStats,
       percentile5: percentile(finalPortfolios, 0.05),
       percentile25: percentile(finalPortfolios, 0.25),
       percentile50: percentile(finalPortfolios, 0.50),
