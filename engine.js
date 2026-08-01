@@ -1854,6 +1854,37 @@ const calculateSSEarningsTestReduction = (earnedIncome, claimAge, fra, yearsFrom
 };
 
 // Calculate Social Security benefit at different claiming ages
+// ── SPOUSAL BENEFIT (42 U.S.C. 402(b)/(c)) ───────────────────────────────────
+// A spouse is entitled to the GREATER of their own retired-worker benefit or a
+// spousal benefit worth 50% of the higher earner's PIA. This is the difference
+// between a stay-at-home spouse projecting $0 of Social Security and projecting
+// half of their partner's full benefit, which for a single-earner household is
+// one of the largest numbers in the whole plan.
+//
+// Two rules make this NOT just calculateSSBenefit(workerPia / 2, ...):
+//   1. The early-claiming reduction runs on a different schedule — 25/36 of 1%
+//      per month for the first 36 months before the claimant's own FRA, then
+//      5/12 of 1% per month beyond. (A retired-worker benefit uses 5/9, not
+//      25/36, for the first 36.) At 62 against FRA 67 that is a 35% haircut on
+//      the spousal benefit versus 30% on a worker benefit.
+//   2. Delayed retirement credits do NOT accrue on a spousal benefit. Waiting
+//      past FRA to claim as a spouse buys nothing, which is why it caps at 50%.
+//
+// The 50% is of the worker's PIA, never of the worker's actual check — the
+// worker claiming early or late does not change what the spouse receives.
+const calculateSpousalBenefit = (workerPia, claimAge, birthYear) => {
+  if (!workerPia || workerPia <= 0) return 0;
+  if (claimAge < 62) return 0;
+  const fra = getFullRetirementAge(birthYear);
+  const base = workerPia * 0.5;
+  if (claimAge >= fra) return base; // no delayed credits on the spousal portion
+  const monthsEarly = Math.round((fra - claimAge) * 12);
+  const reduction = monthsEarly <= 36
+    ? monthsEarly * (25 / 36) / 100
+    : 36 * (25 / 36) / 100 + (monthsEarly - 36) * (5 / 12) / 100;
+  return base * Math.max(0, 1 - reduction);
+};
+
 const calculateSSBenefit = (pia, claimAge, birthYear) => {
   // Get Full Retirement Age (FRA) — includes pre-1943 phase-in
   const fra = getFullRetirementAge(birthYear);
@@ -3005,6 +3036,49 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   let survivorSSBenefit = 0;          // The higher SS benefit the survivor inherits
   let deceasedSSBenefit = 0;          // The SS benefit that stopped
   // Cache original SS amounts for survivor benefit calculation (in today's dollars)
+  // ── SPOUSAL TOP-UP ──────────────────────────────────────────────────────────
+  // Applied here, once, by raising each SS stream's amount to the greater of the
+  // person's own benefit and their spousal entitlement. Doing it at the stream
+  // level rather than inside the year loop means COLA, the today's-dollars flag,
+  // taxation and the survivor rules all keep working unchanged — they simply see
+  // the correct benefit.
+  //
+  // It also composes correctly with survivorship without special-casing: the
+  // survivor rule already pays the GREATER of the survivor's own benefit and the
+  // deceased's. A widow(er) who had been drawing 50% steps up to 100%, because
+  // the deceased's benefit is necessarily the larger of the two.
+  //
+  // Requires a PIA on both streams. Streams built by the wizard carry one; a
+  // hand-entered stream may not, and without the worker's PIA there is nothing
+  // to take half of, so the top-up is skipped rather than guessed at.
+  if (pi.filingStatus === 'married_joint') {
+    const applySpousal = (stream, otherStream, birthYear) => {
+      if (!stream || !otherStream || !otherStream.pia) return;
+      const spousalMonthly = calculateSpousalBenefit(otherStream.pia, stream.startAge, birthYear);
+      const spousalAnnual = spousalMonthly * 12;
+      if (spousalAnnual > (stream.amount || 0)) {
+        stream.spousalTopUp = spousalAnnual - (stream.amount || 0);
+        stream.amount = spousalAnnual;
+      }
+    };
+    // Copy first — callers reuse their stream objects across scenarios (the
+    // Sensitivity and Monte Carlo tabs run the engine dozens of times on the same
+    // array), and a top-up applied in place would compound on every run.
+    const idxMe = streams.findIndex(s => s.type === 'social_security' && s.owner === 'me');
+    const idxSp = streams.findIndex(s => s.type === 'social_security' && s.owner === 'spouse');
+    if (idxMe >= 0 || idxSp >= 0) {
+      streams = streams.slice();
+      if (idxMe >= 0) streams[idxMe] = { ...streams[idxMe] };
+      if (idxSp >= 0) streams[idxSp] = { ...streams[idxSp] };
+      const me = idxMe >= 0 ? streams[idxMe] : null;
+      const sp = idxSp >= 0 ? streams[idxSp] : null;
+      const myBirth = pi.myBirthYear || (currentYear - (pi.myAge || 0));
+      const spBirth = pi.spouseBirthYear || (currentYear - (pi.spouseAge || 0));
+      applySpousal(me, sp, myBirth);
+      applySpousal(sp, me, spBirth);
+    }
+  }
+
   const primarySSStream = streams.find(s => s.type === 'social_security' && s.owner === 'me');
   const spouseSSStream = streams.find(s => s.type === 'social_security' && s.owner === 'spouse');
   const primarySSAmount = primarySSStream ? primarySSStream.amount : 0;
@@ -4813,6 +4887,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     SS_FULL_RETIREMENT_AGE, SS_FRA_PRE_1943, getFullRetirementAge,
     SS_EARNINGS_TEST_LIMIT_2025, SS_EARNINGS_TEST_FRA_LIMIT_2025,
     calculateSSBenefit, calculateSSEarningsTestReduction, inferPiaFromBenefit,
+    calculateSpousalBenefit,
 
     // ── Medicare / IRMAA / healthcare ─────────────────────────────────────
     IRMAA_THRESHOLDS_2025, MEDICARE_PART_B_STANDARD_2025,

@@ -7014,6 +7014,35 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
       }
     }
 
+    // ── A spouse with no Social Security stream at all ────────────────────────
+    // The engine tops a spouse up to 50% of the higher earner's PIA, but it can
+    // only do that for a stream that exists. Someone whose partner never worked
+    // will naturally leave Social Security off for them entirely — and silently
+    // forfeit what is often the second-largest income line in the plan. The
+    // engine deliberately does not invent the stream: a spousal benefit requires
+    // a year of marriage and eligibility this app cannot verify. So it says so.
+    if (info.filingStatus === 'married_joint') {
+      const ssOf = (o) => incomeStreams.find(s => s.type === 'social_security' && s.owner === o);
+      const mine = ssOf('me'), theirs = ssOf('spouse');
+      const missing = (mine && mine.pia > 0 && !theirs) ? 'spouse'
+                    : (theirs && theirs.pia > 0 && !mine) ? 'me' : null;
+      if (missing) {
+        const worker = missing === 'spouse' ? mine : theirs;
+        const half = Math.round((worker.pia || 0) * 0.5);
+        warnings.push({
+          type: 'missing_spousal_social_security',
+          severity: 'warning',
+          message: `${missing === 'spouse' ? 'Your spouse has' : 'You have'} no Social Security income stream, but a spouse can claim on the other's record — worth up to ${formatCurrency(half)}/month here.`,
+          details: [
+            `A spouse receives the greater of their own benefit or 50% of the higher earner's PIA (${formatCurrency(worker.pia)}/month), even with no earnings record of their own.`,
+            'Claimed before their own full retirement age it is reduced — 35% at 62 — and unlike a worker benefit it earns nothing by waiting past FRA.',
+            'Generally requires at least one year of marriage, so this is not added automatically.',
+          ],
+          action: `Add a Social Security stream on the Income tab for ${missing === 'spouse' ? 'your spouse' : 'yourself'}. Enter their own PIA if they have one — the projection pays whichever is larger.`
+        });
+      }
+    }
+
     // ── A pre-tax floor that spending will fight ──────────────────────────────
     // The floor now holds spending back, but if pre-tax is FIRST in the priority
     // order the two settings are working against each other every single year.

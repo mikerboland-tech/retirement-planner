@@ -3461,6 +3461,73 @@ section('P32 — GOLDEN CASES: published figures from the IRS and SSA, not our o
   eq(getRmdStartAge(1960), 75, 'born 1960: 75');
 }
 
+section('P33 — Social Security spousal benefit (42 U.S.C. 402(b))');
+{
+  const { calculateSpousalBenefit } = engine;
+  const PIA = 2000, by = 1965; // FRA 67
+
+  // SSA schedule: 25/36 of 1% per month for the first 36 months early, 5/12 of 1%
+  // beyond, capped at 50% with NO delayed credits. Published percentages of PIA.
+  const SSA = { 62: 32.5, 63: 35, 64: 37.5, 65: 41.667, 66: 45.833, 67: 50, 68: 50, 70: 50 };
+  for (const age of Object.keys(SSA)) {
+    approx(calculateSpousalBenefit(PIA, +age, by) / PIA * 100, SSA[age],
+      `spousal at ${age} is ${SSA[age]}% of the worker's PIA`, 0.0005);
+  }
+  eq(calculateSpousalBenefit(PIA, 61, by), 0, 'nothing before 62');
+  eq(calculateSpousalBenefit(0, 67, by), 0, 'no worker PIA means nothing to halve');
+
+  // The spousal reduction is HARSHER than the worker reduction at the same age:
+  // 25/36 vs 5/9 per month. Claiming spousal at 62 costs 35%, not 30%.
+  approx(calculateSpousalBenefit(PIA, 62, by) / (PIA * 0.5), 0.65,
+    'a spousal benefit claimed at 62 is cut 35%, not the worker schedule’s 30%', 0.0005);
+
+  // Delayed credits accrue on a worker benefit but never on a spousal one.
+  gt(calculateSSBenefit(PIA, 70, by), calculateSSBenefit(PIA, 67, by));
+  eq(calculateSpousalBenefit(PIA, 70, by), calculateSpousalBenefit(PIA, 67, by),
+    'waiting past FRA buys a spouse nothing');
+
+  // ── End to end: the single-earner household this exists for ───────────────
+  const household = (spousePia) => {
+    const s = baseScenario({
+      myAge: 64, spouseAge: 64, myBirthYear: TODAY_YEAR - 64, spouseBirthYear: TODAY_YEAR - 64,
+      myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 75,
+      state: 'Florida', inflationRate: 0, desiredRetirementIncome: 80000,
+    });
+    s.accts = [{ id: 1, name: 'IRA', type: 'traditional_ira', balance: 900000, contribution: 0,
+      contributionGrowth: 0, cagr: 0.05, startAge: 64, stopAge: 65, owner: 'me', contributor: 'me' }];
+    s.streams = [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 3200 * 12, startAge: 67, endAge: 95, cola: 0, owner: 'me', pia: 3200 },
+      { id: 2, name: 'Spouse SS', type: 'social_security', amount: spousePia * 12, startAge: 67, endAge: 95, cola: 0, owner: 'spouse', pia: spousePia },
+    ];
+    return { s, proj: computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR) };
+  };
+
+  const noEarnings = household(0);
+  eq(noEarnings.proj.find(r => r.myAge === 68).socialSecurity, 4800 * 12,
+    'a spouse with no earnings record collects half the worker PIA, not $0');
+
+  // A spouse whose OWN benefit already exceeds half gets no top-up.
+  const highEarner = household(2500);
+  eq(highEarner.proj.find(r => r.myAge === 68).socialSecurity, (3200 + 2500) * 12,
+    'a spouse earning more than half the worker PIA keeps their own, untopped');
+
+  // Idempotence. Sensitivity and Monte Carlo call the engine dozens of times on
+  // ONE stream array; a top-up applied in place would compound every run and
+  // inflate Social Security without bound.
+  const { s } = household(0);
+  const a = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR).find(r => r.myAge === 68).socialSecurity;
+  const b = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR).find(r => r.myAge === 68).socialSecurity;
+  eq(b, a, 'repeated runs on the same array give the same answer');
+  eq(s.streams[1].amount, 0, 'and the caller’s stream object is never mutated');
+
+  // Single filers get no spousal anything.
+  const single = household(0);
+  single.s.pi.filingStatus = 'single';
+  eq(computeProjections(single.s.pi, single.s.accts, single.s.streams, [], [], [], TODAY_YEAR)
+       .find(r => r.myAge === 68).socialSecurity, 3200 * 12,
+    'an unmarried filer gets no spousal top-up');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
