@@ -1989,6 +1989,21 @@ const calculateSSEarningsTestReduction = (earnedIncome, claimAge, fra, yearsFrom
 };
 
 // Calculate Social Security benefit at different claiming ages
+// ── HSA WITHDRAWALS (IRC §223(f)) ────────────────────────────────────────────
+// An HSA is only tax-free to the extent it pays QUALIFIED MEDICAL EXPENSES.
+// Beyond that it is ordinary income, plus a 20% additional tax before age 65.
+// From 65 the penalty disappears and a non-qualified withdrawal is simply
+// ordinary income — which is why an HSA is often described as becoming a
+// traditional IRA at 65. It is strictly better than one, because the medical
+// share stays tax-free for life.
+//
+// Treating the whole balance as tax-free (as this engine did) turns an HSA into
+// an unlimited Roth, and the error grows with the balance: a household that
+// front-loaded an HSA for decades gets a six-figure tax-free windfall that does
+// not exist.
+const HSA_NONQUALIFIED_PENALTY_RATE = 0.20;
+const HSA_PENALTY_END_AGE = 65;
+
 // ── IRC §121 PRIMARY RESIDENCE GAIN EXCLUSION ────────────────────────────────
 // Up to $250,000 of gain on the sale of a primary residence is excluded from
 // income; $500,000 for a couple filing jointly. Not inflation-indexed — the
@@ -3905,6 +3920,22 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     const healthcareResult = calculateHealthcareExpenses(pi, myAge, spouseAge, yearsFromNow, primaryAlive, spouseAlive);
     const healthcareExpense = healthcareResult.total;
 
+    // Qualified medical expenses an HSA may reimburse tax-free this year.
+    //
+    // Two sources, because neither alone is right. The modelled healthcare cost
+    // is real QME, but it is zero for a plan whose healthcare sits inside its
+    // spending target — and telling those households their HSA is suddenly all
+    // taxable would be both alarming and wrong. So pi.hsaQualifiedExpenses lets
+    // a plan state its medical spending directly, in today's dollars, indexed at
+    // the medical rate rather than general inflation.
+    //
+    // Dental, vision, hearing, and long-term care premiums are qualified and are
+    // typically NOT in the modelled figure, which is another reason the manual
+    // input exists.
+    const medInflation = pi.medicalInflation ?? MEDICAL_INFLATION_RATE;
+    const hsaQualifiedBudget = healthcareExpense
+      + (pi.hsaQualifiedExpenses || 0) * Math.pow(1 + medInflation, yearsFromNow);
+
     // ── ACA MARKETPLACE PREMIUM (MAGI-driven, pre-65 retired persons) ───────────
     // When pi.pre65Coverage === 'aca', retired under-65 household members buy
     // marketplace coverage: net premium = benchmark − premium tax credit, and the
@@ -4005,7 +4036,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Returns { preTax: ordinary pre-tax voluntarily drawn, gains: realized LT capital gains }.
       const estimateDrawComposition = (gross) => {
         let need = Math.max(0, gross - totalRMD); // voluntary draw beyond the mandatory RMD
-        let preTax = 0, gains = 0, penalized = 0;
+        let preTax = 0, gains = 0, penalized = 0, hsaNonQual = 0;
         const bal = {};
         accts.forEach(a => {
           bal[a.id] = accountBalances[a.id];
@@ -4017,16 +4048,28 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           sum + (isPreTaxAccount(a.type) ? Math.max(0, bal[a.id] || 0) : 0), 0);
         const simAllowance = (respectFloor) =>
           respectFloor && preTaxFloorAdj > 0 ? Math.max(0, simPreTaxTotal() - preTaxFloorAdj) : Infinity;
+        // Mirror of the executor's HSA limit. Teaching the executor about a cap
+        // and not the solver is a mistake this codebase has already made once
+        // with the pre-tax floor: the solver priced the gross-up off accounts the
+        // executor then refused to touch, and over-withdrew every year as a
+        // result. Non-qualified HSA money is ordinary income AND penalised, so a
+        // solver that thinks it is tax-free understates the gross-up twice over.
+        let simHsaQualified = hsaQualifiedBudget;
+        const simHsaAllowance = (respectFloor) =>
+          respectFloor ? Math.max(0, simHsaQualified) : Infinity;
+        const simAnyHsa = accts.some(a => isHSAAccount(a.type) && (bal[a.id] || 0) > 0);
         let pool = excessReinvestmentPool;
         for (const respectFloor of [true, false]) {
         if (need <= 0) break;
-        if (!respectFloor && preTaxFloorAdj <= 0) break;
+        if (!respectFloor && preTaxFloorAdj <= 0 && !simAnyHsa) break;
         for (const category of solverPriority) {
           if (need <= 0) break;
           const types = solverAccountTypes(category);
           accts.forEach(a => {
             if (types.includes(a.type) && need > 0) {
-              const cap = isPreTaxAccount(a.type) ? simAllowance(respectFloor) : Infinity;
+              const cap = isPreTaxAccount(a.type) ? simAllowance(respectFloor)
+                        : isHSAAccount(a.type) ? simHsaAllowance(respectFloor)
+                        : Infinity;
               const w = Math.min(bal[a.id], need, cap);
               if (w <= 0) return;
               bal[a.id] -= w; need -= w;
@@ -4036,11 +4079,20 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
                 // retiree's spending target is silently missed by 10% of the draw.
                 penalized += w * penaltyShareFor(a);
               }
+              else if (isHSAAccount(a.type)) {
+                const qualified = Math.min(w, Math.max(0, simHsaQualified));
+                simHsaQualified -= qualified;
+                const nonQualified = w - qualified;
+                if (nonQualified > 0) {
+                  preTax += nonQualified;
+                  hsaNonQual += nonQualified;
+                }
+              }
               else if (isBrokerageAccount(a.type)) {
                 const basisPct = (a.costBasisPercent !== undefined && a.costBasisPercent !== null) ? a.costBasisPercent : BROKERAGE_COST_BASIS_ESTIMATE;
                 gains += w * (1 - basisPct);
               }
-              // roth / hsa: tax-free, contributes nothing to taxable income
+              // roth: tax-free, contributes nothing to taxable income
             }
           });
           if (category === 'brokerage' && need > 0 && pool > 0) {
@@ -4049,7 +4101,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           }
         }
         } // end floor pass
-        return { preTax, gains, penalized };
+        return { preTax, gains, penalized, hsaNonQual };
       };
 
       // Iteratively calculate the right withdrawal to hit desired net income
@@ -4103,8 +4155,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // pre-funds the surtax instead of having it eat into realized net income.
           const iterInvestmentIncome = estimatedGains; // gains + dividends, already combined above
           const iterNIIT = calculateNIIT(iterInvestmentIncome, iterMAGI, effectiveFilingStatus);
-          // §72(t) additional tax on the early-distribution slice of this draw.
-          const iterPenalty = draw.penalized * EARLY_WITHDRAWAL_PENALTY_RATE;
+          // §72(t) additional tax on the early-distribution slice of this draw,
+          // plus §223(f)'s 20% on any HSA money drawn beyond qualified medical
+          // expenses before 65. Both are additional taxes the gross-up must fund.
+          const iterPenalty = draw.penalized * EARLY_WITHDRAWAL_PENALTY_RATE
+            + (myAge < HSA_PENALTY_END_AGE ? (draw.hsaNonQual || 0) * HSA_NONQUALIFIED_PENALTY_RATE : 0);
           const totalFedTax = totalFedOrdinary + estCapGainsTax + iterNIIT + iterPenalty;
           // Retirement income for state exemption: pension only (401k/IRA withdrawals are NOT exempt).
           // State taxes capital gains as ordinary income → use the gains-inclusive base.
@@ -4260,16 +4315,30 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     const preTaxDrawAllowance = (respectFloor) =>
       respectFloor && preTaxFloorAdj > 0 ? Math.max(0, totalPreTaxNow() - preTaxFloorAdj) : Infinity;
 
-    // Pass 1 honours the floor; pass 2 only runs if pass 1 left the year short.
+    // How much tax-free HSA room is left this year. Drawn down as the HSA is
+    // tapped; once exhausted, further HSA withdrawals are ordinary income.
+    let hsaQualifiedRemaining = hsaQualifiedBudget;
+    let hsaNonQualifiedWithdrawals = 0;
+    const hsaDrawAllowance = (respectFloor) =>
+      respectFloor ? Math.max(0, hsaQualifiedRemaining) : Infinity;
+    const anyHsaBalance = accts.some(a => isHSAAccount(a.type) && (accountBalances[a.id] || 0) > 0);
+
+    // Pass 1 honours the floor and the HSA's qualified-expense limit; pass 2 only
+    // runs if pass 1 left the year short. Deferring non-qualified HSA money to
+    // the second pass is what a real household does — you do not volunteer a 20%
+    // penalty while a taxable account still has money in it — and it keeps the
+    // HSA intact for the medical costs it exists to cover.
     for (const respectFloor of [true, false]) {
       if (additionalNeeded <= 0) break;
-      if (!respectFloor && preTaxFloorAdj <= 0) break; // no floor -> nothing to retry
+      if (!respectFloor && preTaxFloorAdj <= 0 && !anyHsaBalance) break; // nothing held back -> nothing to retry
     for (const category of priority) {
       if (additionalNeeded <= 0) break;
       const categoryAccountTypes = getAccountTypes(category);
       accts.forEach(account => {
         if (categoryAccountTypes.includes(account.type) && additionalNeeded > 0) {
-          const cap = isPreTaxAccount(account.type) ? preTaxDrawAllowance(respectFloor) : Infinity;
+          const cap = isPreTaxAccount(account.type) ? preTaxDrawAllowance(respectFloor)
+                    : isHSAAccount(account.type) ? hsaDrawAllowance(respectFloor)
+                    : Infinity;
           const withdrawal = Math.min(accountBalances[account.id], additionalNeeded, cap);
           if (withdrawal <= 0) return;
           accountBalances[account.id] -= withdrawal;
@@ -4288,8 +4357,20 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
               : BROKERAGE_COST_BASIS_ESTIMATE;
             brokerageBasisRecovered += withdrawal * basisPct;
             brokerageCapitalGains += withdrawal * (1 - basisPct);
-          } else if (isRothAccount(account.type) || isHSAAccount(account.type)) {
-            rothWithdrawals += withdrawal; // Both Roth and HSA (qualified) are tax-free
+          } else if (isHSAAccount(account.type)) {
+            // Split the draw at the qualified-expense line. The qualified part is
+            // tax-free like a Roth; the rest is ordinary income, and carries a
+            // 20% additional tax before 65.
+            const qualified = Math.min(withdrawal, Math.max(0, hsaQualifiedRemaining));
+            const nonQualified = withdrawal - qualified;
+            hsaQualifiedRemaining -= qualified;
+            rothWithdrawals += qualified;
+            if (nonQualified > 0) {
+              hsaNonQualifiedWithdrawals += nonQualified;
+              preTaxWithdrawals += nonQualified; // ordinary income, same as an IRA draw
+            }
+          } else if (isRothAccount(account.type)) {
+            rothWithdrawals += withdrawal;
           }
         }
       });
@@ -4810,6 +4891,12 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // (Alabama's federal deductibility uses the ordinary tax only).
     const earlyWithdrawalPenalty = penalizedWithdrawals * EARLY_WITHDRAWAL_PENALTY_RATE;
     federalTax += earlyWithdrawalPenalty;
+    // §223(f)(4): 20% additional tax on non-qualified HSA distributions before
+    // 65. At 65 and beyond the penalty vanishes and the withdrawal is simply
+    // ordinary income — already counted above via preTaxWithdrawals.
+    const hsaPenalty = myAge < HSA_PENALTY_END_AGE
+      ? hsaNonQualifiedWithdrawals * HSA_NONQUALIFIED_PENALTY_RATE : 0;
+    federalTax += hsaPenalty;
 
     // ── MEDICARE IRMAA SURCHARGE ──────────────────────────────────────────────
     // IRMAA adds surcharges to Part B and Part D premiums for high-income beneficiaries.
@@ -5043,6 +5130,12 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // so the UI can show it as its own line — it is the dominant cost of an
       // early-retirement withdrawal plan and shouldn't hide inside "federal tax".
       earlyWithdrawalPenalty: Math.round(earlyWithdrawalPenalty),
+      // HSA money drawn beyond qualified medical expenses: ordinary income, and
+      // penalised before 65. Reported so a year that suddenly costs more tax can
+      // be explained rather than just observed.
+      hsaQualifiedBudget: Math.round(hsaQualifiedBudget),
+      hsaNonQualifiedWithdrawals: Math.round(hsaNonQualifiedWithdrawals),
+      hsaPenalty: Math.round(hsaPenalty),
       penalizedWithdrawals: Math.round(penalizedWithdrawals),
       stateTax: Math.round(stateTax),
       ficaTax: Math.round(totalFICA), // Employee FICA (SS + Medicare) on earned income
@@ -5162,6 +5255,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     calculateSSBenefit, calculateSSEarningsTestReduction, inferPiaFromBenefit,
     calculateSpousalBenefit,
     mortalityQx, lifeExpectancyAt, sampleAgeAtDeath, MORTALITY_MIN_AGE,
+    HSA_NONQUALIFIED_PENALTY_RATE, HSA_PENALTY_END_AGE,
     computeAssetSale, section121Exclusion, remainingMortgageAt,
     SECTION_121_EXCLUSION_SINGLE, SECTION_121_EXCLUSION_JOINT,
 

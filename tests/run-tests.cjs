@@ -3775,6 +3775,86 @@ section('P36 — mortality table and longevity sampling');
     'a life expectancy of 100 is modelled to 100, not clipped at 95');
 }
 
+section('P37 — HSA withdrawals are tax-free only up to qualified medical expenses (IRC §223(f))');
+{
+  const { HSA_NONQUALIFIED_PENALTY_RATE, HSA_PENALTY_END_AGE } = engine;
+  eq(HSA_NONQUALIFIED_PENALTY_RATE, 0.20, 'the additional tax is 20%, not the 10% of §72(t)');
+  eq(HSA_PENALTY_END_AGE, 65, 'and it ends at 65 — not 59½');
+
+  const plan = (over, accounts) => {
+    const s = baseScenario({
+      myAge: 60, spouseAge: 60, myBirthYear: TODAY_YEAR - 60, spouseBirthYear: TODAY_YEAR - 60,
+      myRetirementAge: 60, spouseRetirementAge: 60, legacyAge: 67,
+      state: 'Florida', inflationRate: 0, desiredRetirementIncome: 60000,
+      healthcareModel: 'none', medicalInflation: 0, ...over,
+    });
+    s.accts = accounts || [{ id: 1, name: 'HSA', type: 'hsa', balance: 800000, contribution: 0,
+      contributionGrowth: 0, cagr: 0, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me' }];
+    s.streams = [];
+    return computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  };
+
+  // Spending fully covered by qualified expenses: entirely tax-free, and the
+  // draw is exactly the spending target with no gross-up at all.
+  const covered = plan({ hsaQualifiedExpenses: 60000 })[0];
+  eq(covered.hsaNonQualifiedWithdrawals, 0, 'a fully qualified year has no non-qualified draw');
+  eq(covered.hsaPenalty, 0, 'and no penalty');
+  eq(covered.totalTax, 0, 'and no tax at all — this is the HSA superpower');
+  approx(covered.portfolioWithdrawal, 60000, 'so the draw equals the spending target', 0.001);
+
+  // No qualified expenses: every dollar is ordinary income and penalised.
+  const bare = plan({ hsaQualifiedExpenses: 0 })[0];
+  gt(bare.hsaNonQualifiedWithdrawals, 0, 'with no qualified expenses the whole draw is non-qualified');
+  approx(bare.hsaPenalty, bare.hsaNonQualifiedWithdrawals * 0.20,
+    'the penalty is 20% of the non-qualified amount', 0.001);
+  gt(bare.portfolioWithdrawal, covered.portfolioWithdrawal,
+    'and the draw is grossed up to cover the tax the covered case never pays');
+
+  // Partial coverage sits between the two, and only the excess is penalised.
+  const partial = plan({ hsaQualifiedExpenses: 20000 })[0];
+  gt(partial.hsaNonQualifiedWithdrawals, 0, 'partial coverage leaves some non-qualified');
+  lt(partial.hsaNonQualifiedWithdrawals, bare.hsaNonQualifiedWithdrawals, 'but less than none does');
+  approx(partial.hsaNonQualifiedWithdrawals, partial.portfolioWithdrawal - 20000,
+    'exactly the draw above the qualified budget', 0.001);
+
+  // ── The penalty ends at 65; the income tax does not ───────────────────────
+  const at = (age) => plan({ myAge: age, spouseAge: age, myRetirementAge: age,
+    myBirthYear: TODAY_YEAR - age, spouseBirthYear: TODAY_YEAR - age, legacyAge: age + 3,
+    hsaQualifiedExpenses: 0 })[0];
+  gt(at(64).hsaPenalty, 0, 'at 64 a non-qualified withdrawal is penalised');
+  eq(at(65).hsaPenalty, 0, 'at 65 the 20% additional tax is gone');
+  gt(at(65).hsaNonQualifiedWithdrawals, 0, 'but the withdrawal is still non-qualified');
+  gt(at(65).totalTax, 0, 'and still ordinary income — an HSA becomes an IRA, not a Roth');
+  lt(at(65).portfolioWithdrawal, at(64).portfolioWithdrawal,
+    'so less has to be drawn at 65 to fund the same spending');
+
+  // ── Solver and executor must agree ────────────────────────────────────────
+  // Teaching the executor about a cap but not the solver is the exact shape of
+  // the v1.24.0 pre-tax-floor regression: the solver priced the gross-up off
+  // accounts the executor then refused to touch, and the household silently came
+  // up short every year. Net income landing on target is what proves they agree.
+  for (const qme of [0, 20000, 45000]) {
+    const r = plan({ hsaQualifiedExpenses: qme })[0];
+    approx(r.netIncome, 60000, `net income hits the target with QME ${qme}`, 0.001);
+  }
+
+  // ── The HSA is preserved while taxable money is available ─────────────────
+  // Volunteering a 20% penalty while a brokerage account still has a balance is
+  // not what anyone does, and the two-pass draw must not do it either.
+  const withBrokerage = plan({ hsaQualifiedExpenses: 10000 }, [
+    { id: 1, name: 'HSA', type: 'hsa', balance: 800000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Brokerage', type: 'brokerage', balance: 500000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me', costBasisPercent: 0.8 },
+  ])[0];
+  eq(withBrokerage.hsaNonQualifiedWithdrawals, 0,
+    'no penalised HSA draw while a taxable account can fund the year');
+  eq(withBrokerage.hsaPenalty, 0, 'and therefore no penalty');
+
+  // Modelled healthcare counts as qualified expense without being entered twice.
+  const modelled = plan({ healthcareModel: 'basic', hsaQualifiedExpenses: 0 })[0];
+  gt(modelled.hsaQualifiedBudget, 0,
+    'modelled healthcare costs form a qualified budget on their own');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

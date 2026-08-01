@@ -7065,6 +7065,31 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
       }
     }
 
+    // ── An HSA with no qualified medical expenses to spend it on ──────────────
+    // The engine no longer treats an HSA as an unlimited tax-free bucket, so a
+    // plan that models no healthcare AND states no medical spending will have
+    // every HSA dollar taxed as ordinary income — with a 20% penalty before 65.
+    // That is the correct reading of what was entered, but it is almost never
+    // what the household means, so it is worth saying out loud.
+    {
+      const hsaBalance = accounts
+        .filter(a => a.type === 'hsa')
+        .reduce((sum, a) => sum + (Number(a.balance) || 0), 0);
+      const statedQME = info.hsaQualifiedExpenses || 0;
+      if (hsaBalance > 0 && statedQME === 0 && !healthcareCostsModeled(info)) {
+        warnings.push({
+          type: 'hsa_without_qualified_expenses',
+          severity: 'warning',
+          message: `You have ${formatCurrency(hsaBalance)} in an HSA, but the plan models no medical spending for it to cover — so every withdrawal is taxed as ordinary income.`,
+          details: [
+            'HSA withdrawals are tax-free only up to qualified medical expenses. Beyond that they are ordinary income, plus a 20% additional tax before age 65.',
+            'With healthcare left unmodelled and no medical expenses entered, the projection has no qualified expenses to apply — which understates the value of your HSA, probably substantially.',
+          ],
+          action: 'Enter your Annual Qualified Medical Expenses on the Personal tab, or switch Healthcare Modeling to Basic or better so the projection knows what the HSA is paying for.'
+        });
+      }
+    }
+
     // ── RMDs computed from the wrong IRS table ────────────────────────────────
     // Table II (Joint and Last Survivor) governs when the spouse is sole
     // beneficiary and more than 10 years younger; this engine applies Table III
@@ -7831,7 +7856,26 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
               ))}
             </select>
           </div>
-          
+
+          {/* Qualified medical expenses — the line that makes an HSA tax-free.
+              Only worth asking about when there is an HSA to withdraw from. */}
+          {accounts.some(a => a.type === 'hsa') && (
+            <div className="mb-3">
+              <label className={compactLabelStyle}>Annual Qualified Medical Expenses (today's $)</label>
+              <input
+                type="number" min="0" step="500"
+                value={localInfo.hsaQualifiedExpenses || 0}
+                onChange={e => handleChange('hsaQualifiedExpenses', Number(e.target.value))}
+                className={compactInputStyle}
+              />
+              <p className="text-xs text-slate-500 mt-1">
+                HSA withdrawals are tax-free only up to your qualified medical costs; beyond that they are ordinary income,
+                plus 20% before age 65. Any healthcare modelled above already counts — this is for spending it misses, such as
+                dental, vision, hearing, and long-term care premiums. Indexed at the medical inflation rate.
+              </p>
+            </div>
+          )}
+
           {healthcareCostsModeled(localInfo) && (
             <div className="space-y-3">
               <div className="mb-3">
