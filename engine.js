@@ -1920,6 +1920,75 @@ const calculateSSEarningsTestReduction = (earnedIncome, claimAge, fra, yearsFrom
 };
 
 // Calculate Social Security benefit at different claiming ages
+// ── IRC §121 PRIMARY RESIDENCE GAIN EXCLUSION ────────────────────────────────
+// Up to $250,000 of gain on the sale of a primary residence is excluded from
+// income; $500,000 for a couple filing jointly. Not inflation-indexed — the
+// figures have been unchanged since the Taxpayer Relief Act of 1997, which is
+// why an increasing share of long-held homes now produce taxable gain.
+//
+// Eligibility (ownership and use as a principal residence for 2 of the last 5
+// years, and no other §121 exclusion in the prior 2 years) is not verifiable
+// from anything this app stores. Marking an asset as a primary residence is the
+// user asserting they qualify.
+//
+// Gain above the exclusion is LONG-TERM capital gain, so it stacks on ordinary
+// income for the 0/15/20% brackets, counts for NIIT, and lands in MAGI — which
+// is why a downsize can quietly cost two years of IRMAA surcharges on top of
+// the capital gains tax itself.
+// Remaining mortgage balance on an asset, `yearsFromNow` years out.
+//
+// Proper amortization, not linear. Real mortgages are back-loaded: early
+// payments are mostly interest, so the balance drops slowly at first and then
+// accelerates. Linear payoff materially understates debt through the first half
+// to two-thirds of the loan.
+//
+//   B(t) = P x [(1+r)^N - (1+r)^t] / [(1+r)^N - 1]
+//
+// asset.mortgage is TODAY's outstanding balance (treated as fresh principal),
+// mortgagePayoffAge is when it is fully paid, mortgageRate defaults to 6.5%.
+// Extracted so a sale pays off the SAME balance the net-worth line carries --
+// two implementations of this would drift and the discrepancy would surface as
+// unexplained cash at the sale.
+const remainingMortgageAt = (asset, myAge, yearsFromNow, pi) => {
+  if (!(asset.mortgage > 0) || !asset.mortgagePayoffAge) return 0;
+  if (myAge >= asset.mortgagePayoffAge) return 0;
+  const N = asset.mortgagePayoffAge - pi.myAge;
+  const t = yearsFromNow;
+  const r = asset.mortgageRate !== undefined && asset.mortgageRate !== null ? asset.mortgageRate : 0.065;
+  if (r > 0 && N > 0) {
+    const factorN = Math.pow(1 + r, N);
+    const factorT = Math.pow(1 + r, t);
+    return Math.max(0, asset.mortgage * (factorN - factorT) / (factorN - 1));
+  }
+  return Math.max(0, asset.mortgage * Math.max(0, 1 - (t / N))); // r=0 -> linear
+};
+
+const SECTION_121_EXCLUSION_SINGLE = 250000;
+const SECTION_121_EXCLUSION_JOINT = 500000;
+
+const section121Exclusion = (filingStatus) =>
+  filingStatus === 'married_joint' ? SECTION_121_EXCLUSION_JOINT : SECTION_121_EXCLUSION_SINGLE;
+
+// Split an asset sale into the pieces the tax engine needs.
+//   salePrice     — gross, before costs
+//   costBasis     — purchase price plus improvements
+//   sellingCosts  — commission and closing, which REDUCE the gain (they are
+//                   added to basis in substance, not deducted separately)
+//   mortgage      — paid off out of proceeds; affects cash, never the gain
+// Returns { grossGain, excludedGain, taxableGain, netProceeds }.
+const computeAssetSale = ({ salePrice = 0, costBasis = 0, sellingCosts = 0, mortgage = 0,
+                            isPrimaryResidence = false, filingStatus = 'single' } = {}) => {
+  const grossGain = Math.max(0, salePrice - sellingCosts - costBasis);
+  const cap = isPrimaryResidence ? section121Exclusion(filingStatus) : 0;
+  const excludedGain = Math.min(grossGain, cap);
+  const taxableGain = Math.max(0, grossGain - excludedGain);
+  // A loss on a personal residence is not deductible (§165(c)), and this engine
+  // does not model business-asset losses either, so proceeds never go negative
+  // for tax purposes — only the cash does.
+  const netProceeds = salePrice - sellingCosts - mortgage;
+  return { grossGain, excludedGain, taxableGain, netProceeds };
+};
+
 // ── SPOUSAL BENEFIT (42 U.S.C. 402(b)/(c)) ───────────────────────────────────
 // A spouse is entitled to the GREATER of their own retired-worker benefit or a
 // spousal benefit worth 50% of the higher earner's PIA. This is the difference
@@ -3472,7 +3541,48 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         yearEvents.push({ name: evt.name, amount: adjustedAmount, type: evt.type });
       }
     });
-    
+
+    // ── ASSET SALES ─────────────────────────────────────────────────────────────
+    // An asset with a saleAge is disposed of in that year: the mortgage is paid
+    // off out of the proceeds, the net cash becomes spendable, and any gain above
+    // the §121 exclusion is a long-term capital gain.
+    //
+    // The cash and the tax are deliberately routed separately. Net proceeds join
+    // oneTimeNontaxableIncome, which reduces this year's withdrawal need and
+    // sweeps any remainder into a brokerage account. The taxable gain is added to
+    // the capital-gains bucket further down. Splitting them is what keeps return
+    // of basis and excluded gain untaxed while still spendable -- the whole point
+    // of §121. Sending the gross through either channel alone would either tax
+    // money that is not income or hide income that is.
+    let assetSaleTaxableGain = 0;
+    let assetSaleProceeds = 0;
+    let assetSaleExcludedGain = 0;
+    assetList.forEach(asset => {
+      if (!asset.saleAge) return;
+      const ownerAge = asset.owner === 'spouse' ? spouseAge : myAge;
+      if (ownerAge !== asset.saleAge) return;
+
+      // The asset appreciates to the sale year; basis and costs do not. Cost
+      // basis is a historical purchase price, and a percentage selling cost
+      // scales with the sale price by construction.
+      const salePrice = (asset.value || 0) * Math.pow(1 + (asset.appreciationRate || 0), yearsFromNow);
+      const sellingCosts = salePrice * (asset.sellingCostPercent ?? 0.06);
+      const mortgageOwed = remainingMortgageAt(asset, myAge, yearsFromNow, pi);
+      const sale = computeAssetSale({
+        salePrice,
+        costBasis: asset.costBasis || 0,
+        sellingCosts,
+        mortgage: mortgageOwed,
+        isPrimaryResidence: !!asset.isPrimaryResidence,
+        filingStatus: effectiveFilingStatus,
+      });
+      assetSaleTaxableGain += sale.taxableGain;
+      assetSaleExcludedGain += sale.excludedGain;
+      assetSaleProceeds += Math.max(0, sale.netProceeds);
+      oneTimeNontaxableIncome += Math.max(0, sale.netProceeds);
+      yearEvents.push({ name: `Sold ${asset.name}`, amount: Math.max(0, sale.netProceeds), type: 'asset_sale' });
+    });
+
     // Calculate FICA (employee share) on earned income — per-person for correct wage base application
     const myFICA = calculateFICA(myEarnedIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
     const spouseFICA = calculateFICA(spouseEarnedIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
@@ -4053,7 +4163,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // Every downstream use (Pub 915 combined income, removal from the ordinary
     // federal base, LTCG stacking, the state gains-inclusive base, NIIT) applies
     // to dividends identically.
-    let brokerageCapitalGains = brokerageDividends;
+    // Gain on an asset sold this year above the §121 exclusion is long-term
+    // capital gain, and joins the same bucket so it picks up every downstream
+    // consequence without special-casing: LTCG stacking on ordinary income, the
+    // Pub 915 combined-income base for Social Security, state taxation as
+    // ordinary income, NIIT, and MAGI — which is what makes a large downsize
+    // gain reach forward two years into IRMAA.
+    let brokerageCapitalGains = brokerageDividends + assetSaleTaxableGain;
     let brokerageBasisRecovered = 0;
     // HSA withdrawals for qualified medical expenses are tax-free (not tracked for tax)
     
@@ -4790,41 +4906,16 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     let totalAssetValue = 0;
     let totalAssetDebt = 0;
     assetList.forEach(asset => {
+      // A sold asset leaves the balance sheet in the year of sale — its value has
+      // already been converted to cash and swept into the portfolio, so carrying
+      // it here as well would double-count it in net worth and legacy.
+      if (asset.saleAge) {
+        const ownerAge = asset.owner === 'spouse' ? spouseAge : myAge;
+        if (ownerAge >= asset.saleAge) return;
+      }
       const assetValue = asset.value * Math.pow(1 + (asset.appreciationRate || 0), yearsFromNow);
       totalAssetValue += Math.max(0, assetValue); // Don't go negative for depreciating assetList
-      
-      // Calculate remaining mortgage using proper amortization (not linear).
-      // Real mortgages are back-loaded: early payments are mostly interest, so the
-      // outstanding balance drops slowly at first then accelerates. Linear payoff
-      // significantly underestimates debt during the first 1/2 to 2/3 of the loan.
-      //
-      // Formula for remaining balance after t years on a fixed-rate mortgage:
-      //   B(t) = P × [(1+r)^N - (1+r)^t] / [(1+r)^N - 1]
-      // where P = current outstanding balance (treated as fresh principal today),
-      //       r = annual interest rate, N = remaining years to payoff, t = years elapsed.
-      //
-      // We treat asset.mortgage as TODAY's outstanding balance and the
-      // mortgagePayoffAge as when it will be fully paid. mortgageRate (default 6.5%)
-      // is the annual rate. If mortgageRate is 0, we fall back to linear (zero-interest case).
-      if (asset.mortgage > 0 && asset.mortgagePayoffAge) {
-        if (myAge < asset.mortgagePayoffAge) {
-          const N = asset.mortgagePayoffAge - pi.myAge;     // total remaining years from today
-          const t = yearsFromNow;                           // years elapsed from today
-          const r = asset.mortgageRate !== undefined && asset.mortgageRate !== null
-            ? asset.mortgageRate
-            : 0.065;                                        // default 6.5% annual
-          let remainingMortgage;
-          if (r > 0 && N > 0) {
-            const factorN = Math.pow(1 + r, N);
-            const factorT = Math.pow(1 + r, t);
-            remainingMortgage = asset.mortgage * (factorN - factorT) / (factorN - 1);
-          } else {
-            // r=0 → linear payoff (no interest)
-            remainingMortgage = asset.mortgage * Math.max(0, 1 - (t / N));
-          }
-          totalAssetDebt += Math.max(0, remainingMortgage);
-        }
-      }
+      totalAssetDebt += remainingMortgageAt(asset, myAge, yearsFromNow, pi);
     });
     const netAssetValue = totalAssetValue - totalAssetDebt;
     
@@ -4851,6 +4942,12 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // preferential income is taxed at 0/15/20%, and dividends alone don't
       // account for it once a taxable account is being drawn down.
       realizedCapitalGains: Math.round(Math.max(0, brokerageCapitalGains - brokerageDividends)),
+      // Asset sales, reported separately so the UI can explain a spike in tax.
+      // A downsize can produce the largest single-year capital gain in a whole
+      // plan, and without these the year just looks inexplicably expensive.
+      assetSaleProceeds: Math.round(assetSaleProceeds),
+      assetSaleTaxableGain: Math.round(assetSaleTaxableGain),
+      assetSaleExcludedGain: Math.round(assetSaleExcludedGain),
       rothConversion: Math.round(rothConversionThisYear), // Planned Roth conversion executed this year
       conversionTaxWithdrawal: Math.round(conversionTaxWithdrawal), // Extra portfolio draw that paid the conversion's tax bill
       charitableGiving: Math.round(isRetired ? desiredIncome * (charitablePercent / 100) : 0),
@@ -4995,6 +5092,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     SS_EARNINGS_TEST_LIMIT_2025, SS_EARNINGS_TEST_FRA_LIMIT_2025,
     calculateSSBenefit, calculateSSEarningsTestReduction, inferPiaFromBenefit,
     calculateSpousalBenefit,
+    computeAssetSale, section121Exclusion, remainingMortgageAt,
+    SECTION_121_EXCLUSION_SINGLE, SECTION_121_EXCLUSION_JOINT,
 
     // ── Medicare / IRMAA / healthcare ─────────────────────────────────────
     IRMAA_THRESHOLDS_2025, MEDICARE_PART_B_STANDARD_2025,

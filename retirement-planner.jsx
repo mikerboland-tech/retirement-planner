@@ -22,7 +22,7 @@ const {
   FICA_ADDITIONAL_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_THRESHOLD,
   calculateFICA, RMD_FACTORS, calculateRMD, getRmdStartAge,
   getDefaultRothConversionWindow, QCD_ANNUAL_LIMIT, QCD_START_AGE, getPlanningHorizonYears, checkContributionLimits,
-  rmdUsesJointTable,
+  rmdUsesJointTable, SECTION_121_EXCLUSION_SINGLE, SECTION_121_EXCLUSION_JOINT,
   estimateRetirementSavings, estimateAnnualSocialSecurity, savingsMultipleForAge,
   realReturn, inflateToAge, deflateToToday, coastFire, streamColaYears, streamAmountAtAge,
   inferPiaFromBenefit,
@@ -11398,7 +11398,7 @@ function IncomeModal({ editingIncome, personalInfo, incomeStreams = [], onClose,
   );
 }
 
-function AssetModal({ editingAsset, onClose, onSave }) {
+function AssetModal({ editingAsset, onClose, onSave, defaultSaleAge = 65 }) {
   const [formData, setFormData] = useState(editingAsset || { name: '', type: 'real_estate', value: 0, appreciationRate: 0.03, mortgage: 0, mortgagePayoffAge: null, mortgageRate: 0.065 });
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
@@ -11427,6 +11427,66 @@ function AssetModal({ editingAsset, onClose, onSave }) {
               <p className="text-xs text-slate-500 mt-1">Annual interest rate. Used for proper amortization (default 6.5%). Set to 0 for interest-free loans.</p>
             </div>
           )}
+
+          {/* ── Selling this asset ────────────────────────────────────────────
+              Downsizing is one of the most common real retirement events and
+              the app previously had no way to express it: an asset appreciated
+              forever and was never converted to cash. Modelling it needs the
+              cost basis, because the taxable gain is sale price less basis less
+              selling costs — not the sale price. */}
+          <div className="border-t border-slate-700/50 pt-4">
+            <label className="flex items-center gap-2 cursor-pointer mb-3">
+              <input
+                type="checkbox"
+                checked={!!formData.saleAge}
+                onChange={e => setFormData({ ...formData, saleAge: e.target.checked ? defaultSaleAge : null })}
+                className="w-4 h-4 accent-emerald-500"
+              />
+              <span className="text-sm font-medium text-slate-200">Plan to sell this asset</span>
+            </label>
+            {!!formData.saleAge && (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className={labelStyle}>Sell at Age</label>
+                    <input type="number" value={formData.saleAge}
+                      onChange={e => setFormData({ ...formData, saleAge: Number(e.target.value) })}
+                      className={inputStyle} />
+                  </div>
+                  <div>
+                    <label className={labelStyle}>Selling Costs (%)</label>
+                    <input type="number" step="0.5" min="0" max="20"
+                      value={((formData.sellingCostPercent ?? 0.06) * 100).toFixed(1)}
+                      onChange={e => setFormData({ ...formData, sellingCostPercent: Number(e.target.value) / 100 })}
+                      className={inputStyle} />
+                    <p className="text-xs text-slate-500 mt-1">Agent commission and closing (default 6%). Reduces the taxable gain.</p>
+                  </div>
+                </div>
+                <div>
+                  <label className={labelStyle}>Cost Basis</label>
+                  <input type="number" value={formData.costBasis || 0}
+                    onChange={e => setFormData({ ...formData, costBasis: Number(e.target.value) })}
+                    className={inputStyle} placeholder="What you paid, plus improvements" />
+                  <p className="text-xs text-slate-500 mt-1">Purchase price plus capital improvements. Leaving this at $0 treats the entire sale price as gain.</p>
+                </div>
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!formData.isPrimaryResidence}
+                    onChange={e => setFormData({ ...formData, isPrimaryResidence: e.target.checked })}
+                    className="w-4 h-4 accent-emerald-500 mt-0.5"
+                  />
+                  <span className="text-sm text-slate-300">
+                    This is my primary residence
+                    <span className="block text-xs text-slate-500 mt-0.5">
+                      Excludes up to {formatCurrency(SECTION_121_EXCLUSION_JOINT)} of gain if married filing jointly, {formatCurrency(SECTION_121_EXCLUSION_SINGLE)} otherwise (IRC §121).
+                      Requires owning and living in it 2 of the last 5 years — the app can’t check that, so only tick it if you qualify.
+                    </span>
+                  </span>
+                </label>
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex justify-end gap-3 mt-8">
           <button onClick={onClose} className={buttonSecondary}>Cancel</button>
@@ -13151,6 +13211,7 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
         )}
         {showWizAssetModal && (
           <AssetModal
+            defaultSaleAge={Number(w.myRetirementAge)||65}
             editingAsset={editingWizAsset}
             onClose={()=>{setShowWizAssetModal(false);setEditingWizAsset(null);}}
             onSave={(data)=>{
@@ -13807,6 +13868,7 @@ function RetirementPlanner() {
       )}
       {showAssetModal && (
         <AssetModal
+          defaultSaleAge={personalInfo.myRetirementAge||65}
           editingAsset={editingAsset}
           onClose={() => { setShowAssetModal(false); setEditingAsset(null); }}
           onSave={handleSaveAsset}

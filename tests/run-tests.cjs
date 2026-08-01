@@ -3602,6 +3602,98 @@ section('P34 — RMD Joint and Last Survivor table (IRS Pub 590-B, Appendix B, T
     'and the projection uses exactly the Table II divisor', 0.0002);
 }
 
+section('P35 — IRC §121 primary residence exclusion and asset sales');
+{
+  const { computeAssetSale, section121Exclusion, remainingMortgageAt,
+          SECTION_121_EXCLUSION_SINGLE, SECTION_121_EXCLUSION_JOINT } = engine;
+
+  eq(SECTION_121_EXCLUSION_SINGLE, 250000, '§121 single exclusion is $250,000');
+  eq(SECTION_121_EXCLUSION_JOINT, 500000, '§121 joint exclusion is $500,000');
+  eq(section121Exclusion('married_joint'), 500000, 'MFJ gets the joint figure');
+  eq(section121Exclusion('single'), 250000, 'single gets the single figure');
+  eq(section121Exclusion('married_separate'), 250000,
+    'married filing separately gets the single figure, not half of nothing');
+
+  // A $1.2M sale of a home bought for $300k, 6% costs. Gain is measured after
+  // selling costs: 1,200,000 - 72,000 - 300,000 = 828,000.
+  const base = { salePrice: 1200000, costBasis: 300000, sellingCosts: 72000, mortgage: 0 };
+  const mfj = computeAssetSale({ ...base, isPrimaryResidence: true, filingStatus: 'married_joint' });
+  eq(mfj.grossGain, 828000, 'selling costs reduce the gain, they are not a separate deduction');
+  eq(mfj.excludedGain, 500000, 'the full joint exclusion applies');
+  eq(mfj.taxableGain, 328000, 'and the rest is taxable gain');
+  eq(mfj.netProceeds, 1128000, 'net proceeds are price less costs less mortgage');
+
+  const single = computeAssetSale({ ...base, isPrimaryResidence: true, filingStatus: 'single' });
+  eq(single.taxableGain, 578000, 'a single filer shelters $250,000 less');
+  eq(single.netProceeds, mfj.netProceeds, 'but takes home the same cash — the exclusion is a tax concept');
+
+  const rental = computeAssetSale({ ...base, isPrimaryResidence: false, filingStatus: 'married_joint' });
+  eq(rental.taxableGain, 828000, 'a non-residence gets no exclusion at all');
+
+  // A gain smaller than the exclusion is fully sheltered, and cannot go negative.
+  const small = computeAssetSale({ salePrice: 400000, costBasis: 300000, sellingCosts: 24000,
+    isPrimaryResidence: true, filingStatus: 'married_joint' });
+  eq(small.taxableGain, 0, 'a modest gain is entirely excluded');
+  eq(small.excludedGain, 76000, 'and only the gain that exists is excluded, not the whole cap');
+
+  // A loss is not deductible; the engine must not produce a negative gain.
+  const loss = computeAssetSale({ salePrice: 250000, costBasis: 300000, sellingCosts: 15000,
+    isPrimaryResidence: true, filingStatus: 'single' });
+  eq(loss.grossGain, 0, 'a loss on a residence floors at zero — §165(c) denies the deduction');
+  eq(loss.taxableGain, 0, 'and so does the taxable gain');
+
+  // The mortgage consumes cash but never touches the gain.
+  const withDebt = computeAssetSale({ ...base, mortgage: 400000, isPrimaryResidence: true, filingStatus: 'married_joint' });
+  eq(withDebt.taxableGain, mfj.taxableGain, 'a mortgage does not change the taxable gain');
+  eq(withDebt.netProceeds, 728000, 'it only reduces the cash that comes out');
+
+  // ── End to end through the projection ─────────────────────────────────────
+  const s = baseScenario({
+    myAge: 64, spouseAge: 64, myBirthYear: TODAY_YEAR - 64, spouseBirthYear: TODAY_YEAR - 64,
+    myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 72,
+    state: 'Florida', inflationRate: 0, desiredRetirementIncome: 90000,
+  });
+  s.accts = [{ id: 1, name: 'IRA', type: 'traditional_ira', balance: 800000, contribution: 0,
+    contributionGrowth: 0, cagr: 0.05, startAge: 64, stopAge: 65, owner: 'me', contributor: 'me' }];
+  s.streams = [];
+  const home = { id: 1, name: 'Home', type: 'real_estate', value: 1200000, appreciationRate: 0,
+    costBasis: 300000, mortgage: 0, owner: 'me', isPrimaryResidence: true, saleAge: 68, sellingCostPercent: 0.06 };
+  const run = (assets) => computeProjections(s.pi, s.accts, s.streams, assets, [], [], TODAY_YEAR);
+
+  const sold = run([home]);
+  const kept = run([{ ...home, saleAge: null }]);
+  const saleYear = sold.find(r => r.myAge === 68);
+  eq(saleYear.assetSaleTaxableGain, 328000, 'the projection reports the taxable gain in the sale year');
+  eq(saleYear.assetSaleExcludedGain, 500000, 'and what §121 sheltered');
+  eq(saleYear.assetSaleProceeds, 1128000, 'and the cash raised');
+  eq(sold.find(r => r.myAge === 67).assetSaleProceeds, 0, 'nothing happens before the sale age');
+
+  // The asset leaves the balance sheet, and the cash lands in the portfolio.
+  gt(sold.find(r => r.myAge === 67).assetValue, 0, 'the home is an asset the year before');
+  eq(sold.find(r => r.myAge === 69).assetValue, 0, 'and gone the year after — not double-counted');
+  gt(sold.find(r => r.myAge === 69).totalPortfolio, kept.find(r => r.myAge === 69).totalPortfolio,
+    'the proceeds show up in the portfolio instead');
+
+  // The gain is taxed. Same plan, same year, only the sale differs.
+  gt(saleYear.totalTax, kept.find(r => r.myAge === 68).totalTax,
+    'the sale year costs more tax than the same year without a sale');
+
+  // And the exclusion is doing real work: without it the tax would be higher.
+  const noExclusion = run([{ ...home, isPrimaryResidence: false }]);
+  gt(noExclusion.find(r => r.myAge === 68).totalTax, saleYear.totalTax,
+    'the same sale without §121 costs materially more');
+  eq(noExclusion.find(r => r.myAge === 68).assetSaleTaxableGain, 828000,
+    'because the whole gain is taxable');
+
+  // The mortgage paid off at sale must match the balance the net-worth line
+  // carried the year before — one amortization implementation, not two.
+  const mortgaged = { ...home, mortgage: 500000, mortgagePayoffAge: 80, mortgageRate: 0.05 };
+  const mProj = run([mortgaged]);
+  const owedAt68 = remainingMortgageAt(mortgaged, 68, 4, s.pi);
+  approx(mProj.find(r => r.myAge === 68).assetSaleProceeds, 1200000 - 72000 - owedAt68,
+    'the sale pays off exactly the amortized balance shown on the balance sheet', 0.0001);
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
