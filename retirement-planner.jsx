@@ -1193,21 +1193,6 @@ function AssetsTab({ assetTypes, assets, setAssets, setEditingAsset, setShowAsse
   
   return (
     <div className="space-y-6">
-      {limitBreaches.length > 0 && (
-        <div className="p-4 bg-red-500/5 border border-red-500/40 rounded-xl space-y-2">
-          <div className="text-sm font-semibold text-red-300">
-            {limitBreaches.length === 1 ? 'A contribution is over the IRS limit' : 'Some contributions are over IRS limits'}
-          </div>
-          {limitBreaches.map((b, i) => (
-            <p key={i} className="text-xs text-slate-300 leading-relaxed">{b.message}</p>
-          ))}
-          <p className="text-xs text-slate-500 leading-relaxed">
-            The projection uses these numbers exactly as entered — it does not silently cap them —
-            so until this is corrected the plan assumes contributions the IRS would not allow, and
-            every balance downstream is optimistic. Percent-of-salary rows are sized from current salary.
-          </p>
-        </div>
-      )}
       <div className="flex justify-between items-center">
         <div>
           <h3 className="text-xl font-semibold text-slate-100">Non-Liquid Assets</h3>
@@ -1416,21 +1401,6 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
   
   return (
     <div className="space-y-6">
-      {limitBreaches.length > 0 && (
-        <div className="p-4 bg-red-500/5 border border-red-500/40 rounded-xl space-y-2">
-          <div className="text-sm font-semibold text-red-300">
-            {limitBreaches.length === 1 ? 'A contribution is over the IRS limit' : 'Some contributions are over IRS limits'}
-          </div>
-          {limitBreaches.map((b, i) => (
-            <p key={i} className="text-xs text-slate-300 leading-relaxed">{b.message}</p>
-          ))}
-          <p className="text-xs text-slate-500 leading-relaxed">
-            The projection uses these numbers exactly as entered — it does not silently cap them —
-            so until this is corrected the plan assumes contributions the IRS would not allow, and
-            every balance downstream is optimistic. Percent-of-salary rows are sized from current salary.
-          </p>
-        </div>
-      )}
       <div className="flex justify-between items-center">
         <h3 className="text-xl font-semibold text-slate-100">Income Streams</h3>
         <div className="flex items-center gap-2">
