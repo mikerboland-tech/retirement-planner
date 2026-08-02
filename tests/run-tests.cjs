@@ -3855,6 +3855,82 @@ section('P37 — HSA withdrawals are tax-free only up to qualified medical expen
     'modelled healthcare costs form a qualified budget on their own');
 }
 
+section('P38 — bracket-fill must land ON the bracket, not past it or short of it');
+{
+  // Two independent leaks, both found by checking a real plan's realized ordinary
+  // income against the indexed bracket top rather than trusting the solver.
+  const TOP22 = FEDERAL_TAX_BRACKETS_2026.married_joint[2].max; // 211,400
+
+  const build = (over) => {
+    const s = baseScenario({
+      myAge: 64, spouseAge: 64, myBirthYear: TODAY_YEAR - 64, spouseBirthYear: TODAY_YEAR - 64,
+      myRetirementAge: 64, spouseRetirementAge: 64, legacyAge: 76,
+      state: 'Florida', inflationRate: 0, desiredRetirementIncome: 150000,
+      rothConversionBracket: '22%', rothConversionStartAge: 64, rothConversionEndAge: 75,
+      withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+      ...over,
+    });
+    s.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 4000000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', contributor: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 100000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', contributor: 'me' },
+      { id: 3, name: 'Brokerage', type: 'brokerage', balance: 900000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', contributor: 'me', costBasisPercent: 0.5 },
+    ];
+    s.streams = [];
+    return computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+  };
+  const ordinaryOf = (r) => Math.max(0,
+    (r.taxableIncome || 0) - (r.brokerageDividends || 0) - (r.realizedCapitalGains || 0) - (r.federalDeduction || 0));
+
+  // ── Leak 1: the conversion's own tax bill ─────────────────────────────────
+  // Filling to the top and THEN withdrawing more pre-tax to pay the tax pushes
+  // the year past the top — the tax draw is ordinary income too. The overshoot
+  // equalled the tax draw to the dollar on a real plan.
+  const r0 = build({})[0];
+  gt(r0.rothConversion, 0, 'the fill converts something');
+  gt(r0.conversionTaxWithdrawal, 0, 'and funds the tax bill from the portfolio');
+  lt(ordinaryOf(r0) - TOP22, 25, 'ordinary income lands on the 22% top, not past it');
+  gt(ordinaryOf(r0), TOP22 - 25, 'and not short of it either');
+  // Specifically: the year is NOT over the top by the size of its own tax draw.
+  lt(ordinaryOf(r0) - TOP22, r0.conversionTaxWithdrawal * 0.1,
+    'the overshoot is not the conversion tax draw leaking into the next bracket');
+
+  // A brokerage-funded tax bill realizes PREFERENTIAL gains, which consume no
+  // ordinary bracket room — so that case needs no correction, and applying one
+  // anyway would under-convert. Pinned in both directions.
+  const rb = build({ rothConversionTaxSource: 'brokerage' })[0];
+  lt(Math.abs(ordinaryOf(rb) - TOP22), 25,
+    'a brokerage-funded tax bill still lands exactly on the top');
+  const rbf = build({ withdrawalPriority: ['brokerage', 'pretax', 'roth'] })[0];
+  lt(Math.abs(ordinaryOf(rbf) - TOP22), 25,
+    'and so does a brokerage-first withdrawal order');
+
+  // ── Leak 2: QCD dollars are not taxable income ────────────────────────────
+  // A QCD is excluded from income entirely, so pre-tax dollars destined for
+  // charity are not part of the base the bracket must accommodate. Counting them
+  // under-converted by exactly the QCD every year from 70 on — surrendering cheap
+  // bracket room in precisely the years a charitable retiree has most of it.
+  const giving = build({ charitableGivingPercent: 10, myAge: 72, spouseAge: 72,
+    myBirthYear: TODAY_YEAR - 72, spouseBirthYear: TODAY_YEAR - 72,
+    myRetirementAge: 72, spouseRetirementAge: 72, legacyAge: 78,
+    rothConversionStartAge: 72, rothConversionEndAge: 77 })[0];
+  gt(giving.qcd, 0, 'the charitable year really does produce a QCD');
+  // Looser bound than the cases above, for a reason that is understood rather
+  // than fudged: this scenario is in the first projection year at 72, where there
+  // is no 2-year MAGI history and the conversion therefore moves THIS year's
+  // IRMAA. IRMAA is a step function, so the funding draw jumps discontinuously
+  // and no conversion lands exactly on the ceiling. Everything with a normal
+  // lookback settles within $20 — see the real-plan sweep, worst case $15.
+  lt(Math.abs(ordinaryOf(giving) - TOP22), 1500,
+    'and the fill still lands on the bracket top rather than short by the QCD');
+
+  const noGiving = build({ charitableGivingPercent: 0, myAge: 72, spouseAge: 72,
+    myBirthYear: TODAY_YEAR - 72, spouseBirthYear: TODAY_YEAR - 72,
+    myRetirementAge: 72, spouseRetirementAge: 72, legacyAge: 78,
+    rothConversionStartAge: 72, rothConversionEndAge: 77 })[0];
+  gt(giving.rothConversion, noGiving.rothConversion,
+    'a QCD frees ordinary room, so the charitable plan converts MORE, not less');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

@@ -4479,7 +4479,22 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         // conversion itself. RMDs are ordinary income but tracked in totalRMD
         // separately from preTaxWithdrawals (which holds only the additional
         // voluntary pre-tax withdrawals beyond the RMD).
-        const ordinaryBeforeConversion = nonSSIncomeAfterDeduction + totalRMD + preTaxWithdrawals;
+        // A QCD is excluded from income entirely, so pre-tax dollars destined for
+        // charity are NOT part of the base the bracket has to accommodate.
+        // Counting them made the fill under-convert by exactly the QCD every year
+        // from 70 onward — surrendering cheap bracket room in precisely the years
+        // a charitable retiree has the most of it. Mirrors the QCD calculation
+        // further down; both are capped by pre-tax income actually withdrawn for
+        // spending, since conversion dollars and the conversion-tax draw go to the
+        // Roth and the IRS rather than to charity.
+        const anticipatedQCD = (charitablePercent > 0 && isRetired && myAge >= QCD_START_AGE)
+          ? Math.min(
+              desiredIncome * (charitablePercent / 100),
+              totalRMD + spendingPreTaxWithdrawals,
+              (effectiveFilingStatus === 'married_joint' ? 2 : 1) * QCD_ANNUAL_LIMIT * inflationFactor)
+          : 0;
+        const ordinaryBeforeConversion = Math.max(0,
+          nonSSIncomeAfterDeduction + totalRMD + preTaxWithdrawals - anticipatedQCD);
 
         const bracketIdx = RATE_TO_BRACKET_IDX[conversionBracket];
         if (bracketIdx === undefined) {
@@ -4509,17 +4524,112 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           const hiBound = Math.max(0, bracketCap
             + deductionAt(ordinaryBeforeConversion + brokerageCapitalGains + preTaxDeduction)
             - ordinaryBeforeConversion);
-          if (hiBound <= 0 || taxableAt(0) >= bracketCap) {
+
+          // ── THE CONVERSION'S OWN TAX BILL EATS BRACKET ROOM ─────────────────
+          // Filling to the top of a bracket and then withdrawing MORE pre-tax to
+          // pay the resulting tax pushes the year straight past that top — the
+          // tax draw is ordinary income too. The overshoot equalled the tax draw
+          // to the dollar: on a real plan, ~$14-19k/yr spilling from 22% into 24%
+          // in exactly the years the feature exists to keep cheap.
+          //
+          // Only pre-tax draws do this. With rothConversionTaxSource ===
+          // 'brokerage' the bill is met from a taxable account, whose gains are
+          // preferential and consume no ordinary bracket space at all.
+          // Only the PRE-TAX share of that draw is ordinary income. A draw funded
+          // from a taxable account realizes preferential gains, which stack above
+          // ordinary income and consume no ordinary bracket room; a Roth draw is
+          // tax-free. So the correction has to follow the withdrawal order rather
+          // than assume the worst — a brokerage-first plan needs no correction at
+          // all, and applying one anyway would under-convert it.
+          const preTaxShareOfDraw = (amount, convertedAlready) => {
+            if (!(amount > 0)) return 0;
+            let need = amount, ordinary = 0;
+            const bal = {};
+            accts.forEach(a => { bal[a.id] = accountBalances[a.id] || 0; });
+            // The conversion itself comes out of pre-tax first, so it is not
+            // available to fund the tax bill.
+            let toRemove = convertedAlready || 0;
+            for (const a of accts) {
+              if (toRemove <= 0) break;
+              if (!isPreTaxAccount(a.type)) continue;
+              const cut = Math.min(bal[a.id], toRemove);
+              bal[a.id] -= cut; toRemove -= cut;
+            }
+            for (const category of priority) {
+              if (need <= 0) break;
+              const types = getAccountTypes(category);
+              for (const a of accts) {
+                if (!types.includes(a.type) || need <= 0) continue;
+                const w = Math.min(bal[a.id], need);
+                if (w <= 0) continue;
+                bal[a.id] -= w; need -= w;
+                if (isPreTaxAccount(a.type)) ordinary += w;
+              }
+            }
+            return ordinary;
+          };
+          const taxDrawIsOrdinary = pi.rothConversionTaxSource !== 'brokerage';
+          // What the year owes with no conversion — the baseline the incremental
+          // bill is measured against, mirroring the execution block below.
+          // NOTE: this baseline deliberately does NOT subtract the QCD, because the
+          // execution block below prices the real tax bill from the pre-QCD base.
+          // Estimating the bill from a lower base than the one actually used puts
+          // the same conversion in cheaper brackets and under-funds the draw, which
+          // reappears as an overshoot once the true bill is withdrawn. The QCD
+          // adjustment belongs in the bracket TARGET (ordinaryBeforeConversion),
+          // not in the tax-bill estimate.
+          const preConvNonSSForDraw = nonSSIncomeAfterDeduction + totalRMD + preTaxWithdrawals + brokerageCapitalGains;
+          const preConvSSForDraw = calculateSocialSecurityTaxableAmount(totalSocialSecurity, preConvNonSSForDraw, effectiveFilingStatus);
+          const preConvGrossForDraw = preConvNonSSForDraw + preConvSSForDraw;
+          const preConvFedForDraw = calculateFederalTax(preConvGrossForDraw, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(preConvGrossForDraw + preTaxDeduction));
+          const preConvStateForDraw = calculateStateTax(preConvGrossForDraw, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, preConvSSForDraw, totalPension, { federalTaxPaid: preConvFedForDraw, primaryAge: myAge, spouseAge: spouseAge });
+          // IRMAA moves with the conversion only in the first two projection years,
+          // where there is no 2-year MAGI history to look back on. Omitting it made
+          // the estimated bill too small by the surcharge, and the shortfall came
+          // back as an overshoot when the real bill was withdrawn.
+          const convMedicareEligibleForDraw = irmaaLookbackMAGI !== null ? 0 :
+            (primaryAlive && myAge >= 65 ? 1 : 0) +
+            (effectiveFilingStatus === 'married_joint' && spouseAlive && spouseAge >= 65 ? 1 : 0);
+          const irmaaAt = (gross) => convMedicareEligibleForDraw > 0
+            ? calculateIRMAASurcharge(gross + preTaxDeduction, effectiveFilingStatus, yearsFromNow, pi.inflationRate, convMedicareEligibleForDraw).totalSurcharge
+            : 0;
+          const preConvIRMAAForDraw = irmaaAt(preConvGrossForDraw);
+          // Extra ordinary income created by paying the tax on a conversion of X.
+          // Self-referential (a bigger draw is itself taxed), so iterate to a
+          // fixed point — the same shape as the execution block's loop.
+          const taxDrawOrdinaryAt = (X) => {
+            if (!taxDrawIsOrdinary || X <= 0) return 0;
+            let bill = 0, ordinaryFromDraw = 0;
+            for (let i = 0; i < 6; i++) {
+              const nonSS = preConvNonSSForDraw + X + ordinaryFromDraw;
+              const ssT = calculateSocialSecurityTaxableAmount(totalSocialSecurity, nonSS, effectiveFilingStatus);
+              const gross = nonSS + ssT;
+              const fed = calculateFederalTax(gross, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(gross + preTaxDeduction));
+              const st = calculateStateTax(gross, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, ssT, totalPension, { federalTaxPaid: fed, primaryAge: myAge, spouseAge: spouseAge });
+              const nextBill = Math.max(0, (fed - preConvFedForDraw) + (st - preConvStateForDraw)
+                + (irmaaAt(gross) - preConvIRMAAForDraw));
+              const nextOrdinary = preTaxShareOfDraw(nextBill, X);
+              const settled = Math.abs(nextBill - bill) < 1;
+              bill = nextBill; ordinaryFromDraw = nextOrdinary;
+              if (settled) break;
+            }
+            return ordinaryFromDraw;
+          };
+          // Total ordinary taxable income the year ends up with if X is converted.
+          const taxableWithDrawAt = (X) => taxableAt(X) + taxDrawOrdinaryAt(X);
+
+          if (hiBound <= 0 || taxableWithDrawAt(0) >= bracketCap) {
             targetConversion = 0; // already at or past the top of the bracket
-          } else if (taxableAt(hiBound) <= bracketCap) {
+          } else if (taxableWithDrawAt(hiBound) <= bracketCap) {
             targetConversion = hiBound; // no SS in play — the bound is the answer
           } else {
             let lo = 0, hi = hiBound;
             // Halve to sub-cent precision (typically ~30 steps; the 60-step bound
             // covers any conceivable range and keeps the loop provably finite).
+            // taxableWithDrawAt is still strictly increasing in X: both terms are.
             for (let i = 0; i < 60 && hi - lo > 0.005; i++) {
               const mid = (lo + hi) / 2;
-              if (taxableAt(mid) > bracketCap) hi = mid; else lo = mid;
+              if (taxableWithDrawAt(mid) > bracketCap) hi = mid; else lo = mid;
             }
             targetConversion = lo; // the side that never crosses the bracket top
           }
