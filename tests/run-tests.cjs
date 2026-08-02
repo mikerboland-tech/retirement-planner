@@ -723,6 +723,39 @@ section('Unit — calculateIRMAA tier boundaries');
   eq(calculateIRMAA(109001, 'single', 0, 0.03).partBMonthly, 284.10, 'Single MAGI=$109,001 → tier 1');
   eq(calculateIRMAA(500001, 'single', 0, 0.03).partBMonthly, 689.90, 'Single MAGI=$500,001 → tier 5');
 
+  // ── Married filing separately: THREE tiers, and that is correct ────────────
+  // CMS gives MFS filers who lived with their spouse a compressed table: the
+  // standard premium, then 3.2x, then 3.4x. There is no MFS equivalent of the
+  // single/MFJ middle tiers — such a filer jumps from standard straight to the
+  // second-highest premium. 2026: standard to $109,000; $649.20 from there to
+  // $391,000; $689.90 above it. (A filer who lived APART from their spouse all
+  // year uses the SINGLE table instead; the engine does not model that case and
+  // deliberately prices every MFS filer as lived-together.)
+  //
+  // Pinned because the shape invites a false bug report: an audit that expects
+  // six rows and finds three reads it as a truncated table.
+  eq(IRMAA_THRESHOLDS_2025.married_separate.length, 3,
+    'MFS has exactly three IRMAA tiers, per CMS — not a truncated six-tier table');
+  eq(calculateIRMAA(109000, 'married_separate', 0, 0.03).partBMonthly, 202.90,
+    'MFS MAGI=$109k → standard premium');
+  eq(calculateIRMAA(109001, 'married_separate', 0, 0.03).partBMonthly, 649.20,
+    'MFS MAGI=$109,001 → jumps straight to 3.2x standard, skipping the middle tiers');
+  eq(calculateIRMAA(391000, 'married_separate', 0, 0.03).partBMonthly, 649.20,
+    'MFS MAGI=$391k → still the 3.2x tier (boundary stays in the lower tier)');
+  eq(calculateIRMAA(391001, 'married_separate', 0, 0.03).partBMonthly, 689.90,
+    'MFS MAGI=$391,001 → top tier at 3.4x standard');
+  eq(calculateIRMAA(391001, 'married_separate', 0, 0.03).tier, 2,
+    'MFS top tier index is 2, not 5');
+  // The premiums really are the standard one scaled — a wrong constant would
+  // break this even if the thresholds looked right.
+  eq(calculateIRMAA(150000, 'married_separate', 0, 0.03).partBMonthly,
+    Math.round(202.90 * 3.2 * 10) / 10, 'MFS mid-range premium is 3.2 x the standard premium', 0.1);
+  // MFS is genuinely harsher than single at the same MAGI. This is the exact
+  // comparison that makes the compressed table look like a bug; it is not one.
+  gt(calculateIRMAA(150000, 'married_separate', 0, 0.03).partBMonthly,
+    calculateIRMAA(150000, 'single', 0, 0.03).partBMonthly,
+    'MFS at $150k costs more than single at $150k — filing separately is punitive by design');
+
   // Head-of-household uses single thresholds
   eq(calculateIRMAA(109001, 'head_of_household', 0, 0.03).partBMonthly, 284.10, 'HoH uses single thresholds');
 
@@ -1383,6 +1416,65 @@ section('P2 — ACA premiums wired into projections (pre65Coverage: aca)');
   const { pi: piConv, accts: aC, streams: sC } = mk({ rothConversionAmount: 100000, rothConversionStartAge: 60, rothConversionEndAge: 64 });
   const projConv = computeProjections(piConv, aC, sC, [], [], [], TODAY_YEAR);
   lt(projConv[0].acaSubsidy, y0.acaSubsidy, 'Roth conversion raises MAGI → smaller ACA subsidy');
+}
+
+// ── P2b — the ACA MAGI/premium loop actually converges ───────────────────────
+// P2 above proves ACA premiums are WIRED IN; this proves the iteration SETTLES.
+// The two are different failures. The premium depends on MAGI, MAGI depends on
+// the withdrawal, and the withdrawal has to cover the premium — so the solver
+// estimates the premium, corrects it per iteration as a delta, and finally
+// re-prices it from the settled MAGI. If that loop does not reach a fixed point,
+// the year is quietly under- or over-funded by the difference between the
+// premium the solver paid for and the premium it ends up charging, and nothing
+// reports it: unfundedShortfall stays 0 because the solver believes it is done.
+//
+// The invariant that catches it: netIncome — everything left after tax — must
+// equal exactly what the year has to spend, desiredIncome + healthcareExpense
+// (which includes the settled ACA net premium). Sweeping the spending target
+// moves MAGI, and therefore the subsidy, across a wide range; the identity has
+// to hold at every point. This is the ACA analogue of "solver recomputes IRMAA
+// per iteration" above.
+section('P2b — the ACA premium iteration reaches a fixed point across MAGI levels');
+{
+  const mk = (over = {}) => {
+    const s = baseScenario({
+      healthcareModel: 'basic', pre65Coverage: 'aca', acaBenchmarkPremium: 14000,
+      pre65HealthcareAnnual: 10000, post65OOPAnnual: 2000, medicalInflation: 0.05,
+      legacyAge: 70, withdrawalPriority: ['brokerage', 'pretax', 'roth'],
+      ...over,
+    });
+    // Modest, high-basis balances: keeps dividends from single-handedly pushing
+    // the household over the 400% FPL cliff, so a subsidy exists to converge on.
+    s.accts = [
+      { id: 1, name: 'Brokerage', type: 'brokerage', balance: 600000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me', costBasisPercent: 0.7 },
+      { id: 2, name: 'IRA', type: 'traditional_ira', balance: 500000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me' },
+      { id: 3, name: 'Roth', type: 'roth_ira', balance: 100000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me' },
+    ];
+    return computeProjections(s.pi, s.accts, [], [], [], [], TODAY_YEAR)[0];
+  };
+
+  const sweep = [45000, 60000, 75000, 90000, 120000].map(d => ({ d, r: mk({ desiredRetirementIncome: d }) }));
+
+  for (const { d, r } of sweep) {
+    // The premium the solver funded is the premium the year was charged.
+    eq(r.netIncome - (r.desiredIncome + r.healthcareExpense), 0,
+      `ACA loop converges at $${d.toLocaleString()} spending — net income exactly funds spending + healthcare`, 25);
+    eq(r.unfundedShortfall, 0, `no unfunded shortfall at $${d.toLocaleString()} spending`);
+    eq(r.acaNetPremium, r.acaGrossPremium - r.acaSubsidy,
+      `net = gross − subsidy at $${d.toLocaleString()} spending`, 1);
+  }
+
+  // The sweep has to actually MOVE the subsidy, or the convergence assertions
+  // above are vacuous — they'd pass on a constant.
+  const subsidies = sweep.map(s => s.r.acaSubsidy);
+  gt(Math.max(...subsidies) - Math.min(...subsidies), 2500,
+    'the spending sweep moves the subsidy by thousands, so convergence is being tested against a real MAGI swing');
+  lt(sweep[sweep.length - 1].r.acaSubsidy, sweep[0].r.acaSubsidy,
+    'a larger draw raises MAGI and shrinks the credit (monotone in the right direction)');
+  // Every point stayed under the cliff, so the credit is live throughout.
+  for (const { d, r } of sweep) {
+    gt(r.acaSubsidy, 0, `a credit is actually in play at $${d.toLocaleString()} spending`);
+  }
 }
 
 // ── 10. Account-type predicate completeness ──────────────────────────────────

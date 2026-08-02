@@ -4269,10 +4269,17 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     };
     
     // Withdraw in priority order
-    // Track withdrawals by type for proper tax treatment
+    // Track withdrawals by type for proper tax treatment. All four are reported
+    // on the row so a year's draw can be decomposed by tax treatment; only
+    // preTaxWithdrawals feeds the tax calculation itself.
     let preTaxWithdrawals = 0;
     let brokerageWithdrawals = 0;
     let rothWithdrawals = 0;
+    // Qualified HSA draws are tax-free like a Roth draw, but they are NOT Roth
+    // money — reimbursing medical costs and spending Roth principal are different
+    // decisions with different balances behind them. Kept separate so a reader of
+    // the row can tell them apart.
+    let hsaQualifiedWithdrawals = 0;
     // Pre-tax dollars distributed before 59½ without an exception (§72(t) base).
     // RMDs can never be early (they start at 73/75), so only voluntary draws and
     // the conversion-tax draw contribute. Converting to Roth is NOT a
@@ -4364,7 +4371,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             const qualified = Math.min(withdrawal, Math.max(0, hsaQualifiedRemaining));
             const nonQualified = withdrawal - qualified;
             hsaQualifiedRemaining -= qualified;
-            rothWithdrawals += qualified;
+            hsaQualifiedWithdrawals += qualified;
             if (nonQualified > 0) {
               hsaNonQualifiedWithdrawals += nonQualified;
               preTaxWithdrawals += nonQualified; // ordinary income, same as an IRA draw
@@ -4831,8 +4838,17 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
                       : BROKERAGE_COST_BASIS_ESTIMATE;
                     brokerageBasisRecovered += w * basisPct;
                     brokerageCapitalGains += w * (1 - basisPct);
-                  } else if (isRothAccount(account.type) || isHSAAccount(account.type)) {
+                  } else if (isRothAccount(account.type)) {
                     rothWithdrawals += w;
+                  } else if (isHSAAccount(account.type)) {
+                    // NOTE: unlike the spending path above, this conversion-tax
+                    // draw does not split at the qualified-expense line — it
+                    // treats the whole draw as tax-free. Pre-existing behaviour,
+                    // left as-is here; funding a Roth conversion's tax bill from
+                    // an HSA is a corner of a corner. Reported under the HSA
+                    // field rather than the Roth one so the row stays honest
+                    // about which account the money left.
+                    hsaQualifiedWithdrawals += w;
                   }
                 }
               }
@@ -5247,6 +5263,16 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       hsaNonQualifiedWithdrawals: Math.round(hsaNonQualifiedWithdrawals),
       hsaPenalty: Math.round(hsaPenalty),
       penalizedWithdrawals: Math.round(penalizedWithdrawals),
+      // The year's draw decomposed by tax treatment. preTaxWithdrawals is the
+      // ordinary-income base (RMDs + voluntary pre-tax + the non-qualified HSA
+      // share + any pre-tax conversion-tax draw); the other three are reported
+      // for explanation, not used in the tax arithmetic. Qualified HSA draws are
+      // tax-free like Roth draws but are tracked apart from them — spending Roth
+      // principal and reimbursing a medical bill are different decisions.
+      preTaxWithdrawals: Math.round(preTaxWithdrawals),
+      brokerageWithdrawals: Math.round(brokerageWithdrawals),
+      rothWithdrawals: Math.round(rothWithdrawals),
+      hsaQualifiedWithdrawals: Math.round(hsaQualifiedWithdrawals),
       stateTax: Math.round(stateTax),
       ficaTax: Math.round(totalFICA), // Employee FICA (SS + Medicare) on earned income
       irmaaSurcharge: Math.round(irmaaSurcharge), // Medicare IRMAA surcharge (Part B + Part D above standard)

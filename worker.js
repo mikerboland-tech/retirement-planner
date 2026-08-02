@@ -48,10 +48,15 @@ self.onmessage = (e) => {
   }
 };
 
-// Box-Muller transform for normal distribution
+// Box-Muller transform for normal distribution. The zero guards matter:
+// Math.random() can return exactly 0, and Math.log(0) is -Infinity, which makes
+// z -Infinity and turns every balance in the simulation into NaN. A NaN
+// portfolio then compares false against every survival test, silently counting
+// as a failure. Same guard as randomNormalSS below.
 function randomNormalMC(mean, stdDev) {
-  const u1 = Math.random();
-  const u2 = Math.random();
+  let u1 = 0, u2 = 0;
+  while (u1 === 0) u1 = Math.random();
+  while (u2 === 0) u2 = Math.random();
   const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
   return mean + stdDev * z;
 }
