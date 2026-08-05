@@ -30,6 +30,7 @@ const {
   getValidStartYears,
   HISTORICAL_RETURNS,
   calculateSSBenefit,
+  rowAtOrLast,
 } = E;
 
 self.onmessage = (e) => {
@@ -446,10 +447,22 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
     personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
     legacyAge, cagrDelta, myPIA, spousePIA, myBirthYear, spouseBirthYear,
     isMarried,
+    myLifeExpectancy, spouseLifeExpectancy,
     mcRunsPerScenario, mcVolatility,
   } = payload;
 
-  const piWithLifeExp = { ...personalInfo, legacyAge };
+  // The tab's life-expectancy inputs must drive MORTALITY, not just the horizon.
+  // Setting legacyAge alone left the engine killing people off at
+  // personalInfo.myLifeExpectancy (default 85) while the tab measured terminal
+  // wealth at its own default of 90 — a row the projection had already stopped
+  // producing. "How does longevity change the optimal claim age" is the question
+  // this tab exists to answer, so the slider has to move the death age too.
+  const piWithLifeExp = {
+    ...personalInfo,
+    legacyAge,
+    myLifeExpectancy: myLifeExpectancy ?? personalInfo.myLifeExpectancy,
+    spouseLifeExpectancy: spouseLifeExpectancy ?? personalInfo.spouseLifeExpectancy,
+  };
   // Clamp at -1 (a total-loss floor), NOT at 0: flooring at 0% silently converted
   // downside scenarios into flat-return scenarios, biasing results optimistic.
   const adjustedAccounts = cagrDelta === 0
@@ -516,8 +529,11 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
   const runMcSimulation = (modifiedStreams, overrides) => {
     const proj = computeProjections(piWithLifeExp, adjustedAccounts, modifiedStreams, assets,
       oneTimeEvents, recurringExpenses, undefined, { yearOverrides: overrides });
-    const atLegacy = proj.find(p => p.myAge === legacyAge);
-    const survived = atLegacy && atLegacy.totalPortfolio > 0;
+    // rowAtOrLast, not find(): a survivor-modelled plan ends the year both
+    // spouses die, so legacyAge can legitimately have no row. Treating that miss
+    // as a zero portfolio scored every scenario as a total failure.
+    const atLegacy = rowAtOrLast(proj, legacyAge);
+    const survived = !!atLegacy && atLegacy.totalPortfolio > 0;
     let failureAge = null;
     for (const p of proj) {
       if (p.myAge >= personalInfo.myRetirementAge && p.totalPortfolio <= 0) { failureAge = p.myAge; break; }
@@ -539,7 +555,7 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
       const lifetimeWithdrawals = retirementYears.reduce((sum, p) => sum + p.portfolioWithdrawal, 0);
       const lifetimeSS = retirementYears.reduce((sum, p) => sum + p.socialSecurity, 0);
       const lifetimeRothConversions = retirementYears.reduce((sum, p) => sum + (p.rothConversion || 0), 0);
-      const atLegacy = proj.find(p => p.myAge === legacyAge);
+      const atLegacy = rowAtOrLast(proj, legacyAge);
       const at75 = proj.find(p => p.myAge === 75);
       const at80 = proj.find(p => p.myAge === 80);
       const at85 = proj.find(p => p.myAge === 85);

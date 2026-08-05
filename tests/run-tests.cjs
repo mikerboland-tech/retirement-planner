@@ -4023,6 +4023,64 @@ section('P38 — bracket-fill must land ON the bracket, not past it or short of 
     'a QCD frees ordinary room, so the charitable plan converts MORE, not less');
 }
 
+// ── SS claiming grid: terminal-wealth lookup must survive an early plan end ──
+// Regression for the bug where the Social Security tab's grid scored every
+// claiming age as $0. The tab measures terminal wealth at its own life-expectancy
+// input (default 90) while the engine, with survivor modeling on, stops emitting
+// rows the year both spouses have died (personalInfo defaults: 85 and 87). A
+// plain find(myAge === legacyAge) matched nothing, every cell read $0, and the
+// "best" scenario degenerated to whichever cell happened to be first.
+section('SS grid — terminal wealth lookup (rowAtOrLast)');
+{
+  const { rowAtOrLast } = engine;
+
+  // Unit: exact hit, miss-falls-back-to-last, and the empty guard.
+  const fake = [{ myAge: 80, totalPortfolio: 10 }, { myAge: 81, totalPortfolio: 20 }];
+  eq(rowAtOrLast(fake, 80).totalPortfolio, 10, 'exact age match wins when present');
+  eq(rowAtOrLast(fake, 99).totalPortfolio, 20, 'a miss falls back to the final row');
+  eq(rowAtOrLast([], 90), null, 'an empty projection yields null, not a throw');
+  eq(rowAtOrLast(null, 90), null, 'a null projection yields null, not a throw');
+
+  // End-to-end: the exact configuration that produced the all-zeros grid.
+  const ssGridCell = (claimAge, legacyAge) => {
+    const s = baseScenario({
+      survivorModelEnabled: true,
+      myLifeExpectancy: 85,
+      spouseLifeExpectancy: 87,
+      legacyAge,
+      myRetirementAge: 62,
+      spouseRetirementAge: 62,
+      desiredRetirementIncome: 120000,
+    });
+    s.streams = s.streams.map(st =>
+      st.type === 'social_security' && st.owner === 'me'
+        ? { ...st, startAge: claimAge, amount: calculateSSBenefit(3200, claimAge, TODAY_YEAR - 60) * 12, pia: 3200 }
+        : st);
+    const proj = run(s);
+    return { proj, atLegacy: rowAtOrLast(proj, legacyAge) };
+  };
+
+  // legacyAge 90 is PAST both life expectancies, so the projection genuinely
+  // has no age-90 row — the fallback is what keeps the metric meaningful.
+  const at90 = [62, 67, 70].map(a => ssGridCell(a, 90));
+  at90.forEach((c, i) => {
+    gt(c.atLegacy.totalPortfolio, 0,
+      `claim ${[62, 67, 70][i]}: terminal wealth is a real number, not the $0 collapse`);
+  });
+  lt(at90[0].proj[at90[0].proj.length - 1].myAge, 90,
+    'sanity: the plan really does end before 90 (both spouses have died)');
+
+  // The whole point of the grid is that cells DIFFER. Identical values across
+  // claim ages is the signature of the bug, so assert they separate.
+  const spread = Math.max(...at90.map(c => c.atLegacy.totalPortfolio))
+               - Math.min(...at90.map(c => c.atLegacy.totalPortfolio));
+  gt(spread, 1000, 'claiming ages produce distinguishable outcomes, not a 36-way tie');
+
+  // And the ordinary case (legacyAge reachable) is untouched by the fallback.
+  const at85 = ssGridCell(67, 85);
+  eq(at85.atLegacy.myAge, 85, 'when the legacy row exists, it is the one used');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

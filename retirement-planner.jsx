@@ -5503,6 +5503,13 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
         payload: {
           personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
           legacyAge: lifeExpectancy, cagrDelta,
+          // Both life-expectancy inputs drive the engine's mortality, not just
+          // the measurement horizon — otherwise survivor-modelled plans die at
+          // personalInfo's ages while this tab measures at its own, and the
+          // spouse input below is inert. Only has an effect when survivor
+          // modeling is on; the engine ignores these otherwise.
+          myLifeExpectancy: lifeExpectancy,
+          spouseLifeExpectancy,
           myPIA, spousePIA, myBirthYear, spouseBirthYear,
           isMarried: ssIsMarried,
           mcRunsPerScenario, mcVolatility,
@@ -5538,7 +5545,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
     };
   }, [
     personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
-    lifeExpectancy, cagrDelta, myPIA, spousePIA, myBirthYear, spouseBirthYear,
+    lifeExpectancy, spouseLifeExpectancy, cagrDelta, myPIA, spousePIA, myBirthYear, spouseBirthYear,
     ssIsMarried, useMcStressTest,
     // MC knobs are only consumed when the stress test is on. Going inert when it's
     // off prevents adjusting the slider from re-firing the deterministic grid for
@@ -5603,7 +5610,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
             <div>
               <label className={labelStyle}>Your Life Expectancy</label>
               <input type="number" value={lifeExpectancy} onChange={e => setLifeExpectancy(Number(e.target.value))} className={inputStyle} />
-              <p className="text-xs text-slate-500 mt-1">Used by the Full Plan Impact Analysis below as the planning horizon. The longer you expect to live, the more delayed claiming tends to win.</p>
+              <p className="text-xs text-slate-500 mt-1">Used by the Full Plan Impact Analysis below as the planning horizon, and as your age at death when survivor modeling is on. The longer you expect to live, the more delayed claiming tends to win.</p>
             </div>
           </div>
         </div>
@@ -5619,7 +5626,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
               <div>
                 <label className={labelStyle}>Spouse Life Expectancy</label>
                 <input type="number" value={spouseLifeExpectancy} onChange={e => setSpouseLifeExpectancy(Number(e.target.value))} className={inputStyle} />
-                <p className="text-xs text-slate-500 mt-1">Used by the Full Plan Impact Analysis below as the planning horizon for spouse.</p>
+                <p className="text-xs text-slate-500 mt-1">Used by the Full Plan Impact Analysis below as your spouse's age at death when survivor modeling is on — which determines who inherits the higher benefit, and for how long.</p>
               </div>
             </div>
           </div>
@@ -5921,7 +5928,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                   : 'Runs your complete retirement plan for each claiming age — including taxes, portfolio withdrawals, RMDs, growth, and Roth conversions — to show the true financial impact beyond simple breakeven math.'}
               </p>
               <p className="text-slate-500 text-xs mb-4">
-                Using life expectancy of {legacyAge} from the controls above. Both the breakeven analysis and this full-plan analysis use the same planning horizon so their recommendations align. Adjust the life expectancy slider above to see how longevity affects the optimal strategy.
+                Using life expectancy of {legacyAge} from the controls above — it sets both the planning horizon and, when survivor modeling is on, when each spouse dies. Adjust it to see how longevity affects the optimal strategy: it is the single biggest driver of this decision.
               </p>
               {isMarried && personalInfo.survivorModelEnabled && (
                 <div className="mb-4 p-3 bg-sky-900/30 border border-sky-700/50 rounded-lg text-sm">

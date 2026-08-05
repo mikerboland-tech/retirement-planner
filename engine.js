@@ -2506,6 +2506,21 @@ const getDefaultRothConversionWindow = (personalInfo) => {
   };
 };
 
+// ── END-OF-PLAN ROW LOOKUP ───────────────────────────────────────────────────
+// The row to measure terminal wealth on. A plain `find(p => p.myAge === age)`
+// is not safe: with survivor modeling on, the projection STOPS the year both
+// spouses have died (see the `break` at the end of computeProjections), so any
+// legacyAge past both life expectancies matches nothing. Callers that treated
+// the miss as "portfolio is zero" silently ranked every scenario as a tie —
+// which is exactly what the SS claiming grid did before this existed.
+//
+// Falling back to the last row means "measure at the end of the plan, whenever
+// that turned out to be". Returns null only for an empty projection.
+const rowAtOrLast = (proj, age) => {
+  if (!proj || proj.length === 0) return null;
+  return proj.find(p => p.myAge === age) || proj[proj.length - 1];
+};
+
 // ── ROTH OPTIMIZER SCORING ───────────────────────────────────────────────────
 // Reduce a projection to the metrics the Roth Conversion Optimizer ranks by.
 // Lives in the engine (not the worker) so the test suite can exercise it.
@@ -2517,7 +2532,7 @@ const getDefaultRothConversionWindow = (personalInfo) => {
 // basis steps up at death; embedded-gain nuance is ignored).
 const scoreRothStrategy = (proj, { legacyAge, retirementAge, heirTaxRate = 0.25 } = {}) => {
   if (!proj || proj.length === 0) return null;
-  const atLegacy = proj.find(p => p.myAge === legacyAge) || proj[proj.length - 1];
+  const atLegacy = rowAtOrLast(proj, legacyAge);
   const retYears = proj.filter(p => p.myAge >= (retirementAge ?? 0));
   const sum = (field) => retYears.reduce((s, p) => s + (p[field] || 0), 0);
   const afterTaxLegacy = (atLegacy.rothBalance || 0) + (atLegacy.brokerageBalance || 0)
@@ -5405,7 +5420,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     ACA_FPL_2025, calculateACASubsidy,
     ACA_APPLICABLE_PCT_2026, ACA_BENCHMARK_PREMIUM_2026,
     getACAApplicablePercentage, calculateACAPremiumCredit,
-    getSpendingPhaseMultiplier, scoreRothStrategy,
+    getSpendingPhaseMultiplier, scoreRothStrategy, rowAtOrLast,
     calculateHealthcareExpenses, calculateRecurringExpenses,
     healthcareCostsModeled, HEALTHCARE_MODELS_UNPRICED,
 
