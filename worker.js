@@ -31,6 +31,7 @@ const {
   HISTORICAL_RETURNS,
   calculateSSBenefit,
   rowAtOrLast,
+  reindexSSForInflation,
 } = E;
 
 self.onmessage = (e) => {
@@ -436,11 +437,13 @@ function runMonteCarlo(jobId, payload) {
 // Cell shape:
 //   { myClaimAge, spClaimAge, label, myAnnualSS, spAnnualSS,
 //     portfolioAt75, portfolioAt80, portfolioAt85, portfolioAtLegacy,
+//     afterTaxAtLegacy, depletionAge, measuredAtAge,
 //     lifetimeTax, lifetimeWithdrawals, lifetimeSS, lifetimeRothConversions,
 //     netLifetimeWealth,
 //     projections: [{ myAge, totalPortfolio, totalTax, portfolioWithdrawal,
 //                     socialSecurity, rothConversion }, ...],
-//     mcResults: null | { runs, survived, successRate, p10, p50, p90, avgFailureAge } }
+//     mcResults: null | { runs, survived, successRate, p10, p50, p90, avgFailureAge,
+//                         longevity?: { p10, p50, p90, min, max } } }
 // ============================================================================
 function runSocialSecurityGrid(jobId, payload, withMC) {
   const {
@@ -449,6 +452,7 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
     isMarried,
     myLifeExpectancy, spouseLifeExpectancy,
     mcRunsPerScenario, mcVolatility,
+    mcLongevity, mcInflationVol,
   } = payload;
 
   // The tab's life-expectancy inputs must drive MORTALITY, not just the horizon.
@@ -512,33 +516,122 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
   // decision rather than to the dice.
   //
   // Each YEAR still gets an independent return, so sequence-of-returns risk is
-  // preserved within a run. Inflation is left deterministic: this grid varies the
-  // claiming age, and 36 cells x N sims is already the most expensive job here.
+  // preserved within a run.
+  //
+  // LIFESPANS AND INFLATION ARE DRAWN THE SAME WAY, for the same reason. Both
+  // were previously held fixed, and both are first-order for THIS decision:
+  //   - Longevity is the dominant variable in a claiming choice. Holding it
+  //     constant made the one tab that most needs it the only one without it.
+  //   - Social Security is the household's only CPI-indexed asset, so delaying
+  //     buys inflation insurance that a fixed-inflation model cannot price.
+  // Sharing the draws across cells is what keeps the comparison honest: cell A
+  // and cell B face the same markets, the same lifespans and the same prices, so
+  // a gap between them is the claiming decision and nothing else.
+  const baseInflation = piWithLifeExp.inflationRate ?? 0.03;
+  const inflationVol = mcInflationVol ?? 0;
+
+  // Centre the sampled lifespan distribution on the user's own life-expectancy
+  // input, so only the SHAPE comes from the mortality table. Same approach as
+  // the Monte Carlo tab.
+  const myLifeExp = piWithLifeExp.myLifeExpectancy ?? 85;
+  const spouseLifeExp = piWithLifeExp.spouseLifeExpectancy ?? 87;
+  const myShift = mcLongevity
+    ? myLifeExp - (personalInfo.myAge + E.lifeExpectancyAt(personalInfo.myAge))
+    : 0;
+  const spouseShift = mcLongevity && isMarried && typeof personalInfo.spouseAge === 'number'
+    ? spouseLifeExp - (personalInfo.spouseAge + E.lifeExpectancyAt(personalInfo.spouseAge))
+    : 0;
+
+  // With sampled lifespans a run can outlive the deterministic horizon, and any
+  // year past the override array runs on deterministic returns — understating
+  // risk in exactly the late years the simulation exists to stress. Size for the
+  // longest life anyone can draw. MORTALITY_MAX_PLAN_AGE is the terminal age of
+  // the mortality table, so a sim cannot exceed it.
+  const MORTALITY_MAX_PLAN_AGE = 116;
+  const seqYears = mcLongevity
+    ? Math.max(horizonYears,
+               MORTALITY_MAX_PLAN_AGE + Math.ceil(Math.max(myShift, spouseShift, 0)) - personalInfo.myAge + 1)
+    : horizonYears;
+
   const sharedSequences = [];
   for (let run = 0; run < (mcRunsPerScenario || 0); run++) {
-    const seq = new Array(horizonYears);
-    for (let y = 0; y < horizonYears; y++) {
-      seq[y] = {
+    const years = new Array(seqYears);
+    // Geometric mean of this run's inflation path, used below to re-index SS.
+    let inflationProduct = 1;
+    for (let y = 0; y < seqYears; y++) {
+      // Floor at -90% deflation: the draw is Normal and an unbounded left tail
+      // would produce negative price levels.
+      const inf = inflationVol > 0
+        ? Math.max(-0.9, randomNormalSS() * inflationVol + baseInflation)
+        : baseInflation;
+      inflationProduct *= (1 + inf);
+      years[y] = {
         marketReturn: Math.max(-1, randomNormalSS() * mcVolatility + meanReturn),
-        inflation: piWithLifeExp.inflationRate,
+        inflation: inf,
       };
+    }
+    const geoMeanInflation = seqYears > 0
+      ? Math.pow(inflationProduct, 1 / seqYears) - 1
+      : baseInflation;
+
+    const seq = { years, geoMeanInflation, myDeathAge: null, spouseDeathAge: null };
+    if (mcLongevity) {
+      // Independent draws per person. Real joint mortality is correlated (shared
+      // habits and environment, the widowhood effect), but modelling that needs a
+      // copula this app has no data to calibrate; independence is the conventional
+      // and conservative choice.
+      seq.myDeathAge = E.sampleAgeAtDeath(personalInfo.myAge, Math.random, myShift);
+      if (isMarried && typeof personalInfo.spouseAge === 'number') {
+        seq.spouseDeathAge = E.sampleAgeAtDeath(personalInfo.spouseAge, Math.random, spouseShift);
+      }
     }
     sharedSequences.push(seq);
   }
 
-  const runMcSimulation = (modifiedStreams, overrides) => {
-    const proj = computeProjections(piWithLifeExp, adjustedAccounts, modifiedStreams, assets,
-      oneTimeEvents, recurringExpenses, undefined, { yearOverrides: overrides });
+  // Re-index SS to each run's own drawn inflation (engine helper — see the long
+  // rationale there). Approximation, stated plainly: this matches the LEVEL of
+  // inflation over the run, not its PATH. A run that front-loads inflation is
+  // not distinguished from one that back-loads it. Getting the level right is
+  // what the hedge turns on.
+  const reindexSS = (streams, geoMeanInflation) =>
+    inflationVol > 0 ? reindexSSForInflation(streams, baseInflation, geoMeanInflation) : streams;
+
+  const runMcSimulation = (modifiedStreams, seq) => {
+    // A sampled death only bites when survivor modelling is on, and the engine
+    // gates that on married status. For a single filer the lifespan therefore has
+    // to act on the horizon instead — the plan simply ends at death. Either way
+    // the run is measured at the end of the life it drew, so "ran out of money
+    // after you died" never counts as a failure.
+    let pi = piWithLifeExp;
+    let measureAge = legacyAge;
+    if (mcLongevity) {
+      const myDeath = seq.myDeathAge;
+      const spDeath = seq.spouseDeathAge;
+      measureAge = isMarried && spDeath != null ? Math.max(myDeath, spDeath) : myDeath;
+      pi = {
+        ...piWithLifeExp,
+        myLifeExpectancy: myDeath,
+        legacyAge: measureAge,
+        ...(isMarried ? { survivorModelEnabled: true, spouseLifeExpectancy: spDeath } : {}),
+      };
+    }
+    const proj = computeProjections(pi, adjustedAccounts,
+      reindexSS(modifiedStreams, seq.geoMeanInflation), assets,
+      oneTimeEvents, recurringExpenses, undefined, { yearOverrides: seq.years });
     // rowAtOrLast, not find(): a survivor-modelled plan ends the year both
-    // spouses die, so legacyAge can legitimately have no row. Treating that miss
-    // as a zero portfolio scored every scenario as a total failure.
-    const atLegacy = rowAtOrLast(proj, legacyAge);
+    // spouses die, so the measurement age can legitimately have no row. Treating
+    // that miss as a zero portfolio scored every scenario as a total failure.
+    const atLegacy = rowAtOrLast(proj, measureAge);
     const survived = !!atLegacy && atLegacy.totalPortfolio > 0;
     let failureAge = null;
     for (const p of proj) {
       if (p.myAge >= personalInfo.myRetirementAge && p.totalPortfolio <= 0) { failureAge = p.myAge; break; }
     }
-    return { survived, failureAge, portfolioAtLegacy: atLegacy?.totalPortfolio || 0 };
+    return {
+      survived, failureAge,
+      portfolioAtLegacy: atLegacy?.totalPortfolio || 0,
+      lastAge: atLegacy?.myAge ?? measureAge,
+    };
   };
 
   const allScenarios = [];
@@ -560,17 +653,38 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
       const at80 = proj.find(p => p.myAge === 80);
       const at85 = proj.find(p => p.myAge === 85);
 
+      // Age the portfolio first hits zero, or null if it never does. Terminal
+      // wealth alone cannot separate a plan that ran dry at 78 from one that ran
+      // dry at 88 — both report $0 and tie in the ranking.
+      let depletionAge = null;
+      for (const p of retirementYears) {
+        if (p.totalPortfolio <= 0) { depletionAge = p.myAge; break; }
+      }
+
+      // Terminal wealth in AFTER-TAX dollars. Claiming ages differ in how hard
+      // they drain pre-tax accounts during the bridge years, so two scenarios
+      // with equal raw balances can leave materially unequal spendable wealth.
+      // Same discount the Roth optimizer uses (engine scoreRothStrategy).
+      const HEIR_TAX_RATE = 0.25;
+      const afterTaxAtLegacy = atLegacy
+        ? Math.round((atLegacy.rothBalance || 0) + (atLegacy.brokerageBalance || 0)
+            + (atLegacy.preTaxBalance || 0) * (1 - HEIR_TAX_RATE))
+        : 0;
+
       let mcResults = null;
       if (withMC) {
         let survivedCount = 0;
         const finalPortfolios = [];
         const failureAges = [];
+        const lastAges = [];
         for (let sim = 0; sim < mcRunsPerScenario; sim++) {
-          // Same sequence index -> identical market path in every cell.
+          // Same sequence index -> identical market path, lifespans and price
+          // level in every cell. Only the claiming age differs.
           const r = runMcSimulation(modifiedStreams, sharedSequences[sim]);
           if (r.survived) survivedCount++;
           else if (r.failureAge !== null) failureAges.push(r.failureAge);
           finalPortfolios.push(r.portfolioAtLegacy);
+          lastAges.push(r.lastAge);
         }
         finalPortfolios.sort((a, b) => a - b);
         const p10 = finalPortfolios[Math.floor(finalPortfolios.length * 0.1)] || 0;
@@ -578,6 +692,14 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
         const p90 = finalPortfolios[Math.floor(finalPortfolios.length * 0.9)] || 0;
         const avgFailureAge = failureAges.length > 0 ? failureAges.reduce((s, a) => s + a, 0) / failureAges.length : null;
         mcResults = { runs: mcRunsPerScenario, survived: survivedCount, successRate: survivedCount / mcRunsPerScenario, p10, p50, p90, avgFailureAge };
+        if (mcLongevity && lastAges.length) {
+          // The spread of lifespans this cell was actually judged over. Reported
+          // so a success rate that moved because the household sometimes lives to
+          // 100 does not look identical to one that moved because of markets.
+          const sorted = [...lastAges].sort((a, b) => a - b);
+          const q = (p) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+          mcResults.longevity = { p10: q(0.10), p50: q(0.50), p90: q(0.90), min: sorted[0], max: sorted[sorted.length - 1] };
+        }
       }
 
       allScenarios.push({
@@ -589,6 +711,13 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
         portfolioAt80: at80?.totalPortfolio || 0,
         portfolioAt85: at85?.totalPortfolio || 0,
         portfolioAtLegacy: atLegacy?.totalPortfolio || 0,
+        afterTaxAtLegacy,
+        depletionAge,
+        // The age terminal wealth was actually measured at. Equals legacyAge in
+        // the normal case; with survivor modelling it can be the year the last
+        // spouse died. Surfaced so the UI never labels a column with an age the
+        // projection never reached.
+        measuredAtAge: atLegacy?.myAge ?? legacyAge,
         lifetimeTax, lifetimeWithdrawals, lifetimeSS, lifetimeRothConversions,
         // Terminal wealth at the planning age. This ALREADY reflects the claiming
         // decision: benefits received reduced portfolio withdrawals dollar for

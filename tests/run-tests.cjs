@@ -4081,6 +4081,136 @@ section('SS grid — terminal wealth lookup (rowAtOrLast)');
   eq(at85.atLegacy.myAge, 85, 'when the legacy row exists, it is the one used');
 }
 
+// ── SS grid: stochastic-inflation COLA indexation ────────────────────────────
+// Social Security is the only CPI-indexed asset in a plan (42 U.S.C. 415(i)).
+// The engine grows streams by a fixed per-stream `cola` that is independent of
+// the inflation driving expenses, so a stochastic-inflation simulation that did
+// not re-index SS would model it as inflation-EXPOSED — making delayed claiming
+// look worst in exactly the high-inflation runs where it is worth most.
+section('SS grid — SS re-indexation under stochastic inflation');
+{
+  const { reindexSSForInflation } = engine;
+  const BASE = 0.03;
+  const streams = [
+    { id: 1, type: 'social_security', owner: 'me', cola: 0.03 },   // fully indexed
+    { id: 2, type: 'social_security', owner: 'spouse', cola: 0.02 }, // lags CPI
+    { id: 3, type: 'pension', owner: 'me', cola: 0 },                // fixed nominal
+    { id: 4, type: 'pension', owner: 'me', cola: 0.02 },             // partial COLA
+  ];
+
+  // High-inflation draw: SS must rise with it.
+  const hot = reindexSSForInflation(streams, BASE, 0.07);
+  approx(hot[0].cola, 0.07, 'a fully-indexed benefit tracks the drawn inflation', 0.001);
+  gt(hot[1].cola, 0.02, 'a lagging benefit still rises with inflation');
+  lt(hot[1].cola, 0.07, 'but stays behind CPI, preserving its real spread');
+  approx((1 + hot[1].cola) / 1.07 - 1, (1 + 0.02) / (1 + BASE) - 1,
+    'the real spread against inflation is exactly preserved', 0.01);
+
+  // Low-inflation draw: SS must fall with it, not stay pinned high.
+  const cold = reindexSSForInflation(streams, BASE, 0.01);
+  approx(cold[0].cola, 0.01, 'a fully-indexed benefit follows inflation down too', 0.001);
+
+  // Non-SS streams must be untouched in BOTH directions — a fixed-nominal
+  // pension keeps its nominal value and loses real value, which is the point.
+  eq(hot[2].cola, 0, 'a fixed-nominal pension is not re-indexed upward');
+  eq(hot[3].cola, 0.02, 'a partial-COLA pension keeps its own COLA');
+  eq(cold[2].cola, 0, 'and is not re-indexed downward either');
+
+  // No-ops must not clone or corrupt.
+  eq(reindexSSForInflation(streams, BASE, BASE), streams, 'drawn == base is a no-op');
+  eq(reindexSSForInflation(null, BASE, 0.07), null, 'a null stream list is returned as-is');
+
+  // The property that actually matters: under a high-inflation draw, a delayed
+  // claim must gain MORE nominal benefit than an early one, because the larger
+  // base compounds at the same indexed rate.
+  const benefitAt = (claimAge, drawn) => {
+    const s = reindexSSForInflation(
+      [{ id: 1, type: 'social_security', owner: 'me', cola: BASE,
+         amount: calculateSSBenefit(3000, claimAge, TODAY_YEAR - 60) * 12 }],
+      BASE, drawn)[0];
+    return s.amount * Math.pow(1 + s.cola, 20);   // 20 years of COLA
+  };
+  const earlyGain = benefitAt(62, 0.07) - benefitAt(62, BASE);
+  const lateGain = benefitAt(70, 0.07) - benefitAt(70, BASE);
+  gt(lateGain, earlyGain,
+    'high inflation rewards the delayed claim more — the hedge points the right way');
+}
+
+// ── SS grid: depletion-aware ranking ─────────────────────────────────────────
+// Terminal wealth alone cannot separate a plan that ran dry at 78 from one that
+// ran dry at 88 — both end at $0 and tie, leaving array order to decide.
+section('SS grid — claiming scenario ordering');
+{
+  const { compareClaimingScenarios } = engine;
+  const S = (depletionAge, afterTaxAtLegacy) => ({ depletionAge, afterTaxAtLegacy });
+  const bestFirst = (arr) => [...arr].sort(compareClaimingScenarios);
+
+  lt(compareClaimingScenarios(S(null, 100), S(80, 999999)), 0,
+    'a plan that never runs dry beats a richer one that does');
+  lt(compareClaimingScenarios(S(88, 0), S(78, 0)), 0,
+    'among depleted plans, running dry later wins');
+  lt(compareClaimingScenarios(S(null, 500), S(null, 400)), 0,
+    'with survival equal, more after-tax wealth wins');
+  eq(compareClaimingScenarios(S(null, 500), S(null, 500)), 0, 'identical scenarios tie');
+
+  // The exact failure the ranking had: six depleted scenarios all reporting $0.
+  const allBroke = [S(80, 0), S(84, 0), S(78, 0), S(88, 0), S(81, 0), S(79, 0)];
+  eq(bestFirst(allBroke)[0].depletionAge, 88, 'the six-way $0 tie is broken by depletion age');
+  eq(bestFirst(allBroke)[5].depletionAge, 78, 'and the earliest failure ranks last');
+
+  // Ranking must not be decided by raw wealth when after-tax disagrees: a
+  // pre-tax-heavy plan can hold more raw dollars but less spendable wealth.
+  const preTaxHeavy = { depletionAge: null, afterTaxAtLegacy: 900, netLifetimeWealth: 1100 };
+  const rothHeavy = { depletionAge: null, afterTaxAtLegacy: 1000, netLifetimeWealth: 1000 };
+  lt(compareClaimingScenarios(rothHeavy, preTaxHeavy), 0,
+    'after-tax wealth decides, not the raw balance');
+
+  // Missing fields must not throw or silently win.
+  eq(compareClaimingScenarios({}, {}), 0, 'empty scenarios tie rather than throwing');
+  lt(compareClaimingScenarios(S(null, 1), {}), 0, 'a real scenario beats an empty one');
+}
+
+// ── SS grid: a sampled lifespan ends the plan at that age ────────────────────
+// The Monte Carlo path sets legacyAge and the life expectancies to the drawn
+// death age, then measures with rowAtOrLast. This asserts the engine honours
+// that, so "ran out of money after you died" is never scored as a failure.
+section('SS grid — sampled lifespan drives the horizon');
+{
+  const { rowAtOrLast, sampleAgeAtDeath } = engine;
+
+  const planEndingAt = (deathAge) => {
+    const s = baseScenario({
+      survivorModelEnabled: true,
+      myLifeExpectancy: deathAge, spouseLifeExpectancy: deathAge,
+      legacyAge: deathAge, myRetirementAge: 62, spouseRetirementAge: 62,
+    });
+    return run(s);
+  };
+  const short = planEndingAt(78);
+  const long = planEndingAt(96);
+  lt(short[short.length - 1].myAge, 80, 'a short drawn life ends the plan early');
+  gt(long[long.length - 1].myAge, 90, 'a long drawn life runs the plan out further');
+  eq(rowAtOrLast(short, 78).myAge, 78, 'the short run is measured at its own death age');
+  eq(rowAtOrLast(long, 96).myAge, 96, 'and the long run at its own');
+
+  // Sampling must stay inside the mortality table and respond to the shift that
+  // recentres it on the user's life-expectancy input.
+  const draw = (shift) => {
+    let lo = Infinity, hi = -Infinity, sum = 0;
+    const N = 400;
+    for (let i = 0; i < N; i++) {
+      const a = sampleAgeAtDeath(60, Math.random, shift);
+      lo = Math.min(lo, a); hi = Math.max(hi, a); sum += a;
+    }
+    return { lo, hi, mean: sum / N };
+  };
+  const centered = draw(0);
+  const shifted = draw(8);
+  gt(centered.lo, 59, 'a sampled death age is never before the current age');
+  lt(centered.hi, 130, 'and never past the mortality table');
+  gt(shifted.mean, centered.mean, 'a positive shift moves the distribution later');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

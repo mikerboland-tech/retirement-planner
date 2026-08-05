@@ -2521,6 +2521,53 @@ const rowAtOrLast = (proj, age) => {
   return proj.find(p => p.myAge === age) || proj[proj.length - 1];
 };
 
+// ── SS RE-INDEXATION UNDER STOCHASTIC INFLATION ──────────────────────────────
+// The engine grows each income stream by its own fixed `stream.cola`, which is
+// independent of the inflation used for expenses. Under a stochastic-inflation
+// simulation that combination is actively wrong for Social Security: a
+// high-inflation draw would raise the household's costs while pinning SS to its
+// baseline COLA, modelling the one CPI-indexed asset in the plan as
+// inflation-EXPOSED. Delayed claiming would then look worst in exactly the
+// scenarios where it is worth most — the sign of the hedge, backwards.
+//
+// This rescales SS COLA to a run's drawn inflation while preserving the stream's
+// real spread against baseline: a stream entered at exactly the inflation rate
+// stays fully indexed, one entered below it stays proportionally behind.
+//
+// ONLY social_security. Its CPI indexation is statutory (42 U.S.C. 415(i)); a
+// fixed-nominal pension must keep its nominal value and lose real value, which
+// is what leaving its cola untouched already does. Passing drawnInflation equal
+// to baseInflation is a no-op, as is a non-positive baseline.
+const reindexSSForInflation = (streams, baseInflation, drawnInflation) => {
+  if (!Array.isArray(streams)) return streams;
+  if (!(baseInflation > -1) || drawnInflation === baseInflation) return streams;
+  return streams.map(s => {
+    if (!s || s.type !== 'social_security') return s;
+    const realSpread = (1 + (s.cola || 0)) / (1 + baseInflation) - 1;
+    return { ...s, cola: (1 + realSpread) * (1 + drawnInflation) - 1 };
+  });
+};
+
+// ── CLAIMING-SCENARIO ORDERING ───────────────────────────────────────────────
+// Sort comparator for the Social Security grid: best scenario first.
+//
+//   1. Does the plan run dry at all, and if so how late? A plan that survives
+//      beats one that does not, whatever the balances say. Terminal wealth alone
+//      cannot make this distinction — every depleted plan ends at $0 and ties,
+//      so the ranking among them was previously decided by array order.
+//   2. After-tax terminal wealth. Claiming ages differ in how hard they drain
+//      pre-tax accounts during the bridge years, so equal RAW balances can mean
+//      unequal spendable wealth.
+//
+// Shared by the worker and the UI so the ranking and the winner tiles cannot
+// disagree about what "best" means.
+const compareClaimingScenarios = (a, b) => {
+  const aDry = a.depletionAge ?? Infinity;
+  const bDry = b.depletionAge ?? Infinity;
+  if (aDry !== bDry) return bDry - aDry;                     // later / never first
+  return (b.afterTaxAtLegacy || 0) - (a.afterTaxAtLegacy || 0);
+};
+
 // ── ROTH OPTIMIZER SCORING ───────────────────────────────────────────────────
 // Reduce a projection to the metrics the Roth Conversion Optimizer ranks by.
 // Lives in the engine (not the worker) so the test suite can exercise it.
@@ -5421,6 +5468,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     ACA_APPLICABLE_PCT_2026, ACA_BENCHMARK_PREMIUM_2026,
     getACAApplicablePercentage, calculateACAPremiumCredit,
     getSpendingPhaseMultiplier, scoreRothStrategy, rowAtOrLast,
+    reindexSSForInflation, compareClaimingScenarios,
     calculateHealthcareExpenses, calculateRecurringExpenses,
     healthcareCostsModeled, HEALTHCARE_MODELS_UNPRICED,
 

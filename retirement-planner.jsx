@@ -39,7 +39,7 @@ const {
   calculateHealthcareExpenses, calculateRecurringExpenses, healthcareCostsModeled,
   GOV_PENSION_SYSTEMS, estimateGovernmentPension, estimateFersSupplement,
   HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
-  computeProjections,
+  computeProjections, compareClaimingScenarios,
 } = PlannerEngine;
 
 // ============================================
@@ -935,7 +935,7 @@ function FAQTab() {
         },
         {
           q: "What is Net Lifetime Wealth in the SS analysis?",
-          a: "Net Lifetime Wealth equals portfolio value at your legacy age plus total Social Security received during retirement. This combines what remains in your accounts with what SS paid you over your lifetime, giving a single number to compare claiming strategies holistically."
+          a: "Net Lifetime Wealth is your portfolio value at your legacy age. Social Security is already reflected in it: every benefit dollar received reduced a portfolio withdrawal dollar for dollar, so it shows up as a higher remaining balance. Adding Lifetime SS on top would count those dollars twice and bias the ranking toward late claiming — Lifetime SS is shown as its own column for reference, not folded into this number."
         },
         {
           q: "What does the CAGR sensitivity slider do?",
@@ -943,7 +943,7 @@ function FAQTab() {
         },
         {
           q: "What does the Monte Carlo stress test toggle do?",
-          a: "When enabled, each claiming scenario is run through N simulations (50-500 selectable) with randomized returns based on your chosen volatility (σ from 8% bonds-heavy to 22% all-stocks). The analysis then ranks scenarios by success rate — the percentage of simulations where your portfolio survives to legacy age — instead of a single deterministic outcome. New columns appear in the ranking table: Success Rate, p10 Portfolio (the unlucky scenario), and p50 Portfolio (median). This captures sequence-of-returns risk that the deterministic analysis cannot. Methodology note: each simulation applies a single Normal(0, σ) shock to all accounts. This correctly ranks scenarios but exaggerates tail magnitudes vs a year-by-year simulation — trust the rankings, treat the p10/p90 dollar values as relative."
+          a: "When enabled, each claiming scenario is run through N simulations (50-500 selectable) and ranked by success rate — the percentage of simulations where the portfolio survives — instead of a single deterministic outcome. Three things vary per simulation: returns (each year draws its own Normal(mean, σ), so sequence-of-returns risk is captured), lifespan (drawn from a CDC mortality table centered on your life-expectancy inputs, and the dominant variable in this decision), and inflation (with Social Security re-indexed to each run's drawn inflation, since it is the only CPI-indexed asset in the plan — this is what prices delayed claiming as an inflation hedge). New columns appear: Success Rate, p10 Portfolio (the unlucky case) and p50 (median). Every scenario replays the identical draws (common random numbers), so differences between cells reflect the claiming age rather than sampling luck. Limitations: all accounts share each year's return draw, so asset-class diversification is not modeled; lifespans are drawn independently per spouse, ignoring the real correlation between them; and SS re-indexation matches the level of a run's inflation, not its year-by-year path."
         },
         {
           q: "How does Roth conversion strategy affect SS claim timing?",
@@ -5424,6 +5424,13 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
   const [useMcStressTest, setUseMcStressTest] = useState(false);
   const [mcRunsPerScenario, setMcRunsPerScenario] = useState(100);
   const [mcVolatility, setMcVolatility] = useState(0.15);  // 15% std dev = typical 60/40
+  // Longevity defaults ON: it is the single largest driver of the claiming
+  // decision, so a stress test that holds it fixed is stressing the wrong thing.
+  const [mcLongevity, setMcLongevity] = useState(true);
+  // Inflation volatility. 1.5% σ around the plan's own inflation assumption is
+  // roughly the post-war US dispersion of 10-year average CPI. Zero disables the
+  // draw and keeps SS at its entered COLA.
+  const [mcInflationVol, setMcInflationVol] = useState(0.015);
   const [mcAnalysisStatus, setMcAnalysisStatus] = useState('idle');  // idle | running | done
 
   // R6: heavy SS-grid computation runs in a Web Worker. Status: 'idle' | 'running' | 'error'.
@@ -5434,8 +5441,32 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
   const [gridError, setGridError] = useState(null);
   const gridJobRef = useRef(null);
 
-  const myCurrentClaimAge = mySSStream?.startAge || 67;
-  const spouseCurrentClaimAge = spouseSSStream?.startAge || 67;
+  // The claim ages SAVED in the plan — what every other tab is projecting from.
+  const savedMyClaimAge = mySSStream?.startAge || 67;
+  const savedSpouseClaimAge = spouseSSStream?.startAge || 67;
+
+  // Staged (unsaved) claim ages. Changing a dropdown here used to write straight
+  // through to incomeStreams, silently rewriting the plan on every tab with no
+  // button pressed and no confirmation — so exploring "what if I claimed at 64"
+  // was indistinguishable from deciding to. Edits now stage here until applied.
+  const [pendingMyClaimAge, setPendingMyClaimAge] = useState(savedMyClaimAge);
+  const [pendingSpouseClaimAge, setPendingSpouseClaimAge] = useState(savedSpouseClaimAge);
+  const [applyConfirmation, setApplyConfirmation] = useState(null);
+
+  // Follow the plan when it changes underneath us (another tab edits the stream,
+  // or a saved plan loads). Only resyncs what the user has not staged, so an
+  // in-progress edit is never silently discarded.
+  useEffect(() => { setPendingMyClaimAge(savedMyClaimAge); }, [savedMyClaimAge]);
+  useEffect(() => { setPendingSpouseClaimAge(savedSpouseClaimAge); }, [savedSpouseClaimAge]);
+
+  const hasUnappliedClaimAges =
+    pendingMyClaimAge !== savedMyClaimAge ||
+    (!!spouseSSStream && pendingSpouseClaimAge !== savedSpouseClaimAge);
+
+  // The analysis below reads the STAGED ages, so the grid previews what you are
+  // considering. Only Apply writes to the plan.
+  const myCurrentClaimAge = pendingMyClaimAge;
+  const spouseCurrentClaimAge = pendingSpouseClaimAge;
   
   const myBirthYear = personalInfo.myBirthYear || (new Date().getFullYear() - personalInfo.myAge);
   const spouseBirthYear = personalInfo.spouseBirthYear || (new Date().getFullYear() - personalInfo.spouseAge);
@@ -5453,22 +5484,34 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
     percentOfFRA: Math.round((calculateSSBenefit(myPIA, age, myBirthYear) / myPIA) * 100)
   }));
   
-  const updateMyClaimAge = (newAge) => {
-    if (mySSStream) {
-      const newBenefit = calculateSSBenefit(myPIA, newAge, myBirthYear) * 12;
-      setIncomeStreams(incomeStreams.map(s => 
-        s.id === mySSStream.id ? { ...s, startAge: newAge, amount: newBenefit, pia: myPIA } : s
-      ));
-    }
+  // Staging only — no write to the plan.
+  const updateMyClaimAge = (newAge) => { setPendingMyClaimAge(newAge); setApplyConfirmation(null); };
+  const updateSpouseClaimAge = (newAge) => { setPendingSpouseClaimAge(newAge); setApplyConfirmation(null); };
+
+  const revertClaimAges = () => {
+    setPendingMyClaimAge(savedMyClaimAge);
+    setPendingSpouseClaimAge(savedSpouseClaimAge);
+    setApplyConfirmation(null);
   };
-  
-  const updateSpouseClaimAge = (newAge) => {
-    if (spouseSSStream) {
-      const newBenefit = calculateSSBenefit(spousePIA, newAge, spouseBirthYear) * 12;
-      setIncomeStreams(incomeStreams.map(s =>
-        s.id === spouseSSStream.id ? { ...s, startAge: newAge, amount: newBenefit, pia: spousePIA } : s
-      ));
-    }
+
+  // The single write path into the plan. Updates both SS streams in one call so
+  // a couple's change lands atomically rather than as two projection passes.
+  const applyClaimAges = () => {
+    if (!hasUnappliedClaimAges) return;
+    const applied = [];
+    const next = incomeStreams.map(s => {
+      if (mySSStream && s.id === mySSStream.id && pendingMyClaimAge !== savedMyClaimAge) {
+        applied.push(`yours to ${pendingMyClaimAge}`);
+        return { ...s, startAge: pendingMyClaimAge, amount: calculateSSBenefit(myPIA, pendingMyClaimAge, myBirthYear) * 12, pia: myPIA };
+      }
+      if (spouseSSStream && s.id === spouseSSStream.id && pendingSpouseClaimAge !== savedSpouseClaimAge) {
+        applied.push(`your spouse's to ${pendingSpouseClaimAge}`);
+        return { ...s, startAge: pendingSpouseClaimAge, amount: calculateSSBenefit(spousePIA, pendingSpouseClaimAge, spouseBirthYear) * 12, pia: spousePIA };
+      }
+      return s;
+    });
+    setIncomeStreams(next);
+    setApplyConfirmation(applied.join(' and '));
   };
 
   // R6: dispatch the 6x6 (married) or 6x1 (single) claiming-age grid to the worker.
@@ -5512,7 +5555,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
           spouseLifeExpectancy,
           myPIA, spousePIA, myBirthYear, spouseBirthYear,
           isMarried: ssIsMarried,
-          mcRunsPerScenario, mcVolatility,
+          mcRunsPerScenario, mcVolatility, mcLongevity, mcInflationVol,
         },
         onProgress: (pct) => setGridProgress(pct),
       });
@@ -5552,6 +5595,8 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
     // no reason (R4).
     useMcStressTest ? mcRunsPerScenario : null,
     useMcStressTest ? mcVolatility : null,
+    useMcStressTest ? mcLongevity : null,
+    useMcStressTest ? mcInflationVol : null,
   ]);
 
   const cancelGridJob = () => {
@@ -5569,33 +5614,62 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
         <p className="text-slate-400 text-sm">Compare benefits at different claiming ages and find your optimal strategy based on life expectancy.</p>
       </div>
       
-      {/* Current Plan Summary */}
-      <div className={`${cardStyle} border-l-4 border-l-amber-500`}>
-        <h4 className="text-lg font-semibold text-amber-400 mb-3">Your Current Plan</h4>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="flex items-center justify-between p-3 bg-slate-800/50 rounded-lg">
-            <div>
-              <p className="text-slate-400 text-sm">My Claiming Age</p>
-              <p className="text-2xl font-bold text-slate-100">{myCurrentClaimAge}</p>
-              <p className="text-slate-500 text-xs">{formatCurrency(calculateSSBenefit(myPIA, myCurrentClaimAge, myBirthYear) * 12)}/year</p>
-            </div>
-            <select value={myCurrentClaimAge} onChange={e => updateMyClaimAge(Number(e.target.value))} className={`${inputStyle} w-24`}>
-              {claimingAges.map(age => <option key={age} value={age}>{age}</option>)}
-            </select>
-          </div>
-          {personalInfo.filingStatus === 'married_joint' && spouseSSStream && (
-            <div className="flex items-center justify-between p-3 bg-slate-800/50 rounded-lg">
-              <div>
-                <p className="text-slate-400 text-sm">Spouse Claiming Age</p>
-                <p className="text-2xl font-bold text-slate-100">{spouseCurrentClaimAge}</p>
-                <p className="text-slate-500 text-xs">{formatCurrency(calculateSSBenefit(spousePIA, spouseCurrentClaimAge, spouseBirthYear) * 12)}/year</p>
-              </div>
-              <select value={spouseCurrentClaimAge} onChange={e => updateSpouseClaimAge(Number(e.target.value))} className={`${inputStyle} w-24`}>
-                {claimingAges.map(age => <option key={age} value={age}>{age}</option>)}
-              </select>
-            </div>
-          )}
+      {/* Current Plan Summary — staged edits, explicit Apply. */}
+      <div className={`${cardStyle} border-l-4 ${hasUnappliedClaimAges ? 'border-l-sky-500' : 'border-l-amber-500'}`}>
+        <div className="flex items-start justify-between gap-4 mb-3">
+          <h4 className="text-lg font-semibold text-amber-400">Your Current Plan</h4>
+          {hasUnappliedClaimAges
+            ? <span className="text-xs px-2 py-1 rounded bg-sky-500/20 text-sky-300 border border-sky-500/40 whitespace-nowrap">● Unsaved changes</span>
+            : <span className="text-xs px-2 py-1 rounded bg-slate-700/50 text-slate-400 border border-slate-600 whitespace-nowrap">✓ Saved to plan</span>}
         </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {[
+            { key: 'me', label: 'My Claiming Age', pending: pendingMyClaimAge, saved: savedMyClaimAge, pia: myPIA, birthYear: myBirthYear, onChange: updateMyClaimAge, show: true },
+            { key: 'spouse', label: 'Spouse Claiming Age', pending: pendingSpouseClaimAge, saved: savedSpouseClaimAge, pia: spousePIA, birthYear: spouseBirthYear, onChange: updateSpouseClaimAge, show: personalInfo.filingStatus === 'married_joint' && !!spouseSSStream },
+          ].filter(f => f.show).map(f => {
+            const dirty = f.pending !== f.saved;
+            return (
+              <div key={f.key} className={`flex items-center justify-between p-3 rounded-lg ${dirty ? 'bg-sky-900/20 border border-sky-700/40' : 'bg-slate-800/50'}`}>
+                <div>
+                  <p className="text-slate-400 text-sm">{f.label}</p>
+                  <p className="text-2xl font-bold text-slate-100">{f.pending}</p>
+                  <p className="text-slate-500 text-xs">{formatCurrency(calculateSSBenefit(f.pia, f.pending, f.birthYear) * 12)}/year</p>
+                  {dirty && <p className="text-sky-400 text-xs mt-1">Plan currently has {f.saved} — not applied yet</p>}
+                </div>
+                <select value={f.pending} onChange={e => f.onChange(Number(e.target.value))} className={`${inputStyle} w-24`}>
+                  {claimingAges.map(age => <option key={age} value={age}>{age}</option>)}
+                </select>
+              </div>
+            );
+          })}
+        </div>
+
+        {hasUnappliedClaimAges ? (
+          <div className="mt-4 p-3 bg-sky-900/30 border border-sky-700/50 rounded-lg">
+            <p className="text-sky-300 text-sm font-medium mb-1">These ages are being previewed, not saved</p>
+            <p className="text-slate-400 text-xs mb-3">
+              The analysis on this tab already reflects them. Your saved plan — and every other tab — still uses{' '}
+              {savedMyClaimAge}{spouseSSStream ? ` / ${savedSpouseClaimAge}` : ''}. Apply to write the new claiming age
+              into your Social Security income stream.
+            </p>
+            <div className="flex gap-2">
+              <button onClick={applyClaimAges} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-sm font-medium">
+                Apply to Plan
+              </button>
+              <button onClick={revertClaimAges} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-sm font-medium">
+                Discard
+              </button>
+            </div>
+          </div>
+        ) : applyConfirmation ? (
+          <p className="mt-4 text-sm text-emerald-400">
+            ✓ Saved to your plan — changed {applyConfirmation}. Your Social Security income stream is updated and every tab now reflects it.
+          </p>
+        ) : (
+          <p className="mt-4 text-xs text-slate-500">
+            Changing an age here previews it in the analysis below. Nothing is written to your plan until you press Apply.
+          </p>
+        )}
       </div>
       
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -5654,7 +5728,11 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                   <tr key={row.age} className={`border-b border-slate-700/50 ${isCurrent ? 'bg-amber-900/20' : ''}`}>
                     <td className="py-2 px-3 text-slate-200">
                       {row.age} {row.age === Math.round(myFRA) && <span className="text-amber-400 text-xs">(FRA)</span>}
-                      {isCurrent && <span className="ml-2 text-amber-400 text-xs">◆ Current</span>}
+                      {isCurrent && (
+                        <span className={`ml-2 text-xs ${row.age === savedMyClaimAge ? 'text-amber-400' : 'text-sky-400'}`}>
+                          {row.age === savedMyClaimAge ? '◆ In your plan' : '◆ Previewing (not saved)'}
+                        </span>
+                      )}
                     </td>
                     <td className="text-right py-2 px-3 text-slate-300">{row.percentOfFRA}%</td>
                     <td className="text-right py-2 px-3 text-slate-200">{formatCurrency(row.monthlyBenefit)}</td>
@@ -5662,7 +5740,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                     <td className="text-center py-2 px-3">
                       {!isCurrent && (
                         <button onClick={() => updateMyClaimAge(row.age)} className="text-xs text-amber-400 hover:text-amber-300">
-                          Select
+                          Preview
                         </button>
                       )}
                     </td>
@@ -5764,6 +5842,44 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                     </select>
                   </div>
                 </div>
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  <div>
+                    <label className="text-xs text-slate-400">Vary lifespan</label>
+                    <button
+                      onClick={() => setMcLongevity(!mcLongevity)}
+                      className={`w-full mt-1 text-xs px-2 py-1 rounded font-medium border transition-all ${
+                        mcLongevity
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                          : 'bg-slate-700 text-slate-400 border-slate-600 hover:bg-slate-600'
+                      }`}
+                    >
+                      {mcLongevity ? '✓ Sampled' : '○ Fixed'}
+                    </button>
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400">Inflation volatility (σ)</label>
+                    <select
+                      value={mcInflationVol}
+                      onChange={e => setMcInflationVol(Number(e.target.value))}
+                      className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-slate-100 mt-1"
+                    >
+                      <option value={0}>0% (fixed)</option>
+                      <option value={0.01}>1.0% (calm)</option>
+                      <option value={0.015}>1.5% (historical)</option>
+                      <option value={0.025}>2.5% (turbulent)</option>
+                    </select>
+                  </div>
+                </div>
+                <p className="text-xs text-slate-400 mt-2">
+                  {mcLongevity
+                    ? <><strong className="text-slate-200">Lifespans are drawn per simulation</strong> from a CDC mortality table centered on your life-expectancy inputs above — the single biggest driver of this decision. A plan is judged over the life it actually drew, so running out of money after you have died is not counted as a failure.</>
+                    : <><strong className="text-amber-300">Lifespan is fixed</strong> at your life-expectancy inputs, so every simulation dies on the same birthday. Markets vary; longevity — the dominant variable here — does not. Turn this on for a real stress test.</>}
+                </p>
+                {mcInflationVol > 0 && (
+                  <p className="text-xs text-slate-400 mt-2">
+                    <strong className="text-slate-200">Inflation is drawn too</strong>, and Social Security is re-indexed to each run's inflation (it is the only CPI-indexed asset in your plan, by law). This is what lets the analysis price delayed claiming as the inflation hedge it actually is — pensions and other streams keep their own COLA and correctly lose real value.
+                  </p>
+                )}
                 <p className="text-xs text-amber-300 mt-2">
                   ⚠️ With Monte Carlo, each scenario runs {mcRunsPerScenario} simulations across the SS-claiming-age grid (typically 6×6 for married, 6 for single).
                   This may take {mcRunsPerScenario >= 200 ? 'tens of seconds' : 'a few seconds'} to compute on slower machines.
@@ -5776,7 +5892,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
             )}
             {useMcStressTest && (
               <p className="text-xs text-slate-500 mt-2 italic">
-                Methodology note: Each simulation applies a single Normal(0, σ) shock to all accounts (correlated, sustained). This correctly ranks scenarios by their robustness to growth assumptions, but the p10/p90 tail values are wider than a true year-by-year simulation would produce. Use success rate and ranking; treat the tail dollar amounts as relative not absolute.
+                Methodology note: each year draws its own Normal(mean, σ) return, so sequence-of-returns risk is modeled within a run. All accounts share that year's draw, so asset-class diversification is not modeled — treat σ as the volatility of your portfolio as a whole. Every scenario in the grid replays the identical set of draws (common random numbers), which is what makes cell-to-cell differences attributable to the claiming age rather than to sampling luck.
               </p>
             )}
           </div>
@@ -5834,7 +5950,13 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
           );
         }
 
+        // Ranking is the engine's compareClaimingScenarios (survival first, then
+        // after-tax wealth) so the table order, the winner tiles and the Δ column
+        // cannot disagree about what "best" means. Sort comparator: best first.
+        const betterOf = (a, b) => compareClaimingScenarios(b, a) < 0 ? b : a;
+
         // Find winners
+        const bestOverall = allScenarios.reduce(betterOf);
         const bestByWealth = allScenarios.reduce((b, c) => c.netLifetimeWealth > b.netLifetimeWealth ? c : b);
         const bestByPortfolio = allScenarios.reduce((b, c) => c.portfolioAtLegacy > b.portfolioAtLegacy ? c : b);
         const lowestTax = allScenarios.reduce((b, c) => c.lifetimeTax < b.lifetimeTax ? c : b);
@@ -5846,7 +5968,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
               if (c.mcResults.successRate !== b.mcResults.successRate) {
                 return c.mcResults.successRate > b.mcResults.successRate ? c : b;
               }
-              return c.netLifetimeWealth > b.netLifetimeWealth ? c : b;
+              return betterOf(b, c);
             })
           : null;
         const currentScenario = allScenarios.find(s => s.myClaimAge === myCurrentClaimAge && (s.spClaimAge === spouseCurrentClaimAge || s.spClaimAge === null)) 
@@ -5861,7 +5983,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
               return b.mcResults.successRate - a.mcResults.successRate;
             }
           }
-          return b.netLifetimeWealth - a.netLifetimeWealth;
+          return compareClaimingScenarios(a, b);
         });
         
         // Portfolio chart data for top scenarios
@@ -5869,7 +5991,9 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
           allScenarios.find(s => s.myClaimAge === 62 && (s.spClaimAge === 62 || s.spClaimAge === null)),
           allScenarios.find(s => s.myClaimAge === 67 && (s.spClaimAge === 67 || s.spClaimAge === null)),
           allScenarios.find(s => s.myClaimAge === 70 && (s.spClaimAge === 70 || s.spClaimAge === null)),
-          bestByWealth.myClaimAge !== 62 && bestByWealth.myClaimAge !== 67 && bestByWealth.myClaimAge !== 70 ? bestByWealth : null,
+          // Plot the recommended scenario, not a differently-ranked one — the
+          // chart should show the strategy the tab is actually pointing at.
+          bestOverall.myClaimAge !== 62 && bestOverall.myClaimAge !== 67 && bestOverall.myClaimAge !== 70 ? bestOverall : null,
           isMarried ? allScenarios.find(s => s.myClaimAge === 70 && s.spClaimAge === 62) : null
         ].filter(Boolean);
         
@@ -5987,6 +6111,34 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                   </div>
                 );
               })()}
+              {/* ── IS THE WINNER REAL, OR IS IT THE DICE? ─────────────────────
+                  Common random numbers shrink the sampling error between cells
+                  but do not remove it. When the top scenarios sit within roughly
+                  one standard error of each other, the argmax flips from run to
+                  run — presenting it as "the best strategy" would be dressing up
+                  noise as a recommendation. Say so instead. */}
+              {useMcStressTest && bestBySuccessRate?.mcResults && (() => {
+                const rates = allScenarios.filter(s => s.mcResults).map(s => s.mcResults.successRate);
+                if (rates.length < 2) return null;
+                const top = Math.max(...rates);
+                const n = mcRunsPerScenario;
+                const stdErr = Math.sqrt(Math.max(top * (1 - top), 0.0001) / n);
+                const within = rates.filter(r => top - r <= stdErr).length;
+                if (within < 2) return null;
+                return (
+                  <div className="mb-4 p-3 bg-amber-900/30 border border-amber-700/50 rounded-lg text-sm">
+                    <p className="text-amber-300 font-medium">
+                      ⚠ {within} of {rates.length} scenarios are statistically tied
+                    </p>
+                    <p className="text-amber-400/80 text-xs mt-1">
+                      Their success rates fall within one standard error (±{(stdErr * 100).toFixed(1)} points at {n} runs)
+                      of the best. Which one comes out on top will change if you re-run this. Raise the runs per
+                      scenario to separate them, or use the deterministic ranking below — and treat any claiming age
+                      in that band as an equally defensible choice rather than reading the #1 row as the answer.
+                    </p>
+                  </div>
+                );
+              })()}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                 {/* When MC is on, Highest Success Rate is the most decision-relevant
                     winner — it tells you which strategy survives the most bad-luck
@@ -6000,16 +6152,26 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                   </div>
                 ) : (
                   <div className="p-3 bg-slate-800/50 rounded-lg">
-                    <p className="text-slate-500 text-xs uppercase tracking-wide">Highest Net Wealth</p>
-                    <p className="text-xl font-bold text-emerald-400">{bestByWealth.label}</p>
-                    <p className="text-slate-400 text-xs mt-1">{formatCurrency(bestByWealth.netLifetimeWealth)}</p>
+                    <p className="text-slate-500 text-xs uppercase tracking-wide">Best Overall</p>
+                    <p className="text-xl font-bold text-emerald-400">{bestOverall.label}</p>
+                    <p className="text-slate-400 text-xs mt-1">
+                      {formatCurrency(bestOverall.afterTaxAtLegacy)} after tax
+                      {bestOverall.depletionAge
+                        ? <span className="text-red-400"> · runs dry at {bestOverall.depletionAge}</span>
+                        : <span className="text-emerald-500/80"> · never runs dry</span>}
+                    </p>
                   </div>
                 )}
                 {useMcStressTest ? (
                   <div className="p-3 bg-slate-800/50 rounded-lg">
-                    <p className="text-slate-500 text-xs uppercase tracking-wide">Highest Net Wealth</p>
-                    <p className="text-xl font-bold text-emerald-400">{bestByWealth.label}</p>
-                    <p className="text-slate-400 text-xs mt-1">{formatCurrency(bestByWealth.netLifetimeWealth)}</p>
+                    <p className="text-slate-500 text-xs uppercase tracking-wide">Best Overall</p>
+                    <p className="text-xl font-bold text-emerald-400">{bestOverall.label}</p>
+                    <p className="text-slate-400 text-xs mt-1">
+                      {formatCurrency(bestOverall.afterTaxAtLegacy)} after tax
+                      {bestOverall.depletionAge
+                        ? <span className="text-red-400"> · runs dry at {bestOverall.depletionAge}</span>
+                        : <span className="text-emerald-500/80"> · never runs dry</span>}
+                    </p>
                   </div>
                 ) : (
                   <div className="p-3 bg-slate-800/50 rounded-lg">
@@ -6041,12 +6203,12 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
             {/* Ranked Comparison Table */}
             <div className={cardStyle}>
               <h4 className="text-lg font-semibold text-amber-400 mb-2">
-                All Scenarios Ranked by {useMcStressTest ? 'Success Rate' : 'Net Lifetime Wealth'}
+                All Scenarios Ranked by {useMcStressTest ? 'Success Rate' : 'Survival, then After-Tax Wealth'}
               </h4>
               <p className="text-xs text-slate-500 mb-3">
                 {useMcStressTest 
                   ? `Each scenario was stress-tested with ${mcRunsPerScenario} Monte Carlo simulations. Success rate = % of sims where portfolio survived to age ${legacyAge}. Median (p50) is the typical outcome; p10 is the bad-luck scenario (90% of sims did better).`
-                  : `Net Wealth = portfolio at age ${legacyAge} + total SS received during retirement. Lifetime taxes and withdrawals are summed from retirement through ${legacyAge}.`
+                  : `Ranked first on whether the plan runs dry (and if so, how late), then on after-tax wealth at age ${legacyAge} — pre-tax balances discounted 25% for the taxes an heir would owe, since claiming ages differ in how hard they drain pre-tax accounts. Net Wealth is the raw portfolio at ${legacyAge}: benefits received already reduced withdrawals dollar for dollar, so they are embedded in that balance rather than added on top. Lifetime taxes and withdrawals are summed from retirement through ${legacyAge}.`
                 }
               </p>
               <div className="overflow-x-auto">
@@ -6060,19 +6222,24 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                       {useMcStressTest && <th className="text-right py-2 px-2 text-slate-400">p10 Portfolio</th>}
                       {useMcStressTest && <th className="text-right py-2 px-2 text-slate-400">p50 Portfolio</th>}
                       <th className="text-right py-2 px-2 text-slate-400">Portfolio @{legacyAge}</th>
+                      <th className="text-right py-2 px-2 text-slate-400">After Tax</th>
+                      <th className="text-right py-2 px-2 text-slate-400">Runs Dry</th>
                       <th className="text-right py-2 px-2 text-slate-400">Lifetime SS</th>
                       <th className="text-right py-2 px-2 text-slate-400">Lifetime Taxes</th>
                       <th className="text-right py-2 px-2 text-slate-400">Withdrawals</th>
                       {rothConversionActive && <th className="text-right py-2 px-2 text-slate-400">Roth Conv.</th>}
                       <th className="text-right py-2 px-2 text-slate-400">Net Wealth</th>
                       <th className="text-right py-2 px-2 text-slate-400">Δ vs Current</th>
+                      <th className="text-center py-2 px-2 text-slate-400"></th>
                     </tr>
                   </thead>
                   <tbody>
                     {ranked.map((s, i) => {
                       const isCurrent = s === currentScenario;
                       const isBest = i === 0;
-                      const delta = s.netLifetimeWealth - currentScenario.netLifetimeWealth;
+                      // Delta on the same basis the ranking uses, so the column
+                      // cannot disagree with the order it sits in.
+                      const delta = (s.afterTaxAtLegacy || 0) - (currentScenario.afterTaxAtLegacy || 0);
                       const mc = s.mcResults;
                       const successColor = mc ? (mc.successRate >= 0.9 ? 'text-emerald-400' : mc.successRate >= 0.75 ? 'text-amber-400' : 'text-red-400') : '';
                       return (
@@ -6098,6 +6265,13 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                           <td className={`text-right py-2 px-2 font-medium ${s.portfolioAtLegacy > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                             {formatCurrency(s.portfolioAtLegacy)}
                           </td>
+                          <td className="text-right py-2 px-2 text-teal-300">{formatCurrency(s.afterTaxAtLegacy)}</td>
+                          {/* Terminal wealth alone cannot separate a plan that ran
+                              dry at 78 from one that ran dry at 88 — both end at $0
+                              and tie. The age is the decision-relevant part. */}
+                          <td className={`text-right py-2 px-2 ${s.depletionAge ? 'text-red-400 font-semibold' : 'text-slate-600'}`}>
+                            {s.depletionAge ? `age ${s.depletionAge}` : '—'}
+                          </td>
                           <td className="text-right py-2 px-2 text-sky-400">{formatCurrency(s.lifetimeSS)}</td>
                           <td className="text-right py-2 px-2 text-purple-400">{formatCurrency(s.lifetimeTax)}</td>
                           <td className="text-right py-2 px-2 text-orange-400">{formatCurrency(s.lifetimeWithdrawals)}</td>
@@ -6107,6 +6281,23 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                           <td className="text-right py-2 px-2 text-emerald-400 font-semibold">{formatCurrency(s.netLifetimeWealth)}</td>
                           <td className={`text-right py-2 px-2 font-medium ${delta > 0 ? 'text-emerald-400' : delta < 0 ? 'text-red-400' : 'text-slate-400'}`}>
                             {isCurrent ? '—' : `${delta >= 0 ? '+' : ''}${formatCurrency(delta)}`}
+                          </td>
+                          {/* Stages the scenario rather than writing it. Applying
+                              still goes through the one Apply button up top, so
+                              there is exactly one way the plan gets modified. */}
+                          <td className="text-center py-2 px-2">
+                            {!isCurrent && (
+                              <button
+                                onClick={() => {
+                                  updateMyClaimAge(s.myClaimAge);
+                                  if (s.spClaimAge !== null) updateSpouseClaimAge(s.spClaimAge);
+                                  if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+                                }}
+                                className="text-xs text-amber-400 hover:text-amber-300 whitespace-nowrap"
+                              >
+                                Preview
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );
