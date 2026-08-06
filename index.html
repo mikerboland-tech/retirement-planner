@@ -54,7 +54,7 @@
            the value off its own Worker URL search params)
        So one edit per release, in both index.html AND mobile.html.
        ============================================================ -->
-  <script>window.APP_VERSION = '1.37.0';</script>
+  <script>window.APP_VERSION = '1.38.0';</script>
   <!-- engine.js is loaded dynamically from the body IIFE (after the library
        check) using `appendChild` so its ?v= comes from APP_VERSION without any
        hardcoded version in a <script> tag. -->
@@ -269,7 +269,8 @@
             + 'XAxis=Recharts.XAxis,YAxis=Recharts.YAxis,CartesianGrid=Recharts.CartesianGrid,'
             + 'Tooltip=Recharts.Tooltip,Legend=Recharts.Legend,ResponsiveContainer=Recharts.ResponsiveContainer,'
             + 'ComposedChart=Recharts.ComposedChart,Area=Recharts.Area,AreaChart=Recharts.AreaChart,'
-            + 'ReferenceLine=Recharts.ReferenceLine,Cell=Recharts.Cell,PieChart=Recharts.PieChart,Pie=Recharts.Pie;';
+            + 'ReferenceLine=Recharts.ReferenceLine,ReferenceArea=Recharts.ReferenceArea,'
+            + 'Cell=Recharts.Cell,PieChart=Recharts.PieChart,Pie=Recharts.Pie;';
           // Execute in global scope
           (0, eval)(globals + '\n' + code);
           document.getElementById('load-status').textContent = 'Rendering...';

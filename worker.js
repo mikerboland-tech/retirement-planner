@@ -1,11 +1,13 @@
 // ============================================================================
 // PlannerWorker — heavy projection runner for the desktop app.
 //
-// Loads the shared calc engine via importScripts and exposes three job types
+// Loads the shared calc engine via importScripts and exposes these job types
 // to the main thread via postMessage:
-//   - monteCarlo:       MonteCarloTab's full simulation loop (1k-5k sims)
-//   - ssGrid:           SocialSecurityTab's 6x6 deterministic claiming grid
-//   - ssMonteCarlo:     ssGrid + per-cell MC volatility shocks (3,600 calls worst case)
+//   - monteCarlo:        MonteCarloTab's full simulation loop (1k-5k sims)
+//   - ssGrid:            SocialSecurityTab's 6x6 deterministic claiming grid
+//   - ssMonteCarlo:      ssGrid + per-cell MC volatility shocks (3,600 calls worst case)
+//   - rothOptimizer:     bracket x window strategy sweep, scored by the engine
+//   - marginalRateCurve: per-year probe conversions for the lifetime rate chart
 //
 // Message protocol:
 //   main -> worker:  { jobId, type, payload }
@@ -32,6 +34,8 @@ const {
   calculateSSBenefit,
   rowAtOrLast,
   reindexSSForInflation,
+  conversionCostComponents,
+  topMarginalBracket,
 } = E;
 
 self.onmessage = (e) => {
@@ -42,6 +46,7 @@ self.onmessage = (e) => {
       case 'ssGrid':             runSocialSecurityGrid(jobId, payload, false); break;
       case 'ssMonteCarlo':       runSocialSecurityGrid(jobId, payload, true);  break;
       case 'rothOptimizer':      runRothOptimizer(jobId, payload); break;
+      case 'marginalRateCurve':  runMarginalRateCurve(jobId, payload); break;
       default:
         postMessage({ jobId, type: 'error', error: 'Unknown job type: ' + type });
     }
@@ -832,4 +837,114 @@ function runRothOptimizer(jobId, payload) {
   });
 
   postMessage({ jobId, type: 'result', data: { baseline: results[0], results } });
+}
+
+// ============================================================================
+// runMarginalRateCurve — the lifetime tax-rate chart behind the Roth simulator.
+//
+// Answers "in which years of my plan is converting cheap?" across the WHOLE
+// horizon, working years included. Three series per year:
+//
+//   effectiveRate — total tax / gross income. The average rate, i.e. what most
+//                   people mean by "my tax rate".
+//   marginalRate  — all-in cost of the next `probeAmount` converted THIS year:
+//                   income tax + the IRMAA it triggers two years later + any ACA
+//                   premium subsidy it costs. The decision-relevant number.
+//   bracket       — the statutory bracket the year already reaches. The gap
+//                   between this and marginalRate is the whole point of the
+//                   chart: it is why the simulator's per-year cost reads higher
+//                   than the bracket suggests.
+//
+// METHOD. Every year is probed INDEPENDENTLY: one projection carrying a
+// conversion confined to that single year, differenced against a single
+// no-conversion baseline. A probe left running across all years would compound
+// into a different portfolio and contaminate every later year's answer — the
+// measurement would drift into a scenario rather than a derivative.
+//
+// Conversions are gated only by the age window, available pre-tax balance and
+// the existence of a Roth account — NOT by retirement — so this works in working
+// years, which is exactly what makes the chart worth drawing.
+//
+// Cost is one projection per plan year plus the baseline (~35 total), the same
+// order as runRothOptimizer.
+//
+// Payload: { personalInfo, accounts, incomeStreams, assets, oneTimeEvents,
+//            recurringExpenses, probeAmount }
+// Result:  { probeAmount, curve: [{ age, year, effectiveRate, marginalRate,
+//            taxOnlyRate, bracket, converted, irmaaDelta, acaSubsidyLost,
+//            components }] }
+// ============================================================================
+function runMarginalRateCurve(jobId, payload) {
+  const {
+    personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
+    probeAmount,
+  } = payload;
+
+  const probe = probeAmount > 0 ? probeAmount : 10000;
+
+  // One baseline, conversions off. Every series is measured against it so the
+  // chart answers a single coherent question instead of mixing yardsticks.
+  const basePI = {
+    ...personalInfo,
+    rothConversionAmount: 0,
+    rothConversionBracket: '',
+    rothConversionStartAge: 0,
+    rothConversionEndAge: 0,
+    rothConversionPreTaxFloor: 0,
+  };
+  const baseline = computeProjections(basePI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
+
+  const curve = [];
+  const total = baseline.length;
+
+  baseline.forEach((baseRow, idx) => {
+    const age = baseRow.myAge;
+
+    // Probe confined to this one year.
+    const probePI = {
+      ...basePI,
+      rothConversionAmount: probe,
+      rothConversionStartAge: age,
+      rothConversionEndAge: age,
+      // Fixed nominal, NOT inflation-indexed. This is a derivative, so every
+      // year must be probed with an identical nudge — indexing it would grow the
+      // probe from $10k to $28k across the horizon and quietly measure a bigger
+      // slice of the bracket in later years than in earlier ones.
+      rothConversionInflationAdjust: false,
+    };
+    const probeProj = computeProjections(probePI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
+    const probeRow = probeProj.find(p => p.myAge === age);
+    const converted = probeRow ? (probeRow.rothConversion || 0) : 0;
+
+    // Nothing convertible (pre-tax exhausted, or no Roth account to receive it).
+    // Report null rather than 0% — "cannot" and "free" must not look alike.
+    const components = conversionCostComponents(probeProj, baseline, age, converted);
+
+    // Average rate. totalIncome is spendable gross (earned + guaranteed +
+    // withdrawals); the baseline has no conversion, so nothing phantom is in it.
+    const grossIncome = baseRow.totalIncome || 0;
+    const effectiveRate = grossIncome > 0 ? (baseRow.totalTax || 0) / grossIncome : null;
+
+    curve.push({
+      age,
+      year: baseRow.year,
+      effectiveRate,
+      marginalRate: components ? components.rate : null,
+      taxOnlyRate: components ? components.taxOnlyRate : null,
+      bracket: topMarginalBracket(
+        baseRow.taxableIncome, baseRow.filingStatus || personalInfo.filingStatus,
+        idx, personalInfo.inflationRate
+      ),
+      converted,
+      irmaaDelta: components ? components.irmaaDelta : 0,
+      acaSubsidyLost: components ? components.acaSubsidyLost : 0,
+      components,
+    });
+
+    if ((idx + 1) % 5 === 0 || idx + 1 === total) {
+      postMessage({ jobId, type: 'progress', percent: Math.round(((idx + 1) / total) * 100) });
+    }
+  });
+
+  postMessage({ jobId, type: 'result', data: { probeAmount: probe, curve } });
 }

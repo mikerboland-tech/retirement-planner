@@ -2568,6 +2568,103 @@ const compareClaimingScenarios = (a, b) => {
   return (b.afterTaxAtLegacy || 0) - (a.afterTaxAtLegacy || 0);
 };
 
+// ── WHAT A ROTH CONVERSION ACTUALLY COSTS ────────────────────────────────────
+// Differences two projections to price a conversion, and says WHERE the cost
+// came from. The headline number routinely lands well above the bracket the
+// conversion nominally sits in, and without a breakdown that reads like a bug
+// rather than the several real effects it is:
+//
+//   • Social Security torpedo — a conversion dollar drags up to $0.85 of SS into
+//     taxability (Pub 915 combined income), so a 22% dollar can cost ~40%.
+//   • Capital gains stacking — ordinary income pushes LTCG from 0% to 15% to 20%.
+//   • IRMAA — a step function, per person, charged TWO YEARS LATER.
+//   • NIIT — 3.8% once MAGI crosses the threshold.
+//   • Senior deduction phaseout — the 2025-2028 OBBBA 6% phaseout.
+//   • State tax, and the tax on any withdrawal taken to pay the tax.
+//   • Lost ACA premium subsidy, which is NOT a tax and so is absent from
+//     totalTax, but is money out the door all the same. Pre-65 it can exceed the
+//     income tax on the conversion outright.
+//
+// ── THE TWO-YEAR IRMAA LAG ──────────────────────────────────────────────────
+// This is the part that is easy to get wrong. Year Y's surcharge is fixed by
+// year Y−2 MAGI (see the irmaaLookbackMAGI logic in computeProjections), so the
+// IRMAA a conversion causes shows up two rows later. Charging the conversion for
+// the surcharge sitting in ITS OWN year would attribute a cost created two years
+// earlier, and would miss the cost it actually creates — for a single isolated
+// conversion, that means missing the IRMAA hit entirely.
+//
+// So the same-year surcharge is REMOVED from the same-year tax delta (it is
+// already inside totalTax) and the year Y+2 surcharge is added in its place.
+// For a steady multi-year conversion the two are nearly equal and this reduces
+// to the obvious answer; for a one-off it is the difference between pricing
+// IRMAA and ignoring it.
+//
+// Pass full projections; the function finds the rows it needs. Returns null when
+// nothing was converted — a $0 conversion has no rate, and reporting 0% would
+// read as "free" rather than "did not happen".
+const conversionCostComponents = (withProj, withoutProj, age, convertedAmount) => {
+  if (!(convertedAmount > 0) || !withProj || !withoutProj) return null;
+  const w = withProj.find(p => p.myAge === age);
+  const o = withoutProj.find(p => p.myAge === age);
+  if (!w || !o) return null;
+
+  const d = (row, other, field) => (row[field] || 0) - (other[field] || 0);
+
+  // Same-year IRMAA is stripped out; it belongs to a conversion two years back.
+  const sameYearIrmaa = d(w, o, 'irmaaSurcharge');
+  const taxDeltaExIrmaa = d(w, o, 'totalTax') - sameYearIrmaa;
+
+  // The surcharge this conversion causes, two years on. When the plan does not
+  // reach that year (conversion near the end of the horizon) there is no row and
+  // the cost genuinely never lands.
+  const wLag = withProj.find(p => p.myAge === age + 2);
+  const oLag = withoutProj.find(p => p.myAge === age + 2);
+  const irmaaDelta = (wLag && oLag) ? d(wLag, oLag, 'irmaaSurcharge') : 0;
+
+  // Subsidy LOST is a positive cost, hence the reversed subtraction.
+  const acaSubsidyLost = (o.acaSubsidy || 0) - (w.acaSubsidy || 0);
+
+  const federalDelta = d(w, o, 'federalTax');
+  const stateDelta = d(w, o, 'stateTax');
+  const ficaDelta = d(w, o, 'ficaTax');
+  const totalCost = taxDeltaExIrmaa + irmaaDelta + acaSubsidyLost;
+
+  const pct = (n) => n / convertedAmount;
+  return {
+    converted: convertedAmount,
+    federalDelta, stateDelta, ficaDelta, irmaaDelta, acaSubsidyLost,
+    // Income tax only, no surcharge, no subsidy — comparable to a bracket.
+    taxDeltaExIrmaa,
+    // What totalTax alone would have said, kept so the UI can show the gap.
+    taxOnlyRate: pct(d(w, o, 'totalTax')),
+    totalCost,
+    rate: pct(totalCost),
+    // Same figures as rate contributions, so a stacked breakdown sums to `rate`.
+    ratePoints: {
+      incomeTax: pct(taxDeltaExIrmaa),
+      irmaa: pct(irmaaDelta),
+      aca: pct(acaSubsidyLost),
+    },
+  };
+};
+
+// Top statutory federal bracket a given taxable income reaches, as a decimal.
+// The reference line the all-in cost is compared against — the number most
+// people have in mind when they say "my tax rate". Brackets inflate with the
+// same factor the tax calculator uses, so the comparison stays honest in future
+// years rather than drifting against unindexed 2026 thresholds.
+const topMarginalBracket = (taxableIncome, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
+  const brackets = FEDERAL_TAX_BRACKETS_2026[filingStatus] || FEDERAL_TAX_BRACKETS_2026.single;
+  const factor = Math.pow(1 + inflationRate, yearsFromNow);
+  const income = Math.max(0, taxableIncome || 0);
+  let rate = brackets[0].rate;
+  for (const b of brackets) {
+    if (income >= Math.round(b.min * factor)) rate = b.rate;
+    else break;
+  }
+  return rate;
+};
+
 // ── ROTH OPTIMIZER SCORING ───────────────────────────────────────────────────
 // Reduce a projection to the metrics the Roth Conversion Optimizer ranks by.
 // Lives in the engine (not the worker) so the test suite can exercise it.
@@ -5469,6 +5566,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     getACAApplicablePercentage, calculateACAPremiumCredit,
     getSpendingPhaseMultiplier, scoreRothStrategy, rowAtOrLast,
     reindexSSForInflation, compareClaimingScenarios,
+    conversionCostComponents, topMarginalBracket,
     calculateHealthcareExpenses, calculateRecurringExpenses,
     healthcareCostsModeled, HEALTHCARE_MODELS_UNPRICED,
 

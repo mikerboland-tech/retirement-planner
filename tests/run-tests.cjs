@@ -4211,6 +4211,89 @@ section('SS grid — sampled lifespan drives the horizon');
   gt(shifted.mean, centered.mean, 'a positive shift moves the distribution later');
 }
 
+// ── What a Roth conversion actually costs ────────────────────────────────────
+// The simulator's per-year cost reads well above the nominal bracket. That is
+// correct — a conversion dollar is charged for everything it triggers — but the
+// arithmetic has to be right about WHICH year each cost lands in.
+section('Roth conversion cost decomposition');
+{
+  const { conversionCostComponents, topMarginalBracket } = engine;
+
+  // Synthetic projections, so each component can be controlled exactly. Hunting
+  // for a real plan that straddles an IRMAA tier is fragile; this is not.
+  const mk = (over = {}) => ({
+    myAge: 65, totalTax: 0, federalTax: 0, stateTax: 0, ficaTax: 0,
+    irmaaSurcharge: 0, acaSubsidy: 0, ...over,
+  });
+
+  // ── the two-year IRMAA lag ──
+  // A conversion at 65 causes the surcharge at 67. Charging it for the surcharge
+  // sitting in its OWN year would bill it for a conversion two years earlier and
+  // miss the one it actually caused.
+  const withProj = [
+    mk({ myAge: 65, totalTax: 12000, federalTax: 12000, irmaaSurcharge: 0 }),
+    mk({ myAge: 66, totalTax: 10000, federalTax: 10000, irmaaSurcharge: 0 }),
+    mk({ myAge: 67, totalTax: 11800, federalTax: 10000, irmaaSurcharge: 1800 }),
+  ];
+  const withoutProj = [
+    mk({ myAge: 65, totalTax: 8000, federalTax: 8000, irmaaSurcharge: 0 }),
+    mk({ myAge: 66, totalTax: 10000, federalTax: 10000, irmaaSurcharge: 0 }),
+    mk({ myAge: 67, totalTax: 10000, federalTax: 10000, irmaaSurcharge: 0 }),
+  ];
+  const c = conversionCostComponents(withProj, withoutProj, 65, 40000);
+  eq(c.taxDeltaExIrmaa, 4000, 'income tax delta comes from the conversion year');
+  eq(c.irmaaDelta, 1800, 'the IRMAA charged is the one two years later, not the same year');
+  eq(c.totalCost, 5800, 'total cost = income tax + lagged IRMAA');
+  approx(c.rate, 5800 / 40000, 'rate is total cost over the amount actually converted');
+
+  // Same-year surcharge must be REMOVED, not double counted: it belongs to a
+  // conversion two years back, and totalTax already contains it.
+  const withSameYear = [
+    mk({ myAge: 65, totalTax: 13000, federalTax: 12000, irmaaSurcharge: 1000 }),
+    mk({ myAge: 66 }), mk({ myAge: 67, totalTax: 500, irmaaSurcharge: 500 }),
+  ];
+  const withoutSameYear = [
+    mk({ myAge: 65, totalTax: 9000, federalTax: 8000, irmaaSurcharge: 1000 }),
+    mk({ myAge: 66 }), mk({ myAge: 67, totalTax: 0, irmaaSurcharge: 0 }),
+  ];
+  const c2 = conversionCostComponents(withSameYear, withoutSameYear, 65, 40000);
+  eq(c2.taxDeltaExIrmaa, 4000, 'an unchanged same-year surcharge does not inflate the income tax delta');
+  eq(c2.irmaaDelta, 500, 'only the year+2 surcharge is attributed');
+
+  // ── ACA subsidy ──
+  // Not a tax, absent from totalTax, and pre-65 it can exceed the income tax.
+  const withAca = [mk({ myAge: 62, totalTax: 8800, acaSubsidy: 2000 })];
+  const withoutAca = [mk({ myAge: 62, totalTax: 0, acaSubsidy: 8200 })];
+  const c3 = conversionCostComponents(withAca, withoutAca, 62, 40000);
+  eq(c3.acaSubsidyLost, 6200, 'subsidy lost is counted as a positive cost');
+  eq(c3.totalCost, 15000, 'total cost includes the lost subsidy');
+  approx(c3.rate, 0.375, 'a 22% tax year really costs 37.5% once ACA is counted', 0.01);
+  gt(c3.rate, c3.taxOnlyRate, 'the all-in rate exceeds what totalTax alone reports');
+
+  // Components must reconcile — a breakdown that does not sum is worse than none.
+  const sum = c3.ratePoints.incomeTax + c3.ratePoints.irmaa + c3.ratePoints.aca;
+  approx(sum, c3.rate, 'rate contributions sum to the headline rate', 0.0001);
+
+  // ── guards ──
+  eq(conversionCostComponents(withProj, withoutProj, 65, 0), null, 'a $0 conversion has no rate');
+  eq(conversionCostComponents(withProj, withoutProj, 99, 40000), null, 'an absent age yields null');
+  eq(conversionCostComponents(null, withoutProj, 65, 40000), null, 'a null projection yields null');
+  // A conversion near the end of the horizon has no year+2 row; that cost never lands.
+  const shortProj = [mk({ myAge: 89, totalTax: 5000 })];
+  const shortBase = [mk({ myAge: 89, totalTax: 0 })];
+  eq(conversionCostComponents(shortProj, shortBase, 89, 10000).irmaaDelta, 0,
+    'no year+2 row means no IRMAA cost rather than a crash');
+
+  // ── statutory bracket reference line ──
+  eq(topMarginalBracket(0, 'single'), 0.10, 'zero income sits in the bottom bracket');
+  eq(topMarginalBracket(60000, 'single'), 0.22, 'the top bracket REACHED is returned, not the blended rate');
+  eq(topMarginalBracket(9e9, 'single'), 0.37, 'the top bracket saturates');
+  lt(topMarginalBracket(60000, 'single', 10, 0.03), topMarginalBracket(60000, 'single', 0, 0.03),
+    'brackets inflate, so the same nominal income falls into a lower one later');
+  eq(topMarginalBracket(60000, 'married_joint') < topMarginalBracket(60000, 'single'), true,
+    'married brackets are wider, so the same income lands lower');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

@@ -40,6 +40,7 @@ const {
   GOV_PENSION_SYSTEMS, estimateGovernmentPension, estimateFersSupplement,
   HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
   computeProjections, compareClaimingScenarios,
+  conversionCostComponents, topMarginalBracket,
 } = PlannerEngine;
 
 // ============================================
@@ -2148,7 +2149,10 @@ function TaxYearSnapshot({ projections, personalInfo }) {
           <div className="bg-slate-500/10 border border-slate-500/30 rounded-lg px-3 py-2 text-center">
             <div className="text-slate-400 text-xs">Total Tax</div>
             <div className="text-slate-100 font-bold text-lg">{formatCurrency(totalTax)}</div>
-            <div className="text-slate-500 text-xs">{effectiveRate.toFixed(1)}% effective rate</div>
+            {/* "Average", not "effective": the Roth simulator uses a marginal
+                rate on converted dollars, and one tab must not use the same
+                word for both. */}
+            <div className="text-slate-500 text-xs">{effectiveRate.toFixed(1)}% average rate on taxable income</div>
           </div>
           <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2 text-center">
             <div className="text-slate-400 text-xs">Net After Tax</div>
@@ -2183,6 +2187,31 @@ function TaxYearSnapshot({ projections, personalInfo }) {
     </div>
   );
 }
+
+// Direct label at the END of a line series. Recharts' `label` prop renders on
+// every point, which on a 35-year series is a wall of text, so this renders only
+// at a caller-supplied index. Direct labels let the chart be read without
+// pairing each color back to the legend, and they double as the non-color
+// encoding of series identity.
+//
+// The index is passed in rather than sniffed from Recharts internals (which vary
+// by version), and is the last point with a NON-NULL value — a series that stops
+// early must be labelled where it actually ends, not off in the empty tail.
+const lastPointLabel = (text, fill, atIndex) => (props) => {
+  const { x, y, index } = props;
+  if (index !== atIndex || x == null || y == null) return null;
+  return (
+    <text x={x + 8} y={y} dy={4} fill={fill} fontSize={11} textAnchor="start">{text}</text>
+  );
+};
+
+const lastDefinedIndex = (rows, key) => {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const v = rows[i][key];
+    if (v !== null && v !== undefined) return i;
+  }
+  return -1;
+};
 
 // ============================================
 // RothConversionSimulator — Lifted to module scope
@@ -2245,6 +2274,64 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
   const [conversionSettings, setConversionSettings] = useState(() => planToSettings(personalInfo));
   const [savedFlash, setSavedFlash] = useState(false);
 
+  // ── LIFETIME RATE CURVE ────────────────────────────────────────────────────
+  // One probe projection per plan year, so this runs in the worker. See
+  // runMarginalRateCurve for the method and why each year is probed in
+  // isolation. Debounced because the deps are object refs that change identity
+  // on every parent render.
+  const RATE_PROBE = 10000;
+  const [curve, setCurve] = useState(null);
+  const [curveStatus, setCurveStatus] = useState('idle');   // idle | running | error
+  const [curveError, setCurveError] = useState(null);
+  const curveJobRef = useRef(null);
+
+  useEffect(() => {
+    if (!window.PlannerWorker) {
+      setCurveError('Worker not available — reload the page.');
+      setCurveStatus('error');
+      return;
+    }
+    let handle = null;
+    const timer = setTimeout(() => {
+      if (curveJobRef.current) { window.PlannerWorker.cancel(); curveJobRef.current = null; }
+      setCurveStatus('running');
+      setCurveError(null);
+      handle = window.PlannerWorker.run({
+        type: 'marginalRateCurve',
+        payload: {
+          personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
+          probeAmount: RATE_PROBE,
+        },
+      });
+      curveJobRef.current = handle;
+      handle.promise
+        .then((data) => {
+          if (curveJobRef.current !== handle) return;
+          curveJobRef.current = null;
+          setCurve(data.curve);
+          setCurveStatus('idle');
+        })
+        .catch((err) => {
+          if (curveJobRef.current !== handle) return;
+          curveJobRef.current = null;
+          if (err.message === 'Cancelled') return;
+          setCurveError(err.message);
+          setCurveStatus('error');
+        });
+    }, 350);
+    return () => {
+      clearTimeout(timer);
+      if (curveJobRef.current === handle && handle && window.PlannerWorker) {
+        window.PlannerWorker.cancel();
+        curveJobRef.current = null;
+      }
+    };
+    // Deliberately NOT dependent on conversionSettings: the curve is measured
+    // against a no-conversion baseline, so it describes the plan's tax terrain
+    // rather than any one strategy. Re-running it on every slider nudge would
+    // burn ~35 projections to redraw an identical chart.
+  }, [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
+
   const bracketOptions = [
     { value: '12%', label: '12% Bracket' },
     { value: '22%', label: '22% Bracket' },
@@ -2289,12 +2376,19 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
       if (!withYear || !withoutYear) continue;
       
       const conversionAmount = withYear.rothConversion || 0;
-      const taxDelta = withYear.totalTax - withoutYear.totalTax; // Additional tax from conversion
+      // Priced by the engine helper so this table and the rate chart above can
+      // never disagree. It charges the conversion for what it actually costs:
+      // income tax, the IRMAA it triggers TWO YEARS later (not the surcharge
+      // sitting in its own year, which a conversion two years back caused), and
+      // any ACA premium subsidy it burns — the last of which is real money and
+      // is absent from totalTax entirely.
+      const cost = conversionCostComponents(withProj, withoutProj, age, conversionAmount);
+      const taxDelta = cost ? cost.totalCost : 0;
       cumulativeConversion += conversionAmount;
       cumulativeTaxDelta += taxDelta;
-      
-      const effectiveRate = conversionAmount > 0 ? taxDelta / conversionAmount : 0;
-      
+
+      const effectiveRate = cost ? cost.rate : 0;
+
       analysis.push({
         age,
         year: withYear.year,
@@ -2318,7 +2412,9 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
         // Deltas
         taxDelta,
         effectiveRate,
-        irmaaDelta: (withYear.irmaaSurcharge || 0) - (withoutYear.irmaaSurcharge || 0),
+        costComponents: cost,
+        irmaaDelta: cost ? cost.irmaaDelta : 0,
+        acaSubsidyLost: cost ? cost.acaSubsidyLost : 0,
         cumulativeConversion,
         cumulativeTaxDelta,
         remainingPreTax: withYear.preTaxBalance
@@ -2475,9 +2571,9 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
           <div className="text-xs text-slate-500">{conversionAnalysis.length} years</div>
         </div>
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
-          <div className="text-slate-500 text-xs mb-0.5">Tax During Conversions</div>
+          <div className="text-slate-500 text-xs mb-0.5">Cost During Conversions</div>
           <div className="text-xl font-bold text-red-400">+{formatCurrency(totals.conversionWindowTax)}</div>
-          <div className="text-xs text-slate-500">Avg rate: {(totals.avgEffRate * 100).toFixed(1)}%</div>
+          <div className="text-xs text-slate-500">Avg {(totals.avgEffRate * 100).toFixed(1)}% per $ converted</div>
         </div>
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           <div className="text-slate-500 text-xs mb-0.5">Lifetime Tax Savings</div>
@@ -2500,6 +2596,123 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
         </div>
       </div>
       
+      {/* ═══════════════════════════════════════════════════════════════════
+          LIFETIME TAX RATE CURVE
+          Why the per-year cost below reads higher than the bracket: the gap
+          between the "cost of converting" line and the "tax bracket" line IS
+          the answer, drawn across the whole plan rather than argued in prose.
+          ═══════════════════════════════════════════════════════════════════ */}
+      <div className="mb-6">
+        <div className="flex items-start justify-between gap-4 mb-1">
+          <h5 className="text-md font-semibold text-slate-200">Your tax rate across the whole plan</h5>
+          {curveStatus === 'running' && <span className="text-xs text-sky-400 whitespace-nowrap">computing…</span>}
+        </div>
+        <p className="text-xs text-slate-500 mb-3">
+          Working years included, so you can see the years you are trading between. Converting is worth it
+          when the orange line sits <strong className="text-slate-300">lower</strong> than it does in the years
+          you would otherwise pull that money out — typically your RMD years on the right.
+        </p>
+
+        {curveStatus === 'error' ? (
+          <div className="p-3 bg-red-900/30 border border-red-700/50 rounded-lg text-sm text-red-300">
+            Could not compute the rate curve: {curveError}
+          </div>
+        ) : !curve ? (
+          <div className="h-80 flex items-center justify-center text-slate-500 text-sm">
+            Running one probe conversion per plan year…
+          </div>
+        ) : (
+          <>
+            <div className="h-80">
+              <ResponsiveContainer width="100%" height="100%">
+                {(() => { const iBracket = lastDefinedIndex(curve, 'bracket'),
+                                iEff = lastDefinedIndex(curve, 'effectiveRate'),
+                                iMarg = lastDefinedIndex(curve, 'marginalRate'); return (
+                <LineChart data={curve} margin={{ top: 20, right: 96, left: 20, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                  <XAxis dataKey="age" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
+                  {/* One axis: every series is a percentage. */}
+                  <YAxis
+                    stroke="#94a3b8" tick={{ fill: '#94a3b8' }}
+                    tickFormatter={v => `${(v * 100).toFixed(0)}%`}
+                    domain={[0, 'auto']}
+                  />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }}
+                    labelFormatter={l => `Age ${l}`}
+                    formatter={(v, name) => [v === null || v === undefined ? '—' : `${(v * 100).toFixed(1)}%`, name]}
+                  />
+                  <Legend />
+                  {/* The strategy's own window, so the plan can be read against
+                      the terrain it is operating on. */}
+                  <ReferenceArea
+                    x1={conversionSettings.startAge} x2={conversionSettings.endAge}
+                    fill="#38bdf8" fillOpacity={0.07} stroke="#38bdf8" strokeOpacity={0.25}
+                    label={{ value: 'your conversion window', fill: '#7dd3fc', fontSize: 11, position: 'insideTop' }}
+                  />
+                  {/* Fixed-order categorical slots, validated against this
+                      surface. Dashed bracket line doubles as the secondary
+                      encoding that keeps it distinguishable without color. */}
+                  <Line
+                    type="monotone" dataKey="bracket" name="Tax bracket"
+                    stroke="#199e70" strokeWidth={2} strokeDasharray="5 4" dot={false}
+                    label={lastPointLabel('bracket', '#199e70', iBracket)}
+                  />
+                  <Line
+                    type="monotone" dataKey="effectiveRate" name="Average rate you pay"
+                    stroke="#3987e5" strokeWidth={2} dot={false}
+                    label={lastPointLabel('average', '#3987e5', iEff)}
+                  />
+                  <Line
+                    type="monotone" dataKey="marginalRate" name={`Cost of converting $${(RATE_PROBE / 1000).toFixed(0)}k more`}
+                    stroke="#d95926" strokeWidth={2} dot={false} connectNulls={false}
+                    label={lastPointLabel('conversion', '#d95926', iMarg)}
+                  />
+                </LineChart>
+                ); })()}
+              </ResponsiveContainer>
+            </div>
+            {(() => {
+              // Name the gap in words as well as pixels — the chart shows THAT
+              // conversions cost more than the bracket; this says by how much,
+              // and confirms whether the bridge years are actually the cheap
+              // ones this plan should be exploiting.
+              const usable = curve.filter(r => r.marginalRate !== null);
+              if (usable.length === 0) return null;
+              const avgGap = usable.reduce((s, r) => s + (r.marginalRate - r.bracket), 0) / usable.length;
+              const inWindow = usable.filter(r => r.age >= conversionSettings.startAge && r.age <= conversionSettings.endAge);
+              const rmdAge = getRmdStartAge(personalInfo.myBirthYear);
+              const afterRmd = usable.filter(r => r.age >= rmdAge);
+              const avg = (a) => a.length ? a.reduce((s, r) => s + r.marginalRate, 0) / a.length : null;
+              const win = avg(inWindow), late = avg(afterRmd);
+              const cheapest = usable.reduce((b, r) => r.marginalRate < b.marginalRate ? r : b);
+              return (
+                <div className="mt-3 p-3 bg-slate-800/50 border border-slate-700 rounded-lg text-xs space-y-1.5">
+                  <p className="text-slate-300">
+                    Across your plan, converting costs on average{' '}
+                    <strong className="text-orange-300">{(avgGap * 100).toFixed(1)} points more</strong> than your tax
+                    bracket. That gap is not a mistake — a conversion dollar also drags Social Security into
+                    taxability, stacks capital gains into a higher rate, and can trip IRMAA two years later.
+                  </p>
+                  {win !== null && late !== null && (
+                    <p className={win < late ? 'text-emerald-300' : 'text-amber-300'}>
+                      {win < late
+                        ? `Your window (ages ${conversionSettings.startAge}–${conversionSettings.endAge}) averages ${(win * 100).toFixed(1)}% versus ${(late * 100).toFixed(1)}% from age ${rmdAge} on — you are converting in the cheaper years, which is the whole idea.`
+                        : `Your window averages ${(win * 100).toFixed(1)}%, but from age ${rmdAge} on it is ${(late * 100).toFixed(1)}% — converting is not currently buying you a lower rate. Check the window against the dip in the orange line.`}
+                    </p>
+                  )}
+                  <p className="text-slate-500">
+                    Cheapest year to convert: <strong className="text-slate-300">age {cheapest.age}</strong> at{' '}
+                    {(cheapest.marginalRate * 100).toFixed(1)}%. Gaps in the orange line are years with no pre-tax
+                    balance left to convert.
+                  </p>
+                </div>
+              );
+            })()}
+          </>
+        )}
+      </div>
+
       {/* Chart */}
       <div className="mb-6">
         <h5 className="text-md font-semibold text-slate-200 mb-3">Income + Conversions vs. Baseline</h5>
@@ -2534,8 +2747,10 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
               <th className="text-right py-2 px-2 text-slate-400 font-medium">Conversion</th>
               <th className="text-right py-2 px-2 text-slate-400 font-medium">Tax (no conv)</th>
               <th className="text-right py-2 px-2 text-slate-400 font-medium">Tax (w/ conv)</th>
-              <th className="text-right py-2 px-2 text-slate-400 font-medium">Tax Delta</th>
-              <th className="text-right py-2 px-2 text-slate-400 font-medium">Eff. Rate</th>
+              <th className="text-right py-2 px-2 text-slate-400 font-medium">Total Cost</th>
+              <th className="text-right py-2 px-2 text-slate-400 font-medium" title="What each converted dollar costs, all in: income tax plus the IRMAA it triggers two years later plus any ACA subsidy it burns. This is a marginal rate on the converted dollars — it is expected to sit ABOVE your tax bracket, and hovering a row shows why.">
+                Cost per $ Converted <span className="text-slate-600">ⓘ</span>
+              </th>
               <th className="text-right py-2 px-2 text-slate-400 font-medium">IRMAA Δ</th>
               <th className="text-right py-2 px-2 text-slate-400 font-medium">Cumulative</th>
               <th className="text-right py-2 px-2 text-slate-400 font-medium">Pre-Tax Left</th>
@@ -2554,7 +2769,20 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                 <td className="py-2 px-2 text-right text-red-400">
                   {row.taxDelta > 0 ? '+' : ''}{formatCurrency(row.taxDelta)}
                 </td>
-                <td className="py-2 px-2 text-right text-amber-400">
+                {/* Hover decomposes the rate, so a number above the bracket
+                    reads as an explanation rather than an accusation. */}
+                <td
+                  className="py-2 px-2 text-right text-amber-400"
+                  title={row.costComponents ? [
+                    `Converted ${formatCurrency(row.costComponents.converted)}`,
+                    `Income tax:      ${formatCurrency(row.costComponents.taxDeltaExIrmaa)}  (${(row.costComponents.ratePoints.incomeTax * 100).toFixed(1)} pts)`,
+                    `IRMAA at ${row.age + 2}:    ${formatCurrency(row.costComponents.irmaaDelta)}  (${(row.costComponents.ratePoints.irmaa * 100).toFixed(1)} pts)`,
+                    `ACA subsidy lost: ${formatCurrency(row.costComponents.acaSubsidyLost)}  (${(row.costComponents.ratePoints.aca * 100).toFixed(1)} pts)`,
+                    `Total:           ${formatCurrency(row.costComponents.totalCost)}  (${(row.costComponents.rate * 100).toFixed(1)}%)`,
+                    '',
+                    'Above your bracket because a conversion dollar also pulls Social Security into taxability and stacks capital gains into a higher rate.',
+                  ].join('\n') : undefined}
+                >
                   {row.conversionAmount > 0 ? `${(row.effectiveRate * 100).toFixed(1)}%` : '—'}
                 </td>
                 <td className={`py-2 px-2 text-right ${row.irmaaDelta > 0 ? 'text-pink-400' : 'text-slate-500'}`}>
