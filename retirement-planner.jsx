@@ -2205,6 +2205,93 @@ const lastPointLabel = (text, fill, atIndex) => (props) => {
   );
 };
 
+// Tooltip for the lifetime rate curve. The default tooltip showed three bare
+// percentages, which meant a year could read 122% with nothing on screen to say
+// why — the decomposition was computed, shipped to the client, and thrown away.
+//
+// The two-year IRMAA offset is the single most confusing thing about this
+// metric, so the surcharge line always names the age it actually lands at.
+function RateCurveTooltip({ active, payload, label, probeAmount }) {
+  if (!active || !payload || !payload.length) return null;
+  const row = payload[0] && payload[0].payload;
+  if (!row) return null;
+  const c = row.components;
+  const pct = (v) => (v === null || v === undefined ? '—' : `${(v * 100).toFixed(1)}%`);
+  const money = (v) => formatCurrency(Math.round(v || 0));
+
+  // Name the dominant contributor. "34.8%" invites the reader to blame their tax
+  // bracket; "driver: Medicare surcharge" tells them where to actually look.
+  let driver = null;
+  if (c && c.totalCost > 0) {
+    const parts = [
+      { label: 'income tax', v: c.taxDeltaExIrmaa },
+      { label: 'Medicare surcharge (IRMAA)', v: c.irmaaDelta },
+      { label: 'lost ACA subsidy', v: c.acaSubsidyLost },
+    ].sort((a, b) => b.v - a.v);
+    if (parts[0].v > 0) driver = parts[0].label;
+  }
+
+  return (
+    <div style={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: 8, padding: '10px 12px', fontSize: 12, color: '#e2e8f0', maxWidth: 320 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>Age {label}</div>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+        <span style={{ color: '#d95926' }}>Cost of converting {formatCurrency(probeAmount)}</span>
+        <strong>{pct(row.marginalRate)}</strong>
+      </div>
+      {driver && <div style={{ color: '#94a3b8', fontSize: 11, marginBottom: 6 }}>driver: {driver}</div>}
+
+      {c && (
+        <div style={{ margin: '6px 0', paddingLeft: 8, borderLeft: '2px solid #334155', color: '#cbd5e1' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <span>income tax</span><span>{money(c.taxDeltaExIrmaa)} · {(c.ratePoints.incomeTax * 100).toFixed(1)} pts</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <span>IRMAA{c.irmaaDelta > 0 ? ` (lands at ${row.age + 2})` : ''}</span>
+            <span>{money(c.irmaaDelta)} · {(c.ratePoints.irmaa * 100).toFixed(1)} pts</span>
+          </div>
+          {c.acaSubsidyLost !== 0 && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+              <span>ACA subsidy lost</span><span>{money(c.acaSubsidyLost)} · {(c.ratePoints.aca * 100).toFixed(1)} pts</span>
+            </div>
+          )}
+          {row.converted > 0 && row.converted < probeAmount * 0.99 && (
+            <div style={{ color: '#fbbf24', marginTop: 4 }}>
+              only {money(row.converted)} could be converted — rate is on that amount
+            </div>
+          )}
+          {/* A tripped cliff is a fixed toll, not a rate. Measured against a
+              small probe it reads as a catastrophic percentage, which invites
+              exactly the wrong conclusion — "never convert in this year" rather
+              than "this is close to the worst amount to convert in this year".
+              The surcharge does not grow with the conversion, so a larger one
+              spreads the same dollars over a larger base. */}
+          {c.irmaaDelta > 0 && (
+            <div style={{ color: '#94a3b8', marginTop: 4 }}>
+              This {money(c.irmaaDelta)} surcharge is fixed regardless of conversion size —
+              converting more spreads it over a larger base, converting less may avoid it entirely.
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, color: '#3987e5' }}>
+        <span>Average rate you pay</span><span>{pct(row.effectiveRate)}</span>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, color: '#199e70' }}>
+        <span>Tax bracket</span><span>{pct(row.bracket)}</span>
+      </div>
+
+      {row.cliffHeadroom !== null && row.cliffHeadroom !== undefined && (
+        <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid #334155', color: row.cliffHeadroom < 15000 ? '#fbbf24' : '#94a3b8', fontSize: 11 }}>
+          {money(row.cliffHeadroom)} of room before the next Medicare tier
+          {row.cliffHeadroom < 15000 ? ' — any extra income here trips it, not just a conversion' : ''}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const lastDefinedIndex = (rows, key) => {
   for (let i = rows.length - 1; i >= 0; i--) {
     const v = rows[i][key];
@@ -2627,21 +2714,35 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
               <ResponsiveContainer width="100%" height="100%">
                 {(() => { const iBracket = lastDefinedIndex(curve, 'bracket'),
                                 iEff = lastDefinedIndex(curve, 'effectiveRate'),
-                                iMarg = lastDefinedIndex(curve, 'marginalRate'); return (
-                <LineChart data={curve} margin={{ top: 20, right: 96, left: 20, bottom: 5 }}>
+                                iMarg = lastDefinedIndex(curve, 'marginalRate');
+                  // An IRMAA cliff year can cost >100%, which is real but would
+                  // stretch the axis until the other 35 years are a flat smear
+                  // along the bottom. Clamp to the 90th percentile (floor 60%)
+                  // and let the cliff render as a capped marker — it keeps its
+                  // true value in the tooltip and its own label, so nothing is
+                  // hidden, but one year stops costing every other year its
+                  // vertical resolution.
+                  const rates = curve.map(r => r.marginalRate).filter(v => v !== null && v !== undefined).sort((a, b) => a - b);
+                  const p90 = rates.length ? rates[Math.floor(rates.length * 0.9)] : 0.6;
+                  const yMax = Math.max(0.6, Math.ceil(p90 * 10) / 10);
+                  const clipped = curve.map(r => ({
+                    ...r,
+                    marginalRatePlot: r.marginalRate === null ? null : Math.min(r.marginalRate, yMax),
+                    overCap: r.marginalRate !== null && r.marginalRate > yMax,
+                  }));
+                  const capped = clipped.filter(r => r.overCap);
+                  return (
+                <LineChart data={clipped} margin={{ top: 20, right: 96, left: 20, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                   <XAxis dataKey="age" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
                   {/* One axis: every series is a percentage. */}
                   <YAxis
                     stroke="#94a3b8" tick={{ fill: '#94a3b8' }}
                     tickFormatter={v => `${(v * 100).toFixed(0)}%`}
-                    domain={[0, 'auto']}
+                    domain={[0, yMax]}
+                    allowDataOverflow
                   />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }}
-                    labelFormatter={l => `Age ${l}`}
-                    formatter={(v, name) => [v === null || v === undefined ? '—' : `${(v * 100).toFixed(1)}%`, name]}
-                  />
+                  <Tooltip content={<RateCurveTooltip probeAmount={RATE_PROBE} />} />
                   <Legend />
                   {/* The strategy's own window, so the plan can be read against
                       the terrain it is operating on. */}
@@ -2664,10 +2765,19 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                     label={lastPointLabel('average', '#3987e5', iEff)}
                   />
                   <Line
-                    type="monotone" dataKey="marginalRate" name={`Cost of converting $${(RATE_PROBE / 1000).toFixed(0)}k more`}
+                    type="monotone" dataKey="marginalRatePlot" name={`Cost of converting $${(RATE_PROBE / 1000).toFixed(0)}k more`}
                     stroke="#d95926" strokeWidth={2} dot={false} connectNulls={false}
                     label={lastPointLabel('conversion', '#d95926', iMarg)}
                   />
+                  {/* Capped years: mark them and print the true value, so a
+                      clamped axis never silently understates a cliff. */}
+                  {capped.map(r => (
+                    <ReferenceDot
+                      key={`cap-${r.age}`} x={r.age} y={yMax} r={5}
+                      fill="#d95926" stroke="#1e293b" strokeWidth={2}
+                      label={{ value: `${(r.marginalRate * 100).toFixed(0)}%`, position: 'top', fill: '#fb923c', fontSize: 11 }}
+                    />
+                  ))}
                 </LineChart>
                 ); })()}
               </ResponsiveContainer>
@@ -2706,6 +2816,23 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                     {(cheapest.marginalRate * 100).toFixed(1)}%. Gaps in the orange line are years with no pre-tax
                     balance left to convert.
                   </p>
+                  {/* Medicare cliff proximity. This is the usual explanation for a
+                      spike, and it is information about the YEAR rather than about
+                      converting — any extra income trips it. Descriptive only. */}
+                  {(() => {
+                    const NEAR = 15000;
+                    const tight = curve.filter(r => r.cliffHeadroom !== null && r.cliffHeadroom !== undefined && r.cliffHeadroom < NEAR);
+                    if (!tight.length) return null;
+                    return (
+                      <p className="text-amber-300/90 pt-1.5 border-t border-slate-700">
+                        <span className="font-medium">Close to a Medicare surcharge tier:</span>{' '}
+                        {tight.map(r => `age ${r.age} (${formatCurrency(r.cliffHeadroom)} of room)`).join(', ')}.
+                        IRMAA is a cliff, not a bracket — crossing it by a dollar costs the whole surcharge, per person,
+                        for a full year, and it lands two years later. In {tight.length === 1 ? 'that year' : 'those years'}{' '}
+                        <em>any</em> extra income trips it, not just a Roth conversion.
+                      </p>
+                    );
+                  })()}
                 </div>
               );
             })()}

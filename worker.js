@@ -872,7 +872,7 @@ function runRothOptimizer(jobId, payload) {
 //            recurringExpenses, probeAmount }
 // Result:  { probeAmount, curve: [{ age, year, effectiveRate, marginalRate,
 //            taxOnlyRate, bracket, converted, irmaaDelta, acaSubsidyLost,
-//            components }] }
+//            cliffHeadroom, filingStatus, magi, components }] }
 // ============================================================================
 function runMarginalRateCurve(jobId, payload) {
   const {
@@ -925,10 +925,23 @@ function runMarginalRateCurve(jobId, payload) {
     const grossIncome = baseRow.totalIncome || 0;
     const effectiveRate = grossIncome > 0 ? (baseRow.totalTax || 0) / grossIncome : null;
 
+    // Headroom in THIS year's MAGI before the surcharge two years out crosses a
+    // tier. The engine already computes it per row (irmaaInfo.distToNextTier);
+    // read it rather than recomputing, so the chart and the Tax Year Snapshot
+    // can never disagree. Undefined means the top tier — no cliff left to hit.
+    const cliffHeadroom = baseRow.irmaaInfo && baseRow.irmaaInfo.distToNextTier !== undefined
+      ? baseRow.irmaaInfo.distToNextTier
+      : null;
+
     curve.push({
       age,
       year: baseRow.year,
       effectiveRate,
+      // Why a year is expensive is usually "you were close to a cliff". Carrying
+      // the headroom lets the UI say that without a second projection.
+      cliffHeadroom,
+      filingStatus: baseRow.filingStatus,
+      magi: baseRow.magi,
       marginalRate: components ? components.rate : null,
       taxOnlyRate: components ? components.taxOnlyRate : null,
       bracket: topMarginalBracket(

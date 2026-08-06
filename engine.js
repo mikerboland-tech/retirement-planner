@@ -1915,6 +1915,35 @@ const STATES_THAT_TAX_SS = new Set([
 // indexed while the premiums stayed frozen at base-year dollars, which
 // systematically understated late-life Medicare surcharges in a projection
 // where every other dollar figure is nominal (inflated).
+// ── HOW CLOSE IS THIS YEAR TO A MEDICARE CLIFF? ──────────────────────────────
+// IRMAA is a step function, not a slope: exceeding a tier edge by one dollar
+// costs the entire surcharge, for a full year, per person. That makes proximity
+// to an edge a real property of a plan year — any extra income trips it, not
+// just a Roth conversion — and nothing in the model surfaced it.
+//
+// Returns the next edge ABOVE the given MAGI and the distance to it, or null
+// when already in the top tier (where there is no further cliff to fall off).
+//
+// Filing status must come from the year being asked about, not from the plan:
+// survivorship switches married_joint to single mid-projection, and the single
+// thresholds are roughly half. A year that sat comfortably inside a band while
+// filing jointly can be a dollar from the edge as a survivor.
+const nextIRMAAThreshold = (magi, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
+  const lookupStatus = filingStatus === 'head_of_household' ? 'single' : filingStatus;
+  const thresholds = IRMAA_THRESHOLDS_2025[lookupStatus] || IRMAA_THRESHOLDS_2025.married_joint;
+  const inflationFactor = Math.pow(1 + inflationRate, yearsFromNow);
+  const income = Math.max(0, magi || 0);
+  for (let i = 0; i < thresholds.length; i++) {
+    const max = thresholds[i].maxIncome;
+    // The top tier is open-ended (null / Infinity depending on the table) — there
+    // is no edge beyond it.
+    if (max === null || max === undefined || max === Infinity) continue;
+    const edge = max * inflationFactor;
+    if (income <= edge) return { threshold: edge, distance: edge - income, tier: i };
+  }
+  return null;
+};
+
 const calculateIRMAA = (magi, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
   // Head of household uses single thresholds per CMS rules
   const lookupStatus = filingStatus === 'head_of_household' ? 'single' : filingStatus;
@@ -5203,18 +5232,15 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         partBAnnual: irmaaDetail.partBAnnual, partDAnnual: irmaaDetail.partDAnnual,
         partBMonthly: irmaaDetail.partBMonthly, partDMonthly: irmaaDetail.partDMonthly };
       // distToNextTier is PLANNING info: headroom in THIS year's MAGI before the
-      // surcharge that lands two years from now crosses a tier. Compare current
-      // MAGI against thresholds inflated to the year the surcharge will be paid.
-      const lookupStatus = effectiveFilingStatus === 'head_of_household' ? 'single' : effectiveFilingStatus;
-      const tiers = IRMAA_THRESHOLDS_2025[lookupStatus] || IRMAA_THRESHOLDS_2025.married_joint;
-      const inflFactor = Math.pow(1 + pi.inflationRate, yearsFromNow + 2);
-      for (const tier of tiers) {
-        const adjMax = tier.maxIncome === Infinity ? Infinity : tier.maxIncome * inflFactor;
-        if (magi < adjMax) {
-          irmaaInfo.distToNextTier = Math.round(adjMax - magi);
-          break;
-        }
-      }
+      // surcharge that lands two years from now crosses a tier. Hence THIS year's
+      // MAGI against thresholds inflated to `yearsFromNow + 2` — the year the
+      // surcharge will actually be paid.
+      //
+      // Left undefined in the top tier: there is no further cliff to fall off,
+      // and reporting a distance of 0 or Infinity would both read as "you are
+      // about to cross something".
+      const nextTier = nextIRMAAThreshold(magi, effectiveFilingStatus, yearsFromNow + 2, pi.inflationRate);
+      if (nextTier) irmaaInfo.distToNextTier = Math.round(nextTier.distance);
     }
     
     // ── ACA PREMIUM: settle from final MAGI ────────────────────────────────────
@@ -5556,7 +5582,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
 
     // ── Medicare / IRMAA / healthcare ─────────────────────────────────────
     IRMAA_THRESHOLDS_2025, MEDICARE_PART_B_STANDARD_2025,
-    calculateIRMAA, calculateIRMAASurcharge,
+    calculateIRMAA, calculateIRMAASurcharge, nextIRMAAThreshold,
     MEDICARE_PART_B_PREMIUM_2025, MEDICARE_PART_D_PREMIUM_2025,
     MEDICARE_SUPPLEMENT_PREMIUM_2025, MEDICARE_OOP_ANNUAL_2025,
     PRE_65_HEALTHCARE_ANNUAL_2025, MEDICAL_INFLATION_RATE,

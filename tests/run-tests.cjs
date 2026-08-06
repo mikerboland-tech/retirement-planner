@@ -4294,6 +4294,81 @@ section('Roth conversion cost decomposition');
     'married brackets are wider, so the same income lands lower');
 }
 
+// ── Distance to the next Medicare (IRMAA) cliff ──────────────────────────────
+// IRMAA is a step function: crossing an edge by a dollar costs the whole
+// surcharge, per person, for a year. Proximity to an edge is therefore a real
+// property of a plan year — it is what makes a single year's conversion cost
+// spike above 100% and drop back the next year.
+section('IRMAA cliff proximity (nextIRMAAThreshold)');
+{
+  const { nextIRMAAThreshold, IRMAA_THRESHOLDS_2025 } = engine;
+  const mfj = IRMAA_THRESHOLDS_2025.married_joint;
+  const sing = IRMAA_THRESHOLDS_2025.single;
+
+  const r1 = nextIRMAAThreshold(200000, 'married_joint');
+  eq(r1.threshold, mfj[0].maxIncome, 'below the first edge, the first edge is next');
+  eq(r1.distance, mfj[0].maxIncome - 200000, 'distance is edge minus income');
+  eq(r1.tier, 0, 'and the tier index is reported');
+
+  // Exactly ON an edge is still inside that tier — you cross by EXCEEDING it.
+  const onEdge = nextIRMAAThreshold(mfj[0].maxIncome, 'married_joint');
+  eq(onEdge.distance, 0, 'sitting exactly on an edge leaves zero headroom');
+  eq(onEdge.tier, 0, 'and has not yet crossed');
+  const overEdge = nextIRMAAThreshold(mfj[0].maxIncome + 1, 'married_joint');
+  eq(overEdge.tier, 1, 'one dollar past the edge is the next tier');
+
+  // Top tier: no further cliff. Null, not zero and not Infinity — both of those
+  // read as "about to cross something".
+  eq(nextIRMAAThreshold(9e9, 'married_joint'), null, 'above the top edge there is no next cliff');
+  eq(nextIRMAAThreshold(9e9, 'single'), null, 'same for single');
+
+  // Filing status matters, and it CHANGES mid-plan at survivorship. Single
+  // thresholds are far lower, so the identical MAGI can be comfortable jointly
+  // and one step from a cliff as a survivor — this is why Mike's age-88 spike
+  // exists at an income that was fine while filing jointly.
+  const sameMagi = 200000;
+  const asJoint = nextIRMAAThreshold(sameMagi, 'married_joint');
+  const asSingle = nextIRMAAThreshold(sameMagi, 'single');
+  lt(asSingle.distance, asJoint.distance, 'the same income is closer to a cliff filing single');
+  gt(asSingle.tier, asJoint.tier, 'and sits in a higher tier');
+  eq(nextIRMAAThreshold(sameMagi, 'head_of_household').threshold, asSingle.threshold,
+    'head of household uses the single table (CMS)');
+
+  // Thresholds index with inflation, so headroom must be measured in the dollars
+  // of the year the surcharge is PAID, not today's.
+  const now = nextIRMAAThreshold(300000, 'married_joint', 0, 0.03);
+  const later = nextIRMAAThreshold(300000, 'married_joint', 20, 0.03);
+  gt(later.distance, now.distance, 'the same nominal income has more headroom against indexed thresholds later');
+  lt(later.tier, now.tier, 'and drops into a lower tier, because the edges moved up past it');
+  // Compare a FIXED tier across time — at 20 years the income above has moved to
+  // a different tier, so comparing its "next edge" would be two different edges.
+  approx(nextIRMAAThreshold(0, 'married_joint', 20, 0.03).threshold,
+    mfj[0].maxIncome * Math.pow(1.03, 20),
+    'a given edge inflates at the given rate', 0.001);
+
+  // Guards.
+  eq(nextIRMAAThreshold(0, 'married_joint').tier, 0, 'zero income is in the bottom tier');
+  eq(nextIRMAAThreshold(-5000, 'married_joint').distance, mfj[0].maxIncome,
+    'negative MAGI is floored at zero rather than inflating headroom');
+  eq(nextIRMAAThreshold(200000, 'nonsense_status').threshold, mfj[0].maxIncome,
+    'an unknown filing status falls back to the married_joint table');
+
+  // The engine's per-row planning field must agree with the helper it now uses,
+  // measured two years out (the surcharge lands on a 2-year lookback).
+  {
+    const s = baseScenario({ myAge: 70, spouseAge: 70, myRetirementAge: 70, spouseRetirementAge: 70,
+      myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 70, legacyAge: 80 });
+    const proj = run(s);
+    const row = proj.find(p => p.myAge === 72 && p.irmaaInfo);
+    if (row && row.irmaaInfo.distToNextTier !== undefined) {
+      const yearsFromNow = row.myAge - 70;
+      const expect = nextIRMAAThreshold(row.magi, row.filingStatus, yearsFromNow + 2, 0.03);
+      eq(row.irmaaInfo.distToNextTier, Math.round(expect.distance),
+        'the row\'s distToNextTier is the helper measured at the surcharge year');
+    } else { pass++; }
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
