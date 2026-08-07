@@ -3452,6 +3452,857 @@ const estimateGovernmentPension = ({
 const estimateFersSupplement = ({ ssAt62Annual = 0, yearsOfService = 0 } = {}) =>
   Math.round(ssAt62Annual * Math.min(yearsOfService, 40) / 40);
 
+// ============================================================================
+// FORM 1040 — CURRENT-YEAR TAX RETURN
+// ============================================================================
+// computeProjections answers "what does 2041 look like" from six aggregate
+// income scalars. That is the right shape for a 40-year plan and the wrong shape
+// for a decision you have to make before December 31, where the question is
+// which line of an actual return moves and by how much.
+//
+// This section builds a return at 1040 line granularity from line-item inputs,
+// and returns an object whose keys are the REAL form line numbers, so the output
+// can be reconciled against a filed return rather than merely believed.
+//
+// It is deliberately decoupled from computeProjections: pure in, pure out, no
+// account balances, no withdrawal solver, no multi-year state. Wiring it into
+// year 0 of the projection is a separate step, behind a flag.
+//
+// SOURCES for every 2026 figure below:
+//   IRS Rev. Proc. 2025-32 (2026 inflation adjustments, as amended by OBBBA)
+//   P.L. 119-21 (OBBBA) §70102 (SALT), §70105 (§199A), §70425/§70426 (charitable)
+//   IRC §469 (passive activity), §704(d) and §731 (partner basis),
+//   §1411 (NIIT), §6654 (estimated tax), §199A (QBI), §1211(b) (capital losses)
+
+// ── §199A qualified business income ──────────────────────────────────────────
+// Below the threshold the deduction is a flat 20% of QBI. Above threshold +
+// phase-in range the W-2 wage/UBIA limit binds fully and an SSTB gets nothing.
+// Inside the range both effects phase in proportionally.
+//
+// OBBBA widened the phase-in range for 2026 from $50k/$100k to $75k/$150k, which
+// is why the range end is no longer simply threshold + 50k.
+const QBI_THRESHOLD_2026 = {
+  single: 201750, married_joint: 403500, married_separate: 201775, head_of_household: 201750,
+};
+const QBI_PHASEIN_RANGE_2026 = {
+  single: 75000, married_joint: 150000, married_separate: 75000, head_of_household: 75000,
+};
+const QBI_DEDUCTION_RATE = 0.20;
+// OBBBA §70105 minimum: $400 for a taxpayer with at least $1,000 of QBI from an
+// active trade or business in which they MATERIALLY PARTICIPATE. A purely passive
+// owner does not qualify for the floor, which matters for a K-1 holder who does
+// not participate. Both figures index after 2026, not in it.
+const QBI_MINIMUM_DEDUCTION = 400;
+const QBI_MINIMUM_QBI_REQUIRED = 1000;
+
+// ── SALT (OBBBA §70102) ──────────────────────────────────────────────────────
+// The cap went from $10,000 to $40,000 in 2025 and $40,400 in 2026, rising 1% a
+// year through 2029, then reverting to $10,000 in 2030. Above a MAGI threshold
+// the cap bleeds off at 30 cents per dollar but never below $10,000 — which
+// creates a band where an extra dollar of income costs far more than the bracket
+// rate, and is exactly the sort of thing a marginal-rate readout must catch.
+const SALT_CAP_2025 = 40000;
+const SALT_CAP_2026 = 40400;
+const SALT_CAP_ANNUAL_GROWTH = 0.01;
+const SALT_CAP_LAST_ENHANCED_YEAR = 2029;
+const SALT_CAP_BASE = 10000;                 // pre-2025 and post-2029
+const SALT_PHASEOUT_START_2026 = 505000;     // half for MFS
+const SALT_PHASEOUT_RATE = 0.30;
+
+// The enhanced SALT cap and its phaseout threshold for a given tax year, before
+// the MAGI phaseout is applied. Returns { cap, phaseoutStart, floor }.
+const saltCapSchedule = (taxYear, filingStatus) => {
+  const mfs = filingStatus === 'married_separate';
+  const half = (v) => (mfs ? v / 2 : v);
+  if (!taxYear || taxYear < 2025 || taxYear > SALT_CAP_LAST_ENHANCED_YEAR) {
+    return { cap: half(SALT_CAP_BASE), phaseoutStart: Infinity, floor: half(SALT_CAP_BASE) };
+  }
+  let cap;
+  if (taxYear === 2025) cap = SALT_CAP_2025;
+  else cap = SALT_CAP_2026 * Math.pow(1 + SALT_CAP_ANNUAL_GROWTH, taxYear - 2026);
+  const start = taxYear === 2025
+    ? 500000
+    : SALT_PHASEOUT_START_2026 * Math.pow(1 + SALT_CAP_ANNUAL_GROWTH, taxYear - 2026);
+  return { cap: half(cap), phaseoutStart: half(start), floor: half(SALT_CAP_BASE) };
+};
+
+// The SALT cap actually available at a given MAGI.
+const saltCapFor = (taxYear, filingStatus, magi = 0) => {
+  const { cap, phaseoutStart, floor } = saltCapSchedule(taxYear, filingStatus);
+  if (!Number.isFinite(phaseoutStart)) return cap;
+  const excess = Math.max(0, (magi || 0) - phaseoutStart);
+  return Math.max(floor, cap - SALT_PHASEOUT_RATE * excess);
+};
+
+// ── Charitable contributions (OBBBA, effective 2026) ─────────────────────────
+// Itemizers lose the first 0.5% of AGI. Non-itemizers gain a deduction of up to
+// $1,000 / $2,000 for CASH gifts, allowed alongside the standard deduction.
+const CHARITABLE_AGI_FLOOR_RATE = 0.005;
+const CHARITABLE_FLOOR_FIRST_YEAR = 2026;
+const CHARITABLE_CASH_AGI_LIMIT = 0.60;
+const CHARITABLE_NONITEMIZER_LIMIT = {
+  single: 1000, married_joint: 2000, married_separate: 1000, head_of_household: 1000,
+};
+
+// ── The 35% cap on the benefit of itemizing (OBBBA, effective 2026) ──────────
+// A 37%-bracket taxpayer may only take itemized deductions at 35 cents on the
+// dollar. Implemented as the statute writes it: reduce total itemized deductions
+// by 2/37 of the LESSER of (a) those deductions or (b) the amount by which
+// taxable income computed WITH them, plus them back, exceeds the 37% threshold.
+const ITEMIZED_BENEFIT_REDUCTION_FRACTION = 2 / 37;
+const ITEMIZED_BENEFIT_CAP_FIRST_YEAR = 2026;
+
+// ── Medical expense floor (IRC §213) ─────────────────────────────────────────
+const MEDICAL_EXPENSE_AGI_FLOOR = 0.075;
+
+// ── Capital losses (IRC §1211(b)) ────────────────────────────────────────────
+// Net capital loss offsets ordinary income only $3,000 a year ($1,500 MFS); the
+// rest carries forward indefinitely. The projection engine drops losses entirely
+// (calculateCapitalGainsTax returns 0 for a loss), so the carryforward is new.
+const CAPITAL_LOSS_ANNUAL_LIMIT = 3000;
+const CAPITAL_LOSS_ANNUAL_LIMIT_MFS = 1500;
+
+// ── Self-employment tax (IRC §1401, §1402) ───────────────────────────────────
+// Only reached when a K-1 reports box 14A. A limited partner's distributive share
+// is not self-employment income, so for a passive partnership interest this stays
+// zero — but a general-partner or guaranteed-payment allocation would land here,
+// and silently ignoring box 14A would understate the bill by ~15%.
+const SE_NET_EARNINGS_FACTOR = 0.9235;
+const SE_TAX_SS_RATE = 0.124;
+const SE_TAX_MEDICARE_RATE = 0.029;
+const SE_TAX_DEDUCTIBLE_SHARE = 0.50;
+
+// ── Estimated tax safe harbor (IRC §6654) ────────────────────────────────────
+// No penalty if payments reach the LESSER of 90% of this year's tax or 100% of
+// last year's (110% when last year's AGI topped $150,000). Withholding counts as
+// paid ratably across the year no matter when it was withheld — which is why a
+// December withholding bump can cure a shortfall that a Q4 estimated payment
+// cannot. Also no penalty when the balance due is under $1,000.
+const SAFE_HARBOR_CURRENT_YEAR_RATE = 0.90;
+const SAFE_HARBOR_PRIOR_YEAR_RATE = 1.00;
+const SAFE_HARBOR_PRIOR_YEAR_RATE_HIGH_AGI = 1.10;
+const SAFE_HARBOR_HIGH_AGI_THRESHOLD = 150000;      // half for MFS
+const UNDERPAYMENT_DE_MINIMIS = 1000;
+// §6621 underpayment rate. Recalculated quarterly by the IRS; 7% has been the
+// standing figure. Used only to size the penalty, never to decide whether one
+// applies, so a stale rate misstates a dollar amount and not a conclusion.
+const UNDERPAYMENT_PENALTY_RATE = 0.07;
+
+const n_ = (v) => (Number.isFinite(v) ? v : 0);
+
+// ── K-1 box routing ──────────────────────────────────────────────────────────
+// A partnership K-1 does NOT land on one line. Only boxes 1 and 2 reach Schedule
+// E Part II; the portfolio boxes are routed to the same 1040 lines they would
+// occupy if a broker had reported them, and box 19 is not income at all.
+//
+// Treating a K-1 as a single "business income" number — the natural shortcut —
+// taxes qualified dividends at ordinary rates, hides long-term gains from the
+// preferential brackets, and puts portfolio income into the passive-activity
+// netting where it does not belong (§469(e)(1) excludes it). Each of those
+// errors moves the answer in a different direction, so they do not cancel.
+const routeK1 = (k1) => {
+  const b = (k1 && k1.boxes) || {};
+  return {
+    // Schedule E Part II — trade or business and rental. Subject to §469.
+    scheduleE: n_(b.b1_ordinaryBusiness) + n_(b.b2_rental) - n_(b.b13_deductions),
+    // Portfolio income — its own 1040 lines, never passive under §469(e)(1).
+    interest: n_(b.b5_interest),
+    ordinaryDividends: n_(b.b6a_ordinaryDiv),
+    qualifiedDividends: n_(b.b6b_qualifiedDiv),
+    shortTermGain: n_(b.b8_shortTermGain),
+    longTermGain: n_(b.b9a_longTermGain),
+    // Schedule SE — blank for a limited partner, present for a general partner.
+    seEarnings: n_(b.b14a_seEarnings),
+    // Cash out. Not income; reduces basis and can trigger §731 gain.
+    distributions: n_(b.b19_distributions),
+    // §199A attributes.
+    qbi: n_(b.b20z_qbi),
+    qbiW2Wages: n_(b.b20z_w2Wages),
+    qbiUbia: n_(b.b20z_ubia),
+    isSSTB: !!b.isSSTB,
+  };
+};
+
+// ── Partner outside basis: IRC §705, §731, §704(d) ───────────────────────────
+// Order is prescribed and is not commutative: basis is increased by income
+// FIRST, then reduced by distributions, and only then are losses allowed to the
+// extent of what remains. Running distributions before income would manufacture
+// §731 gain that the statute does not impose, and would suspend losses that are
+// in fact allowable.
+//
+// Returns the allowed loss, any §731 capital gain, the closing basis, and the
+// amount of loss suspended for lack of basis (a separate limitation from §469 —
+// a loss can clear §704(d) and still be trapped by passive-activity rules).
+const applyPartnerBasis = ({ basisStart = 0, income = 0, distributions = 0, loss = 0 }) => {
+  let basis = n_(basisStart) + Math.max(0, n_(income));
+  const dist = Math.max(0, n_(distributions));
+  // §731(a)(1): cash out beyond basis is gain from the sale of the interest.
+  const section731Gain = Math.max(0, dist - basis);
+  basis = Math.max(0, basis - dist);
+  // §704(d): loss allowed only to the extent of remaining basis.
+  const lossClaimed = Math.max(0, n_(loss));
+  const lossAllowed = Math.min(lossClaimed, basis);
+  const lossSuspendedForBasis = lossClaimed - lossAllowed;
+  basis -= lossAllowed;
+  return {
+    basisEnd: basis,
+    section731Gain,
+    lossAllowed,
+    lossSuspendedForBasis,
+  };
+};
+
+// ── Passive activity losses: IRC §469 ────────────────────────────────────────
+// Passive losses may offset passive income and nothing else; the excess suspends
+// and carries forward until there is passive income to absorb it or the activity
+// is disposed of. With two K-1s this is not academic — a loss on one genuinely
+// shelters income on the other, and netting them is the whole point.
+//
+// Non-passive (materially participating) activities are NOT part of this netting;
+// their income and losses go straight to Schedule E.
+const applyPassiveLossRules = (activities = [], suspendedCarryforward = 0) => {
+  let passiveIncome = 0, passiveLoss = 0, nonPassiveNet = 0;
+  for (const a of activities) {
+    const amt = n_(a.amount);
+    if (!a.isPassive) { nonPassiveNet += amt; continue; }
+    if (amt >= 0) passiveIncome += amt; else passiveLoss += -amt;
+  }
+  // Prior suspended losses queue up behind this year's.
+  const totalLoss = passiveLoss + Math.max(0, n_(suspendedCarryforward));
+  const lossAllowed = Math.min(totalLoss, passiveIncome);
+  const suspendedEnd = totalLoss - lossAllowed;
+  return {
+    passiveIncome,
+    passiveLossCurrent: passiveLoss,
+    passiveLossAllowed: lossAllowed,
+    suspendedCarryforwardEnd: suspendedEnd,
+    // What actually reaches Schedule E / AGI this year.
+    netPassiveToAGI: passiveIncome - lossAllowed,
+    nonPassiveNet,
+  };
+};
+
+// ── Schedule D: netting and the §1211(b) limit ───────────────────────────────
+// Short and long net separately, then against each other. A net loss deducts
+// only $3,000 ($1,500 MFS) against ordinary income; the rest carries forward and
+// keeps its character. The projection engine discards losses outright, so a
+// carryforward is new behavior rather than a refinement.
+const computeScheduleD = ({ shortTerm = 0, longTerm = 0,
+                            shortTermCarryforward = 0, longTermCarryforward = 0,
+                            filingStatus = 'married_joint' } = {}) => {
+  const st = n_(shortTerm) - Math.max(0, n_(shortTermCarryforward));
+  const lt = n_(longTerm) - Math.max(0, n_(longTermCarryforward));
+  const net = st + lt;
+  const limit = filingStatus === 'married_separate'
+    ? CAPITAL_LOSS_ANNUAL_LIMIT_MFS : CAPITAL_LOSS_ANNUAL_LIMIT;
+
+  if (net >= 0) {
+    // Only LONG-term gain gets preferential rates. A net gain made up of
+    // short-term gain offset by long-term loss is entirely ordinary.
+    const preferential = Math.max(0, Math.min(net, lt));
+    return {
+      netGainOrLoss: net,
+      reportedOnLine7: net,
+      preferentialGain: preferential,
+      shortTermOrdinaryGain: net - preferential,
+      lossDeductedAgainstOrdinary: 0,
+      shortTermCarryforwardEnd: 0,
+      longTermCarryforwardEnd: 0,
+    };
+  }
+
+  const deductible = Math.min(-net, limit);
+  const remaining = -net - deductible;
+  // Carryforward keeps its character; the allowed loss comes off short-term first.
+  const stLoss = Math.max(0, -st), ltLoss = Math.max(0, -lt);
+  const stUsed = Math.min(stLoss, deductible);
+  const ltUsed = Math.min(ltLoss, deductible - stUsed);
+  return {
+    netGainOrLoss: net,
+    reportedOnLine7: -deductible,
+    preferentialGain: 0,
+    shortTermOrdinaryGain: 0,
+    lossDeductedAgainstOrdinary: deductible,
+    shortTermCarryforwardEnd: Math.max(0, stLoss - stUsed),
+    longTermCarryforwardEnd: Math.max(0, ltLoss - ltUsed),
+    unusedLoss: remaining,
+  };
+};
+
+// ── §199A qualified business income deduction ────────────────────────────────
+// Per-business: tentative 20% of QBI, then two limits that switch on above a
+// taxable-income threshold — the W-2 wage/UBIA cap, and outright denial for a
+// specified service trade or business. Inside the phase-in range both apply
+// proportionally rather than all at once.
+//
+// `taxableIncomeBeforeQBI` is 1040 line 11 minus line 12 — the deduction is
+// computed on income that already reflects the standard or itemized deduction,
+// so it cannot be evaluated before line 12 is settled.
+const qbiDeduction = ({ businesses = [], taxableIncomeBeforeQBI = 0, netCapitalGain = 0,
+                        filingStatus = 'married_joint', taxYear = BASE_TAX_YEAR,
+                        yearsFromNow = 0, inflationRate = 0.03 } = {}) => {
+  const threshold = indexTo(
+    QBI_THRESHOLD_2026[filingStatus] ?? QBI_THRESHOLD_2026.married_joint,
+    yearsFromNow, inflationRate);
+  const range = indexTo(
+    QBI_PHASEIN_RANGE_2026[filingStatus] ?? QBI_PHASEIN_RANGE_2026.married_joint,
+    yearsFromNow, inflationRate);
+
+  const excess = Math.max(0, n_(taxableIncomeBeforeQBI) - threshold);
+  // 0 below the threshold, 1 at or above the top of the range.
+  const phase = range > 0 ? Math.min(1, excess / range) : (excess > 0 ? 1 : 0);
+
+  // A qualified business LOSS is not simply ignored: §199A(c)(1) works on the NET
+  // amount, and Reg. §1.199A-1(d)(2)(iii) allocates a net negative against the
+  // positive businesses in proportion to their QBI before any per-business limit
+  // is applied. Dropping loss businesses instead — the obvious shortcut — would
+  // here have deducted 20% of $85,000 rather than of $67,000, overstating the
+  // deduction by $3,600 and the refund with it. A net negative overall produces
+  // no deduction and carries to next year.
+  let positiveQBI = 0, negativeQBI = 0, anyMaterialParticipation = false;
+  for (const b of businesses) {
+    const q = n_(b.qbi);
+    if (b.materiallyParticipates) anyMaterialParticipation = true;
+    if (q >= 0) positiveQBI += q; else negativeQBI += -q;
+  }
+  const totalQBI = positiveQBI - negativeQBI;
+  const offsetShare = positiveQBI > 0 ? Math.min(1, negativeQBI / positiveQBI) : 0;
+
+  let total = 0;
+  const detail = [];
+
+  for (const b of businesses) {
+    const rawQBI = n_(b.qbi);
+    if (rawQBI <= 0) {
+      detail.push({ label: b.label, qbi: rawQBI, deduction: 0,
+                    reason: 'qualified business loss — netted against the other businesses' });
+      continue;
+    }
+    // This business's QBI after absorbing its share of the aggregate loss.
+    const qbi = rawQBI * (1 - offsetShare);
+    const tentative = qbi * QBI_DEDUCTION_RATE;
+
+    // W-2 wage / UBIA cap: the greater of 50% of wages, or 25% of wages plus
+    // 2.5% of unadjusted basis. Phases in across the range rather than binding
+    // at a cliff.
+    const wageCap = Math.max(n_(b.w2Wages) * 0.50, n_(b.w2Wages) * 0.25 + n_(b.ubia) * 0.025);
+    const wageLimited = Math.min(tentative, wageCap);
+    const afterWageLimit = tentative - (tentative - wageLimited) * phase;
+
+    // SSTB: fully allowed below the threshold, fully denied above the range.
+    const afterSSTB = b.isSSTB ? afterWageLimit * (1 - phase) : afterWageLimit;
+
+    total += Math.max(0, afterSSTB);
+    detail.push({
+      label: b.label, qbi, qbiBeforeLossOffset: rawQBI, tentative, wageCap,
+      deduction: Math.max(0, afterSSTB),
+      sstbPhasedOut: !!b.isSSTB && phase > 0,
+      wageLimitBinding: phase > 0 && wageCap < tentative,
+    });
+  }
+
+  // OBBBA §70105 floor: $400 for at least $1,000 of QBI from an active business
+  // the taxpayer materially participates in. A purely passive partner does not
+  // qualify — which is the common case for a K-1 held as an investment.
+  const floorApplies = taxYear >= 2026
+    && anyMaterialParticipation
+    && totalQBI >= QBI_MINIMUM_QBI_REQUIRED;
+  if (floorApplies) total = Math.max(total, QBI_MINIMUM_DEDUCTION);
+
+  // Overall cap: 20% of taxable income excluding net capital gain.
+  const overallCap = Math.max(0, (n_(taxableIncomeBeforeQBI) - Math.max(0, n_(netCapitalGain)))) * QBI_DEDUCTION_RATE;
+  const deduction = Math.min(total, overallCap);
+
+  return {
+    deduction: Math.max(0, deduction),
+    beforeOverallCap: total,
+    overallCap,
+    threshold, phaseInRange: range, phase,
+    netQBI: totalQBI,
+    positiveQBI, negativeQBI, lossOffsetShare: offsetShare,
+    // §199A(c)(2): a net qualified business loss carries to next year.
+    negativeQBICarryforward: Math.max(0, -totalQBI),
+    minimumApplied: floorApplies && total === QBI_MINIMUM_DEDUCTION,
+    businesses: detail,
+  };
+};
+
+// ── Estimated tax safe harbor: IRC §6654 ─────────────────────────────────────
+// The requirement is the LESSER of the two tests, not the greater — a common and
+// expensive misreading, since the prior-year test is usually the cheaper one and
+// is the only one you can compute with certainty before the year ends.
+const safeHarborRequirement = ({ currentTotalTax = 0, priorTotalTax = null, priorAGI = null,
+                                 filingStatus = 'married_joint', paymentsToDate = 0,
+                                 balanceDue = 0 } = {}) => {
+  const currentTest = n_(currentTotalTax) * SAFE_HARBOR_CURRENT_YEAR_RATE;
+  const highAGIThreshold = filingStatus === 'married_separate'
+    ? SAFE_HARBOR_HIGH_AGI_THRESHOLD / 2 : SAFE_HARBOR_HIGH_AGI_THRESHOLD;
+
+  let priorTest = null, priorRate = null;
+  if (priorTotalTax !== null && priorTotalTax !== undefined) {
+    priorRate = (priorAGI !== null && priorAGI !== undefined && priorAGI > highAGIThreshold)
+      ? SAFE_HARBOR_PRIOR_YEAR_RATE_HIGH_AGI : SAFE_HARBOR_PRIOR_YEAR_RATE;
+    priorTest = n_(priorTotalTax) * priorRate;
+  }
+
+  const required = priorTest === null ? currentTest : Math.min(currentTest, priorTest);
+  const basis = priorTest === null
+    ? '90% of current year (no prior-year return entered)'
+    : (priorTest <= currentTest
+        ? `${Math.round(priorRate * 100)}% of prior-year tax`
+        : '90% of current-year tax');
+
+  const shortfall = Math.max(0, required - n_(paymentsToDate));
+  // §6654(e)(1): no penalty when the balance due is under $1,000.
+  const deMinimis = Math.abs(n_(balanceDue)) < UNDERPAYMENT_DE_MINIMIS;
+  return {
+    required, basis, priorRate,
+    currentYearTest: currentTest,
+    priorYearTest: priorTest,
+    paidToDate: n_(paymentsToDate),
+    shortfall: deMinimis ? 0 : shortfall,
+    rawShortfall: shortfall,
+    deMinimis,
+    // Rough sizing only — the real Form 2210 runs quarter by quarter.
+    estimatedPenalty: deMinimis ? 0 : shortfall * UNDERPAYMENT_PENALTY_RATE * 0.5,
+    satisfied: shortfall <= 0 || deMinimis,
+  };
+};
+
+// ── Schedule A, and the standard-vs-itemized decision ────────────────────────
+// Built even when the standard deduction wins, because with the SALT cap at
+// $40,400 for 2026 rather than $10,000, a household that has always taken the
+// standard deduction may now be better off itemizing without anything prompting
+// them to check. Reporting both figures makes that a computed conclusion.
+const computeScheduleA = ({ stateIncomeTax = 0, stateSalesTax = 0, propertyTax = 0,
+                            mortgageInterest = 0, charitableCash = 0, charitableNonCash = 0,
+                            medicalExpenses = 0, otherItemized = 0,
+                            agi = 0, filingStatus = 'married_joint',
+                            taxYear = BASE_TAX_YEAR } = {}) => {
+  // §164(b)(6): income OR sales tax, not both, plus property tax — then capped.
+  const saltPaid = Math.max(n_(stateIncomeTax), n_(stateSalesTax)) + n_(propertyTax);
+  const saltCap = saltCapFor(taxYear, filingStatus, agi);
+  const saltDeductible = Math.min(saltPaid, saltCap);
+
+  // §213: medical only above 7.5% of AGI.
+  const medicalDeductible = Math.max(0, n_(medicalExpenses) - n_(agi) * MEDICAL_EXPENSE_AGI_FLOOR);
+
+  // OBBBA: 0.5% of AGI floor on charitable, and the 60%-of-AGI cash ceiling.
+  const charitableTotal = n_(charitableCash) + n_(charitableNonCash);
+  const charFloor = taxYear >= CHARITABLE_FLOOR_FIRST_YEAR ? n_(agi) * CHARITABLE_AGI_FLOOR_RATE : 0;
+  const charCeiling = n_(agi) * CHARITABLE_CASH_AGI_LIMIT;
+  const charitableDeductible = Math.max(0, Math.min(charitableTotal - charFloor, charCeiling));
+
+  const total = saltDeductible + medicalDeductible + charitableDeductible
+              + n_(mortgageInterest) + n_(otherItemized);
+
+  return {
+    saltPaid, saltCap, saltDeductible, saltCapBinding: saltPaid > saltCap,
+    medicalDeductible,
+    charitableTotal, charitableFloor: charFloor, charitableDeductible,
+    mortgageInterest: n_(mortgageInterest),
+    otherItemized: n_(otherItemized),
+    total,
+  };
+};
+
+// The 35% benefit cap, applied after the itemized total is known. Written as the
+// statute does: 2/37 of the lesser of the deductions themselves or the amount by
+// which income exceeds the 37% threshold.
+const applyItemizedBenefitCap = (itemizedTotal, agi, filingStatus, taxYear, yearsFromNow, inflationRate) => {
+  if (!taxYear || taxYear < ITEMIZED_BENEFIT_CAP_FIRST_YEAR) return { reduction: 0, allowed: itemizedTotal };
+  const brackets = FEDERAL_TAX_BRACKETS_2026[filingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
+  const topStart = indexTo(brackets[brackets.length - 1].min, yearsFromNow, inflationRate);
+  const taxableWithDeductions = Math.max(0, n_(agi) - n_(itemizedTotal));
+  const overTop = Math.max(0, taxableWithDeductions + n_(itemizedTotal) - topStart);
+  const reduction = ITEMIZED_BENEFIT_REDUCTION_FRACTION * Math.min(n_(itemizedTotal), overTop);
+  return { reduction, allowed: Math.max(0, n_(itemizedTotal) - reduction), topBracketStart: topStart };
+};
+
+// ── Schedule SE ──────────────────────────────────────────────────────────────
+// Reached only when a K-1 reports box 14A. The wage base is shared with W-2
+// employment and W-2 wages consume it FIRST, so a high earner with a general-
+// partner allocation owes only the 2.9% Medicare piece on it — computing SE tax
+// without netting out W-2 Social Security wages overstates the bill by 12.4% of
+// the overlap.
+const computeScheduleSE = (seEarnings, w2SocialSecurityWages, yearsFromNow = 0, inflationRate = 0.03) => {
+  const net = Math.max(0, n_(seEarnings)) * SE_NET_EARNINGS_FACTOR;
+  if (net <= 0) return { netEarnings: 0, socialSecurity: 0, medicare: 0, total: 0, deductibleHalf: 0 };
+  const wageBase = indexTo(FICA_SS_WAGE_BASE_2025, yearsFromNow, inflationRate);
+  const baseRemaining = Math.max(0, wageBase - Math.max(0, n_(w2SocialSecurityWages)));
+  const ssPortion = Math.min(net, baseRemaining) * SE_TAX_SS_RATE;
+  const medicarePortion = net * SE_TAX_MEDICARE_RATE;
+  const total = ssPortion + medicarePortion;
+  return {
+    netEarnings: net,
+    socialSecurity: ssPortion,
+    medicare: medicarePortion,
+    total,
+    deductibleHalf: total * SE_TAX_DEDUCTIBLE_SHARE,
+    wageBaseRemaining: baseRemaining,
+  };
+};
+
+// ============================================================================
+// computeTaxReturn — the whole return, in form order
+// ============================================================================
+// Input is line-item and every field is optional; anything absent is zero, so a
+// caller can start with wages alone and add detail as it arrives. Output keys
+// are real 1040 line numbers.
+//
+//   situation = {
+//     taxYear, filingStatus, state, inflationRate,
+//     people: [{ age65, blind }],
+//     w2: { wages, federalWithheld, stateWithheld, socialSecurityWages,
+//           medicareWages, socialSecurityWithheld, medicareWithheld },
+//     income: { taxableInterest, taxExemptInterest, ordinaryDividends,
+//               qualifiedDividends, iraDistributions, pensions,
+//               socialSecurityBenefits, shortTermGain, longTermGain,
+//               shortTermLossCarryforward, longTermLossCarryforward, otherIncome },
+//     k1s: [ { label, isPassive, materiallyParticipates, basisStart,
+//              suspendedLossCarryforward, boxes: {...} } ],
+//     adjustments: { deductibleIRA, hsaDeduction, studentLoanInterest, other },
+//     deductions: { mode: 'auto'|'standard'|'itemized', ...Schedule A inputs },
+//     payments: { estimatedFederal, estimatedState },
+//     priorYear: { agi, totalTax },
+//   }
+const computeTaxReturn = (situation = {}) => {
+  const taxYear = situation.taxYear || BASE_TAX_YEAR;
+  const filingStatus = situation.filingStatus || 'married_joint';
+  const inflationRate = situation.inflationRate ?? 0.03;
+  const yearsFromNow = taxYear - BASE_TAX_YEAR;
+  const state = situation.state || 'None';
+
+  const w2 = situation.w2 || {};
+  const inc = situation.income || {};
+  const adj = situation.adjustments || {};
+  const ded = situation.deductions || {};
+  const pay = situation.payments || {};
+  const prior = situation.priorYear || {};
+  const k1s = situation.k1s || [];
+  const diagnostics = [];
+
+  // ── Step 1: route every K-1 and settle basis before anything reaches AGI ───
+  const k1Detail = [];
+  let k1Interest = 0, k1OrdDiv = 0, k1QualDiv = 0, k1STCG = 0, k1LTCG = 0;
+  let k1SEEarnings = 0, section731Gain = 0;
+  const passiveActivities = [];
+  const qbiBusinesses = [];
+
+  for (const k1 of k1s) {
+    const r = routeK1(k1);
+    k1Interest += r.interest;
+    k1OrdDiv += r.ordinaryDividends;
+    k1QualDiv += r.qualifiedDividends;
+    k1STCG += r.shortTermGain;
+    k1LTCG += r.longTermGain;
+    k1SEEarnings += r.seEarnings;
+
+    // Basis moves on ALL income, not just the Schedule E piece.
+    const totalIncomeItems = Math.max(0, r.scheduleE) + r.interest + r.ordinaryDividends
+                           + Math.max(0, r.shortTermGain) + Math.max(0, r.longTermGain);
+    const lossItems = Math.max(0, -r.scheduleE);
+    const basis = applyPartnerBasis({
+      basisStart: n_(k1.basisStart),
+      income: totalIncomeItems,
+      distributions: r.distributions,
+      loss: lossItems,
+    });
+    section731Gain += basis.section731Gain;
+
+    // Only the amount that survived §704(d) is exposed to §469.
+    const scheduleEAfterBasis = r.scheduleE >= 0 ? r.scheduleE : -basis.lossAllowed;
+    passiveActivities.push({
+      label: k1.label, isPassive: k1.isPassive !== false, amount: scheduleEAfterBasis,
+    });
+    if (r.qbi !== 0) {
+      qbiBusinesses.push({
+        label: k1.label, qbi: r.qbi, w2Wages: r.qbiW2Wages, ubia: r.qbiUbia,
+        isSSTB: r.isSSTB, materiallyParticipates: !!k1.materiallyParticipates,
+      });
+    }
+
+    if (basis.lossSuspendedForBasis > 0) {
+      diagnostics.push({ severity: 'warning', code: 'basis-limited',
+        message: `${k1.label || 'K-1'}: $${Math.round(basis.lossSuspendedForBasis).toLocaleString()} of loss exceeds your outside basis and is suspended under §704(d).` });
+    }
+    if (basis.section731Gain > 0) {
+      diagnostics.push({ severity: 'warning', code: 'section-731-gain',
+        message: `${k1.label || 'K-1'}: distributions exceeded basis by $${Math.round(basis.section731Gain).toLocaleString()}, which is taxable capital gain under §731.` });
+    }
+    k1Detail.push({
+      label: k1.label, isPassive: k1.isPassive !== false,
+      routed: r, basis,
+      taxableShare: r.scheduleE + r.interest + r.ordinaryDividends + r.shortTermGain + r.longTermGain,
+      cashDistributed: r.distributions,
+    });
+  }
+
+  // ── Step 2: §469 netting across the K-1s ──────────────────────────────────
+  const suspendedStart = k1s.reduce((s, k) => s + n_(k.suspendedLossCarryforward), 0);
+  const pal = applyPassiveLossRules(passiveActivities, suspendedStart);
+  const scheduleENet = pal.netPassiveToAGI + pal.nonPassiveNet;
+  if (pal.suspendedCarryforwardEnd > 0) {
+    diagnostics.push({ severity: 'info', code: 'passive-loss-suspended',
+      message: `$${Math.round(pal.suspendedCarryforwardEnd).toLocaleString()} of passive loss is suspended under §469 and carries forward.` });
+  }
+
+  // ── Step 3: Schedule D ────────────────────────────────────────────────────
+  const schedD = computeScheduleD({
+    shortTerm: n_(inc.shortTermGain) + k1STCG,
+    longTerm: n_(inc.longTermGain) + k1LTCG + section731Gain,
+    shortTermCarryforward: inc.shortTermLossCarryforward,
+    longTermCarryforward: inc.longTermLossCarryforward,
+    filingStatus,
+  });
+
+  // ── Step 4: income lines ──────────────────────────────────────────────────
+  const wages = n_(w2.wages);
+  const taxableInterest = n_(inc.taxableInterest) + k1Interest;
+  const taxExemptInterest = n_(inc.taxExemptInterest);
+  const ordinaryDividends = n_(inc.ordinaryDividends) + k1OrdDiv;
+  const qualifiedDividends = n_(inc.qualifiedDividends) + k1QualDiv;
+  const iraDistributions = n_(inc.iraDistributions);
+  const pensions = n_(inc.pensions);
+  const ssBenefits = n_(inc.socialSecurityBenefits);
+
+  const scheduleOneIncome = scheduleENet + n_(inc.otherIncome);
+
+  // Provisional income for §86 excludes the SS itself and adds back tax-exempt
+  // interest. Reuses the projection engine's implementation, including the
+  // tax-exempt add-back the projection loop never actually supplies.
+  const otherIncomeForSS = wages + taxableInterest + ordinaryDividends
+                         + iraDistributions + pensions
+                         + schedD.reportedOnLine7 + scheduleOneIncome;
+  const taxableSS = calculateSocialSecurityTaxableAmount(
+    ssBenefits, otherIncomeForSS, filingStatus, taxExemptInterest);
+
+  const totalIncome = wages + taxableInterest + ordinaryDividends + iraDistributions
+                    + pensions + taxableSS + schedD.reportedOnLine7 + scheduleOneIncome;
+
+  // ── Step 5: Schedule 1 Part II adjustments ────────────────────────────────
+  const scheduleSE = computeScheduleSE(k1SEEarnings, n_(w2.socialSecurityWages), yearsFromNow, inflationRate);
+  const adjustments = n_(adj.deductibleIRA) + n_(adj.hsaDeduction)
+                    + n_(adj.studentLoanInterest) + n_(adj.other)
+                    + scheduleSE.deductibleHalf;
+
+  const agi = totalIncome - adjustments;
+
+  // ── Step 6: line 12, standard vs itemized ─────────────────────────────────
+  // `people` accepts either an explicit age or a plain age65 flag, so a caller
+  // that only knows "we are both over 65" does not have to invent birthdays.
+  const people = situation.people || [];
+  const ageOf = (i) => {
+    const p = people[i];
+    if (!p) return 0;
+    if (Number.isFinite(p.age)) return p.age;
+    return p.age65 ? 65 : 0;
+  };
+  const age65Count = people.filter(p => p && (p.age65 || (Number.isFinite(p.age) && p.age >= 65))).length;
+  const standardDeduction = getFederalDeduction(filingStatus, yearsFromNow, inflationRate, {
+    age65Count, taxYear, magi: agi,
+  });
+
+  const schedA = computeScheduleA({
+    ...ded, agi, filingStatus, taxYear,
+    stateIncomeTax: ded.stateIncomeTax ?? n_(w2.stateWithheld),
+  });
+  const capped = applyItemizedBenefitCap(schedA.total, agi, filingStatus, taxYear, yearsFromNow, inflationRate);
+  const itemizedTotal = capped.allowed;
+
+  // Non-itemizers get a separate cash-charitable deduction alongside the standard.
+  const nonItemizerCharitable = taxYear >= CHARITABLE_FLOOR_FIRST_YEAR
+    ? Math.min(n_(ded.charitableCash),
+               CHARITABLE_NONITEMIZER_LIMIT[filingStatus] ?? CHARITABLE_NONITEMIZER_LIMIT.single)
+    : 0;
+  const standardTotal = standardDeduction + nonItemizerCharitable;
+
+  const mode = ded.mode && ded.mode !== 'auto'
+    ? ded.mode
+    : (itemizedTotal > standardTotal ? 'itemized' : 'standard');
+  const deductionTaken = mode === 'itemized' ? itemizedTotal : standardTotal;
+
+  if (mode === 'standard' && itemizedTotal > standardTotal) {
+    diagnostics.push({ severity: 'warning', code: 'itemizing-would-win',
+      message: `Itemizing would deduct $${Math.round(itemizedTotal - standardTotal).toLocaleString()} more than the standard deduction.` });
+  } else if (mode === 'auto' || !ded.mode) {
+    if (itemizedTotal > standardTotal) {
+      diagnostics.push({ severity: 'info', code: 'itemized-now-better',
+        message: `Itemizing beats the standard deduction by $${Math.round(itemizedTotal - standardTotal).toLocaleString()} — largely the higher SALT cap.` });
+    }
+  }
+
+  // ── Step 7: §199A ─────────────────────────────────────────────────────────
+  const taxableBeforeQBI = Math.max(0, agi - deductionTaken);
+  const netCapitalGain = schedD.preferentialGain + qualifiedDividends;
+  const qbi = qbiDeduction({
+    businesses: qbiBusinesses, taxableIncomeBeforeQBI: taxableBeforeQBI,
+    netCapitalGain, filingStatus, taxYear, yearsFromNow, inflationRate,
+  });
+
+  const taxableIncome = Math.max(0, taxableBeforeQBI - qbi.deduction);
+
+  // ── Step 8: line 16, via the qualified-dividends worksheet ────────────────
+  // Preferential income is taxed on its own schedule; only what is left runs the
+  // ordinary brackets. Capping the preferential slice at taxable income matters
+  // when deductions exceed ordinary income and eat into the gains.
+  const preferential = Math.min(netCapitalGain, taxableIncome);
+  const ordinaryTaxable = Math.max(0, taxableIncome - preferential);
+  const ordinaryTax = federalTaxOnTaxableIncome(ordinaryTaxable, filingStatus, yearsFromNow, inflationRate);
+  const preferentialTax = calculateCapitalGainsTax(preferential, taxableIncome, filingStatus, yearsFromNow, inflationRate);
+  const tax = ordinaryTax + preferentialTax;
+
+  // ── Step 9: Schedule 2 ────────────────────────────────────────────────────
+  // NIIT base: portfolio income plus PASSIVE trade-or-business income. That last
+  // term is why a passive K-1 is expensive — §1411(c)(1)(A)(ii) reaches it while
+  // an actively-managed interest escapes.
+  const passiveForNIIT = Math.max(0, pal.netPassiveToAGI);
+  const netInvestmentIncome = taxableInterest + ordinaryDividends
+                            + Math.max(0, schedD.reportedOnLine7) + passiveForNIIT;
+  const niit = calculateNIIT(netInvestmentIncome, agi, filingStatus);
+
+  const addlMedicareThreshold = FICA_ADDITIONAL_MEDICARE_THRESHOLD[filingStatus]
+                             ?? FICA_ADDITIONAL_MEDICARE_THRESHOLD.married_joint;
+  const medicareWages = n_(w2.medicareWages) || wages;
+  const additionalMedicare = Math.max(0, medicareWages + scheduleSE.netEarnings - addlMedicareThreshold)
+                           * FICA_ADDITIONAL_MEDICARE_RATE;
+  const otherTaxes = scheduleSE.total + niit + additionalMedicare;
+
+  const totalTax = tax + otherTaxes;
+
+  // ── Step 10: payments, refund or balance due ──────────────────────────────
+  const federalWithheld = n_(w2.federalWithheld);
+  const estimatedFederal = Array.isArray(pay.estimatedFederal)
+    ? pay.estimatedFederal.reduce((s, v) => s + n_(v), 0) : n_(pay.estimatedFederal);
+  const totalPayments = federalWithheld + estimatedFederal;
+  const balance = totalTax - totalPayments;
+
+  // ── Step 11: state ────────────────────────────────────────────────────────
+  // Ages are passed through because several states key a retirement-income
+  // exclusion off them (see STATE_TAX_CONFIG.retirement); defaulting them to 0
+  // would silently deny those exclusions to a household old enough to have them.
+  const stateTax = calculateStateTax(
+    agi, state, filingStatus, yearsFromNow, inflationRate, taxableSS, pensions,
+    { primaryAge: ageOf(0), spouseAge: ageOf(1),
+      qualifiedRetirementWithdrawals: iraDistributions });
+  const stateWithheld = n_(w2.stateWithheld);
+  const estimatedState = Array.isArray(pay.estimatedState)
+    ? pay.estimatedState.reduce((s, v) => s + n_(v), 0) : n_(pay.estimatedState);
+
+  // ── Step 12: §6654 ────────────────────────────────────────────────────────
+  const safeHarbor = safeHarborRequirement({
+    currentTotalTax: totalTax, priorTotalTax: prior.totalTax, priorAGI: prior.agi,
+    filingStatus, paymentsToDate: totalPayments, balanceDue: balance,
+  });
+  if (!safeHarbor.satisfied) {
+    diagnostics.push({ severity: 'warning', code: 'safe-harbor-shortfall',
+      message: `Payments are $${Math.round(safeHarbor.shortfall).toLocaleString()} short of the §6654 safe harbor (${safeHarbor.basis}).` });
+  }
+
+  // Proximity warnings — the cliffs a December decision can still avoid.
+  const niitThreshold = filingStatus === 'married_joint' ? 250000
+    : filingStatus === 'married_separate' ? 125000 : 200000;
+  if (agi > niitThreshold && netInvestmentIncome > 0) {
+    diagnostics.push({ severity: 'info', code: 'niit-applies',
+      message: `AGI is $${Math.round(agi - niitThreshold).toLocaleString()} over the $${niitThreshold.toLocaleString()} NIIT threshold; reducing AGI below it saves 3.8% on investment income.` });
+  }
+  const saltSched = saltCapSchedule(taxYear, filingStatus);
+  if (Number.isFinite(saltSched.phaseoutStart) && agi > saltSched.phaseoutStart
+      && schedA.saltPaid > saltCapFor(taxYear, filingStatus, agi)) {
+    diagnostics.push({ severity: 'info', code: 'salt-phaseout',
+      message: 'AGI is inside the SALT phaseout band, where each extra dollar also costs 30 cents of SALT deduction.' });
+  }
+
+  const L = (label, amount, extra) => ({ label, amount: Math.round(amount * 100) / 100, ...(extra || {}) });
+
+  return {
+    taxYear, filingStatus, state,
+    lines: {
+      '1a': L('Wages, salaries, tips', wages),
+      '2a': L('Tax-exempt interest', taxExemptInterest),
+      '2b': L('Taxable interest', taxableInterest),
+      '3a': L('Qualified dividends', qualifiedDividends),
+      '3b': L('Ordinary dividends', ordinaryDividends),
+      '4b': L('IRA distributions — taxable amount', iraDistributions),
+      '5b': L('Pensions and annuities — taxable amount', pensions),
+      '6a': L('Social security benefits', ssBenefits),
+      '6b': L('Social security — taxable amount', taxableSS),
+      '7':  L('Capital gain or (loss)', schedD.reportedOnLine7),
+      '8':  L('Additional income from Schedule 1', scheduleOneIncome),
+      '9':  L('Total income', totalIncome),
+      '10': L('Adjustments to income (Schedule 1, Part II)', adjustments),
+      '11': L('Adjusted gross income', agi),
+      '12': L(mode === 'itemized' ? 'Itemized deductions' : 'Standard deduction',
+              deductionTaken, { which: mode }),
+      '13': L('Qualified business income deduction (§199A)', qbi.deduction),
+      '14': L('Line 12 plus line 13', deductionTaken + qbi.deduction),
+      '15': L('Taxable income', taxableIncome),
+      '16': L('Tax', tax),
+      '23': L('Other taxes (Schedule 2)', otherTaxes),
+      '24': L('Total tax', totalTax),
+      '25': L('Federal income tax withheld', federalWithheld),
+      '26': L('Estimated tax payments', estimatedFederal),
+      '33': L('Total payments', totalPayments),
+      '34': L('Refund', Math.max(0, -balance)),
+      '37': L('Amount you owe', Math.max(0, balance)),
+    },
+    schedules: {
+      A: { ...schedA, benefitCapReduction: capped.reduction, allowedAfterCap: itemizedTotal,
+           standardAlternative: standardTotal, wouldItemize: itemizedTotal > standardTotal },
+      D: schedD,
+      E: { netToAGI: scheduleENet, passive: pal },
+      SE: scheduleSE,
+      one: { additionalIncome: scheduleOneIncome, adjustments },
+      two: { selfEmploymentTax: scheduleSE.total, niit, additionalMedicare },
+    },
+    qbi,
+    k1s: k1Detail,
+    passive: pal,
+    state: {
+      taxableIncomeApprox: agi, tax: stateTax,
+      withheld: stateWithheld, estimated: estimatedState,
+      balance: stateTax - stateWithheld - estimatedState,
+    },
+    fica: {
+      socialSecurityWithheld: n_(w2.socialSecurityWithheld),
+      medicareWithheld: n_(w2.medicareWithheld),
+      additionalMedicare,
+    },
+    netInvestmentIncome,
+    safeHarbor,
+    diagnostics,
+    // Cash actually received from the K-1s against the tax their income creates.
+    // A partner is taxed on the distributive share whether or not cash came out.
+    phantomIncome: k1Detail.reduce((s, k) => s + (k.taxableShare - k.cashDistributed), 0),
+  };
+};
+
+// Marginal cost of one more dollar of ordinary income, measured rather than
+// looked up — it runs the whole return twice and differences the result, so it
+// picks up NIIT, the SALT phaseout, the senior-deduction phaseout, the QBI
+// phase-in and the SS torpedo, none of which appear in a bracket table.
+//
+// `mutate(situation, delta)` places the extra income; the default adds wages.
+const marginalRateOn = (situation, probe = 1000, mutate = null) => {
+  const place = mutate || ((s, d) => ({ ...s, w2: { ...(s.w2 || {}), wages: n_((s.w2 || {}).wages) + d } }));
+  const base = computeTaxReturn(situation);
+  const bumped = computeTaxReturn(place(situation, probe));
+  const fed = bumped.lines['24'].amount - base.lines['24'].amount;
+  const st = bumped.state.tax - base.state.tax;
+  return {
+    probe,
+    federal: fed / probe,
+    state: st / probe,
+    combined: (fed + st) / probe,
+    federalDollars: fed,
+    stateDollars: st,
+    niitDelta: bumped.schedules.two.niit - base.schedules.two.niit,
+    qbiDelta: bumped.qbi.deduction - base.qbi.deduction,
+    deductionDelta: bumped.lines['12'].amount - base.lines['12'].amount,
+  };
+};
+
+
 function computeProjections(pi, accts, streams, assetList, events = [], recurringExpensesList = [], currentYearArg, opts = {}) {
   // currentYear used to be captured from RetirementPlanner's closure. It's now an
   // explicit parameter (with a fallback) so this function can be moved to module
@@ -5578,6 +6429,23 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
 
     // ── Tax base year and inflation indexing ──────────────────────────────
     BASE_TAX_YEAR, indexTo,
+
+    // ── Form 1040 current-year return ─────────────────────────────────────
+    computeTaxReturn, marginalRateOn,
+    routeK1, applyPartnerBasis, applyPassiveLossRules, computeScheduleD,
+    qbiDeduction, safeHarborRequirement, computeScheduleA,
+    applyItemizedBenefitCap, computeScheduleSE,
+    saltCapSchedule, saltCapFor,
+    QBI_THRESHOLD_2026, QBI_PHASEIN_RANGE_2026, QBI_DEDUCTION_RATE,
+    QBI_MINIMUM_DEDUCTION, QBI_MINIMUM_QBI_REQUIRED,
+    SALT_CAP_2026, SALT_PHASEOUT_START_2026, SALT_PHASEOUT_RATE, SALT_CAP_BASE,
+    CHARITABLE_AGI_FLOOR_RATE, CHARITABLE_NONITEMIZER_LIMIT, CHARITABLE_CASH_AGI_LIMIT,
+    ITEMIZED_BENEFIT_REDUCTION_FRACTION, MEDICAL_EXPENSE_AGI_FLOOR,
+    CAPITAL_LOSS_ANNUAL_LIMIT, CAPITAL_LOSS_ANNUAL_LIMIT_MFS,
+    SE_NET_EARNINGS_FACTOR, SE_TAX_SS_RATE, SE_TAX_MEDICARE_RATE,
+    SAFE_HARBOR_CURRENT_YEAR_RATE, SAFE_HARBOR_PRIOR_YEAR_RATE,
+    SAFE_HARBOR_PRIOR_YEAR_RATE_HIGH_AGI, SAFE_HARBOR_HIGH_AGI_THRESHOLD,
+    UNDERPAYMENT_DE_MINIMIS,
 
     // ── Account type taxonomy ─────────────────────────────────────────────
     PRE_TAX_TYPES, ROTH_TYPES, BROKERAGE_TYPES, HSA_TYPES,

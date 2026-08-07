@@ -4478,6 +4478,370 @@ section('P39 — tax tables index from BASE_TAX_YEAR, not from whatever year it 
     'year-0 net spending is unchanged — the two clocks stayed separate', 0.02);
 }
 
+section('P40 — Form 1040: the current-year return, line by line (IRC §199A, §469, §704(d), §731, §1211, §1411, §6654)');
+{
+  // computeProjections answers "what does 2041 look like" from six aggregate
+  // income scalars. That shape cannot answer "what should I do before December
+  // 31", where the whole question is which line of a real return moves. This
+  // pack pins the return itself: the routing, the limits that interact, and the
+  // arithmetic that has to reconcile before any of it can be trusted.
+  const { computeTaxReturn, marginalRateOn, routeK1, applyPartnerBasis,
+          applyPassiveLossRules, computeScheduleD, qbiDeduction,
+          safeHarborRequirement, computeScheduleA, computeScheduleSE,
+          saltCapFor, saltCapSchedule, STANDARD_DEDUCTION_2026,
+          FICA_SS_WAGE_BASE_2025, CAPITAL_LOSS_ANNUAL_LIMIT } = engine;
+
+  // ── A K-1 does not land on one line ───────────────────────────────────────
+  // The natural shortcut is to treat a K-1 as a single "business income" figure.
+  // Doing so taxes qualified dividends at ordinary rates, hides long-term gain
+  // from the preferential brackets, and drags portfolio income into the §469
+  // netting that §469(e)(1) explicitly excludes it from. Those errors push in
+  // different directions, so they do not cancel — which is why the routing is
+  // asserted box by box.
+  {
+    const r = routeK1({ boxes: {
+      b1_ordinaryBusiness: 50000, b2_rental: 10000, b13_deductions: 2000,
+      b5_interest: 900, b6a_ordinaryDiv: 1500, b6b_qualifiedDiv: 1200,
+      b8_shortTermGain: 300, b9a_longTermGain: 4000,
+      b19_distributions: 30000, b20z_qbi: 60000,
+    }});
+    eq(r.scheduleE, 58000, 'boxes 1 and 2 less box 13 are what reaches Schedule E');
+    eq(r.interest, 900, 'box 5 interest goes to 1040 line 2b, not Schedule E');
+    eq(r.qualifiedDividends, 1200, 'box 6b keeps its preferential character');
+    eq(r.longTermGain, 4000, 'box 9a goes to Schedule D');
+    eq(r.distributions, 30000, 'box 19 is cash, not income');
+    eq(r.seEarnings, 0, 'a limited partner reports no box 14A self-employment earnings');
+  }
+
+  // ── Partner basis: §705 then §731 then §704(d), in that order ─────────────
+  // The order is prescribed and is not commutative. Running distributions before
+  // income would manufacture §731 gain the statute does not impose and suspend
+  // losses that are in fact allowable.
+  {
+    const b = applyPartnerBasis({ basisStart: 100000, income: 40000, distributions: 30000, loss: 0 });
+    eq(b.basisEnd, 110000, 'basis rises by income and falls by distributions');
+    eq(b.section731Gain, 0, 'a distribution within basis is not a taxable event');
+
+    // Cash out beyond basis is gain from the sale of the interest, §731(a)(1).
+    const g = applyPartnerBasis({ basisStart: 10000, income: 5000, distributions: 40000, loss: 0 });
+    eq(g.section731Gain, 25000, 'distributions past basis are §731 capital gain: 40,000 - (10,000 + 5,000)');
+    eq(g.basisEnd, 0, 'and basis floors at zero rather than going negative');
+
+    // §704(d): a loss is allowed only to the extent of basis left after
+    // distributions — which is why the ordering matters.
+    const l = applyPartnerBasis({ basisStart: 20000, income: 0, distributions: 15000, loss: 30000 });
+    eq(l.lossAllowed, 5000, 'loss is limited to the 5,000 of basis surviving the distribution');
+    eq(l.lossSuspendedForBasis, 25000, 'and the remaining 25,000 suspends under §704(d)');
+    // Had the loss been taken before the distribution, 20,000 would have been
+    // allowed and the distribution would have thrown off §731 gain instead.
+    lt(l.lossAllowed, 20000, 'ordering matters: distributions come first, so less loss clears than basis alone suggests');
+  }
+
+  // ── §469: a loss on one K-1 shelters income on the other ──────────────────
+  {
+    const p = applyPassiveLossRules([
+      { label: 'A', isPassive: true, amount: 85000 },
+      { label: 'B', isPassive: true, amount: -18000 },
+    ]);
+    eq(p.netPassiveToAGI, 67000, 'passive loss offsets passive income across activities');
+    eq(p.suspendedCarryforwardEnd, 0, 'nothing suspends while passive income remains to absorb it');
+
+    // Excess passive loss cannot touch wages — it waits.
+    const s = applyPassiveLossRules([
+      { label: 'A', isPassive: true, amount: 10000 },
+      { label: 'B', isPassive: true, amount: -40000 },
+    ]);
+    eq(s.netPassiveToAGI, 0, 'a net passive loss does not reach AGI');
+    eq(s.suspendedCarryforwardEnd, 30000, 'the unused 30,000 suspends under §469');
+
+    // Prior suspended losses are released as soon as passive income appears.
+    const rel = applyPassiveLossRules([{ label: 'A', isPassive: true, amount: 50000 }], 30000);
+    eq(rel.netPassiveToAGI, 20000, 'a prior suspended loss is released against this year\'s passive income');
+    eq(rel.suspendedCarryforwardEnd, 0, 'and the carryforward is exhausted');
+
+    // A materially-participating activity is not part of the netting at all.
+    const mixed = applyPassiveLossRules([
+      { label: 'A', isPassive: true, amount: -20000 },
+      { label: 'B', isPassive: false, amount: 60000 },
+    ]);
+    eq(mixed.nonPassiveNet, 60000, 'non-passive income is not sheltered by a passive loss');
+    eq(mixed.suspendedCarryforwardEnd, 20000, 'the passive loss suspends despite the non-passive income');
+  }
+
+  // ── Schedule D and the §1211(b) limit ────────────────────────────────────
+  {
+    eq(CAPITAL_LOSS_ANNUAL_LIMIT, 3000, 'the annual capital-loss offset against ordinary income is $3,000');
+
+    const loss = computeScheduleD({ shortTerm: -10000, longTerm: -5000, filingStatus: 'married_joint' });
+    eq(loss.reportedOnLine7, -3000, 'a 15,000 net loss deducts only 3,000 this year');
+    eq(loss.shortTermCarryforwardEnd + loss.longTermCarryforwardEnd, 12000,
+      'and 12,000 carries forward — the projection engine used to discard it entirely');
+    eq(loss.shortTermCarryforwardEnd, 7000, 'the allowed loss comes off short-term first');
+
+    const mfs = computeScheduleD({ shortTerm: -10000, longTerm: 0, filingStatus: 'married_separate' });
+    eq(mfs.reportedOnLine7, -1500, 'MFS halves the limit to $1,500');
+
+    // Character survives netting: short-term gain offset by long-term loss is
+    // ordinary, and must NOT reach the preferential brackets.
+    const ch = computeScheduleD({ shortTerm: 20000, longTerm: -5000 });
+    eq(ch.netGainOrLoss, 15000, 'net gain of 15,000');
+    eq(ch.preferentialGain, 0, 'but no long-term gain survives, so none of it is preferential');
+    const ch2 = computeScheduleD({ shortTerm: -5000, longTerm: 20000 });
+    eq(ch2.preferentialGain, 15000, 'the reverse case leaves 15,000 of genuinely long-term gain');
+  }
+
+  // ── §199A ────────────────────────────────────────────────────────────────
+  {
+    // Below the threshold: a flat 20%, with no wage limit and no SSTB penalty.
+    const simple = qbiDeduction({ businesses: [{ label: 'A', qbi: 100000 }],
+      taxableIncomeBeforeQBI: 150000, filingStatus: 'married_joint', taxYear: 2026 });
+    eq(simple.deduction, 20000, 'below the threshold the deduction is a flat 20% of QBI');
+    eq(simple.phase, 0, 'and nothing has begun to phase in');
+
+    // A qualified business LOSS nets against the others before any limit —
+    // §199A(c)(1) and Reg. §1.199A-1(d)(2)(iii). Dropping the loss business
+    // instead (the obvious shortcut) deducts 20% of 85,000 rather than of
+    // 67,000: a $3,600 overstatement on this fixture alone.
+    const netted = qbiDeduction({
+      businesses: [{ label: 'A', qbi: 85000 }, { label: 'B', qbi: -18000 }],
+      taxableIncomeBeforeQBI: 300000, filingStatus: 'married_joint', taxYear: 2026 });
+    eq(netted.netQBI, 67000, 'QBI is netted across businesses before the deduction');
+    eq(netted.deduction, 13400, 'so the deduction is 20% of 67,000, not of 85,000');
+
+    // Net negative: no deduction, and it follows you into next year.
+    const neg = qbiDeduction({ businesses: [{ label: 'A', qbi: 20000 }, { label: 'B', qbi: -50000 }],
+      taxableIncomeBeforeQBI: 300000, filingStatus: 'married_joint', taxYear: 2026 });
+    eq(neg.deduction, 0, 'a net qualified business loss produces no deduction');
+    eq(neg.negativeQBICarryforward, 30000, 'and carries forward under §199A(c)(2)');
+
+    // Above threshold + range, the W-2 wage/UBIA cap binds fully. 2026 MFJ
+    // threshold 403,500, range 150,000 (OBBBA widened it from 100,000), so the
+    // range ends at 553,500.
+    const th = engine.QBI_THRESHOLD_2026.married_joint;
+    eq(th, 403500, '2026 MFJ §199A threshold is $403,500 (Rev. Proc. 2025-32)');
+    eq(engine.QBI_PHASEIN_RANGE_2026.married_joint, 150000,
+      'OBBBA widened the MFJ phase-in range to $150,000');
+
+    const capped = qbiDeduction({
+      businesses: [{ label: 'A', qbi: 200000, w2Wages: 40000, ubia: 0 }],
+      taxableIncomeBeforeQBI: 600000, filingStatus: 'married_joint', taxYear: 2026 });
+    eq(capped.phase, 1, 'past the top of the range the limits apply in full');
+    // 20% of 200,000 = 40,000 tentative; wage cap = 50% of 40,000 = 20,000.
+    eq(capped.deduction, 20000, 'the 50%-of-W-2-wages cap binds, halving the deduction');
+
+    // Halfway through the range, half the limitation applies.
+    const half = qbiDeduction({
+      businesses: [{ label: 'A', qbi: 200000, w2Wages: 40000, ubia: 0 }],
+      taxableIncomeBeforeQBI: th + 75000, filingStatus: 'married_joint', taxYear: 2026 });
+    approx(half.phase, 0.5, 'halfway through the phase-in range', 1e-9);
+    approx(half.deduction, 30000, 'and exactly half the wage limitation has bitten: 40,000 - 0.5*(40,000-20,000)', 1e-6);
+
+    // An SSTB is fully denied above the range and untouched below it.
+    const sstbLow = qbiDeduction({ businesses: [{ label: 'S', qbi: 100000, isSSTB: true }],
+      taxableIncomeBeforeQBI: 200000, filingStatus: 'married_joint', taxYear: 2026 });
+    eq(sstbLow.deduction, 20000, 'below the threshold an SSTB is treated like any other business');
+    const sstbHigh = qbiDeduction({ businesses: [{ label: 'S', qbi: 100000, w2Wages: 500000, isSSTB: true }],
+      taxableIncomeBeforeQBI: 600000, filingStatus: 'married_joint', taxYear: 2026 });
+    eq(sstbHigh.deduction, 0, 'above the range an SSTB gets nothing, however large its payroll');
+
+    // The 25%-wages-plus-2.5%-UBIA alternative can beat the 50% test.
+    const ubia = qbiDeduction({
+      businesses: [{ label: 'A', qbi: 200000, w2Wages: 40000, ubia: 1000000 }],
+      taxableIncomeBeforeQBI: 600000, filingStatus: 'married_joint', taxYear: 2026 });
+    // max(20,000, 10,000 + 25,000) = 35,000
+    eq(ubia.deduction, 35000, 'a capital-intensive business uses 25% of wages plus 2.5% of UBIA');
+
+    // Overall cap: 20% of taxable income excluding net capital gain.
+    const overall = qbiDeduction({ businesses: [{ label: 'A', qbi: 100000 }],
+      taxableIncomeBeforeQBI: 60000, netCapitalGain: 10000,
+      filingStatus: 'married_joint', taxYear: 2026 });
+    eq(overall.deduction, 10000, 'the overall cap is 20% of (60,000 - 10,000), below the 20,000 tentative');
+
+    // OBBBA's $400 floor requires MATERIAL PARTICIPATION. A passive K-1 holder
+    // does not get it, which is the common case for an interest held as an
+    // investment — and the case this planner is being built for.
+    const floorActive = qbiDeduction({
+      businesses: [{ label: 'A', qbi: 1500, materiallyParticipates: true }],
+      taxableIncomeBeforeQBI: 100000, filingStatus: 'married_joint', taxYear: 2026 });
+    eq(floorActive.deduction, 400, 'an active owner with at least $1,000 of QBI gets the $400 floor');
+    const floorPassive = qbiDeduction({
+      businesses: [{ label: 'A', qbi: 1500, materiallyParticipates: false }],
+      taxableIncomeBeforeQBI: 100000, filingStatus: 'married_joint', taxYear: 2026 });
+    eq(floorPassive.deduction, 300, 'a passive owner does not, and takes the plain 20% of 1,500');
+  }
+
+  // ── SALT under OBBBA ─────────────────────────────────────────────────────
+  {
+    eq(saltCapFor(2026, 'married_joint', 0), 40400, '2026 SALT cap is $40,400, not $10,000');
+    eq(saltCapFor(2024, 'married_joint', 0), 10000, 'before 2025 the cap was $10,000');
+    eq(saltCapFor(2030, 'married_joint', 0), 10000, 'and it reverts to $10,000 in 2030');
+    eq(saltCapSchedule(2026, 'married_joint').phaseoutStart, 505000,
+      'the 2026 phaseout starts at $505,000 of MAGI');
+
+    // 30 cents of cap per dollar of MAGI above the threshold.
+    eq(saltCapFor(2026, 'married_joint', 555000), 40400 - 0.30 * 50000,
+      'the cap bleeds off at 30 cents on the dollar above the threshold');
+    // But never below $10,000, however high income goes.
+    eq(saltCapFor(2026, 'married_joint', 5000000), 10000,
+      'the phaseout floors at $10,000 rather than running to zero');
+    eq(saltCapFor(2026, 'married_separate', 0), 20200, 'MFS gets half the cap');
+    eq(saltCapSchedule(2026, 'married_separate').phaseoutStart, 252500, 'and half the threshold');
+  }
+
+  // ── Schedule A: the 0.5% charitable floor and the 35% benefit cap ────────
+  {
+    const a = computeScheduleA({ stateIncomeTax: 12000, propertyTax: 9000,
+      mortgageInterest: 14000, charitableCash: 10000, agi: 400000,
+      filingStatus: 'married_joint', taxYear: 2026 });
+    eq(a.saltPaid, 21000, 'SALT is income tax plus property tax');
+    eq(a.charitableFloor, 2000, 'OBBBA disallows the first 0.5% of AGI: 0.5% of 400,000');
+    eq(a.charitableDeductible, 8000, 'so 8,000 of a 10,000 gift is deductible');
+    eq(a.total, 21000 + 14000 + 8000, 'and the three components sum to the Schedule A total');
+
+    // Income OR sales tax, never both (§164(b)(6)).
+    const s = computeScheduleA({ stateIncomeTax: 12000, stateSalesTax: 4000, propertyTax: 0, agi: 100000, taxYear: 2026 });
+    eq(s.saltPaid, 12000, 'the larger of income or sales tax is taken, not the sum');
+
+    // Medical only above 7.5% of AGI.
+    const m = computeScheduleA({ medicalExpenses: 20000, agi: 200000, taxYear: 2026 });
+    eq(m.medicalDeductible, 5000, 'medical above 7.5% of AGI: 20,000 - 15,000');
+  }
+
+  // ── §6654: the requirement is the LESSER of the two tests ────────────────
+  {
+    // Reading it as the greater is a common and expensive error — the prior-year
+    // test is usually the cheaper one, and the only one knowable before year end.
+    const sh = safeHarborRequirement({ currentTotalTax: 100000, priorTotalTax: 60000,
+      priorAGI: 300000, filingStatus: 'married_joint', paymentsToDate: 70000, balanceDue: 30000 });
+    eq(sh.currentYearTest, 90000, '90% of this year is 90,000');
+    eq(sh.priorYearTest, 66000, 'and 110% of last year is 66,000 — prior AGI topped $150,000');
+    eq(sh.required, 66000, 'the requirement is the lesser of the two');
+    eq(sh.shortfall, 0, 'so 70,000 of payments already clears it');
+
+    // Under the AGI threshold the multiplier drops to 100%.
+    const low = safeHarborRequirement({ currentTotalTax: 100000, priorTotalTax: 60000,
+      priorAGI: 120000, paymentsToDate: 0, balanceDue: 100000 });
+    eq(low.priorYearTest, 60000, 'below $150,000 of prior AGI the prior-year test is 100%, not 110%');
+
+    // With no prior return there is only the current-year test.
+    const noPrior = safeHarborRequirement({ currentTotalTax: 100000, paymentsToDate: 0, balanceDue: 100000 });
+    eq(noPrior.required, 90000, 'without a prior-year return only the 90% test is available');
+
+    // §6654(e)(1): under $1,000 owed, no penalty regardless.
+    const dm = safeHarborRequirement({ currentTotalTax: 100000, priorTotalTax: 90000,
+      priorAGI: 100000, paymentsToDate: 0, balanceDue: 400 });
+    eq(dm.shortfall, 0, 'a balance due under $1,000 is penalty-free even with nothing paid in');
+    eq(dm.deMinimis, true, 'and is flagged as the de minimis case rather than as compliance');
+  }
+
+  // ── Schedule SE shares the wage base with W-2 employment ─────────────────
+  {
+    // W-2 wages consume the Social Security wage base first. Computing SE tax
+    // without netting them out overstates the bill by 12.4% of the overlap.
+    const base = FICA_SS_WAGE_BASE_2025;
+    const alone = computeScheduleSE(100000, 0);
+    const net = 100000 * 0.9235;
+    approx(alone.total, net * 0.124 + net * 0.029, 'SE tax on 100,000 with no wages is the full 15.3% of 92,350', 1e-6);
+
+    const withWages = computeScheduleSE(100000, base);
+    approx(withWages.total, net * 0.029,
+      'once W-2 wages have used up the wage base, only the 2.9% Medicare piece remains', 1e-6);
+    lt(withWages.total, alone.total, 'which is strictly less than ignoring the W-2 wages would give');
+    approx(withWages.deductibleHalf, withWages.total / 2, 'and half of it is an above-the-line deduction', 1e-9);
+
+    eq(computeScheduleSE(0, 0).total, 0, 'no box 14A earnings, no self-employment tax');
+  }
+
+  // ── The whole return has to reconcile ────────────────────────────────────
+  // Every line above is a piece; this asserts they add up as Form 1040 says they
+  // must. Internal consistency is what makes a line-by-line readout worth
+  // tying out against a filed return rather than merely reading.
+  {
+    const situation = {
+      // A state WITH an income tax, deliberately: SALT is the whole reason the
+      // standard-vs-itemized answer moved in 2026, and a no-tax state would hide it.
+      taxYear: 2026, filingStatus: 'married_joint', state: 'Missouri',
+      people: [{}, {}],
+      w2: { wages: 245000, federalWithheld: 42000, stateWithheld: 11000,
+            socialSecurityWages: 268000, medicareWages: 268000 },
+      income: { taxableInterest: 3200, qualifiedDividends: 8000,
+                ordinaryDividends: 9500, longTermGain: 12000 },
+      k1s: [
+        { label: 'A', isPassive: true, basisStart: 400000, boxes: {
+            b1_ordinaryBusiness: 85000, b5_interest: 1200, b6a_ordinaryDiv: 2000,
+            b6b_qualifiedDiv: 1800, b9a_longTermGain: 5000, b19_distributions: 60000,
+            b20z_qbi: 85000, b20z_w2Wages: 120000, b20z_ubia: 300000 } },
+        { label: 'B', isPassive: true, basisStart: 150000, boxes: {
+            b1_ordinaryBusiness: -18000, b19_distributions: 5000, b20z_qbi: -18000 } },
+      ],
+      deductions: { mode: 'auto', propertyTax: 9800, mortgageInterest: 14500, charitableCash: 6000 },
+      payments: { estimatedFederal: [6000, 6000, 6000, 0] },
+      priorYear: { agi: 372000, totalTax: 84000 },
+    };
+    const r = computeTaxReturn(situation);
+    const L = (k) => r.lines[k].amount;
+
+    // Income section: line 9 is the sum of what precedes it.
+    approx(L('9'), L('1a') + L('2b') + L('3b') + L('4b') + L('5b') + L('6b') + L('7') + L('8'),
+      'line 9 totals the income lines (3a and 2a are memo lines, not additive)', 1e-6);
+    approx(L('11'), L('9') - L('10'), 'line 11 is total income less adjustments', 1e-6);
+    approx(L('14'), L('12') + L('13'), 'line 14 is the deduction plus the QBI deduction', 1e-6);
+    approx(L('15'), Math.max(0, L('11') - L('14')), 'line 15 is AGI less line 14', 1e-6);
+    approx(L('24'), L('16') + L('23'), 'line 24 is tax plus other taxes', 1e-6);
+    approx(L('33'), L('25') + L('26'), 'line 33 totals the payments', 1e-6);
+    approx(L('34') - L('37'), L('33') - L('24'), 'refund less amount owed equals payments less total tax', 1e-6);
+    eq(Math.min(L('34'), L('37')), 0, 'a return is either owed or refunded, never both');
+
+    // Routing: the K-1 portfolio boxes reached their own lines, not Schedule E.
+    eq(L('2b'), 3200 + 1200, 'K-1 box 5 interest joined 1040 line 2b');
+    eq(L('3a'), 8000 + 1800, 'K-1 box 6b landed in qualified dividends');
+    eq(L('7'), 12000 + 5000, 'K-1 box 9a went to Schedule D, not Schedule E');
+    eq(L('8'), 67000, 'Schedule E carries only the §469-netted business income: 85,000 - 18,000');
+
+    // §1411: the passive K-1 income is in the NIIT base. This is the single
+    // most consequential consequence of holding the interest passively.
+    gt(r.schedules.two.niit, 0, 'passive K-1 income drags the household into NIIT');
+    approx(r.netInvestmentIncome, L('2b') + L('3b') + L('7') + 67000,
+      'the NIIT base is portfolio income plus passive activity income (§1411(c)(1)(A)(ii))', 1e-6);
+
+    // The same household with the interests actively managed owes no NIIT on
+    // them — worth 3.8% of the K-1 income, and the reason the tool reports both.
+    const active = computeTaxReturn({ ...situation,
+      k1s: situation.k1s.map(k => ({ ...k, isPassive: false, materiallyParticipates: true })) });
+    lt(active.schedules.two.niit, r.schedules.two.niit,
+      'material participation removes the K-1 income from the NIIT base');
+
+    // Phantom income: taxed on the distributive share, not on the cash.
+    gt(r.phantomIncome, 0, 'the household is taxed on more K-1 income than it received in cash');
+
+    // With SALT at 40,400 rather than 10,000, itemizing now wins for a household
+    // that has always taken the standard deduction — the flip this is meant to catch.
+    eq(r.lines['12'].which, 'itemized', 'the higher SALT cap flips this household to itemizing');
+    gt(r.schedules.A.allowedAfterCap, r.schedules.A.standardAlternative,
+      'and the tool reports both figures so the flip is a computed conclusion');
+
+    // Marginal rate: measured by running the return twice, so it picks up the
+    // NIIT and the charitable floor, neither of which is in a bracket table.
+    const m = marginalRateOn(situation, 1000);
+    gt(m.federal, 0.24, 'the true marginal rate exceeds the 24% bracket');
+    approx(m.niitDelta, 38, 'because each extra dollar also drags 3.8% of NIIT with it', 1e-6);
+    lt(m.deductionDelta, 0, 'and raises the 0.5% charitable floor, shaving the deduction');
+  }
+
+  // ── An empty situation must not throw ────────────────────────────────────
+  // Phase 3 populates this incrementally from paystubs, so a half-filled input
+  // is the normal state, not an error case.
+  {
+    const empty = computeTaxReturn({});
+    eq(empty.lines['24'].amount, 0, 'a return with no inputs owes no tax');
+    eq(empty.lines['11'].amount, 0, 'and has no AGI');
+    eq(empty.diagnostics.length, 0, 'and raises no warnings');
+    const wagesOnly = computeTaxReturn({ taxYear: 2026, filingStatus: 'married_joint', w2: { wages: 120000 } });
+    approx(wagesOnly.lines['15'].amount, 120000 - STANDARD_DEDUCTION_2026.married_joint,
+      'wages alone produce taxable income net of the standard deduction', 1e-6);
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
