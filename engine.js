@@ -4303,6 +4303,273 @@ const marginalRateOn = (situation, probe = 1000, mutate = null) => {
 };
 
 
+// ============================================================================
+// YEAR-TO-DATE PAYROLL → PROJECTED W-2
+// ============================================================================
+// The whole point of a current-year model is that part of the year already
+// happened. A paystub is the ideal input for this because it carries YTD totals
+// in its own columns — one recent stub per employer pins everything earned,
+// deferred and withheld so far, and only the remainder has to be projected.
+//
+// The distinction this exists to preserve is Box 1 versus Box 3/5:
+//
+//   Box 1  (federal taxable wages) = gross − traditional deferrals
+//                                          − §125 health − cafeteria-plan HSA
+//   Box 3/5 (Social Security and Medicare wages)
+//                                  = gross − §125 health − cafeteria-plan HSA
+//
+// Traditional 401(k) deferrals reduce Box 1 and NOT Box 3/5. That asymmetry IS
+// the traditional-versus-Roth question: deferring saves income tax at the
+// margin and saves no FICA at all, so the comparison is against the future
+// income-tax rate alone. A model that carries a single "salary" number cannot
+// express it, which is why the projection engine cannot answer the question.
+
+const PAY_PERIODS_PER_YEAR = { weekly: 52, biweekly: 26, semimonthly: 24, monthly: 12 };
+
+// Pay periods already elapsed as of a date. Derived from the calendar rather
+// than from the YTD dollars, so it stays right when pay varies between periods
+// (bonus, commission, an unpaid week) — dividing YTD gross by a per-period
+// figure would silently mis-count the year in exactly those cases.
+const payPeriodsElapsed = (asOfDate, payFrequency = 'biweekly', taxYear = BASE_TAX_YEAR) => {
+  const per = PAY_PERIODS_PER_YEAR[payFrequency] || PAY_PERIODS_PER_YEAR.biweekly;
+  if (!asOfDate) return 0;
+  const d = asOfDate instanceof Date ? asOfDate : new Date(asOfDate);
+  if (isNaN(d.getTime())) return 0;
+  const start = new Date(Date.UTC(taxYear, 0, 1));
+  const end = new Date(Date.UTC(taxYear + 1, 0, 1));
+  const frac = Math.min(1, Math.max(0, (d.getTime() - start.getTime()) / (end.getTime() - start.getTime())));
+  return Math.min(per, Math.round(per * frac));
+};
+
+// Project one payroll row to December 31.
+//
+// `ytd` is taken verbatim from the stub — no derivation, no guessing. Only the
+// REMAINDER is modeled, which is also the only part a December decision can
+// still change. Overriding `deferralPercent` re-projects just the periods that
+// have not happened yet, which is what makes "should I change my election for
+// the rest of the year" a question the tool can actually answer.
+const projectPayrollYearEnd = (row = {}, opts = {}) => {
+  const taxYear = opts.taxYear || row.taxYear || BASE_TAX_YEAR;
+  const freq = row.payFrequency || 'biweekly';
+  const per = PAY_PERIODS_PER_YEAR[freq] || PAY_PERIODS_PER_YEAR.biweekly;
+  const ytd = row.ytd || {};
+  const rem = row.remainder || {};
+
+  const elapsed = Number.isFinite(rem.payPeriodsElapsed)
+    ? rem.payPeriodsElapsed
+    : payPeriodsElapsed(row.asOfDate, freq, taxYear);
+  const remaining = Number.isFinite(rem.payPeriodsRemaining)
+    ? Math.max(0, rem.payPeriodsRemaining)
+    : Math.max(0, per - elapsed);
+
+  // Per-period gross: explicit if given, else the YTD average.
+  const perPeriodGross = Number.isFinite(rem.perPeriodGross) && rem.perPeriodGross > 0
+    ? rem.perPeriodGross
+    : (elapsed > 0 ? n_(ytd.grossPay) / elapsed : 0);
+
+  const bonus = n_(rem.knownBonus);
+  const remainderGross = perPeriodGross * remaining + bonus;
+
+  // Deferral election for the remaining periods. Falls back to the rate implied
+  // by what has been deferred so far, so leaving it blank continues the status quo.
+  const impliedRate = n_(ytd.grossPay) > 0 ? n_(ytd.preTax401kTraditional) / n_(ytd.grossPay) : 0;
+  const impliedRothRate = n_(ytd.grossPay) > 0 ? n_(ytd.roth401k) / n_(ytd.grossPay) : 0;
+  const tradRate = Number.isFinite(rem.deferralPercent) ? rem.deferralPercent / 100 : impliedRate;
+  const rothRate = Number.isFinite(rem.rothDeferralPercent) ? rem.rothDeferralPercent / 100 : impliedRothRate;
+
+  // §402(g) is a per-PERSON, per-YEAR cap across traditional and Roth together.
+  // A solo 401(k) or a second employer's plan shares this one limit — a trap
+  // worth surfacing rather than discovering on a corrective distribution.
+  const catchUp = workplaceCatchUp(n_(opts.age));
+  const deferralCap = LIMIT_402G + catchUp;
+  const ytdDeferral = n_(ytd.preTax401kTraditional) + n_(ytd.roth401k);
+  const roomRemaining = Math.max(0, deferralCap - ytdDeferral);
+
+  let remainderTrad = remainderGross * tradRate;
+  let remainderRoth = remainderGross * rothRate;
+  const wanted = remainderTrad + remainderRoth;
+  let cappedByLimit = false;
+  if (wanted > roomRemaining) {
+    cappedByLimit = true;
+    const scale = wanted > 0 ? roomRemaining / wanted : 0;
+    remainderTrad *= scale;
+    remainderRoth *= scale;
+  }
+
+  // §125 and cafeteria-plan HSA reduce BOTH Box 1 and Box 3/5; deferrals reduce
+  // only Box 1. Carried at the YTD rate unless overridden.
+  const s125Rate = n_(ytd.grossPay) > 0 ? n_(ytd.section125Health) / n_(ytd.grossPay) : 0;
+  const hsaRate = n_(ytd.grossPay) > 0 ? n_(ytd.hsa) / n_(ytd.grossPay) : 0;
+  const remainderS125 = Number.isFinite(rem.section125Health) ? rem.section125Health : remainderGross * s125Rate;
+  const remainderHSA = Number.isFinite(rem.hsa) ? rem.hsa : remainderGross * hsaRate;
+
+  // Withholding continues at the YTD effective rate unless overridden — the
+  // override is what prices a December withholding bump.
+  const fedWhRate = n_(ytd.grossPay) > 0 ? n_(ytd.fedWithheld) / n_(ytd.grossPay) : 0;
+  const stWhRate = n_(ytd.grossPay) > 0 ? n_(ytd.stateWithheld) / n_(ytd.grossPay) : 0;
+  const remainderFedWh = Number.isFinite(rem.federalWithheld) ? rem.federalWithheld : remainderGross * fedWhRate;
+  const remainderStWh = Number.isFinite(rem.stateWithheld) ? rem.stateWithheld : remainderGross * stWhRate;
+
+  const grossPay = n_(ytd.grossPay) + remainderGross;
+  const traditional = n_(ytd.preTax401kTraditional) + remainderTrad;
+  const roth = n_(ytd.roth401k) + remainderRoth;
+  const s125 = n_(ytd.section125Health) + remainderS125;
+  const hsa = n_(ytd.hsa) + remainderHSA;
+  const otherPreTax = n_(ytd.otherPreTax);
+
+  // The two wage bases. Roth deferrals appear in NEITHER subtraction — that is
+  // the whole asymmetry.
+  const ficaWages = Math.max(0, grossPay - s125 - hsa);
+  const box1 = Math.max(0, ficaWages - traditional - otherPreTax);
+
+  return {
+    payFrequency: freq, periodsPerYear: per,
+    periodsElapsed: elapsed, periodsRemaining: remaining, perPeriodGross,
+    deferral: {
+      cap: deferralCap, catchUp, ytd: ytdDeferral,
+      roomRemaining, projectedTotal: traditional + roth,
+      cappedByLimit,
+      traditionalRateApplied: tradRate, rothRateApplied: rothRate,
+    },
+    projected: {
+      grossPay,
+      fedTaxableWages: box1,             // W-2 Box 1
+      socialSecurityWages: ficaWages,    // W-2 Box 3
+      medicareWages: ficaWages,          // W-2 Box 5
+      traditional401k: traditional,
+      roth401k: roth,
+      employerMatch: n_(ytd.employerMatch) + n_(rem.employerMatch),
+      section125Health: s125, hsa,
+      federalWithheld: n_(ytd.fedWithheld) + remainderFedWh,
+      stateWithheld: n_(ytd.stateWithheld) + remainderStWh,
+    },
+    remainder: {
+      grossPay: remainderGross, traditional401k: remainderTrad, roth401k: remainderRoth,
+      federalWithheld: remainderFedWh, stateWithheld: remainderStWh,
+    },
+  };
+};
+
+// ── Assemble a `situation` for computeTaxReturn from the currentYear slice ───
+// One place where the app's stored shape becomes the tax engine's input shape,
+// so the UI never has to know how a paystub turns into a 1040 line.
+const buildTaxSituation = (cy = {}, pi = {}, opts = {}) => {
+  const taxYear = cy.taxYear || opts.taxYear || BASE_TAX_YEAR;
+  const payroll = (cy.payroll || []).map(row => ({
+    row,
+    projected: projectPayrollYearEnd(row, {
+      taxYear,
+      age: row.owner === 'spouse' ? pi.spouseAge : pi.myAge,
+    }),
+  }));
+
+  const sum = (f) => payroll.reduce((s, p) => s + n_(f(p.projected.projected)), 0);
+  const other = cy.otherIncome || {};
+
+  return {
+    taxYear,
+    filingStatus: pi.filingStatus || 'married_joint',
+    state: pi.state || 'None',
+    inflationRate: pi.inflationRate ?? 0.03,
+    people: [
+      { age: n_(pi.myAge) },
+      ...(pi.filingStatus === 'married_joint' ? [{ age: n_(pi.spouseAge) }] : []),
+    ],
+    w2: {
+      wages: sum(p => p.fedTaxableWages),
+      federalWithheld: sum(p => p.federalWithheld),
+      stateWithheld: sum(p => p.stateWithheld),
+      socialSecurityWages: sum(p => p.socialSecurityWages),
+      medicareWages: sum(p => p.medicareWages),
+    },
+    income: {
+      taxableInterest: n_(other.taxableInterest),
+      taxExemptInterest: n_(other.taxExemptInterest),
+      ordinaryDividends: n_(other.ordinaryDividends),
+      qualifiedDividends: n_(other.qualifiedDividends),
+      shortTermGain: n_(other.shortTermGain),
+      longTermGain: n_(other.longTermGain),
+      shortTermLossCarryforward: n_(other.shortTermLossCarryforward),
+      longTermLossCarryforward: n_(other.longTermLossCarryforward),
+      iraDistributions: n_(other.iraDistributions),
+      pensions: n_(other.pensions),
+      socialSecurityBenefits: n_(other.socialSecurityBenefits),
+      otherIncome: n_(other.otherIncome),
+    },
+    k1s: cy.k1s || [],
+    adjustments: {
+      // A cafeteria-plan HSA already came out of Box 1, so deducting it again on
+      // Schedule 1 would double-count it. Only direct (non-payroll)
+      // contributions are an above-the-line deduction.
+      hsaDeduction: n_((cy.adjustments || {}).hsaDirectContribution),
+      deductibleIRA: n_((cy.adjustments || {}).deductibleIRA),
+      studentLoanInterest: n_((cy.adjustments || {}).studentLoanInterest),
+      other: n_((cy.adjustments || {}).other),
+    },
+    deductions: cy.deductions || { mode: 'auto' },
+    payments: {
+      estimatedFederal: (cy.estimatedPayments || {}).federal || [],
+      estimatedState: (cy.estimatedPayments || {}).state || [],
+    },
+    priorYear: cy.priorYearReturn || {},
+    _payroll: payroll,
+  };
+};
+
+// ── Traditional vs. Roth for the REMAINING pay periods ───────────────────────
+// Prices the decision that is still open: reallocating the deferrals that have
+// not happened yet. Compares the measured marginal rate today — which picks up
+// NIIT, the SALT phaseout and the §199A phase-in, none of which are in a bracket
+// table — against the rate the money is expected to face on withdrawal.
+//
+// `futureMarginalRate` comes from the long-range projection; the caller supplies
+// it because this function must stay pure.
+const compareTraditionalVsRoth = (cy, pi, futureMarginalRate, opts = {}) => {
+  const base = buildTaxSituation(cy, pi, opts);
+  const shiftAmount = opts.shiftAmount ?? 1000;
+
+  // Moving a dollar from Roth to traditional lowers Box 1 and nothing else —
+  // FICA is untouched either way, which is why the comparison is against the
+  // future INCOME-tax rate alone and not against a combined rate.
+  const toTraditional = { ...base, w2: { ...base.w2, wages: n_(base.w2.wages) - shiftAmount } };
+
+  const a = computeTaxReturn(base);
+  const b = computeTaxReturn(toTraditional);
+  const fedSaved = a.lines['24'].amount - b.lines['24'].amount;
+  const stateSaved = a.state.tax - b.state.tax;
+  const savedNow = fedSaved + stateSaved;
+  const rateNow = shiftAmount > 0 ? savedNow / shiftAmount : 0;
+  const rateLater = n_(futureMarginalRate);
+
+  return {
+    shiftAmount,
+    marginalRateNow: rateNow,
+    federalRateNow: shiftAmount > 0 ? fedSaved / shiftAmount : 0,
+    stateRateNow: shiftAmount > 0 ? stateSaved / shiftAmount : 0,
+    taxSavedNow: savedNow,
+    projectedRateAtWithdrawal: rateLater,
+    // Traditional wins when the rate avoided now exceeds the rate paid later.
+    favors: rateNow > rateLater ? 'traditional' : (rateNow < rateLater ? 'roth' : 'neutral'),
+    advantagePerDollar: rateNow - rateLater,
+    // What each component of the saving is, so a surprising rate is explainable.
+    components: {
+      bracket: b.lines['16'].amount - a.lines['16'].amount,
+      niit: b.schedules.two.niit - a.schedules.two.niit,
+      qbi: b.qbi.deduction - a.qbi.deduction,
+      deduction: b.lines['12'].amount - a.lines['12'].amount,
+      state: -stateSaved,
+    },
+    deferralRoom: base._payroll.map(p => ({
+      owner: p.row.owner, employer: p.row.employerLabel,
+      roomRemaining: p.projected.deferral.roomRemaining,
+      cap: p.projected.deferral.cap,
+      projectedTotal: p.projected.deferral.projectedTotal,
+      cappedByLimit: p.projected.deferral.cappedByLimit,
+    })),
+  };
+};
+
+
 function computeProjections(pi, accts, streams, assetList, events = [], recurringExpensesList = [], currentYearArg, opts = {}) {
   // currentYear used to be captured from RetirementPlanner's closure. It's now an
   // explicit parameter (with a fallback) so this function can be moved to module
@@ -6432,6 +6699,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
 
     // ── Form 1040 current-year return ─────────────────────────────────────
     computeTaxReturn, marginalRateOn,
+    PAY_PERIODS_PER_YEAR, payPeriodsElapsed, projectPayrollYearEnd,
+    buildTaxSituation, compareTraditionalVsRoth,
     routeK1, applyPartnerBasis, applyPassiveLossRules, computeScheduleD,
     qbiDeduction, safeHarborRequirement, computeScheduleA,
     applyItemizedBenefitCap, computeScheduleSE,
@@ -6519,6 +6788,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     getPlanningHorizonYears,
     realReturn, inflateToAge, deflateToToday, coastFire,
     LIMIT_402G, LIMIT_415C, LIMIT_IRA, LIMIT_HSA_SELF, LIMIT_HSA_FAMILY,
+    LIMIT_CATCHUP_50, LIMIT_CATCHUP_60_63,
     DEFERRAL_TYPES, IRA_TYPES, workplaceCatchUp, checkContributionLimits,
     streamColaYears, streamAmountAtAge,
     SAVINGS_MULTIPLE_BY_AGE, savingsMultipleForAge, TYPICAL_DEFERRAL_RATE,

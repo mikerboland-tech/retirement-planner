@@ -291,7 +291,21 @@ const STORAGE_KEY = 'retirement_planner_data';
 //     are optional; absent → engine treats as 'fixed' so older saved scenarios still load.
 //     Spending-phase fields (spendingPhasesEnabled, goGoEndAge, ...) are also optional;
 //     absent → engine multiplier is 1 (flat spending), so no version bump needed.
-const SCHEMA_VERSION = 2;
+// v3: adds the `currentYear` slice (paystub YTD ledger, K-1 ledger, estimated
+//     payments, prior-year return). Bumped rather than defaulted because this is
+//     a whole new top-level key: an older build round-tripping a v3 export would
+//     drop it silently, and the user would not find out until a tax number moved.
+const SCHEMA_VERSION = 3;
+
+// Migrations run in order from the saved version up to SCHEMA_VERSION. Each is
+// a pure (data) => data. Absent entries are skipped, so a version that only adds
+// optional fields needs no migration — but must still be listed here as a
+// comment, or the next person cannot tell "no migration needed" from "forgot".
+const migrations = {
+  // v2 → v3: nothing to backfill. `currentYear` is merged from defaults on load,
+  // exactly like personalInfo, so an older plan simply arrives with an empty one.
+  3: (data) => ({ ...data, currentYear: data.currentYear || DEFAULT_CURRENT_YEAR }),
+};
 
 const DEFAULT_DASHBOARD_VISIBILITY = {
   summaryCards: true,
@@ -426,6 +440,60 @@ const DEFAULT_RECURRING_EXPENSES = [
   { id: 1, name: 'Property Tax', category: 'housing', amount: 4000, startAge: 35, endAge: 95, inflationRate: 0.03, owner: 'me' }
 ];
 
+// ── CURRENT-YEAR TAX DETAIL ──────────────────────────────────────────────────
+// Everything the Form 1040 engine needs that the long-range plan does not carry:
+// what has actually been earned, deferred and withheld so far, and the K-1s.
+//
+// PRIVACY: this lives in localStorage alongside the rest of the plan and travels
+// in plan exports, which now carry wage and withholding detail. No field asks for
+// an SSN or an EIN — `employerLabel` and `label` are free text for the user's own
+// benefit and are never required.
+const DEFAULT_CURRENT_YEAR = {
+  taxYear: (typeof BASE_TAX_YEAR === 'number' ? BASE_TAX_YEAR : 2026),
+  // One row per person per employer. `ytd` is copied straight off a paystub —
+  // the stub's own YTD columns are the input, so nothing has to be derived.
+  payroll: [],
+  // One row per K-1, laid out by box number so it can be filled in from the form.
+  k1s: [],
+  estimatedPayments: { federal: [0, 0, 0, 0], state: [0, 0, 0, 0] },
+  // Key lines off last year's return. Drives the §6654 safe harbor (which needs
+  // prior AGI and prior total tax) and seeds items that are hard to project.
+  priorYearReturn: { taxYear: null, agi: null, totalTax: null, totalWithheld: null,
+                     deductionTaken: null, qbiDeduction: null },
+  otherIncome: {},
+  adjustments: {},
+  deductions: { mode: 'auto' },
+};
+
+// A blank paystub row. asOfDate defaults to today so the period count is right
+// the moment a row is added.
+const newPayrollRow = (owner = 'me') => ({
+  id: Date.now() + Math.random(),
+  owner, employerLabel: '',
+  asOfDate: new Date().toISOString().slice(0, 10),
+  payFrequency: 'biweekly',
+  ytd: { grossPay: 0, fedTaxableWages: 0, ssWages: 0, medicareWages: 0,
+         preTax401kTraditional: 0, roth401k: 0, employerMatch: 0,
+         hsa: 0, section125Health: 0, otherPreTax: 0,
+         fedWithheld: 0, stateWithheld: 0, ssWithheld: 0, medicareWithheld: 0 },
+  remainder: {},
+});
+
+// A blank K-1. Passive by default: that is both the common case for an interest
+// held as an investment and the conservative one, since passive income carries
+// 3.8% NIIT that a materially-participating owner would not owe.
+const newK1Row = () => ({
+  id: Date.now() + Math.random(),
+  label: '', entityType: 'partnership',
+  isPassive: true, materiallyParticipates: false,
+  basisStart: 0, suspendedLossCarryforward: 0,
+  boxes: { b1_ordinaryBusiness: 0, b2_rental: 0, b5_interest: 0,
+           b6a_ordinaryDiv: 0, b6b_qualifiedDiv: 0,
+           b8_shortTermGain: 0, b9a_longTermGain: 0, b13_deductions: 0,
+           b14a_seEarnings: 0, b19_distributions: 0,
+           b20z_qbi: 0, b20z_w2Wages: 0, b20z_ubia: 0, isSSTB: false },
+});
+
 const formatCurrency = (value) => {
   if (value === undefined || value === null || isNaN(value)) return '$0';
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(value);
@@ -446,7 +514,20 @@ function loadFromStorage() {
       console.warn(`Saved data is from a newer schema (v${parsed.schemaVersion}); this build only understands v${SCHEMA_VERSION}. Ignoring to avoid corruption.`);
       return null;
     }
-    return parsed;
+    // Run forward migrations. Until v3 this gated on version but never actually
+    // migrated, which was fine while every change was an optional field merged
+    // from defaults. A new top-level key is not that, so the runner is real now.
+    // Stops at the first missing step rather than skipping it, so a gap cannot
+    // silently apply a later migration to data that never got an earlier one.
+    let data = parsed;
+    let version = (data && typeof data.schemaVersion === 'number') ? data.schemaVersion : 0;
+    while (version < SCHEMA_VERSION) {
+      const next = version + 1;
+      const migrate = migrations[next];
+      if (migrate) data = migrate(data);
+      version = next;
+    }
+    return data;
   } catch (e) {
     console.error('Error loading from localStorage:', e);
   }
@@ -13948,6 +14029,14 @@ function RetirementPlanner() {
     return savedData?.dashboardVisibility || DEFAULT_DASHBOARD_VISIBILITY;
   });
 
+  // Default-merged like personalInfo (not `|| DEFAULT`, which the list slices
+  // use) because this is a settings-shaped object: a plan saved before a field
+  // existed must gain it, not lose the rest of the object.
+  const [currentYearData, setCurrentYearData] = useState(() => ({
+    ...DEFAULT_CURRENT_YEAR,
+    ...(savedData?.currentYear || {}),
+  }));
+
   const [showAccountModal, setShowAccountModal] = useState(false);
   const [showIncomeModal, setShowIncomeModal] = useState(false);
   const [showAssetModal, setShowAssetModal] = useState(false);
@@ -13973,6 +14062,10 @@ function RetirementPlanner() {
       assets: assets.map(a => ({ ...a })),
       oneTimeEvents: oneTimeEvents.map(e => ({ ...e })),
       recurringExpenses: recurringExpenses.map(e => ({ ...e })),
+      // Snapshotted with the rest of the plan: a scenario that changes the
+      // deferral election has to carry the payroll it changed, or comparing two
+      // scenarios silently compares them against the same current-year data.
+      currentYear: JSON.parse(JSON.stringify(currentYearData)),
       createdAt: new Date().toISOString()
     };
     setScenarios(prev => [...prev, newScenario]);
@@ -13998,6 +14091,10 @@ function RetirementPlanner() {
       setAssets(scenario.assets || []);
       setOneTimeEvents(scenario.oneTimeEvents || []);
       setRecurringExpenses(scenario.recurringExpenses || []);
+      // Default-merged rather than `|| DEFAULT`: unlike the list fields above,
+      // dropping a key here would lose unrelated current-year data rather than
+      // clear a stale list.
+      setCurrentYearData({ ...DEFAULT_CURRENT_YEAR, ...(scenario.currentYear || {}) });
       setActiveScenarioId(id);
     }
   };
@@ -14005,7 +14102,7 @@ function RetirementPlanner() {
   // Auto-save to localStorage with debouncing to prevent excessive saves
   useEffect(() => {
     const saveTimer = setTimeout(() => {
-      const data = { personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, scenarios, lastSaved: new Date().toISOString() };
+      const data = { personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, scenarios, currentYear: currentYearData, lastSaved: new Date().toISOString() };
       const result = saveToStorage(data);
       if (result.ok) {
         setSaveStatus('Saved');
@@ -14025,7 +14122,7 @@ function RetirementPlanner() {
       clearTimeout(saveTimer);
       clearTimeout(clearTimer);
     };
-  }, [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, scenarios]);
+  }, [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, scenarios, currentYearData]);
   
   // Export data as JSON file
   const handleExport = () => {
@@ -14038,7 +14135,12 @@ function RetirementPlanner() {
       recurringExpenses,
       dashboardVisibility,
       scenarios,
+      currentYear: currentYearData,
       exportDate: new Date().toISOString(),
+      // schemaVersion is what handleImport and loadFromStorage actually gate on.
+      // `version` is a legacy display string that nothing reads; kept so older
+      // builds see the field they expect, but it is not the migration signal.
+      schemaVersion: SCHEMA_VERSION,
       version: '2.1'  // v37 - Removed milestones/phases/cashflow tabs (will return later)
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -14081,6 +14183,15 @@ function RetirementPlanner() {
             && (typeof data.personalInfo !== 'object' || data.personalInfo === null || Array.isArray(data.personalInfo))) {
           throw new Error('"personalInfo" should be an object');
         }
+        if (data.currentYear !== undefined
+            && (typeof data.currentYear !== 'object' || data.currentYear === null || Array.isArray(data.currentYear))) {
+          throw new Error('"currentYear" should be an object');
+        }
+        for (const f of ['payroll', 'k1s']) {
+          if (data.currentYear && data.currentYear[f] !== undefined && !Array.isArray(data.currentYear[f])) {
+            throw new Error(`"currentYear.${f}" should be a list but is ${typeof data.currentYear[f]}`);
+          }
+        }
         if (!data.personalInfo && !listFields.some(f => data[f])) {
           throw new Error('no plan data found in this file');
         }
@@ -14104,6 +14215,9 @@ function RetirementPlanner() {
         // the JSON file the user has on disk).
         setDashboardVisibility(data.dashboardVisibility || DEFAULT_DASHBOARD_VISIBILITY);
         if (data.scenarios) setScenarios(data.scenarios);
+        // Default-merged, not assigned: an export written before a currentYear
+        // field existed must gain it rather than arrive missing it.
+        setCurrentYearData({ ...DEFAULT_CURRENT_YEAR, ...(data.currentYear || {}) });
         setSaveStatus('Imported!');
         setTimeout(() => setSaveStatus(''), 2000);
       } catch (err) {
@@ -14133,6 +14247,7 @@ function RetirementPlanner() {
     setRecurringExpenses(DEFAULT_RECURRING_EXPENSES);
     setDashboardVisibility(DEFAULT_DASHBOARD_VISIBILITY);
     setScenarios([]);
+    setCurrentYearData(DEFAULT_CURRENT_YEAR);
     setActiveScenarioId(null); // scenarios are gone; don't keep pointing at one
 
     setShowResetConfirm(false);

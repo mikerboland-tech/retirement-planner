@@ -4842,6 +4842,192 @@ section('P40 — Form 1040: the current-year return, line by line (IRC §199A, �
   }
 }
 
+section('P41 — year-to-date payroll, the Box 1 / Box 3-5 split, and the traditional-vs-Roth decision');
+{
+  // A paystub is the ideal current-year input because it carries YTD totals in
+  // its own columns: one recent stub per employer pins everything earned,
+  // deferred and withheld so far, and only the remainder has to be projected.
+  // The remainder is also the only part a December decision can still change.
+  const { projectPayrollYearEnd, payPeriodsElapsed, PAY_PERIODS_PER_YEAR,
+          buildTaxSituation, compareTraditionalVsRoth, computeTaxReturn,
+          LIMIT_402G, LIMIT_CATCHUP_50 } = engine;
+
+  // ── Pay periods come from the calendar, not from dividing YTD dollars ─────
+  {
+    eq(PAY_PERIODS_PER_YEAR.biweekly, 26, 'biweekly is 26 periods');
+    eq(payPeriodsElapsed('2026-01-01', 'biweekly', 2026), 0, 'January 1: nothing has been paid yet');
+    eq(payPeriodsElapsed('2026-12-31', 'biweekly', 2026), 26, 'December 31: the year is fully paid out');
+    eq(payPeriodsElapsed('2026-07-02', 'biweekly', 2026), 13, 'the midpoint of the year is 13 of 26 periods');
+    eq(payPeriodsElapsed('2026-07-02', 'monthly', 2026), 6, 'and 6 of 12 monthly periods');
+    // Deriving the count from YTD gross instead would mis-read any year with a
+    // bonus, a commission, or an unpaid week — precisely the years that matter.
+    eq(payPeriodsElapsed(null, 'biweekly', 2026), 0, 'a missing date yields zero rather than NaN');
+    eq(payPeriodsElapsed('not a date', 'biweekly', 2026), 0, 'and so does an unparseable one');
+  }
+
+  // ── The asymmetry the whole feature rests on ─────────────────────────────
+  // Traditional deferrals reduce W-2 Box 1 and do NOT reduce Box 3/5. §125
+  // health and cafeteria-plan HSA reduce both. Roth deferrals reduce neither.
+  // A model carrying a single "salary" number cannot express this, which is why
+  // the projection engine cannot answer the traditional-vs-Roth question.
+  {
+    const row = (over) => ({
+      owner: 'me', asOfDate: '2026-07-02', payFrequency: 'biweekly',
+      ytd: { grossPay: 100000, preTax401kTraditional: 0, roth401k: 0,
+             hsa: 0, section125Health: 0, fedWithheld: 0, stateWithheld: 0 },
+      remainder: {}, ...over,
+    });
+
+    const plain = projectPayrollYearEnd(row(), { taxYear: 2026, age: 45 });
+    eq(plain.periodsElapsed, 13, 'half the year is behind us');
+    eq(plain.periodsRemaining, 13, 'and half remains to project');
+    approx(plain.perPeriodGross, 100000 / 13, 'per-period gross is the YTD average when not stated', 1e-9);
+    approx(plain.projected.grossPay, 200000, 'so the full year projects to 200,000', 1e-6);
+    approx(plain.projected.fedTaxableWages, 200000, 'with no deferrals, Box 1 equals gross', 1e-6);
+    approx(plain.projected.socialSecurityWages, 200000, 'and so does Box 3', 1e-6);
+
+    // Traditional: Box 1 falls, Box 3/5 does not.
+    const trad = projectPayrollYearEnd(
+      row({ ytd: { ...row().ytd, preTax401kTraditional: 10000 }, remainder: { deferralPercent: 10 } }),
+      { taxYear: 2026, age: 45 });
+    approx(trad.projected.traditional401k, 10000 + 100000 * 0.10, 'YTD deferral plus 10% of the remainder', 1e-6);
+    approx(trad.projected.fedTaxableWages, 200000 - 20000, 'Box 1 drops by the full deferral', 1e-6);
+    approx(trad.projected.socialSecurityWages, 200000, 'Box 3/5 does NOT — deferring saves income tax, never FICA', 1e-6);
+
+    // Roth: neither base moves.
+    const roth = projectPayrollYearEnd(
+      row({ remainder: { rothDeferralPercent: 10 } }), { taxYear: 2026, age: 45 });
+    approx(roth.projected.fedTaxableWages, 200000, 'a Roth deferral leaves Box 1 alone', 1e-6);
+    approx(roth.projected.socialSecurityWages, 200000, 'and Box 3/5 too', 1e-6);
+    approx(roth.projected.roth401k, 10000, 'while still putting 10,000 into the Roth side', 1e-6);
+
+    // §125 and cafeteria HSA come out of BOTH.
+    const caf = projectPayrollYearEnd(
+      row({ ytd: { ...row().ytd, section125Health: 3000, hsa: 2000 } }), { taxYear: 2026, age: 45 });
+    approx(caf.projected.fedTaxableWages, 200000 - 10000, '§125 and HSA reduce Box 1', 1e-6);
+    approx(caf.projected.socialSecurityWages, 200000 - 10000, 'and reduce Box 3/5 as well — unlike deferrals', 1e-6);
+  }
+
+  // ── §402(g) is one cap per person per year ───────────────────────────────
+  {
+    const base = { owner: 'me', asOfDate: '2026-07-02', payFrequency: 'biweekly',
+      ytd: { grossPay: 150000, preTax401kTraditional: 20000, roth401k: 0 }, remainder: {} };
+
+    const young = projectPayrollYearEnd(base, { taxYear: 2026, age: 45 });
+    eq(young.deferral.cap, LIMIT_402G, 'under 50 the cap is the plain §402(g) limit');
+    eq(young.deferral.roomRemaining, LIMIT_402G - 20000, 'room is the cap less what is already deferred');
+
+    const older = projectPayrollYearEnd(base, { taxYear: 2026, age: 54 });
+    eq(older.deferral.cap, LIMIT_402G + LIMIT_CATCHUP_50, 'at 50+ the catch-up raises the cap');
+
+    // An over-election is clamped rather than silently blown through — a real
+    // 402(g) excess means a corrective distribution, not a bigger deduction.
+    const greedy = projectPayrollYearEnd({ ...base, remainder: { deferralPercent: 90 } }, { taxYear: 2026, age: 45 });
+    eq(greedy.deferral.cappedByLimit, true, 'a 90% election is flagged as capped');
+    approx(greedy.projected.traditional401k, LIMIT_402G, 'and lands exactly on the §402(g) limit', 1e-6);
+
+    // Traditional and Roth share the ONE limit — they do not each get their own.
+    const split = projectPayrollYearEnd(
+      { ...base, ytd: { grossPay: 150000, preTax401kTraditional: 12000, roth401k: 12000 }, remainder: { deferralPercent: 50 } },
+      { taxYear: 2026, age: 45 });
+    approx(split.projected.traditional401k + split.projected.roth401k, LIMIT_402G,
+      'traditional and Roth are capped together, not separately', 1e-6);
+  }
+
+  // ── buildTaxSituation stitches the slice to the 1040 engine ──────────────
+  {
+    const cy = {
+      taxYear: 2026,
+      payroll: [{
+        owner: 'me', asOfDate: '2026-07-02', payFrequency: 'biweekly',
+        ytd: { grossPay: 100000, preTax401kTraditional: 10000, fedWithheld: 15000, stateWithheld: 4000 },
+        remainder: {},
+      }],
+      k1s: [{ label: 'A', isPassive: true, basisStart: 500000,
+              boxes: { b1_ordinaryBusiness: 90000, b19_distributions: 70000, b20z_qbi: 90000 } }],
+      estimatedPayments: { federal: [5000, 5000, 0, 0], state: [] },
+      priorYearReturn: { agi: 300000, totalTax: 62000 },
+      deductions: { mode: 'auto' },
+    };
+    const pi = { filingStatus: 'married_joint', state: 'Missouri', myAge: 45, spouseAge: 43, inflationRate: 0.03 };
+    const sit = buildTaxSituation(cy, pi);
+
+    approx(sit.w2.wages, 180000, 'projected Box 1 reaches the return as wages: 200,000 less 20,000 deferred', 1e-6);
+    approx(sit.w2.socialSecurityWages, 200000, 'while the FICA base stays at the full 200,000', 1e-6);
+    approx(sit.w2.federalWithheld, 30000, 'withholding continues at the YTD rate through year end', 1e-6);
+    eq(sit.payments.estimatedFederal.length, 4, 'the quarterly estimated payments come through');
+    eq(sit.people.length, 2, 'MFJ produces two people for the 65+ and state-exclusion tests');
+
+    const r = computeTaxReturn(sit);
+    approx(r.lines['1a'].amount, 180000, 'and line 1a is the projected Box 1', 1e-6);
+    approx(r.lines['8'].amount, 90000, 'with the K-1 business income on Schedule 1', 1e-6);
+    eq(r.safeHarbor.priorRate, 1.10, 'prior AGI over $150,000 sets the safe harbor at 110%');
+
+    // A cafeteria-plan HSA already left Box 1; deducting it again on Schedule 1
+    // would double-count it, so only a DIRECT contribution is an adjustment.
+    const withHSA = buildTaxSituation({ ...cy, adjustments: { hsaDirectContribution: 4000 } }, pi);
+    eq(withHSA.adjustments.hsaDeduction, 4000, 'a direct HSA contribution is an above-the-line deduction');
+    const payrollHSA = buildTaxSituation({ ...cy,
+      payroll: [{ ...cy.payroll[0], ytd: { ...cy.payroll[0].ytd, hsa: 4000 } }] }, pi);
+    eq(payrollHSA.adjustments.hsaDeduction, 0,
+      'but a payroll HSA is not — it already came out of Box 1 and would otherwise count twice');
+  }
+
+  // ── Traditional vs. Roth, priced on the return rather than on a bracket ──
+  {
+    const cy = {
+      taxYear: 2026,
+      payroll: [{ owner: 'me', asOfDate: '2026-08-01', payFrequency: 'biweekly',
+        ytd: { grossPay: 160000, preTax401kTraditional: 14000, fedWithheld: 28000, stateWithheld: 7000 },
+        remainder: {} }],
+      k1s: [{ label: 'A', isPassive: true, basisStart: 800000,
+              boxes: { b1_ordinaryBusiness: 120000, b19_distributions: 100000,
+                       b20z_qbi: 120000, b20z_w2Wages: 60000 } }],
+      deductions: { mode: 'auto', propertyTax: 9000, mortgageInterest: 14000 },
+    };
+    const pi = { filingStatus: 'married_joint', state: 'Missouri', myAge: 54, spouseAge: 52, inflationRate: 0.03 };
+
+    // Against a low expected withdrawal rate, deferring wins.
+    const vsLow = compareTraditionalVsRoth(cy, pi, 0.12);
+    eq(vsLow.favors, 'traditional', 'a 12% expected withdrawal rate makes deferring the better trade');
+    gt(vsLow.marginalRateNow, 0.12, 'because the rate avoided today is higher than the rate paid later');
+
+    // Against a high one, Roth wins. Same plan, same year — only the future
+    // rate changed, which is the whole comparison.
+    const vsHigh = compareTraditionalVsRoth(cy, pi, 0.60);
+    eq(vsHigh.favors, 'roth', 'a 60% expected withdrawal rate flips the answer to Roth');
+    lt(vsHigh.advantagePerDollar, 0, 'and the advantage per dollar goes negative');
+
+    // The saving is measured on the whole return, so it can exceed the bracket.
+    gt(vsLow.marginalRateNow, 0.22, 'the measured saving beats the headline bracket');
+    eq(typeof vsLow.components.niit, 'number', 'and is decomposed so a surprising rate is explainable');
+
+    // Deferral room is reported per person per employer, because §402(g) is a
+    // per-person cap and "how much more can I defer" is the next question.
+    eq(vsLow.deferralRoom.length, 1, 'deferral room is reported for each payroll row');
+    gt(vsLow.deferralRoom[0].roomRemaining, 0, 'and there is room left to act on');
+
+    // The K-1 adds no deferral capacity. Passive income is not earned income,
+    // so it opens no 401(k), SEP or solo-401(k) room — a natural and expensive
+    // assumption for someone whose K-1 income exceeds their salary.
+    const noK1 = compareTraditionalVsRoth({ ...cy, k1s: [] }, pi, 0.12);
+    eq(noK1.deferralRoom[0].roomRemaining, vsLow.deferralRoom[0].roomRemaining,
+      'removing $120,000 of K-1 income leaves the deferral limit exactly where it was');
+  }
+
+  // ── Empty and partial input must not throw ───────────────────────────────
+  // Phase 3 fills this in from paystubs over the course of a year, so a
+  // half-populated slice is the normal state rather than an error.
+  {
+    const empty = buildTaxSituation({}, {});
+    eq(empty.w2.wages, 0, 'an empty slice produces a zero return, not a crash');
+    eq(computeTaxReturn(empty).lines['24'].amount, 0, 'and no tax');
+    const noYtd = projectPayrollYearEnd({ payFrequency: 'biweekly', ytd: {}, remainder: {} }, { taxYear: 2026, age: 40 });
+    eq(noYtd.projected.grossPay, 0, 'a row with no YTD figures projects to zero rather than NaN');
+    eq(noYtd.deferral.roomRemaining, LIMIT_402G, 'and reports the full deferral limit as available');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
