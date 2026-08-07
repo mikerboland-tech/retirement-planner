@@ -4450,6 +4450,64 @@ const projectPayrollYearEnd = (row = {}, opts = {}) => {
   };
 };
 
+// ── FEEDING THE DETAILED RETURN INTO PROJECTION YEAR 0 ───────────────────────
+// Year 0 of a projection is normally a synthetic full year built from a salary
+// scalar. When the Current Year tab has been filled in, most of that year has
+// actually happened and is known at 1040 granularity — so the projection can
+// start from reality instead of from an estimate, and the IRMAA lookback two
+// years out gets a real MAGI rather than a reconstructed one.
+//
+// This is deliberately NARROW. The override replaces income taxes only, and only
+// when the return describes the whole year. Three things gate it:
+//
+//   1. The user opted in (pi.useDetailedCurrentYear).
+//   2. It is year 0. Later years are forecasts and the detailed return says
+//      nothing about them.
+//   3. No portfolio withdrawal and no Roth conversion happened in year 0. The
+//      return is built from paystubs and K-1s; it does not know about a draw the
+//      withdrawal solver decided on, so its tax would be too low by exactly the
+//      tax on that draw. Rather than patch a partial figure — which would mean
+//      reaching into the 15-iteration solver and is the one change most likely
+//      to destabilise it — the override simply stands down and says why.
+//
+// FICA is NOT overridden. The engine computes it from earned income and the
+// solver reads it while sizing withdrawals; swapping it late would change a
+// number the solver had already used. The returned reconciliation reports both
+// figures so any gap is visible rather than silently absorbed.
+const detailedCurrentYearDecision = ({ yearsFromNow, pi = {}, currentYearReturn = null,
+                                       portfolioWithdrawal = 0, rothConversion = 0 } = {}) => {
+  if (!pi.useDetailedCurrentYear) return { apply: false, reason: 'not-enabled' };
+  if (!currentYearReturn || !currentYearReturn.lines) return { apply: false, reason: 'no-return-supplied' };
+  if (yearsFromNow !== 0) return { apply: false, reason: 'not-current-year' };
+  if (Math.abs(portfolioWithdrawal) > 0.5) {
+    return { apply: false, reason: 'portfolio-withdrawal',
+      message: 'Detailed current-year figures were not applied: this year draws from the portfolio, which the return you entered does not include.' };
+  }
+  if (Math.abs(rothConversion) > 0.5) {
+    return { apply: false, reason: 'roth-conversion',
+      message: 'Detailed current-year figures were not applied: this year includes a Roth conversion, which the return you entered does not include.' };
+  }
+  return { apply: true, reason: 'applied' };
+};
+
+// Map a Form 1040 onto the projection row's tax fields.
+//
+// The engine splits taxes differently from the form: its `federalTax` is income
+// tax (ordinary + preferential + NIIT + penalties) while payroll taxes live in
+// `ficaTax`. Line 24 mixes both. So line 23 is decomposed rather than added
+// wholesale — additional Medicare in particular is ALREADY inside the engine's
+// calculateFICA, and adding it again here would double-count it.
+const taxFieldsFromReturn = (ret) => {
+  const two = (ret.schedules && ret.schedules.two) || {};
+  return {
+    // Income tax proper. Self-employment tax has no engine equivalent, so it is
+    // carried here rather than dropped; additional Medicare is excluded because
+    // calculateFICA already includes it.
+    federalTax: ret.lines['16'].amount + (two.niit || 0) + (two.selfEmploymentTax || 0),
+    stateTax: (ret.state && ret.state.tax) || 0,
+    magi: ret.lines['11'].amount,
+  };
+};
 // ── The projected marginal rate at WITHDRAWAL ────────────────────────────────
 // The other half of the traditional-vs-Roth comparison. Deferring is worth it
 // only if the rate you avoid now beats the rate you pay later, and the point of
@@ -6309,6 +6367,18 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // federal tax because it drives the senior-deduction phaseout (and, further down,
     // the NIIT threshold and the IRMAA lookback record).
     const magi = finalTotalTaxableIncome + preTaxDeduction;
+
+    // Does the detailed current-year return replace this year's figures? Decided
+    // here, after the withdrawal solver has run, because one of the gates is
+    // whether a draw happened (see detailedCurrentYearDecision).
+    const detailedDecision = detailedCurrentYearDecision({
+      yearsFromNow, pi, currentYearReturn: opts.currentYearReturn,
+      portfolioWithdrawal, rothConversion: rothConversionThisYear,
+    });
+    const detailedFields = detailedDecision.apply ? taxFieldsFromReturn(opts.currentYearReturn) : null;
+    // Everything downstream that reports or looks up MAGI uses this, so the real
+    // figure reaches the t+2 IRMAA lookback rather than a reconstructed one.
+    const reportedMagi = detailedFields ? detailedFields.magi : magi;
     federalTax = calculateFederalTax(federalOrdinaryTaxableIncome, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(magi));
     // Retirement income exempt in some states: pension only (401k/IRA withdrawals are NOT exempt)
     const finalRetirementIncome = totalPension;
@@ -6382,7 +6452,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // an earlier version added them a second time, overstating MAGI and pushing
     // IRMAA tiers / NIIT too high whenever there were brokerage gains.
     // Record this year's MAGI so years t+2 onward can apply the IRMAA lookback.
-    magiByYear[yearsFromNow] = magi;
+    magiByYear[yearsFromNow] = reportedMagi;
     const niitTax = calculateNIIT(totalInvestmentIncome, magi, effectiveFilingStatus);
     federalTax += niitTax;
 
@@ -6400,6 +6470,20 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       ? hsaNonQualifiedWithdrawals * HSA_NONQUALIFIED_PENALTY_RATE : 0;
     federalTax += hsaPenalty;
 
+    // ── DETAILED CURRENT-YEAR OVERRIDE ────────────────────────────────────────
+    // Applied here, after every federal component has been summed, so it
+    // replaces the finished figure rather than racing the pieces that build it.
+    // The engine's own numbers are kept alongside: a projection whose year 0
+    // silently disagrees with the Current Year tab is worse than one that shows
+    // both and lets you see the gap.
+    let engineFederalTax = null, engineStateTax = null;
+    if (detailedFields) {
+      engineFederalTax = federalTax;
+      engineStateTax = stateTax;
+      federalTax = detailedFields.federalTax;
+      stateTax = detailedFields.stateTax;
+    }
+
     // ── MEDICARE IRMAA SURCHARGE ──────────────────────────────────────────────
     // IRMAA adds surcharges to Part B and Part D premiums for high-income beneficiaries.
     // Based on MAGI from TWO YEARS PRIOR (real Medicare lookback), applied against
@@ -6410,7 +6494,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     let irmaaInfo = null; // IRMAA tier detail for display components
     const numMedicareEligible = age65Count; // same predicate as the 65+ deductions
     if (numMedicareEligible > 0) {
-      const irmaaMAGI = irmaaLookbackMAGI !== null ? irmaaLookbackMAGI : magi;
+      const irmaaMAGI = irmaaLookbackMAGI !== null ? irmaaLookbackMAGI : reportedMagi;
       const irmaaResult = calculateIRMAASurcharge(irmaaMAGI, effectiveFilingStatus, taxIndexYears, pi.inflationRate, numMedicareEligible);
       irmaaSurcharge = irmaaResult.totalSurcharge;
       // Store IRMAA detail for display components (avoids independent recalculation).
@@ -6427,7 +6511,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Left undefined in the top tier: there is no further cliff to fall off,
       // and reporting a distance of 0 or Infinity would both read as "you are
       // about to cross something".
-      const nextTier = nextIRMAAThreshold(magi, effectiveFilingStatus, taxIndexYears + 2, pi.inflationRate);
+      const nextTier = nextIRMAAThreshold(reportedMagi, effectiveFilingStatus, taxIndexYears + 2, pi.inflationRate);
       if (nextTier) irmaaInfo.distToNextTier = Math.round(nextTier.distance);
     }
     
@@ -6622,9 +6706,20 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       federalDeduction: Math.round(adjustedDeduction),
       age65Count, // living people 65+ (drives Medicare/IRMAA billing)
       age65OnReturn, // people 65+ the tax return covers (includes a decedent in their final year)
-      magi: Math.round(magi), // Modified Adjusted Gross Income (gains-inclusive AGI with pre-tax deduction added back)
+      magi: Math.round(reportedMagi), // Modified Adjusted Gross Income (gains-inclusive AGI with pre-tax deduction added back)
       stateTaxableIncome: Math.round(stateTaxableIncome), // State taxable income after SS/retirement exclusions and deduction
       federalTax: Math.round(federalTax),
+      // Present only on year 0, and only when the Current Year tab supplied a
+      // return. `detailedCurrentYear` says the override took; when it did not,
+      // `detailedCurrentYearReason` says why, so a view can explain the
+      // difference instead of leaving the user to notice it.
+      detailedCurrentYear: !!detailedFields,
+      detailedCurrentYearReason: detailedDecision.reason,
+      detailedCurrentYearMessage: detailedDecision.message || null,
+      // What the engine itself would have said. Kept so the two views can be
+      // reconciled rather than quietly diverging.
+      engineFederalTax: engineFederalTax === null ? null : Math.round(engineFederalTax),
+      engineStateTax: engineStateTax === null ? null : Math.round(engineStateTax),
       // §72(t) additional tax, already included in federalTax above. Broken out
       // so the UI can show it as its own line — it is the dominant cost of an
       // early-retirement withdrawal plan and shouldn't hide inside "federal tax".
@@ -6729,6 +6824,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     computeTaxReturn, marginalRateOn,
     PAY_PERIODS_PER_YEAR, payPeriodsElapsed, projectPayrollYearEnd,
     buildTaxSituation, compareTraditionalVsRoth, projectedWithdrawalRate,
+    detailedCurrentYearDecision, taxFieldsFromReturn,
     routeK1, applyPartnerBasis, applyPassiveLossRules, computeScheduleD,
     qbiDeduction, safeHarborRequirement, computeScheduleA,
     applyItemizedBenefitCap, computeScheduleSE,

@@ -5078,6 +5078,159 @@ section('P42 — the projected withdrawal rate, which is the other half of the t
   eq(projectedWithdrawalRate(null, {}).sample, 0, 'a null projection is handled rather than thrown on');
 }
 
+section('P43 — feeding the detailed current-year return into projection year 0');
+{
+  // Year 0 of a projection is normally a synthetic full year built from a salary
+  // scalar. When the Current Year tab has been filled in, most of that year has
+  // already happened and is known at 1040 granularity — so the plan can start
+  // from reality, and the IRMAA lookback two years out gets a real MAGI.
+  //
+  // This is the riskiest change in the series: year 0 is where the withdrawal
+  // solver, Monte Carlo, the SS grid and the Roth optimizer all begin. The
+  // governing requirement is therefore not that the override works but that it
+  // is INERT when switched off.
+  const { computeTaxReturn, buildTaxSituation, detailedCurrentYearDecision,
+          taxFieldsFromReturn } = engine;
+
+  const basePi = {
+    myAge: 54, spouseAge: 52, myBirthYear: TODAY_YEAR - 54, spouseBirthYear: TODAY_YEAR - 52,
+    myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 90,
+    filingStatus: 'married_joint', state: 'Missouri', inflationRate: 0.03,
+    desiredRetirementIncome: 140000, withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+    healthcareModel: 'none', medicalInflation: 0,
+  };
+  const accts = [{ id: 1, name: '401k', type: '401k', balance: 1400000,
+                   contribution: 24500, cagr: 0.06, startAge: 54, stopAge: 65, owner: 'me' }];
+  const streams = [{ id: 1, name: 'Salary', type: 'earned_income', amount: 250000,
+                     startAge: 54, endAge: 65, cola: 0.03, owner: 'me' }];
+  const cy = {
+    taxYear: 2026,
+    payroll: [{ id: 1, owner: 'me', asOfDate: '2026-08-07', payFrequency: 'biweekly',
+      ytd: { grossPay: 154000, preTax401kTraditional: 14500, hsa: 3000,
+             section125Health: 3000, fedWithheld: 26000, stateWithheld: 6800 }, remainder: {} }],
+    k1s: [{ id: 2, label: 'A', isPassive: true, basisStart: 400000,
+            boxes: { b1_ordinaryBusiness: 85000, b19_distributions: 60000, b20z_qbi: 85000 } }],
+    estimatedPayments: { federal: [6000, 6000, 0, 0], state: [] },
+    priorYearReturn: { agi: 372000, totalTax: 84000 },
+    otherIncome: { taxableInterest: 3200, qualifiedDividends: 8000 },
+    adjustments: {}, deductions: { mode: 'auto', propertyTax: 9800, mortgageInterest: 14500 },
+  };
+  const ret = computeTaxReturn(buildTaxSituation(cy, basePi));
+  const runPlain = () => computeProjections(basePi, accts, streams, [], [], [], 2026);
+  const runWith = (piOver, o) => computeProjections({ ...basePi, ...piOver },
+    accts, streams, [], [], [], 2026, o);
+
+  // ── The requirement that matters most: inert when off ────────────────────
+  // Not "close" — identical. Anything else means the override leaked into a
+  // path it was never supposed to touch.
+  // The explanatory fields are EXPECTED to differ — reporting "no return was
+  // supplied" rather than "the feature is off" is the whole point of them. So
+  // the comparison strips those three and asserts every COMPUTED value matches.
+  const computedOnly = (rows) => JSON.stringify(rows.map(r => {
+    const { detailedCurrentYear, detailedCurrentYearReason, detailedCurrentYearMessage,
+            ...rest } = r;
+    return rest;
+  }));
+
+  eq(JSON.stringify(runPlain()), JSON.stringify(runPlain()),
+    'the projection is deterministic, so a byte comparison is meaningful at all');
+  eq(computedOnly(runWith({}, { currentYearReturn: ret })), computedOnly(runPlain()),
+    'supplying a return WITHOUT the opt-in flag changes no computed value');
+  eq(computedOnly(runWith({ useDetailedCurrentYear: true }, {})), computedOnly(runPlain()),
+    'and setting the flag without supplying a return changes none either');
+  // The reason field still distinguishes the two, which is what a UI needs to
+  // explain itself rather than silently doing nothing.
+  eq(runWith({ useDetailedCurrentYear: true }, {})[0].detailedCurrentYearReason, 'no-return-supplied',
+    'flag on but nothing entered yet reports that, specifically');
+  eq(runPlain()[0].detailedCurrentYearReason, 'not-enabled',
+    'while the feature being off reports something different');
+
+  // ── With both, year 0 takes the return's figures ─────────────────────────
+  const on = runWith({ useDetailedCurrentYear: true }, { currentYearReturn: ret });
+  const off = runPlain();
+  eq(on[0].detailedCurrentYear, true, 'year 0 reports that the detailed figures were applied');
+  eq(off[0].detailedCurrentYear, false, 'and reports the opposite when they were not');
+
+  const expected = taxFieldsFromReturn(ret);
+  eq(on[0].federalTax, Math.round(expected.federalTax), 'year 0 federal tax comes from the return');
+  eq(on[0].stateTax, Math.round(expected.stateTax), 'and so does state tax');
+  eq(on[0].magi, Math.round(expected.magi), 'and MAGI, which is what the IRMAA lookback will read');
+
+  // The gap is the entire point: the synthetic year knows only about the salary
+  // stream and cannot see the K-1 at all.
+  gt(on[0].federalTax, off[0].federalTax,
+    'the detailed figure is higher — the synthetic year had no idea the K-1 existed');
+  eq(on[0].engineFederalTax, off[0].federalTax,
+    'the engine\'s own figure is kept alongside, so the two views can be reconciled');
+  eq(on[0].engineStateTax, off[0].stateTax, 'for state tax too');
+  eq(off[0].engineFederalTax, null, 'and is null when no override happened, rather than a duplicate');
+
+  // ── Only year 0 moves ────────────────────────────────────────────────────
+  // A detailed return says nothing about 2041. If a later year changed, the
+  // override leaked into the forecast.
+  eq(computedOnly(on.slice(1)), computedOnly(off.slice(1)),
+    'every year after the first is untouched, value for value');
+
+  // ── The gates ────────────────────────────────────────────────────────────
+  {
+    const d = (over) => detailedCurrentYearDecision({
+      yearsFromNow: 0, pi: { useDetailedCurrentYear: true },
+      currentYearReturn: ret, portfolioWithdrawal: 0, rothConversion: 0, ...over });
+
+    eq(d({}).apply, true, 'the ordinary case applies');
+    eq(d({ yearsFromNow: 3 }).apply, false, 'a later year never does — the return describes one year');
+    eq(d({ pi: {} }).apply, false, 'nor without the opt-in');
+    eq(d({ currentYearReturn: null }).apply, false, 'nor without a return');
+
+    // The important stand-downs. The return is built from paystubs and K-1s; it
+    // cannot know about a draw the solver decided on, so its tax would be short
+    // by exactly the tax on that draw. Patching a partial figure would mean
+    // reaching into the 15-iteration solver — the one change most likely to
+    // destabilise it — so the override stands down instead, and says why.
+    const w = d({ portfolioWithdrawal: 40000 });
+    eq(w.apply, false, 'a portfolio withdrawal stands the override down');
+    eq(w.reason, 'portfolio-withdrawal', 'with a reason a view can act on');
+    gt((w.message || '').length, 0, 'and a message that explains it in plain words');
+
+    const c = d({ rothConversion: 50000 });
+    eq(c.apply, false, 'so does a Roth conversion');
+    eq(c.reason, 'roth-conversion', 'also with its own reason');
+
+    // A rounding-sized figure is not a withdrawal.
+    eq(d({ portfolioWithdrawal: 0.2 }).apply, true,
+      'a sub-dollar residual does not count as a draw');
+  }
+
+  // ── A retired household draws, so the override correctly declines ────────
+  {
+    const retiredPi = { ...basePi, myAge: 70, spouseAge: 68,
+      myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 68,
+      myRetirementAge: 65, spouseRetirementAge: 65, useDetailedCurrentYear: true };
+    const rows = computeProjections(retiredPi, accts, [], [], [], [], 2026,
+      { currentYearReturn: ret });
+    eq(rows[0].detailedCurrentYear, false,
+      'a retired year draws from the portfolio, so the detailed figures are not applied');
+    eq(rows[0].detailedCurrentYearReason, 'portfolio-withdrawal',
+      'and the row records why rather than leaving it a mystery');
+    gt((rows[0].detailedCurrentYearMessage || '').length, 0,
+      'with a message the UI can surface');
+  }
+
+  // ── The mapping between form and engine ──────────────────────────────────
+  {
+    // The engine splits taxes differently from the form: its federalTax is
+    // income tax while payroll taxes live in ficaTax. Line 24 mixes both, so it
+    // is decomposed rather than copied. Additional Medicare in particular is
+    // already inside calculateFICA, and adding it again would double-count.
+    const f = taxFieldsFromReturn(ret);
+    approx(f.federalTax, ret.lines['16'].amount + ret.schedules.two.niit + ret.schedules.two.selfEmploymentTax,
+      'federal tax is line 16 plus NIIT plus any self-employment tax', 1e-9);
+    lt(f.federalTax, ret.lines['24'].amount,
+      'which is strictly less than line 24, because additional Medicare is left to FICA');
+    approx(f.magi, ret.lines['11'].amount, 'MAGI is line 11', 1e-9);
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

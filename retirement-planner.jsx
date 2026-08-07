@@ -44,6 +44,7 @@ const {
   conversionCostComponents, topMarginalBracket,
   computeTaxReturn, buildTaxSituation, compareTraditionalVsRoth,
   projectPayrollYearEnd, marginalRateOn, saltCapFor, projectedWithdrawalRate,
+  detailedCurrentYearDecision,
 } = PlannerEngine;
 
 // ============================================
@@ -1195,6 +1196,14 @@ function FAQTab() {
         {
           q: "What is the safe harbor, and why does it want last year's return?",
           a: "Under IRC Section 6654 you avoid an underpayment penalty by paying the LESSER of 90% of this year's tax or 100% of last year's (110% if last year's AGI topped $150,000). The prior-year test is usually the cheaper one and is the only one you can compute with certainty before the year ends — which is why two lines off last year's Form 1040, AGI and total tax, are worth entering. Note that withholding counts as paid evenly across the year no matter when it is withheld, so raising withholding in December can cure a shortfall that a Q4 estimated payment cannot."
+        },
+        {
+          q: "What does 'Use these figures in the 40-year plan' do?",
+          a: "Year one of the long-range projection is normally a synthetic year built from a single salary figure — it cannot see a K-1, an itemized deduction, or what you have actually withheld. Switching this on replaces that first year's income taxes with the return on this tab, and gives the Medicare IRMAA lookback a real MAGI two years out instead of a reconstructed one. Only the first year changes; every later year is still a forecast and is untouched. Social Security and Medicare tax stay on the plan's own calculation, because the withdrawal engine reads that figure while it works. The tool shows you both numbers and the difference between them rather than quietly swapping one for the other."
+        },
+        {
+          q: "Why did it say the detailed figures were not applied?",
+          a: "The override stands down when the year includes a portfolio withdrawal or a Roth conversion. The return on this tab is built from paystubs and K-1s, so it does not know about a draw the withdrawal engine decided on, and its tax would be short by exactly the tax on that draw. Rather than patch a partial figure, the tool declines and tells you why. In practice this means the feature applies to working years and steps aside once you are drawing from the portfolio."
         },
         {
           q: "What is NOT modeled here?",
@@ -3483,7 +3492,7 @@ function K1Row({ k1, onChange, onDelete, detail }) {
   );
 }
 
-function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, projections }) {
+function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, projections, setPersonalInfo }) {
   const [openInfoCard, setOpenInfoCard] = React.useState(null);
   const [showPrior, setShowPrior] = React.useState(false);
   const [rateOverride, setRateOverride] = React.useState(null);
@@ -3948,6 +3957,73 @@ function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, pro
             </div>
           </div>
         )}
+      </div>
+
+      {/* ── Feed it into the long-range plan ───────────────────────────── */}
+      <div className={cardStyle}>
+        <div className="flex items-start justify-between gap-4 mb-2">
+          <div>
+            <h4 className="text-lg font-semibold text-slate-100">Use these figures in the 40-year plan</h4>
+            <p className="text-sm text-slate-400 mt-1">
+              Year one of your long-range projection is normally a synthetic year built from a single
+              salary figure. It cannot see a K-1, an itemized deduction, or what you have actually
+              withheld. Switching this on replaces that first year with the return above.
+            </p>
+          </div>
+          <label className="flex items-center gap-2 shrink-0 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={!!personalInfo.useDetailedCurrentYear}
+              onChange={(e) => setPersonalInfo({ ...personalInfo, useDetailedCurrentYear: e.target.checked })}
+              className="w-4 h-4 accent-amber-500"
+            />
+            <span className="text-sm text-slate-300">Use detailed figures</span>
+          </label>
+        </div>
+
+        {(() => {
+          const yr0 = (projections || [])[0];
+          if (!yr0) return null;
+          if (!personalInfo.useDetailedCurrentYear) {
+            return (
+              <p className="text-xs text-slate-500">
+                Currently off. The long-range plan is using its own estimate for {cy.taxYear}.
+              </p>
+            );
+          }
+          if (!yr0.detailedCurrentYear) {
+            return (
+              <div className="text-xs px-3 py-2 rounded bg-amber-900/25 text-amber-300">
+                {yr0.detailedCurrentYearMessage
+                  || 'Detailed figures are switched on but were not applied to this year.'}
+                {' '}The plan is using its own estimate for {cy.taxYear} instead.
+              </div>
+            );
+          }
+          return (
+            <div className="text-xs text-slate-400 space-y-1">
+              <div className="flex justify-between">
+                <span>Federal income tax the plan would have assumed</span>
+                <span className="text-slate-300">{formatCurrency(yr0.engineFederalTax)}</span></div>
+              <div className="flex justify-between">
+                <span>Federal income tax from the return above</span>
+                <span className="text-slate-100 font-medium">{formatCurrency(yr0.federalTax)}</span></div>
+              <div className="flex justify-between border-t border-slate-700 pt-1">
+                <span className="text-slate-300">Difference</span>
+                <span className={yr0.federalTax > yr0.engineFederalTax ? 'text-amber-300 font-medium' : 'text-emerald-300 font-medium'}>
+                  {formatCurrency(Math.abs(yr0.federalTax - yr0.engineFederalTax))}
+                  {yr0.federalTax > yr0.engineFederalTax ? ' more than it assumed' : ' less than it assumed'}</span></div>
+              <p className="text-[11px] text-slate-500 pt-2">
+                Only this first year changes; every later year is still a forecast and is untouched.
+                Social Security and Medicare tax also stay on the plan&rsquo;s own calculation, because the
+                withdrawal engine reads that figure while it works. Monte Carlo, the Social Security
+                grid and the Roth optimizer run their own projections and still use the estimate — for a
+                working year that makes no difference to a balance, since the tax is paid out of salary
+                rather than the portfolio.
+              </p>
+            </div>
+          );
+        })()}
       </div>
     </div>
   );
@@ -15012,9 +15088,22 @@ function RetirementPlanner() {
   // (above this function) so they aren't recreated on every render.
 
 
+  // The current-year return, derived from the Current Year tab. Depends only on
+  // that slice and personalInfo — never on `projections` — so feeding it into the
+  // projection below is a straight line and not a cycle. Guarded because a
+  // half-filled slice is the normal state while the year is in progress.
+  const currentYearReturn = useMemo(() => {
+    try { return computeTaxReturn(buildTaxSituation(currentYearData, personalInfo)); }
+    catch (e) { return null; }
+  }, [currentYearData, personalInfo]);
+
   const projections = useMemo(() => {
-    return computeProjections(personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
-  }, [accounts, incomeStreams, assets, personalInfo, oneTimeEvents, recurringExpenses, currentYear]);
+    // Year 0 uses the detailed return when the user has opted in and it applies.
+    // The engine decides whether it applies and records why if it does not; see
+    // detailedCurrentYearDecision. With the flag off this argument is inert.
+    return computeProjections(personalInfo, accounts, incomeStreams, assets, oneTimeEvents,
+      recurringExpenses, undefined, { currentYearReturn });
+  }, [accounts, incomeStreams, assets, personalInfo, oneTimeEvents, recurringExpenses, currentYear, currentYearReturn]);
   
   // Input validation helper
   const validateAccount = (account) => {
@@ -15330,7 +15419,7 @@ function RetirementPlanner() {
             {activeTab === 'socialsecurity' && <SocialSecurityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
             {activeTab === 'scenarios' && <ScenarioComparisonTab activeScenarioId={activeScenarioId} assets={assets} computeProjections={computeProjections} createScenario={createScenario} deleteScenario={deleteScenario} loadScenario={loadScenario} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} scenarios={scenarios} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
-            {activeTab === 'currentyear' && <CurrentYearTab currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} />}
+            {activeTab === 'currentyear' && <CurrentYearTab currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'withdrawal' && <WithdrawalStrategiesTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} />}
             {activeTab === 'montecarlo' && <MonteCarloTab accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'stresstest' && <StressTestTab accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
