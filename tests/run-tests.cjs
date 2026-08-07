@@ -5028,6 +5028,56 @@ section('P41 — year-to-date payroll, the Box 1 / Box 3-5 split, and the tradit
   }
 }
 
+section('P42 — the projected withdrawal rate, which is the other half of the traditional-vs-Roth trade');
+{
+  // Deferring is worth it only when the rate you avoid now beats the rate you
+  // pay later. The first half is measured on the current-year return; this is
+  // the second half, read off the long-range projection. It lives in the engine
+  // rather than in the tab so it can be tested at all.
+  const { projectedWithdrawalRate, topMarginalBracket, STANDARD_DEDUCTION_2026 } = engine;
+
+  const rows = (taxables) => taxables.map((t, i) => ({
+    myAge: 65 + i, year: 2036 + i, filingStatus: 'married_joint',
+    taxableIncome: t + STANDARD_DEDUCTION_2026.married_joint,
+    federalDeduction: STANDARD_DEDUCTION_2026.married_joint,
+  }));
+
+  // The MEDIAN, not the mean: one unusual year — a large conversion, a home
+  // sale, the first RMD — must not set the whole answer.
+  const spiky = projectedWithdrawalRate(rows([40000, 45000, 50000, 55000, 2000000]),
+    { myRetirementAge: 65, filingStatus: 'married_joint', inflationRate: 0 });
+  eq(spiky.sample, 5, 'all five retirement years are considered');
+  eq(spiky.rate, 0.12, 'a single 37% year does not drag the median off the 12% bracket');
+  eq(spiky.high, 0.37, 'but the range still reports it, so the outlier is visible rather than hidden');
+  eq(spiky.low, 0.12, 'and the bottom of the range too');
+
+  // Pre-retirement years are excluded — the question is the rate at WITHDRAWAL.
+  const mixed = [
+    { myAge: 60, year: 2031, filingStatus: 'married_joint', taxableIncome: 900000, federalDeduction: 32200 },
+    ...rows([40000, 40000, 40000]),
+  ];
+  const only = projectedWithdrawalRate(mixed, { myRetirementAge: 65, filingStatus: 'married_joint', inflationRate: 0 });
+  eq(only.sample, 3, 'working years are not part of the withdrawal-rate estimate');
+  eq(only.rate, 0.12, 'so a high-earning pre-retirement year cannot inflate it');
+
+  // Brackets are indexed from the row's own calendar year (see P39), so a plan
+  // whose nominal income grows with inflation does not drift up a bracket for
+  // that reason alone.
+  const flat = projectedWithdrawalRate(
+    [{ myAge: 70, year: 2046, filingStatus: 'married_joint',
+       taxableIncome: 100000 * Math.pow(1.03, 20) + 32200 * Math.pow(1.03, 20),
+       federalDeduction: 32200 * Math.pow(1.03, 20) }],
+    { myRetirementAge: 65, filingStatus: 'married_joint', inflationRate: 0.03 });
+  eq(flat.rate, topMarginalBracket(100000, 'married_joint', 0, 0.03),
+    'an income that merely kept pace with inflation lands in the same real bracket 20 years out');
+
+  // Degenerate inputs: a plan with no retirement years yet must not throw.
+  const none = projectedWithdrawalRate([], { myRetirementAge: 65 });
+  eq(none.rate, 0, 'no projected retirement years yields a zero rate');
+  eq(none.sample, 0, 'and says so, rather than implying a confident estimate');
+  eq(projectedWithdrawalRate(null, {}).sample, 0, 'a null projection is handled rather than thrown on');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

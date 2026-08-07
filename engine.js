@@ -4450,6 +4450,34 @@ const projectPayrollYearEnd = (row = {}, opts = {}) => {
   };
 };
 
+// ── The projected marginal rate at WITHDRAWAL ────────────────────────────────
+// The other half of the traditional-vs-Roth comparison. Deferring is worth it
+// only if the rate you avoid now beats the rate you pay later, and the point of
+// having a 40-year projection is that it can answer the second part.
+//
+// Uses the MEDIAN across retirement years rather than a single year, so one
+// unusual year — a large conversion, a home sale, the first RMD — does not set
+// the whole answer. The full range is returned alongside it, because a plan
+// spanning 10% to 32% is a materially different decision from one pinned at 22%
+// even when the medians agree.
+const projectedWithdrawalRate = (projections, pi = {}) => {
+  const retireAge = pi.myRetirementAge || 65;
+  const rows = (projections || []).filter(p => p && p.myAge >= retireAge);
+  if (!rows.length) return { rate: 0, sample: 0, low: 0, high: 0 };
+  const rates = rows.map(p => topMarginalBracket(
+    Math.max(0, (p.taxableIncome || 0) - (p.federalDeduction || 0)),
+    p.filingStatus || pi.filingStatus,
+    (p.year || BASE_TAX_YEAR) - BASE_TAX_YEAR,
+    pi.inflationRate || 0.03
+  )).sort((a, b) => a - b);
+  return {
+    rate: rates[Math.floor(rates.length / 2)],
+    sample: rates.length,
+    low: rates[0],
+    high: rates[rates.length - 1],
+  };
+};
+
 // ── Assemble a `situation` for computeTaxReturn from the currentYear slice ───
 // One place where the app's stored shape becomes the tax engine's input shape,
 // so the UI never has to know how a paystub turns into a 1040 line.
@@ -6700,7 +6728,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // ── Form 1040 current-year return ─────────────────────────────────────
     computeTaxReturn, marginalRateOn,
     PAY_PERIODS_PER_YEAR, payPeriodsElapsed, projectPayrollYearEnd,
-    buildTaxSituation, compareTraditionalVsRoth,
+    buildTaxSituation, compareTraditionalVsRoth, projectedWithdrawalRate,
     routeK1, applyPartnerBasis, applyPassiveLossRules, computeScheduleD,
     qbiDeduction, safeHarborRequirement, computeScheduleA,
     applyItemizedBenefitCap, computeScheduleSE,

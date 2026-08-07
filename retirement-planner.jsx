@@ -42,6 +42,8 @@ const {
   HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
   computeProjections, compareClaimingScenarios,
   conversionCostComponents, topMarginalBracket,
+  computeTaxReturn, buildTaxSituation, compareTraditionalVsRoth,
+  projectPayrollYearEnd, marginalRateOn, saltCapFor, projectedWithdrawalRate,
 } = PlannerEngine;
 
 // ============================================
@@ -1156,6 +1158,51 @@ function FAQTab() {
       ]
     },
     {
+      category: "Current Year Tax Detail",
+      items: [
+        {
+          q: "What is the Current Year tab for?",
+          a: "Decisions with a December 31 deadline. The rest of this app projects decades; that horizon cannot tell you whether to send your next paycheck's deferral to traditional or Roth, whether to raise withholding, or whether you are about to cross a threshold that costs more than your tax bracket suggests. This tab builds a projected Form 1040 for the year in progress, at real line-number granularity, so you can act on it and later reconcile it against the return you actually file."
+        },
+        {
+          q: "Why does it ask for a paystub instead of my salary?",
+          a: "A paystub carries year-to-date totals in its own columns, so one recent stub per employer pins everything you have earned, deferred and withheld so far. Only the remaining pay periods have to be projected — and those are the only part you can still change. It also separates W-2 Box 1 from Box 3/5, which a single salary figure cannot."
+        },
+        {
+          q: "Why does Box 1 matter so much?",
+          a: "Traditional 401(k) deferrals reduce Box 1 (federal taxable wages) but NOT Box 3/5 (Social Security and Medicare wages). Section 125 health premiums and payroll HSA contributions reduce both. Roth deferrals reduce neither. That asymmetry is the whole traditional-versus-Roth question: deferring saves income tax and never saves FICA, so the comparison is against your future income-tax rate alone."
+        },
+        {
+          q: "Why is my marginal rate higher than my tax bracket?",
+          a: "Because a bracket is only part of what the next dollar costs. The tool measures your marginal rate by computing the entire return twice and taking the difference, so it picks up the 3.8% net investment income tax, the SALT deduction phasing out at 30 cents per dollar of income, the Section 199A deduction shrinking through its phase-in range, the 0.5%-of-AGI charitable floor rising, and the 0.9% additional Medicare tax. In some income bands these stack to a marginal rate ten points or more above the bracket — and then fall back once the phase-outs finish. None of that is visible in a bracket table."
+        },
+        {
+          q: "Why does my K-1 income not increase how much I can defer?",
+          a: "Retirement plan contributions require EARNED income. A passive partnership interest produces investment income, not compensation, so it opens no 401(k), SEP or solo-401(k) capacity however large it is. The Section 402(g) limit is also per person per year, not per account: traditional and Roth share one limit, and a second employer's plan shares it too."
+        },
+        {
+          q: "What does 'passive' mean on a K-1, and why does the tool ask?",
+          a: "Material participation is a specific test under IRC Section 469. If you do not materially participate, the income is passive: it carries the 3.8% net investment income tax under Section 1411, and any loss can only offset other passive income rather than your wages. If you do materially participate, the income escapes that surtax. The tool defaults to passive because that is both the common case for an interest held as an investment and the conservative assumption — but it is worth confirming with your preparer, because it is worth 3.8%."
+        },
+        {
+          q: "Why does it show income I never received?",
+          a: "A partner is taxed on their distributive share of partnership income whether or not cash was distributed. When the taxable share exceeds the cash, the difference is often called phantom income, and the tax on it has to be funded from somewhere else. The tool reports both figures and the gap between them."
+        },
+        {
+          q: "It says I should itemize, but I always take the standard deduction.",
+          a: "The SALT cap rose from $10,000 to $40,400 for 2026 under the One Big Beautiful Bill Act. For anyone paying meaningful state income and property tax, that alone can move the answer. The tool computes both figures every time and tells you which is larger, rather than assuming."
+        },
+        {
+          q: "What is the safe harbor, and why does it want last year's return?",
+          a: "Under IRC Section 6654 you avoid an underpayment penalty by paying the LESSER of 90% of this year's tax or 100% of last year's (110% if last year's AGI topped $150,000). The prior-year test is usually the cheaper one and is the only one you can compute with certainty before the year ends — which is why two lines off last year's Form 1040, AGI and total tax, are worth entering. Note that withholding counts as paid evenly across the year no matter when it is withheld, so raising withholding in December can cure a shortfall that a Q4 estimated payment cannot."
+        },
+        {
+          q: "What is NOT modeled here?",
+          a: "The alternative minimum tax; the child tax credit and other dependent credits; RSU and ESPP vest timing; multi-state K-1 sourcing, nonresident filings and composite returns; the at-risk limitation of Section 465; the annualized income installment method for Section 6654 (which can matter when income lands unevenly across the year); state-level estimated payment penalties; and the Roth 5-year clocks. Amounts shown are projections from the figures you enter, not tax advice — check anything consequential with your preparer."
+        }
+      ]
+    },
+    {
       category: "Data Storage & Privacy",
       items: [
         {
@@ -1164,7 +1211,7 @@ function FAQTab() {
         },
         {
           q: "How do I backup my data?",
-          a: "Use the Import/Export button in the header to download a JSON backup file. This file contains all your personal info, accounts, income streams, recurring expenses, one-time events, assets, and visibility settings. You can import this file later to restore your data, or share it across devices."
+          a: "Use the Import/Export button in the header to download a JSON backup file. This file contains all your personal info, accounts, income streams, recurring expenses, one-time events, assets, and visibility settings — and, if you have filled in the Current Year tab, your year-to-date wages, deferrals, withholding and K-1 figures. Treat an exported file with that in mind: it is ordinary financial detail, not encrypted, and it sits wherever your browser puts downloads. You can import it later to restore your data, or move it to another device."
         },
         {
           q: "How do I clear my data for sharing?",
@@ -3201,6 +3248,711 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
     </div>
   );
 }
+
+// ── CURRENT YEAR ─────────────────────────────────────────────────────────────
+// Everything else in this app answers "what does 2041 look like". This tab
+// answers "what should I do before December 31", which needs a different kind of
+// input: what has ALREADY happened this year, at the granularity a real return
+// uses. The engine side is computeTaxReturn / buildTaxSituation.
+//
+// Module scope, like every other tab — defining a component inside
+// RetirementPlanner remounts the subtree on each parent render and loses focus
+// mid-keystroke (see the comments at the modal definitions).
+
+// A labelled money cell for the dense YTD and K-1 grids. Wraps CurrencyCell so
+// every one of the ~30 numeric inputs on this tab behaves identically.
+function MoneyField({ label, value, onChange, hint, wide }) {
+  return (
+    <div className={wide ? 'col-span-2' : ''}>
+      <label className="block text-[11px] text-slate-400 mb-1 leading-tight" title={hint || label}>{label}</label>
+      <CurrencyCell
+        value={value || 0}
+        onValueChange={onChange}
+        className="w-full bg-slate-900/70 border border-slate-600/50 rounded px-2 py-1.5 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+      />
+    </div>
+  );
+}
+
+// One paystub row. `ytd` is copied straight off the stub — the stub's own YTD
+// columns are the input, so nothing has to be derived or reconstructed.
+function PayrollRow({ row, onChange, onDelete, projected, hasSpouse }) {
+  const [open, setOpen] = React.useState(!row.ytd || !row.ytd.grossPay);
+  const setYtd = (k, v) => onChange({ ...row, ytd: { ...row.ytd, [k]: v } });
+  const setRem = (k, v) => onChange({ ...row, remainder: { ...row.remainder, [k]: v } });
+
+  return (
+    <div className="bg-slate-800/40 border border-slate-700/50 rounded-lg p-3 mb-3">
+      <div className="flex flex-wrap items-end gap-2 mb-2">
+        {hasSpouse && (
+          <div>
+            <label className="block text-[11px] text-slate-400 mb-1">Whose</label>
+            <GridSelect
+              value={row.owner || 'me'}
+              onChange={(e) => onChange({ ...row, owner: e.target.value })}
+              options={[{ value: 'me', label: 'Me' }, { value: 'spouse', label: 'Spouse' }]}
+              className="bg-slate-900/70 border border-slate-600/50 rounded px-2 py-1.5 text-sm text-slate-100"
+            />
+          </div>
+        )}
+        <div className="flex-1 min-w-[140px]">
+          <label className="block text-[11px] text-slate-400 mb-1">Employer (optional)</label>
+          <input
+            type="text" value={row.employerLabel || ''} placeholder="e.g. Acme"
+            onChange={(e) => onChange({ ...row, employerLabel: e.target.value })}
+            className="w-full bg-slate-900/70 border border-slate-600/50 rounded px-2 py-1.5 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+          />
+        </div>
+        <div>
+          <label className="block text-[11px] text-slate-400 mb-1">Paystub date</label>
+          <input
+            type="date" value={row.asOfDate || ''}
+            onChange={(e) => onChange({ ...row, asOfDate: e.target.value })}
+            className="bg-slate-900/70 border border-slate-600/50 rounded px-2 py-1.5 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+          />
+        </div>
+        <div>
+          <label className="block text-[11px] text-slate-400 mb-1">Paid</label>
+          <GridSelect
+            value={row.payFrequency || 'biweekly'}
+            onChange={(e) => onChange({ ...row, payFrequency: e.target.value })}
+            options={[
+              { value: 'weekly', label: 'Weekly' }, { value: 'biweekly', label: 'Every 2 weeks' },
+              { value: 'semimonthly', label: 'Twice a month' }, { value: 'monthly', label: 'Monthly' },
+            ]}
+            className="bg-slate-900/70 border border-slate-600/50 rounded px-2 py-1.5 text-sm text-slate-100"
+          />
+        </div>
+        <button onClick={() => setOpen(!open)}
+          className="px-2 py-1.5 text-xs bg-slate-700 hover:bg-slate-600 text-slate-200 rounded">
+          {open ? '− Hide stub' : '+ Enter stub'}
+        </button>
+        <button onClick={onDelete} tabIndex={-1} title="Remove this employer"
+          className="px-2 py-1.5 text-red-400 hover:text-red-300 text-sm">✕</button>
+      </div>
+
+      {projected && (
+        <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-400 mb-2">
+          <span>{projected.periodsElapsed} of {projected.periodsPerYear} pay periods done,
+            <span className="text-slate-200"> {projected.periodsRemaining} left</span></span>
+          <span>Projected gross <span className="text-slate-200">{formatCurrency(projected.projected.grossPay)}</span></span>
+          <span title="W-2 Box 1 — reduced by traditional deferrals">
+            Box 1 <span className="text-amber-300">{formatCurrency(projected.projected.fedTaxableWages)}</span></span>
+          <span title="W-2 Box 3/5 — NOT reduced by traditional deferrals. This gap is the whole traditional-vs-Roth question.">
+            Box 3/5 <span className="text-sky-300">{formatCurrency(projected.projected.socialSecurityWages)}</span></span>
+          {projected.deferral.cappedByLimit && (
+            <span className="text-amber-400">capped at the §402(g) limit</span>
+          )}
+        </div>
+      )}
+
+      {open && (
+        <div className="border-t border-slate-700/50 pt-3">
+          <p className="text-[11px] text-slate-500 mb-2">
+            Copy these from the <strong className="text-slate-400">year-to-date</strong> column of your most recent
+            paystub — not the current-period column. One stub pins everything earned, deferred and withheld so far.
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+            <MoneyField label="YTD gross pay" value={row.ytd.grossPay} onChange={(v) => setYtd('grossPay', v)} />
+            <MoneyField label="YTD federal withheld" value={row.ytd.fedWithheld} onChange={(v) => setYtd('fedWithheld', v)} />
+            <MoneyField label="YTD state withheld" value={row.ytd.stateWithheld} onChange={(v) => setYtd('stateWithheld', v)} />
+            <MoneyField label="YTD employer match" value={row.ytd.employerMatch} onChange={(v) => setYtd('employerMatch', v)} />
+            <MoneyField label="YTD 401(k) traditional" value={row.ytd.preTax401kTraditional} onChange={(v) => setYtd('preTax401kTraditional', v)}
+              hint="Pre-tax deferral. Reduces Box 1 but NOT Box 3/5." />
+            <MoneyField label="YTD 401(k) Roth" value={row.ytd.roth401k} onChange={(v) => setYtd('roth401k', v)}
+              hint="Reduces neither wage base. Shares the same §402(g) limit as traditional." />
+            <MoneyField label="YTD HSA (payroll)" value={row.ytd.hsa} onChange={(v) => setYtd('hsa', v)}
+              hint="Cafeteria-plan HSA reduces BOTH Box 1 and Box 3/5 — unlike a 401(k) deferral." />
+            <MoneyField label="YTD health premiums" value={row.ytd.section125Health} onChange={(v) => setYtd('section125Health', v)}
+              hint="§125 pre-tax premiums. Reduce both wage bases." />
+          </div>
+          <p className="text-[11px] text-slate-500 mb-2">
+            The rest of the year. Leave blank to carry on exactly as you are — the tool continues your
+            current pay, deferral rate and withholding rate through December.
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <MoneyField label="Gross per paycheck" value={row.remainder.perPeriodGross} onChange={(v) => setRem('perPeriodGross', v)}
+              hint="Defaults to the YTD average." />
+            <MoneyField label="Bonus still to come" value={row.remainder.knownBonus} onChange={(v) => setRem('knownBonus', v)} />
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">Traditional % (rest of year)</label>
+              <PercentCell
+                value={(row.remainder.deferralPercent ?? 0) / 100}
+                onValueChange={(v) => setRem('deferralPercent', v * 100)}
+                className="w-full bg-slate-900/70 border border-slate-600/50 rounded px-2 py-1.5 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">Roth % (rest of year)</label>
+              <PercentCell
+                value={(row.remainder.rothDeferralPercent ?? 0) / 100}
+                onValueChange={(v) => setRem('rothDeferralPercent', v * 100)}
+                className="w-full bg-slate-900/70 border border-slate-600/50 rounded px-2 py-1.5 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One K-1, laid out by box number so it can be filled in straight from the form.
+// The boxes do NOT all go to the same place — box 5 is interest, 6b is qualified
+// dividends, 9a is long-term gain — and entering them separately is what lets
+// the return route each to its correct 1040 line.
+function K1Row({ k1, onChange, onDelete, detail }) {
+  const [open, setOpen] = React.useState(!k1.label);
+  const setBox = (k, v) => onChange({ ...k1, boxes: { ...k1.boxes, [k]: v } });
+
+  return (
+    <div className="bg-slate-800/40 border border-slate-700/50 rounded-lg p-3 mb-3">
+      <div className="flex flex-wrap items-end gap-2 mb-2">
+        <div className="flex-1 min-w-[160px]">
+          <label className="block text-[11px] text-slate-400 mb-1">Partnership (optional label)</label>
+          <input
+            type="text" value={k1.label || ''} placeholder="e.g. Partnership A"
+            onChange={(e) => onChange({ ...k1, label: e.target.value })}
+            className="w-full bg-slate-900/70 border border-slate-600/50 rounded px-2 py-1.5 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+          />
+        </div>
+        <div>
+          <label className="block text-[11px] text-slate-400 mb-1">Your role</label>
+          <GridSelect
+            value={k1.isPassive === false ? 'active' : 'passive'}
+            onChange={(e) => onChange({ ...k1,
+              isPassive: e.target.value === 'passive',
+              materiallyParticipates: e.target.value === 'active' })}
+            options={[
+              { value: 'passive', label: 'Passive (no material participation)' },
+              { value: 'active', label: 'I materially participate' },
+            ]}
+            className="bg-slate-900/70 border border-slate-600/50 rounded px-2 py-1.5 text-sm text-slate-100"
+          />
+        </div>
+        <button onClick={() => setOpen(!open)}
+          className="px-2 py-1.5 text-xs bg-slate-700 hover:bg-slate-600 text-slate-200 rounded">
+          {open ? '− Hide boxes' : '+ Enter boxes'}
+        </button>
+        <button onClick={onDelete} tabIndex={-1} title="Remove this K-1"
+          className="px-2 py-1.5 text-red-400 hover:text-red-300 text-sm">✕</button>
+      </div>
+
+      {detail && (
+        <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-400 mb-2">
+          <span>Taxable share <span className="text-slate-200">{formatCurrency(detail.taxableShare)}</span></span>
+          <span>Cash received <span className="text-slate-200">{formatCurrency(detail.cashDistributed)}</span></span>
+          <span title="You are taxed on your distributive share whether or not cash came out.">
+            Phantom <span className={detail.taxableShare - detail.cashDistributed > 0 ? 'text-amber-300' : 'text-emerald-300'}>
+              {formatCurrency(detail.taxableShare - detail.cashDistributed)}</span></span>
+          <span>Ending basis <span className="text-slate-200">{formatCurrency(detail.basis.basisEnd)}</span></span>
+        </div>
+      )}
+
+      {open && (
+        <div className="border-t border-slate-700/50 pt-3">
+          <p className="text-[11px] text-slate-500 mb-2">
+            Straight off the K-1, box by box. Boxes 1 and 2 go to Schedule E; boxes 5, 6 and 9a go to their
+            own 1040 lines and keep their own tax treatment, which is why they are entered separately.
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+            <MoneyField label="1 — Ordinary business income" value={k1.boxes.b1_ordinaryBusiness} onChange={(v) => setBox('b1_ordinaryBusiness', v)} />
+            <MoneyField label="2 — Net rental real estate" value={k1.boxes.b2_rental} onChange={(v) => setBox('b2_rental', v)} />
+            <MoneyField label="5 — Interest income" value={k1.boxes.b5_interest} onChange={(v) => setBox('b5_interest', v)} />
+            <MoneyField label="6a — Ordinary dividends" value={k1.boxes.b6a_ordinaryDiv} onChange={(v) => setBox('b6a_ordinaryDiv', v)} />
+            <MoneyField label="6b — Qualified dividends" value={k1.boxes.b6b_qualifiedDiv} onChange={(v) => setBox('b6b_qualifiedDiv', v)} />
+            <MoneyField label="8 — Short-term capital gain" value={k1.boxes.b8_shortTermGain} onChange={(v) => setBox('b8_shortTermGain', v)} />
+            <MoneyField label="9a — Long-term capital gain" value={k1.boxes.b9a_longTermGain} onChange={(v) => setBox('b9a_longTermGain', v)} />
+            <MoneyField label="13 — Deductions" value={k1.boxes.b13_deductions} onChange={(v) => setBox('b13_deductions', v)} />
+            <MoneyField label="14a — Self-employment earnings" value={k1.boxes.b14a_seEarnings} onChange={(v) => setBox('b14a_seEarnings', v)}
+              hint="Usually blank for a limited partner. If it has a figure, self-employment tax applies." />
+            <MoneyField label="19 — Distributions (cash)" value={k1.boxes.b19_distributions} onChange={(v) => setBox('b19_distributions', v)}
+              hint="Cash out. Not income — it reduces your basis." />
+            <MoneyField label="20Z — Qualified business income" value={k1.boxes.b20z_qbi} onChange={(v) => setBox('b20z_qbi', v)}
+              hint="Drives the 20% §199A deduction." />
+            <MoneyField label="20Z — W-2 wages" value={k1.boxes.b20z_w2Wages} onChange={(v) => setBox('b20z_w2Wages', v)}
+              hint="Caps the §199A deduction once your taxable income passes the threshold." />
+            <MoneyField label="20Z — UBIA of qualified property" value={k1.boxes.b20z_ubia} onChange={(v) => setBox('b20z_ubia', v)} />
+            <MoneyField label="Your outside basis, start of year" value={k1.basisStart} onChange={(v) => onChange({ ...k1, basisStart: v })}
+              hint="Limits deductible losses (§704(d)); distributions beyond it are taxable gain (§731)." />
+            <MoneyField label="Suspended passive loss carried in" value={k1.suspendedLossCarryforward} onChange={(v) => onChange({ ...k1, suspendedLossCarryforward: v })} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, projections }) {
+  const [openInfoCard, setOpenInfoCard] = React.useState(null);
+  const [showPrior, setShowPrior] = React.useState(false);
+  const [rateOverride, setRateOverride] = React.useState(null);
+
+  const cy = currentYearData || DEFAULT_CURRENT_YEAR;
+  const hasSpouse = personalInfo.filingStatus === 'married_joint';
+  const set = (patch) => setCurrentYearData({ ...cy, ...patch });
+  const setIn = (key, patch) => set({ [key]: { ...(cy[key] || {}), ...patch } });
+
+  // The whole tab is one derivation from the slice. If this throws on a
+  // half-filled input the tab is useless during the exact period it exists for,
+  // so it is guarded and reports the failure rather than blanking the page.
+  const result = React.useMemo(() => {
+    try {
+      const situation = buildTaxSituation(cy, personalInfo);
+      return { situation, ret: computeTaxReturn(situation), error: null };
+    } catch (e) {
+      return { situation: null, ret: null, error: e.message };
+    }
+  }, [cy, personalInfo]);
+
+  const future = projectedWithdrawalRate(projections, personalInfo);
+  const futureRate = rateOverride === null ? future.rate : rateOverride;
+
+  const decision = React.useMemo(() => {
+    try { return compareTraditionalVsRoth(cy, personalInfo, futureRate); }
+    catch (e) { return null; }
+  }, [cy, personalInfo, futureRate]);
+
+  if (result.error) {
+    return (
+      <div className={cardStyle}>
+        <h3 className="text-lg font-semibold text-red-300 mb-2">Could not compute this year&rsquo;s return</h3>
+        <p className="text-sm text-slate-400">{result.error}</p>
+      </div>
+    );
+  }
+
+  const r = result.ret;
+  const L = (k) => (r.lines[k] ? r.lines[k].amount : 0);
+  const payrollProjections = result.situation._payroll || [];
+
+  // 1040 display groups. Lines 3a and 2a are memo lines — they are already
+  // inside 3b and are not added again, which is why they are dimmed.
+  const formGroups = [
+    { title: 'Income', lines: ['1a', '2a', '2b', '3a', '3b', '4b', '5b', '6a', '6b', '7', '8', '9'] },
+    { title: 'Adjusted gross income', lines: ['10', '11'] },
+    { title: 'Deductions', lines: ['12', '13', '14', '15'] },
+    { title: 'Tax', lines: ['16', '23', '24'] },
+    { title: 'Payments', lines: ['25', '26', '33'] },
+    { title: 'Result', lines: ['34', '37'] },
+  ];
+  const memoLines = new Set(['2a', '3a', '6a']);
+  const keyLines = new Set(['11', '15', '24', '34', '37']);
+
+  const totalRemainingPeriods = payrollProjections.reduce((s, p) => s + p.projected.periodsRemaining, 0);
+  const perCheckBump = totalRemainingPeriods > 0 ? r.safeHarbor.shortfall / totalRemainingPeriods : 0;
+
+  return (
+    <div className="space-y-6">
+      {/* ── Header ─────────────────────────────────────────────────────── */}
+      <div className={cardStyle}>
+        <div className="flex items-start justify-between gap-4 mb-2">
+          <div>
+            <h3 className="text-xl font-semibold text-slate-100">Current Year ({cy.taxYear})</h3>
+            <p className="text-sm text-slate-400 mt-1">
+              Everything else here plans decades out. This plans the months you have left —
+              what you have already earned, deferred and withheld, and what that makes the
+              December decisions worth.
+            </p>
+          </div>
+          <InfoCard
+            title="Current Year"
+            isOpen={openInfoCard === 'currentyear'}
+            onToggle={() => setOpenInfoCard(openInfoCard === 'currentyear' ? null : 'currentyear')}
+            sections={[
+              { heading: 'What this is for',
+                body: 'Decisions with a deadline: whether to defer to traditional or Roth for the rest of the year, whether to raise withholding, and whether you are about to cross a threshold that costs more than your bracket suggests.' },
+              { heading: 'Why a paystub',
+                body: 'A paystub carries year-to-date totals in its own columns. One recent stub per employer pins everything so far, and only the remaining pay periods have to be projected — which is also the only part you can still change.' },
+              { heading: 'Box 1 versus Box 3/5',
+                body: 'Traditional 401(k) deferrals reduce W-2 Box 1 (federal taxable wages) but not Box 3/5 (Social Security and Medicare wages). Deferring saves income tax and never saves FICA, so the comparison is against your future income-tax rate alone.' },
+              { heading: 'Your data stays here',
+                body: 'This is stored in your browser only, like the rest of the plan. It is included in plan exports, which now carry wage and withholding detail — so treat an exported file accordingly. Nothing asks for a Social Security or employer ID number.' },
+            ]}
+          />
+        </div>
+      </div>
+
+      {/* ── Paystubs ───────────────────────────────────────────────────── */}
+      <div className={cardStyle}>
+        <div className="flex items-center justify-between mb-3">
+          <h4 className="text-lg font-semibold text-slate-100">Paychecks</h4>
+          <button
+            onClick={() => set({ payroll: [...(cy.payroll || []), newPayrollRow(hasSpouse && (cy.payroll || []).length ? 'spouse' : 'me')] })}
+            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded">+ Add employer</button>
+        </div>
+        {(cy.payroll || []).length === 0 && (
+          <p className="text-sm text-slate-500">
+            Add an employer and copy in the year-to-date column of a recent paystub. That single column is
+            enough to project the whole year.
+          </p>
+        )}
+        {(cy.payroll || []).map((row, i) => (
+          <PayrollRow
+            key={row.id} row={row} hasSpouse={hasSpouse}
+            projected={payrollProjections[i] ? payrollProjections[i].projected : null}
+            onChange={(next) => set({ payroll: cy.payroll.map(x => x.id === row.id ? next : x) })}
+            onDelete={() => set({ payroll: cy.payroll.filter(x => x.id !== row.id) })}
+          />
+        ))}
+      </div>
+
+      {/* ── K-1s ───────────────────────────────────────────────────────── */}
+      <div className={cardStyle}>
+        <div className="flex items-center justify-between mb-3">
+          <h4 className="text-lg font-semibold text-slate-100">Schedule K-1s</h4>
+          <button onClick={() => set({ k1s: [...(cy.k1s || []), newK1Row()] })}
+            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded">+ Add K-1</button>
+        </div>
+        {(cy.k1s || []).length === 0 && (
+          <p className="text-sm text-slate-500">
+            Add a K-1 for each partnership. Until this year&rsquo;s arrives, last year&rsquo;s figures are the
+            best available estimate — the point is to be roughly right in time to act, not exactly right in April.
+          </p>
+        )}
+        {(cy.k1s || []).map((k1, i) => (
+          <K1Row
+            key={k1.id} k1={k1} detail={r.k1s[i]}
+            onChange={(next) => set({ k1s: cy.k1s.map(x => x.id === k1.id ? next : x) })}
+            onDelete={() => set({ k1s: cy.k1s.filter(x => x.id !== k1.id) })}
+          />
+        ))}
+      </div>
+
+      {/* ── Other income, deductions, payments, prior year ─────────────── */}
+      <div className={cardStyle}>
+        <h4 className="text-lg font-semibold text-slate-100 mb-3">Everything else</h4>
+        <p className="text-[11px] text-slate-500 mb-2">Investment income outside a K-1.</p>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
+          <MoneyField label="Taxable interest" value={cy.otherIncome.taxableInterest} onChange={(v) => setIn('otherIncome', { taxableInterest: v })} />
+          <MoneyField label="Tax-exempt interest" value={cy.otherIncome.taxExemptInterest} onChange={(v) => setIn('otherIncome', { taxExemptInterest: v })} />
+          <MoneyField label="Ordinary dividends" value={cy.otherIncome.ordinaryDividends} onChange={(v) => setIn('otherIncome', { ordinaryDividends: v })} />
+          <MoneyField label="Qualified dividends" value={cy.otherIncome.qualifiedDividends} onChange={(v) => setIn('otherIncome', { qualifiedDividends: v })} />
+          <MoneyField label="Short-term gains" value={cy.otherIncome.shortTermGain} onChange={(v) => setIn('otherIncome', { shortTermGain: v })} />
+          <MoneyField label="Long-term gains" value={cy.otherIncome.longTermGain} onChange={(v) => setIn('otherIncome', { longTermGain: v })} />
+          <MoneyField label="Capital loss carried in" value={cy.otherIncome.longTermLossCarryforward} onChange={(v) => setIn('otherIncome', { longTermLossCarryforward: v })} />
+          <MoneyField label="Other income" value={cy.otherIncome.otherIncome} onChange={(v) => setIn('otherIncome', { otherIncome: v })} />
+        </div>
+
+        <p className="text-[11px] text-slate-500 mb-2">
+          Deductions. The tool takes whichever is larger and tells you which — with the 2026 SALT cap at
+          {' '}{formatCurrency(saltCapFor(cy.taxYear, personalInfo.filingStatus, L('11')))} rather than $10,000,
+          that answer may not be the one you are used to.
+        </p>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
+          <MoneyField label="Property tax" value={cy.deductions.propertyTax} onChange={(v) => setIn('deductions', { propertyTax: v })} />
+          <MoneyField label="Mortgage interest" value={cy.deductions.mortgageInterest} onChange={(v) => setIn('deductions', { mortgageInterest: v })} />
+          <MoneyField label="Charitable (cash)" value={cy.deductions.charitableCash} onChange={(v) => setIn('deductions', { charitableCash: v })} />
+          <MoneyField label="Medical expenses" value={cy.deductions.medicalExpenses} onChange={(v) => setIn('deductions', { medicalExpenses: v })} />
+          <MoneyField label="Direct HSA (not payroll)" value={cy.adjustments.hsaDirectContribution} onChange={(v) => setIn('adjustments', { hsaDirectContribution: v })}
+            hint="Only contributions you made outside payroll. A payroll HSA already came out of Box 1." />
+          <MoneyField label="Deductible IRA" value={cy.adjustments.deductibleIRA} onChange={(v) => setIn('adjustments', { deductibleIRA: v })} />
+        </div>
+
+        <p className="text-[11px] text-slate-500 mb-2">Estimated tax payments already made.</p>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
+          {[0, 1, 2, 3].map(q => (
+            <MoneyField key={q} label={`Federal Q${q + 1}`}
+              value={(cy.estimatedPayments.federal || [])[q]}
+              onChange={(v) => {
+                const next = [...(cy.estimatedPayments.federal || [0, 0, 0, 0])];
+                next[q] = v;
+                setIn('estimatedPayments', { federal: next });
+              }} />
+          ))}
+        </div>
+
+        <button onClick={() => setShowPrior(!showPrior)}
+          className="text-sm text-amber-400 hover:text-amber-300">
+          {showPrior ? '− ' : '+ '}Last year&rsquo;s return {r.safeHarbor.priorYearTest === null && (
+            <span className="text-slate-500">— needed for the safe-harbor test</span>)}
+        </button>
+        {showPrior && (
+          <div className="mt-3">
+            <p className="text-[11px] text-slate-500 mb-2">
+              Two lines off last year&rsquo;s Form 1040. They set the §6654 safe harbor, which is usually the
+              cheaper of the two ways to avoid an underpayment penalty — and the only one you can compute
+              before the year is over.
+            </p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <MoneyField label="Line 11 — AGI" value={cy.priorYearReturn.agi} onChange={(v) => setIn('priorYearReturn', { agi: v })} />
+              <MoneyField label="Line 24 — total tax" value={cy.priorYearReturn.totalTax} onChange={(v) => setIn('priorYearReturn', { totalTax: v })} />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── The return itself ──────────────────────────────────────────── */}
+      <div className={cardStyle}>
+        <div className="flex items-start justify-between gap-4 mb-1">
+          <h4 className="text-lg font-semibold text-slate-100">Projected Form 1040</h4>
+          <span className="text-xs text-slate-500">line numbers match the real form</span>
+        </div>
+        <p className="text-sm text-slate-400 mb-4">
+          Where this year lands if nothing changes. Every line carries its actual 1040 number so you can
+          set it beside a filed return, or your preparer&rsquo;s draft, and reconcile it line by line.
+        </p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <tbody>
+              {formGroups.map(group => (
+                <React.Fragment key={group.title}>
+                  <tr>
+                    <td colSpan={3} className="pt-4 pb-1 text-xs uppercase tracking-wide text-slate-500 font-semibold">
+                      {group.title}
+                    </td>
+                  </tr>
+                  {group.lines.map(k => {
+                    const line = r.lines[k];
+                    if (!line) return null;
+                    const memo = memoLines.has(k);
+                    const key = keyLines.has(k);
+                    return (
+                      <tr key={k} className={`border-b border-slate-800/70 ${key ? 'bg-slate-800/40' : ''}`}>
+                        <td className="py-1.5 pr-3 text-slate-500 font-mono text-xs w-12 align-top">{k}</td>
+                        <td className={`py-1.5 pr-4 ${memo ? 'text-slate-500' : key ? 'text-slate-100 font-medium' : 'text-slate-300'}`}>
+                          {line.label}
+                          {line.which && <span className="ml-2 text-xs text-amber-400">({line.which})</span>}
+                          {memo && <span className="ml-2 text-[10px] text-slate-600">memo — already inside the line above</span>}
+                        </td>
+                        <td className={`py-1.5 text-right tabular-nums whitespace-nowrap ${
+                          memo ? 'text-slate-500' : key ? 'text-slate-100 font-semibold' : 'text-slate-300'}`}>
+                          {formatCurrency(line.amount)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Supporting schedules — the working behind the lines above. */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
+          <div className="bg-slate-800/40 rounded-lg p-3">
+            <h5 className="text-sm font-semibold text-slate-200 mb-2">Schedule A vs. the standard deduction</h5>
+            <div className="text-xs text-slate-400 space-y-1">
+              <div className="flex justify-between"><span>State and local tax paid</span><span className="text-slate-200">{formatCurrency(r.schedules.A.saltPaid)}</span></div>
+              <div className="flex justify-between"><span>SALT cap this year</span><span className={r.schedules.A.saltCapBinding ? 'text-amber-300' : 'text-slate-200'}>{formatCurrency(r.schedules.A.saltCap)}</span></div>
+              <div className="flex justify-between"><span>Mortgage interest</span><span className="text-slate-200">{formatCurrency(r.schedules.A.mortgageInterest)}</span></div>
+              <div className="flex justify-between"><span>Charitable, less the 0.5% AGI floor</span><span className="text-slate-200">{formatCurrency(r.schedules.A.charitableDeductible)}</span></div>
+              <div className="flex justify-between border-t border-slate-700 pt-1 mt-1">
+                <span className="text-slate-300">Itemized total</span><span className="text-slate-100 font-medium">{formatCurrency(r.schedules.A.allowedAfterCap)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-300">Standard deduction</span><span className="text-slate-100 font-medium">{formatCurrency(r.schedules.A.standardAlternative)}</span></div>
+              <div className={`mt-2 px-2 py-1.5 rounded ${r.schedules.A.wouldItemize ? 'bg-emerald-900/30 text-emerald-300' : 'bg-slate-700/40 text-slate-300'}`}>
+                {r.schedules.A.wouldItemize
+                  ? `Itemizing wins by ${formatCurrency(r.schedules.A.allowedAfterCap - r.schedules.A.standardAlternative)}.`
+                  : `The standard deduction wins by ${formatCurrency(r.schedules.A.standardAlternative - r.schedules.A.allowedAfterCap)}.`}
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-slate-800/40 rounded-lg p-3">
+            <h5 className="text-sm font-semibold text-slate-200 mb-2">K-1s, §199A and the 3.8% surtax</h5>
+            <div className="text-xs text-slate-400 space-y-1">
+              <div className="flex justify-between"><span>Passive income reaching AGI</span><span className="text-slate-200">{formatCurrency(r.passive.netPassiveToAGI)}</span></div>
+              {r.passive.suspendedCarryforwardEnd > 0 && (
+                <div className="flex justify-between"><span>Passive loss suspended (§469)</span><span className="text-amber-300">{formatCurrency(r.passive.suspendedCarryforwardEnd)}</span></div>
+              )}
+              <div className="flex justify-between"><span>Net qualified business income</span><span className="text-slate-200">{formatCurrency(r.qbi.netQBI)}</span></div>
+              <div className="flex justify-between"><span>§199A deduction</span><span className="text-slate-100 font-medium">{formatCurrency(r.qbi.deduction)}</span></div>
+              {r.qbi.phase > 0 && (
+                <div className="text-[11px] text-amber-400/90">
+                  You are {Math.round(r.qbi.phase * 100)}% through the §199A phase-in — each extra dollar of
+                  taxable income is also shrinking this deduction.
+                </div>
+              )}
+              <div className="flex justify-between border-t border-slate-700 pt-1 mt-1"><span>Net investment income</span><span className="text-slate-200">{formatCurrency(r.netInvestmentIncome)}</span></div>
+              <div className="flex justify-between"><span>Net investment income tax</span><span className={r.schedules.two.niit > 0 ? 'text-amber-300 font-medium' : 'text-slate-200'}>{formatCurrency(r.schedules.two.niit)}</span></div>
+              {r.schedules.SE.total > 0 && (
+                <div className="flex justify-between"><span>Self-employment tax (box 14a)</span><span className="text-slate-200">{formatCurrency(r.schedules.SE.total)}</span></div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {r.diagnostics.length > 0 && (
+          <div className="mt-4 space-y-1">
+            {r.diagnostics.map((d, i) => (
+              <div key={i} className={`text-xs px-3 py-2 rounded ${
+                d.severity === 'warning' ? 'bg-amber-900/25 text-amber-300' : 'bg-slate-800/60 text-slate-400'}`}>
+                {d.message}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── Decisions ──────────────────────────────────────────────────── */}
+      <div className={cardStyle}>
+        <h4 className="text-lg font-semibold text-slate-100 mb-1">What to do about it</h4>
+        <p className="text-sm text-slate-400 mb-4">
+          Four things you can still change before December 31.
+        </p>
+
+        {/* 1. Traditional vs Roth */}
+        <div className="bg-slate-800/40 rounded-lg p-4 mb-3">
+          <h5 className="text-sm font-semibold text-slate-200 mb-2">1 &middot; Traditional or Roth for the rest of the year</h5>
+          {decision ? (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+                <div>
+                  <p className="text-[11px] text-slate-400">Rate you avoid now</p>
+                  <p className="text-2xl font-semibold text-amber-400">{(decision.marginalRateNow * 100).toFixed(1)}%</p>
+                  <p className="text-[11px] text-slate-500">measured on the whole return, not read off a bracket</p>
+                </div>
+                <div>
+                  <p className="text-[11px] text-slate-400">Rate you expect to pay later</p>
+                  <div className="flex items-center gap-2">
+                    <PercentCell
+                      value={futureRate}
+                      onValueChange={(v) => setRateOverride(v)}
+                      className="w-20 bg-slate-900/70 border border-slate-600/50 rounded px-2 py-1 text-lg text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+                    />
+                    {rateOverride !== null && (
+                      <button onClick={() => setRateOverride(null)} className="text-[11px] text-slate-500 hover:text-slate-300 underline">reset</button>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    {future.sample > 0
+                      ? `median bracket across ${future.sample} retirement years in your plan (${(future.low * 100).toFixed(0)}–${(future.high * 100).toFixed(0)}%)`
+                      : 'no retirement years projected yet'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[11px] text-slate-400">Verdict</p>
+                  <p className={`text-2xl font-semibold ${decision.favors === 'traditional' ? 'text-emerald-400' : decision.favors === 'roth' ? 'text-sky-400' : 'text-slate-300'}`}>
+                    {decision.favors === 'traditional' ? 'Traditional' : decision.favors === 'roth' ? 'Roth' : 'Line ball'}
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    {Math.abs(decision.advantagePerDollar * 100).toFixed(1)} cents per dollar deferred
+                  </p>
+                </div>
+              </div>
+              {/* Only line 16, Schedule 2 and state are ADDITIVE — together they are
+                  the whole saving. The QBI and deduction figures explain part of
+                  why line 16 moved as much as it did and are already inside it, so
+                  they are stated separately rather than listed alongside, which
+                  would read as double-counting and would not sum to the rate. */}
+              <div className="text-xs text-slate-400">
+                Where the {(decision.marginalRateNow * 100).toFixed(1)}% comes from, per $1,000 deferred:
+                <span className="text-slate-300"> {formatCurrency(Math.abs(decision.components.bracket))} income tax</span>
+                {Math.abs(decision.components.niit) > 0.5 && <span className="text-amber-300"> + {formatCurrency(Math.abs(decision.components.niit))} net investment income tax</span>}
+                {Math.abs(decision.components.state) > 0.5 && <span className="text-slate-300"> + {formatCurrency(Math.abs(decision.components.state))} state</span>}
+                {' '}= <span className="text-slate-200">{formatCurrency(decision.taxSavedNow)}</span>.
+              </div>
+              {(Math.abs(decision.components.qbi) > 0.5 || Math.abs(decision.components.deduction) > 0.5) && (
+                <div className="text-[11px] text-slate-500 mt-1">
+                  That income-tax figure is larger than your bracket alone because deferring also
+                  {Math.abs(decision.components.qbi) > 0.5 && <> restores {formatCurrency(Math.abs(decision.components.qbi))} of §199A deduction</>}
+                  {Math.abs(decision.components.qbi) > 0.5 && Math.abs(decision.components.deduction) > 0.5 && ' and'}
+                  {Math.abs(decision.components.deduction) > 0.5 && <> recovers {formatCurrency(Math.abs(decision.components.deduction))} of deduction</>}
+                  {' '}— already counted above, not additional to it.
+                </div>
+              )}
+              <p className="text-[11px] text-slate-500 mt-2">
+                Deferring never saves Social Security or Medicare tax — those come out of Box 3/5, which a
+                deferral does not touch. So this is a straight comparison of income-tax rates, now against later.
+              </p>
+            </>
+          ) : <p className="text-sm text-slate-500">Add a paycheck to compare.</p>}
+        </div>
+
+        {/* 2. Deferral headroom */}
+        <div className="bg-slate-800/40 rounded-lg p-4 mb-3">
+          <h5 className="text-sm font-semibold text-slate-200 mb-2">2 &middot; How much more can you defer</h5>
+          {payrollProjections.length ? (
+            <div className="space-y-2">
+              {payrollProjections.map((p, i) => (
+                <div key={i} className="flex flex-wrap justify-between gap-2 text-xs">
+                  <span className="text-slate-400">
+                    {p.row.employerLabel || 'Employer'} ({p.row.owner === 'spouse' ? 'spouse' : 'you'})
+                  </span>
+                  <span className="text-slate-300">
+                    on track for {formatCurrency(p.projected.deferral.projectedTotal)} of {formatCurrency(p.projected.deferral.cap)}
+                    {' '}&mdash; <span className={p.projected.deferral.roomRemaining > 0 ? 'text-emerald-400' : 'text-slate-500'}>
+                      {formatCurrency(p.projected.deferral.roomRemaining)} of room left</span>
+                  </span>
+                </div>
+              ))}
+              <p className="text-[11px] text-slate-500 pt-2 border-t border-slate-700/50">
+                The §402(g) limit is <strong className="text-slate-400">per person, per year</strong> — traditional
+                and Roth share it, and a second employer&rsquo;s plan or a solo 401(k) shares it too. It is not a
+                limit per account.
+                {(cy.k1s || []).length > 0 && (
+                  <> Your K-1 income adds <strong className="text-slate-400">no</strong> deferral room:
+                  it is not earned income, so it opens no 401(k), SEP or solo-401(k) capacity.</>
+                )}
+              </p>
+            </div>
+          ) : <p className="text-sm text-slate-500">Add a paycheck to see your remaining limit.</p>}
+        </div>
+
+        {/* 3. Withholding / estimated payments */}
+        <div className="bg-slate-800/40 rounded-lg p-4 mb-3">
+          <h5 className="text-sm font-semibold text-slate-200 mb-2">3 &middot; Withholding and estimated payments</h5>
+          <div className="text-xs text-slate-400 space-y-1">
+            <div className="flex justify-between"><span>Projected total tax</span><span className="text-slate-200">{formatCurrency(L('24'))}</span></div>
+            <div className="flex justify-between"><span>Projected payments</span><span className="text-slate-200">{formatCurrency(L('33'))}</span></div>
+            <div className="flex justify-between border-t border-slate-700 pt-1">
+              <span className="text-slate-300">{L('37') > 0 ? 'Balance due in April' : 'Refund'}</span>
+              <span className={L('37') > 0 ? 'text-amber-300 font-medium' : 'text-emerald-300 font-medium'}>
+                {formatCurrency(L('37') > 0 ? L('37') : L('34'))}</span></div>
+            <div className="flex justify-between pt-2"><span>Safe-harbor requirement ({r.safeHarbor.basis})</span><span className="text-slate-200">{formatCurrency(r.safeHarbor.required)}</span></div>
+            {r.safeHarbor.shortfall > 0 ? (
+              <div className="mt-2 px-3 py-2 rounded bg-amber-900/25 text-amber-300">
+                You are {formatCurrency(r.safeHarbor.shortfall)} short of the safe harbor.
+                {totalRemainingPeriods > 0 && (
+                  <> Raising withholding by about <strong>{formatCurrency(perCheckBump)}</strong> per paycheck
+                  across your {totalRemainingPeriods} remaining checks would close it.</>
+                )}
+                <div className="text-[11px] mt-1 text-amber-400/80">
+                  Withholding counts as paid evenly across the year no matter when it is withheld, so a
+                  December increase cures an underpayment that a Q4 estimated payment would not.
+                </div>
+              </div>
+            ) : (
+              <div className="mt-2 px-3 py-2 rounded bg-emerald-900/25 text-emerald-300">
+                {r.safeHarbor.deMinimis
+                  ? 'No penalty exposure — the balance due is under $1,000.'
+                  : 'You have already met the safe harbor, so there is no underpayment penalty even if you owe in April.'}
+              </div>
+            )}
+            {r.safeHarbor.priorYearTest === null && (
+              <p className="text-[11px] text-slate-500 pt-1">
+                Entering last year&rsquo;s AGI and total tax above would likely lower this requirement — the
+                prior-year test is usually the cheaper of the two.
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* 4. Cash vs tax */}
+        {(cy.k1s || []).length > 0 && (
+          <div className="bg-slate-800/40 rounded-lg p-4">
+            <h5 className="text-sm font-semibold text-slate-200 mb-2">4 &middot; Will the K-1 tax pay for itself</h5>
+            <div className="text-xs text-slate-400 space-y-1">
+              <div className="flex justify-between"><span>Taxable share of partnership income</span>
+                <span className="text-slate-200">{formatCurrency(r.k1s.reduce((s, k) => s + k.taxableShare, 0))}</span></div>
+              <div className="flex justify-between"><span>Cash actually distributed to you</span>
+                <span className="text-slate-200">{formatCurrency(r.k1s.reduce((s, k) => s + k.cashDistributed, 0))}</span></div>
+              <div className="flex justify-between border-t border-slate-700 pt-1">
+                <span className="text-slate-300">Income taxed but not received</span>
+                <span className={r.phantomIncome > 0 ? 'text-amber-300 font-medium' : 'text-emerald-300 font-medium'}>
+                  {formatCurrency(r.phantomIncome)}</span></div>
+              <p className="text-[11px] text-slate-500 pt-2">
+                A partner is taxed on the distributive share whether or not the cash came out. When this figure
+                is positive, part of the bill has to be funded from somewhere else.
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setPersonalInfo }) {
   const [ageRange, setAgeRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || 95 });
@@ -14356,6 +15108,7 @@ function RetirementPlanner() {
       icon: '📈',
       items: [
         // Deep analysis tools
+        { id: 'currentyear', label: 'Current Year', icon: '🧾' },
         { id: 'socialsecurity', label: 'Social Security', icon: '🎯' },
         { id: 'taxplanning', label: 'Tax Planning', icon: '📋' },
         { id: 'withdrawal', label: 'Withdrawals', icon: '📤' },
@@ -14577,6 +15330,7 @@ function RetirementPlanner() {
             {activeTab === 'socialsecurity' && <SocialSecurityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
             {activeTab === 'scenarios' && <ScenarioComparisonTab activeScenarioId={activeScenarioId} assets={assets} computeProjections={computeProjections} createScenario={createScenario} deleteScenario={deleteScenario} loadScenario={loadScenario} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} scenarios={scenarios} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
+            {activeTab === 'currentyear' && <CurrentYearTab currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} />}
             {activeTab === 'withdrawal' && <WithdrawalStrategiesTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} />}
             {activeTab === 'montecarlo' && <MonteCarloTab accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'stresstest' && <StressTestTab accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
