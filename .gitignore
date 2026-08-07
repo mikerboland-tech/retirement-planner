@@ -5,6 +5,13 @@ Thumbs.db
 # In-progress browser downloads
 *.crdownload
 
+# Exported plans. handleExport writes retirement-plan-YYYY-MM-DD.json to the
+# browser's download directory, and the README tells you to serve this folder
+# locally — so the export can land right here, one `git add .` from a public
+# repo. It already carries balances and income; it is about to carry wage and
+# withholding detail.
+retirement-plan-*.json
+
 # Node (no dependencies today, but just in case)
 node_modules/
 

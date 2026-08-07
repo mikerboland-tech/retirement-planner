@@ -33,6 +33,37 @@ const MAX_ITERATIONS_FOR_TAX_CALC = 15;
 const MONTE_CARLO_TAX_ESTIMATE = 0.15;
 const SAVE_DEBOUNCE_MS = 500;
 
+// ── TAX BASE YEAR ────────────────────────────────────────────────────────────
+// Every federal and state tax table in this file is stated in dollars of ONE
+// year: 2026. Tax functions take `yearsFromNow`, which they use to index those
+// tables forward — so `yearsFromNow` means "years after BASE_TAX_YEAR", NOT
+// "years after today".
+//
+// Those were the same number only for as long as the app ran during 2026.
+// computeProjections derived its year offset from `new Date().getFullYear()`,
+// so running the app in 2027 applied the raw 2026 brackets to 2027 and indexed
+// every later year from the wrong base — the whole schedule silently slipped a
+// year, and the error grew with every calendar year that passed. Nothing in the
+// output looked wrong, which is what made it worth pinning down before building
+// anything that names a specific tax year.
+//
+// Two clocks now run side by side inside the projection loop, and they are not
+// interchangeable:
+//   yearsFromNow   = year - currentYear    → spending, COLA, asset growth,
+//                                            healthcare — things measured from
+//                                            TODAY, in today's dollars
+//   taxIndexYears  = year - BASE_TAX_YEAR  → bracket edges, standard deduction,
+//                                            FICA wage base, IRMAA tiers, LTCG
+//                                            thresholds — things measured from
+//                                            the year the tables were published
+const BASE_TAX_YEAR = 2026;
+
+// Index a BASE_TAX_YEAR dollar amount forward. One definition replacing twelve
+// open-coded copies of the same Math.pow, so a change to how tax figures index
+// happens in one place.
+const indexTo = (amount, yearsFromNow = 0, inflationRate = 0.03) =>
+  amount * Math.pow(1 + inflationRate, yearsFromNow);
+
 // Account type categories - used throughout for consistent classification
 const PRE_TAX_TYPES = ['401k', 'traditional_ira', '457b', '403b'];
 const ROTH_TYPES = ['roth_401k', 'roth_ira', 'roth_457b', 'roth_403b'];
@@ -216,7 +247,7 @@ const getFederalDeduction = (filingStatus, yearsFromNow = 0, inflationRate = 0.0
   const maxAge65 = filingStatus === 'married_joint' ? 2 : 1;
   const age65Count = Math.min(Math.max(0, opts.age65Count || 0), maxAge65);
   const per65 = ADDITIONAL_STD_DEDUCTION_65_2026[filingStatus] || ADDITIONAL_STD_DEDUCTION_65_2026.married_joint;
-  const indexed = (base + age65Count * per65) * Math.pow(1 + inflationRate, yearsFromNow);
+  const indexed = indexTo(base + age65Count * per65, yearsFromNow, inflationRate);
   return indexed + seniorDeduction(age65Count, opts.taxYear, opts.magi, filingStatus);
 };
 
@@ -1528,7 +1559,7 @@ const calculateStateTaxProgressive = (grossIncome, state, filingStatus, yearsFro
   if (!config) return 0;
   if (grossIncome <= 0) return 0;
 
-  const inf = config.inflationIndexed ? Math.pow(1 + inflationRate, yearsFromNow) : 1;
+  const inf = config.inflationIndexed ? indexTo(1, yearsFromNow, inflationRate) : 1;
   const r = config.retirement || {};
 
   let agi = grossIncome;
@@ -1649,7 +1680,7 @@ const calculateFICA = (earnedIncome, filingStatus, yearsFromNow = 0, inflationRa
   if (earnedIncome <= 0) return { socialSecurity: 0, medicare: 0, total: 0 };
   
   // Inflate the SS wage base
-  const inflationFactor = Math.pow(1 + inflationRate, yearsFromNow);
+  const inflationFactor = indexTo(1, yearsFromNow, inflationRate);
   const wageBase = FICA_SS_WAGE_BASE_2025 * inflationFactor;
   
   // Social Security tax (capped at wage base)
@@ -1931,7 +1962,7 @@ const STATES_THAT_TAX_SS = new Set([
 const nextIRMAAThreshold = (magi, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
   const lookupStatus = filingStatus === 'head_of_household' ? 'single' : filingStatus;
   const thresholds = IRMAA_THRESHOLDS_2025[lookupStatus] || IRMAA_THRESHOLDS_2025.married_joint;
-  const inflationFactor = Math.pow(1 + inflationRate, yearsFromNow);
+  const inflationFactor = indexTo(1, yearsFromNow, inflationRate);
   const income = Math.max(0, magi || 0);
   for (let i = 0; i < thresholds.length; i++) {
     const max = thresholds[i].maxIncome;
@@ -1948,7 +1979,7 @@ const calculateIRMAA = (magi, filingStatus, yearsFromNow = 0, inflationRate = 0.
   // Head of household uses single thresholds per CMS rules
   const lookupStatus = filingStatus === 'head_of_household' ? 'single' : filingStatus;
   const thresholds = IRMAA_THRESHOLDS_2025[lookupStatus] || IRMAA_THRESHOLDS_2025.married_joint;
-  const inflationFactor = Math.pow(1 + inflationRate, yearsFromNow);
+  const inflationFactor = indexTo(1, yearsFromNow, inflationRate);
 
   // Find the applicable tier
   for (const tier of thresholds) {
@@ -1983,7 +2014,7 @@ const calculateIRMAASurcharge = (magi, filingStatus, yearsFromNow = 0, inflation
   const irmaa = calculateIRMAA(magi, filingStatus, yearsFromNow, inflationRate);
   // Standard premium indexed by the same rate as the tier premiums above, so the
   // surcharge (tier premium − standard premium) scales consistently in nominal dollars.
-  const standardPartB = MEDICARE_PART_B_STANDARD_2025 * Math.pow(1 + inflationRate, yearsFromNow);
+  const standardPartB = indexTo(MEDICARE_PART_B_STANDARD_2025, yearsFromNow, inflationRate);
   const surchargePerPerson = Math.max(0, irmaa.partBMonthly - standardPartB) * 12 + irmaa.partDAnnual;
   return {
     surchargePerPerson: Math.round(surchargePerPerson),
@@ -2001,7 +2032,7 @@ const calculateSSEarningsTestReduction = (earnedIncome, claimAge, fra, yearsFrom
   // No reduction at or after FRA
   if (claimAge >= fra) return 0;
   
-  const inflationFactor = Math.pow(1 + inflationRate, yearsFromNow);
+  const inflationFactor = indexTo(1, yearsFromNow, inflationRate);
   
   // Check if this is the year you reach FRA (use higher limit, $1 per $3)
   const isFRAYear = Math.floor(claimAge) === Math.floor(fra);
@@ -2684,7 +2715,7 @@ const conversionCostComponents = (withProj, withoutProj, age, convertedAmount) =
 // years rather than drifting against unindexed 2026 thresholds.
 const topMarginalBracket = (taxableIncome, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
   const brackets = FEDERAL_TAX_BRACKETS_2026[filingStatus] || FEDERAL_TAX_BRACKETS_2026.single;
-  const factor = Math.pow(1 + inflationRate, yearsFromNow);
+  const factor = indexTo(1, yearsFromNow, inflationRate);
   const income = Math.max(0, taxableIncome || 0);
   let rate = brackets[0].rate;
   for (const b of brackets) {
@@ -2757,7 +2788,7 @@ const getACAApplicablePercentage = (fplPercent) => {
 // ACA MAGI = AGI + tax-exempt interest + UNTAXED Social Security (the caller is
 // responsible for building that base — see computeProjections).
 const calculateACAPremiumCredit = ({ magi, householdSize, benchmarkPremium, yearsFromNow = 0, inflationRate = 0.03 }) => {
-  const inf = Math.pow(1 + inflationRate, yearsFromNow);
+  const inf = indexTo(1, yearsFromNow, inflationRate);
   const fpl = (ACA_FPL_2025[Math.min(Math.max(householdSize, 1), 8)] || ACA_FPL_2025[1]) * inf;
   const fplPercent = fpl > 0 ? (magi / fpl) * 100 : Infinity;
   const applicablePct = getACAApplicablePercentage(fplPercent);
@@ -3082,39 +3113,41 @@ const getValidStartYears = (numYears, allowWrap = false) => {
     .map(r => r.year);
 };
 
+// Walk the ordinary federal brackets over an ALREADY-DEDUCTED taxable income.
+//
+// Split out of calculateFederalTax, which takes gross and applies the deduction
+// itself. Both shapes are needed: a projection year knows its gross and wants a
+// number, while a Form 1040 arrives at taxable income on line 15 and computes
+// the tax on line 16 — the deduction was already spent on line 12, and feeding
+// gross to a function that deducts again would double-count it.
+//
+// This mirrors applyStateBrackets, which the state engine already separates the
+// same way for the same reason.
+const federalTaxOnTaxableIncome = (taxableIncome, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
+  const baseBrackets = FEDERAL_TAX_BRACKETS_2026[filingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
+  let tax = 0;
+  let remainingIncome = Math.max(0, taxableIncome);
+  for (const bracket of baseBrackets) {
+    if (remainingIncome <= 0) break;
+    const width = bracket.max === Infinity ? Infinity : bracket.max - bracket.min;
+    const taxableInBracket = Math.min(remainingIncome, indexTo(width, yearsFromNow, inflationRate));
+    tax += taxableInBracket * bracket.rate;
+    remainingIncome -= taxableInBracket;
+  }
+  return tax;
+};
+
 // opts (all optional): { age65Count, taxYear, magi } — see getFederalDeduction.
 // Omitting them yields the plain standard deduction, i.e. the historic behavior.
 // `magi` defaults to grossIncome; pass it explicitly at call sites where the two
 // differ (e.g. the final tax block, whose base excludes capital gains).
 const calculateFederalTax = (grossIncome, filingStatus, yearsFromNow = 0, inflationRate = 0.03, opts = {}) => {
-  const baseBrackets = FEDERAL_TAX_BRACKETS_2026[filingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
-
-  // Adjust deduction and brackets for inflation
-  const inflationFactor = Math.pow(1 + inflationRate, yearsFromNow);
   const adjustedDeduction = getFederalDeduction(filingStatus, yearsFromNow, inflationRate, {
     ...opts,
     magi: opts.magi !== undefined && opts.magi !== null ? opts.magi : grossIncome,
   });
-
-  // Apply the deduction
   const taxableIncome = Math.max(0, grossIncome - adjustedDeduction);
-  
-  // Adjust brackets for inflation
-  const adjustedBrackets = baseBrackets.map(bracket => ({
-    min: bracket.min * inflationFactor,
-    max: bracket.max === Infinity ? Infinity : bracket.max * inflationFactor,
-    rate: bracket.rate
-  }));
-  
-  let tax = 0;
-  let remainingIncome = taxableIncome;
-  for (const bracket of adjustedBrackets) {
-    if (remainingIncome <= 0) break;
-    const taxableInBracket = Math.min(remainingIncome, bracket.max - bracket.min);
-    tax += taxableInBracket * bracket.rate;
-    remainingIncome -= taxableInBracket;
-  }
-  return tax;
+  return federalTaxOnTaxableIncome(taxableIncome, filingStatus, yearsFromNow, inflationRate);
 };
 
 const calculateStateTax = (grossIncome, state, filingStatus, yearsFromNow = 0, inflationRate = 0.03, taxableSS = 0, retirementIncome = 0, extraParams = {}) => {
@@ -3130,7 +3163,7 @@ const calculateStateTax = (grossIncome, state, filingStatus, yearsFromNow = 0, i
   // ── FLAT-TAX STATES: Simplified flat-rate approximation ──
   // Apply inflation-adjusted standard deduction for state tax too (simplified)
   const baseDeduction = STANDARD_DEDUCTION_2026[filingStatus] || STANDARD_DEDUCTION_2026.married_joint;
-  const inflationFactor = Math.pow(1 + inflationRate, yearsFromNow);
+  const inflationFactor = indexTo(1, yearsFromNow, inflationRate);
   const adjustedDeduction = baseDeduction * inflationFactor;
   // Exclude taxable SS from state income for states that don't tax it (41 of 50 states)
   const ssExclusion = STATES_THAT_TAX_SS.has(state) ? 0 : taxableSS;
@@ -3259,7 +3292,7 @@ const calculateCapitalGainsTax = (capitalGains, taxableIncome, filingStatus, yea
   if (capitalGains <= 0) return 0;
   
   const thresholds = CAPITAL_GAINS_THRESHOLDS_2025[filingStatus] || CAPITAL_GAINS_THRESHOLDS_2025.married_joint;
-  const inflationFactor = Math.pow(1 + inflationRate, yearsFromNow);
+  const inflationFactor = indexTo(1, yearsFromNow, inflationRate);
   
   // Adjust thresholds for inflation
   const zeroRateThreshold = thresholds.zeroRate * inflationFactor;
@@ -3537,6 +3570,15 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     const myAge = pi.myAge + (year - currentYear);
     const spouseAge = pi.spouseAge + (year - currentYear);
     const yearsFromNow = year - currentYear;
+    // Years of tax-table indexing for THIS calendar year. See BASE_TAX_YEAR: the
+    // tables are 2026 dollars, so they index from 2026, not from whenever the app
+    // happens to be running. Equal to yearsFromNow only during 2026 — which is
+    // exactly why the difference went unnoticed. Every call that reads a tax
+    // table (brackets, deductions, FICA wage base, IRMAA tiers, LTCG thresholds,
+    // the SS earnings-test limit, ACA FPL) takes this; everything measured from
+    // today in today's dollars (spending, COLA, asset growth, healthcare) keeps
+    // taking yearsFromNow.
+    const taxIndexYears = year - BASE_TAX_YEAR;
     // IRMAA 2-year MAGI lookback: this year's surcharge is FIXED by income from
     // two years ago — it does not respond to this year's withdrawals or
     // conversions (those hit the surcharge two years from now). null = no
@@ -3775,7 +3817,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         const ownerEarned = stream.owner === 'me' ? myEarnedIncome : spouseEarnedIncome;
         
         if (ownerAge >= stream.startAge && ownerAge < ownerFRA && ownerEarned > 0) {
-          const reduction = calculateSSEarningsTestReduction(ownerEarned, ownerAge, ownerFRA, yearsFromNow, pi.inflationRate);
+          const reduction = calculateSSEarningsTestReduction(ownerEarned, ownerAge, ownerFRA, taxIndexYears, pi.inflationRate);
           // Can't reduce more than the SS benefit itself
           const colaYears = streamColaYears(stream, ownerAge, yearsFromNow);
           const thisBenefit = stream.amount * Math.pow(1 + (stream.cola || 0), colaYears);
@@ -3856,8 +3898,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     });
 
     // Calculate FICA (employee share) on earned income — per-person for correct wage base application
-    const myFICA = calculateFICA(myEarnedIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
-    const spouseFICA = calculateFICA(spouseEarnedIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
+    const myFICA = calculateFICA(myEarnedIncome, effectiveFilingStatus, taxIndexYears, pi.inflationRate);
+    const spouseFICA = calculateFICA(spouseEarnedIncome, effectiveFilingStatus, taxIndexYears, pi.inflationRate);
     const totalFICA = myFICA.total + spouseFICA.total;
     
     // NOTE: taxable SS is computed below, AFTER the accounts loop, because the
@@ -4141,7 +4183,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     const acaHouseholdSize = (effectiveFilingStatus === 'married_joint' && primaryAlive && spouseAlive) ? 2 : 1;
     const acaCredit = (acaMagi) => calculateACAPremiumCredit({
       magi: acaMagi, householdSize: acaHouseholdSize,
-      benchmarkPremium: acaGrossPremium, yearsFromNow, inflationRate: pi.inflationRate,
+      benchmarkPremium: acaGrossPremium, yearsFromNow: taxIndexYears, inflationRate: pi.inflationRate,
     });
     // AGI ≈ totalTaxableIncome_adjusted (net non-SS income + taxable SS).
     const baseACAMagi = totalTaxableIncome_adjusted + (totalSocialSecurity - taxableSS);
@@ -4170,10 +4212,10 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     if (isRetired || preRetirementDrawNeed > 0) {
       // Calculate taxes on guaranteed income + any earned income first
       const baseGrossIncome = totalTaxableIncome_adjusted; // Adjusted for pre-tax contributions
-      const baseFederalTax = calculateFederalTax(baseGrossIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(baseGrossIncome + preTaxDeduction));
+      const baseFederalTax = calculateFederalTax(baseGrossIncome, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(baseGrossIncome + preTaxDeduction));
       // For state tax, pension is retirement income exempt in some states (e.g., Alabama)
       const baseRetirementIncome = totalPension;
-      const baseStateTax = calculateStateTax(baseGrossIncome, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, taxableSS, baseRetirementIncome, { federalTaxPaid: baseFederalTax, primaryAge: myAge, spouseAge: spouseAge });
+      const baseStateTax = calculateStateTax(baseGrossIncome, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, taxableSS, baseRetirementIncome, { federalTaxPaid: baseFederalTax, primaryAge: myAge, spouseAge: spouseAge });
       
       // Net income from guaranteed sources + earned income + non-taxable one-time income
       const netCurrentIncome = totalGuaranteedIncome + earnedIncome + oneTimeNontaxableIncome - baseFederalTax - baseStateTax - totalFICA;
@@ -4187,7 +4229,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         // With lookback history the surcharge is exact (fixed by year t−2 MAGI);
         // only the first two projection years fall back to a current-year estimate.
         const baseMAGI = irmaaLookbackMAGI !== null ? irmaaLookbackMAGI : baseGrossIncome;
-        estimatedIRMAA = calculateIRMAASurcharge(baseMAGI, effectiveFilingStatus, yearsFromNow, pi.inflationRate, estMedicareEligible).totalSurcharge;
+        estimatedIRMAA = calculateIRMAASurcharge(baseMAGI, effectiveFilingStatus, taxIndexYears, pi.inflationRate, estMedicareEligible).totalSurcharge;
       }
       
       // How much the portfolio must deliver AFTER tax this year.
@@ -4330,13 +4372,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // MAGI drives both the NIIT threshold and the senior-deduction phaseout,
           // so it is derived before the federal tax that depends on the deduction.
           const iterMAGI = ordinaryBaseGross + estimatedGains + preTaxDeduction;
-          const totalFedOrdinary = calculateFederalTax(ordinaryBaseGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(iterMAGI));
+          const totalFedOrdinary = calculateFederalTax(ordinaryBaseGross, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(iterMAGI));
           // LTCG tax on realized gains, stacked above ordinary taxable income.
           // The 65+ deductions lower ordinary taxable income, so gains stack lower too.
-          const iterAdjDeduction = getFederalDeduction(effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(iterMAGI));
+          const iterAdjDeduction = getFederalDeduction(effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(iterMAGI));
           const estCapGainsTax = calculateCapitalGainsTax(
             estimatedGains, Math.max(0, ordinaryBaseGross - iterAdjDeduction) + estimatedGains,
-            effectiveFilingStatus, yearsFromNow, pi.inflationRate
+            effectiveFilingStatus, taxIndexYears, pi.inflationRate
           );
           // NIIT (3.8%) — kicks in when MAGI crosses the filing-status threshold.
           // Mirrors the final-block calc at the bottom of the year loop so the solver
@@ -4352,7 +4394,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // Retirement income for state exemption: pension only (401k/IRA withdrawals are NOT exempt).
           // State taxes capital gains as ordinary income → use the gains-inclusive base.
           const iterRetirementIncome = totalPension;
-          const totalStateTax = calculateStateTax(adjustedNonSSIncome + adjustedTaxableSS, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, adjustedTaxableSS, iterRetirementIncome, { federalTaxPaid: totalFedOrdinary, primaryAge: myAge, spouseAge: spouseAge });
+          const totalStateTax = calculateStateTax(adjustedNonSSIncome + adjustedTaxableSS, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, adjustedTaxableSS, iterRetirementIncome, { federalTaxPaid: totalFedOrdinary, primaryAge: myAge, spouseAge: spouseAge });
 
           // Tax attributable to the withdrawal = total tax minus tax on guaranteed income alone.
           const withdrawalFedTax = totalFedTax - baseFederalTax;
@@ -4364,7 +4406,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // so withdrawals can push it up. Under lookback the surcharge is fixed
           // by year t−2 income and this year's withdrawals cannot move it.
           const iterIRMAA = (estMedicareEligible > 0 && irmaaLookbackMAGI === null)
-            ? calculateIRMAASurcharge(iterMAGI, effectiveFilingStatus, yearsFromNow, pi.inflationRate, estMedicareEligible).totalSurcharge
+            ? calculateIRMAASurcharge(iterMAGI, effectiveFilingStatus, taxIndexYears, pi.inflationRate, estMedicareEligible).totalSurcharge
             : estimatedIRMAA;
           const iterIRMAADelta = iterIRMAA - estimatedIRMAA;
 
@@ -4668,7 +4710,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         // deduction's own phaseout depends on the conversion, so it is evaluated
         // inside the solve below rather than fixed here.
         const deductionAt = (magiForPhaseout) =>
-          getFederalDeduction(effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(magiForPhaseout));
+          getFederalDeduction(effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(magiForPhaseout));
 
         // Ordinary income already recognized this year, EXCLUDING SS and the
         // conversion itself. RMDs are ordinary income but tracked in totalRMD
@@ -4776,8 +4818,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           const preConvNonSSForDraw = nonSSIncomeAfterDeduction + totalRMD + preTaxWithdrawals + brokerageCapitalGains;
           const preConvSSForDraw = calculateSocialSecurityTaxableAmount(totalSocialSecurity, preConvNonSSForDraw, effectiveFilingStatus);
           const preConvGrossForDraw = preConvNonSSForDraw + preConvSSForDraw;
-          const preConvFedForDraw = calculateFederalTax(preConvGrossForDraw, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(preConvGrossForDraw + preTaxDeduction));
-          const preConvStateForDraw = calculateStateTax(preConvGrossForDraw, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, preConvSSForDraw, totalPension, { federalTaxPaid: preConvFedForDraw, primaryAge: myAge, spouseAge: spouseAge });
+          const preConvFedForDraw = calculateFederalTax(preConvGrossForDraw, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(preConvGrossForDraw + preTaxDeduction));
+          const preConvStateForDraw = calculateStateTax(preConvGrossForDraw, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, preConvSSForDraw, totalPension, { federalTaxPaid: preConvFedForDraw, primaryAge: myAge, spouseAge: spouseAge });
           // IRMAA moves with the conversion only in the first two projection years,
           // where there is no 2-year MAGI history to look back on. Omitting it made
           // the estimated bill too small by the surcharge, and the shortfall came
@@ -4786,7 +4828,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             (primaryAlive && myAge >= 65 ? 1 : 0) +
             (effectiveFilingStatus === 'married_joint' && spouseAlive && spouseAge >= 65 ? 1 : 0);
           const irmaaAt = (gross) => convMedicareEligibleForDraw > 0
-            ? calculateIRMAASurcharge(gross + preTaxDeduction, effectiveFilingStatus, yearsFromNow, pi.inflationRate, convMedicareEligibleForDraw).totalSurcharge
+            ? calculateIRMAASurcharge(gross + preTaxDeduction, effectiveFilingStatus, taxIndexYears, pi.inflationRate, convMedicareEligibleForDraw).totalSurcharge
             : 0;
           const preConvIRMAAForDraw = irmaaAt(preConvGrossForDraw);
           // Extra ordinary income created by paying the tax on a conversion of X.
@@ -4799,8 +4841,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
               const nonSS = preConvNonSSForDraw + X + ordinaryFromDraw;
               const ssT = calculateSocialSecurityTaxableAmount(totalSocialSecurity, nonSS, effectiveFilingStatus);
               const gross = nonSS + ssT;
-              const fed = calculateFederalTax(gross, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(gross + preTaxDeduction));
-              const st = calculateStateTax(gross, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, ssT, totalPension, { federalTaxPaid: fed, primaryAge: myAge, spouseAge: spouseAge });
+              const fed = calculateFederalTax(gross, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(gross + preTaxDeduction));
+              const st = calculateStateTax(gross, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, ssT, totalPension, { federalTaxPaid: fed, primaryAge: myAge, spouseAge: spouseAge });
               const nextBill = Math.max(0, (fed - preConvFedForDraw) + (st - preConvStateForDraw)
                 + (irmaaAt(gross) - preConvIRMAAForDraw));
               const nextOrdinary = preTaxShareOfDraw(nextBill, X);
@@ -4896,8 +4938,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             const preConvNonSS = nonSSIncomeAfterDeduction + totalRMD + spendingPreTax + brokerageCapitalGains;
             const preConvTaxableSS = calculateSocialSecurityTaxableAmount(totalSocialSecurity, preConvNonSS, effectiveFilingStatus);
             const preConvGross = preConvNonSS + preConvTaxableSS;
-            const preConvFed = calculateFederalTax(preConvGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(preConvGross + preTaxDeduction));
-            const preConvState = calculateStateTax(preConvGross, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, preConvTaxableSS, totalPension, { federalTaxPaid: preConvFed, primaryAge: myAge, spouseAge: spouseAge });
+            const preConvFed = calculateFederalTax(preConvGross, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(preConvGross + preTaxDeduction));
+            const preConvState = calculateStateTax(preConvGross, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, preConvTaxableSS, totalPension, { federalTaxPaid: preConvFed, primaryAge: myAge, spouseAge: spouseAge });
 
             // IRMAA: under the 2-year lookback this year's surcharge is fixed by
             // past MAGI — the conversion's IRMAA impact lands two years from now,
@@ -4908,7 +4950,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
               (primaryAlive && myAge >= 65 ? 1 : 0) +
               (effectiveFilingStatus === 'married_joint' && spouseAlive && spouseAge >= 65 ? 1 : 0);
             const preConvIRMAA = convMedicareEligible > 0
-              ? calculateIRMAASurcharge(preConvGross + preTaxDeduction, effectiveFilingStatus, yearsFromNow, pi.inflationRate, convMedicareEligible).totalSurcharge
+              ? calculateIRMAASurcharge(preConvGross + preTaxDeduction, effectiveFilingStatus, taxIndexYears, pi.inflationRate, convMedicareEligible).totalSurcharge
               : 0;
 
             // The bill is paid with a portfolio draw that may itself be taxable
@@ -4960,10 +5002,10 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
               const postConvNonSS = preConvNonSS + rothConversionThisYear + taxDrawTaxable;
               const postConvTaxableSS = calculateSocialSecurityTaxableAmount(totalSocialSecurity, postConvNonSS, effectiveFilingStatus);
               const postConvGross = postConvNonSS + postConvTaxableSS;
-              const postConvFed = calculateFederalTax(postConvGross, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(postConvGross + preTaxDeduction));
-              const postConvState = calculateStateTax(postConvGross, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, postConvTaxableSS, totalPension, { federalTaxPaid: postConvFed, primaryAge: myAge, spouseAge: spouseAge });
+              const postConvFed = calculateFederalTax(postConvGross, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(postConvGross + preTaxDeduction));
+              const postConvState = calculateStateTax(postConvGross, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, postConvTaxableSS, totalPension, { federalTaxPaid: postConvFed, primaryAge: myAge, spouseAge: spouseAge });
               const postConvIRMAA = convMedicareEligible > 0
-                ? calculateIRMAASurcharge(postConvGross + preTaxDeduction, effectiveFilingStatus, yearsFromNow, pi.inflationRate, convMedicareEligible).totalSurcharge
+                ? calculateIRMAASurcharge(postConvGross + preTaxDeduction, effectiveFilingStatus, taxIndexYears, pi.inflationRate, convMedicareEligible).totalSurcharge
                 : 0;
               const nextBill = Math.max(0, (postConvFed - preConvFed) + (postConvState - preConvState) + (postConvIRMAA - preConvIRMAA));
               const converged = Math.abs(nextBill - conversionTaxNeeded) < 1;
@@ -5121,7 +5163,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // federal tax because it drives the senior-deduction phaseout (and, further down,
     // the NIIT threshold and the IRMAA lookback record).
     const magi = finalTotalTaxableIncome + preTaxDeduction;
-    federalTax = calculateFederalTax(federalOrdinaryTaxableIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(magi));
+    federalTax = calculateFederalTax(federalOrdinaryTaxableIncome, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(magi));
     // Retirement income exempt in some states: pension only (401k/IRA withdrawals are NOT exempt)
     const finalRetirementIncome = totalPension;
     // For IL/MS/PA, ALL qualified retirement distributions (pre-tax 401k/IRA + RMDs) are also
@@ -5129,7 +5171,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     const qualifiedRetirementWithdrawals = preTaxWithdrawals + totalRMD;
     // Pass extraParams for Alabama progressive tax engine (federal deductibility, age-based exclusions)
     const stateExtraParams = { federalTaxPaid: federalTax, primaryAge: myAge, spouseAge: spouseAge, qualifiedRetirementWithdrawals };
-    stateTax = calculateStateTax(finalTotalTaxableIncome, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate, finalTaxableSS, finalRetirementIncome, stateExtraParams);
+    stateTax = calculateStateTax(finalTotalTaxableIncome, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, finalTaxableSS, finalRetirementIncome, stateExtraParams);
     
     // Calculate state taxable income (for display in detailed table)
     // For Alabama: mirror the progressive engine's deductions (federal tax, over-65, personal exemption)
@@ -5168,7 +5210,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // to 0). Mirror that by reducing the taxable-gains figure by any unused deduction.
     // Full federal deduction including the 65+ amounts — they reduce ordinary
     // taxable income, so gains stack lower in the LTCG brackets.
-    const adjustedDeduction = getFederalDeduction(effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(magi));
+    const adjustedDeduction = getFederalDeduction(effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(magi));
     const unusedDeduction = Math.max(0, adjustedDeduction - federalOrdinaryTaxableIncome);
     const taxableGains = Math.max(0, capitalGainsFromWithdrawals - unusedDeduction);
     const taxableOrdinaryIncome = Math.max(0, federalOrdinaryTaxableIncome - adjustedDeduction);
@@ -5178,7 +5220,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       taxableGains,
       taxableOrdinaryIncome + taxableGains,
       effectiveFilingStatus,
-      yearsFromNow,
+      taxIndexYears,
       pi.inflationRate
     );
     federalTax += capitalGainsTax;
@@ -5223,11 +5265,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     const numMedicareEligible = age65Count; // same predicate as the 65+ deductions
     if (numMedicareEligible > 0) {
       const irmaaMAGI = irmaaLookbackMAGI !== null ? irmaaLookbackMAGI : magi;
-      const irmaaResult = calculateIRMAASurcharge(irmaaMAGI, effectiveFilingStatus, yearsFromNow, pi.inflationRate, numMedicareEligible);
+      const irmaaResult = calculateIRMAASurcharge(irmaaMAGI, effectiveFilingStatus, taxIndexYears, pi.inflationRate, numMedicareEligible);
       irmaaSurcharge = irmaaResult.totalSurcharge;
       // Store IRMAA detail for display components (avoids independent recalculation).
       // tier/premium fields describe the surcharge being PAID this year (lookback MAGI).
-      const irmaaDetail = calculateIRMAA(irmaaMAGI, effectiveFilingStatus, yearsFromNow, pi.inflationRate);
+      const irmaaDetail = calculateIRMAA(irmaaMAGI, effectiveFilingStatus, taxIndexYears, pi.inflationRate);
       irmaaInfo = { tier: irmaaDetail.tier, totalAnnual: irmaaDetail.totalAnnual,
         partBAnnual: irmaaDetail.partBAnnual, partDAnnual: irmaaDetail.partDAnnual,
         partBMonthly: irmaaDetail.partBMonthly, partDMonthly: irmaaDetail.partDMonthly };
@@ -5239,7 +5281,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Left undefined in the top tier: there is no further cliff to fall off,
       // and reporting a distance of 0 or Infinity would both read as "you are
       // about to cross something".
-      const nextTier = nextIRMAAThreshold(magi, effectiveFilingStatus, yearsFromNow + 2, pi.inflationRate);
+      const nextTier = nextIRMAAThreshold(magi, effectiveFilingStatus, taxIndexYears + 2, pi.inflationRate);
       if (nextTier) irmaaInfo.distToNextTier = Math.round(nextTier.distance);
     }
     
@@ -5280,13 +5322,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // shows up in the marginal rate — dropping the excess RMD restores deduction,
       // which is a real part of what that RMD costs.
       const magiWithoutExcess = Math.max(0, nonSSWithoutExcess + taxableSSWithoutExcess + preTaxDeduction);
-      const fedTaxWithoutExcess = calculateFederalTax(fedOrdinaryWithoutExcess, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(magiWithoutExcess));
-      const fedTaxWithExcess = calculateFederalTax(federalOrdinaryTaxableIncome, effectiveFilingStatus, yearsFromNow, pi.inflationRate, fedOpts(magi));
+      const fedTaxWithoutExcess = calculateFederalTax(fedOrdinaryWithoutExcess, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(magiWithoutExcess));
+      const fedTaxWithExcess = calculateFederalTax(federalOrdinaryTaxableIncome, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(magi));
       // State: gains-inclusive base, without the excess RMD (compare against the already-
       // computed `stateTax`, which is the gains-inclusive with-excess figure).
       const stateBaseWithoutExcess = Math.max(0, nonSSWithoutExcess + taxableSSWithoutExcess);
       const stateTaxWithoutExcess = calculateStateTax(
-        stateBaseWithoutExcess, pi.state, effectiveFilingStatus, yearsFromNow, pi.inflationRate,
+        stateBaseWithoutExcess, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate,
         taxableSSWithoutExcess, finalRetirementIncome,
         { federalTaxPaid: fedTaxWithoutExcess, primaryAge: myAge, spouseAge: spouseAge }
       );
@@ -5534,6 +5576,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     MAX_AGE, MAX_MODELED_AGE, BROKERAGE_COST_BASIS_ESTIMATE, MAX_ITERATIONS_FOR_TAX_CALC,
     MONTE_CARLO_TAX_ESTIMATE, SAVE_DEBOUNCE_MS,
 
+    // ── Tax base year and inflation indexing ──────────────────────────────
+    BASE_TAX_YEAR, indexTo,
+
     // ── Account type taxonomy ─────────────────────────────────────────────
     PRE_TAX_TYPES, ROTH_TYPES, BROKERAGE_TYPES, HSA_TYPES,
     isPreTaxAccount, isRothAccount, isBrokerageAccount, isHSAAccount,
@@ -5544,7 +5589,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     SENIOR_DEDUCTION_FIRST_YEAR, SENIOR_DEDUCTION_LAST_YEAR,
     SENIOR_DEDUCTION_PHASEOUT_RATE, SENIOR_DEDUCTION_PHASEOUT_START,
     seniorDeduction, getFederalDeduction,
-    calculateFederalTax, calculateSocialSecurityTaxableAmount,
+    calculateFederalTax, federalTaxOnTaxableIncome,
+    calculateSocialSecurityTaxableAmount,
     CAPITAL_GAINS_THRESHOLDS_2025, calculateCapitalGainsTax, calculateNIIT,
 
     // ── State income tax ──────────────────────────────────────────────────

@@ -4361,12 +4361,121 @@ section('IRMAA cliff proximity (nextIRMAAThreshold)');
     const proj = run(s);
     const row = proj.find(p => p.myAge === 72 && p.irmaaInfo);
     if (row && row.irmaaInfo.distToNextTier !== undefined) {
-      const yearsFromNow = row.myAge - 70;
-      const expect = nextIRMAAThreshold(row.magi, row.filingStatus, yearsFromNow + 2, 0.03);
+      // Measured from BASE_TAX_YEAR, not from the row's age offset. Those agree
+      // only while the suite runs during 2026; deriving from row.year keeps the
+      // assertion honest in every later calendar year (see P39).
+      const taxIndexYears = row.year - engine.BASE_TAX_YEAR;
+      const expect = nextIRMAAThreshold(row.magi, row.filingStatus, taxIndexYears + 2, 0.03);
       eq(row.irmaaInfo.distToNextTier, Math.round(expect.distance),
         'the row\'s distToNextTier is the helper measured at the surcharge year');
     } else { pass++; }
   }
+}
+
+section('P39 — tax tables index from BASE_TAX_YEAR, not from whatever year it is today');
+{
+  // Every federal and state table in the engine is stated in 2026 dollars, and
+  // the tax functions index them forward by `yearsFromNow`. computeProjections
+  // used to derive that offset from new Date().getFullYear(), which silently
+  // made the offset mean "years since the app happened to be run." During 2026
+  // the two readings coincide; from 2027 on, the raw 2026 schedule was applied
+  // to a later year and every subsequent year indexed off that wrong base. The
+  // failure was invisible in the output — the numbers stayed plausible, just
+  // one year stale, and grew staler every January.
+  //
+  // The projection now runs two clocks: yearsFromNow (spending, COLA, asset
+  // growth — measured from today) and taxIndexYears (tax tables — measured from
+  // BASE_TAX_YEAR). These tests pin the tax clock specifically, by running the
+  // SAME plan in different calendar years, which is the only way to see it.
+  const { BASE_TAX_YEAR, indexTo, federalTaxOnTaxableIncome,
+          calculateFederalTax, getFederalDeduction, STANDARD_DEDUCTION_2026 } = engine;
+
+  eq(BASE_TAX_YEAR, 2026, 'the tables in this engine are 2026 dollars');
+
+  // ── indexTo is the one definition of forward indexing ──────────────────────
+  eq(indexTo(1000, 0, 0.03), 1000, 'zero years out is the base amount untouched');
+  approx(indexTo(1000, 1, 0.03), 1030, 'one year at 3% is 1.03x', 1e-9);
+  approx(indexTo(1000, 3, 0.03), 1092.727, 'three years compounds, not multiplies', 1e-6);
+  eq(indexTo(1000, 5, 0), 1000, 'zero inflation never moves an amount');
+  eq(indexTo(Infinity, 4, 0.03), Infinity,
+    'an open-topped bracket stays open when indexed — Infinity, not NaN');
+
+  // ── federalTaxOnTaxableIncome vs calculateFederalTax ───────────────────────
+  // The extracted function takes income that has ALREADY had the deduction
+  // applied. Feeding it gross would tax the deduction; feeding calculateFederalTax
+  // a taxable figure would deduct twice. Pinned so the two never drift.
+  for (const status of ['single', 'married_joint', 'married_separate', 'head_of_household']) {
+    const std = STANDARD_DEDUCTION_2026[status];
+    for (const taxable of [0, 25000, 120000, 450000, 900000]) {
+      approx(calculateFederalTax(taxable + std, status, 0, 0.03),
+             federalTaxOnTaxableIncome(taxable, status, 0, 0.03),
+             `${status} $${taxable} taxable: gross-in and taxable-in agree once the deduction is accounted for`, 1e-9);
+    }
+  }
+  eq(federalTaxOnTaxableIncome(0, 'married_joint', 0, 0.03), 0, 'no taxable income, no tax');
+  eq(federalTaxOnTaxableIncome(-5000, 'married_joint', 0, 0.03), 0,
+    'a negative taxable income floors at zero rather than producing a credit');
+
+  // Indexing the brackets is equivalent to deflating the income into base-year
+  // dollars — the schedule shifts, the shape does not.
+  for (const y of [1, 3, 7]) {
+    approx(federalTaxOnTaxableIncome(indexTo(200000, y, 0.03), 'married_joint', y, 0.03),
+           indexTo(federalTaxOnTaxableIncome(200000, 'married_joint', 0, 0.03), y, 0.03),
+      `${y} years out, an equally-indexed income pays an equally-indexed tax`, 1e-6);
+  }
+
+  // ── The projection's tax clock is anchored to BASE_TAX_YEAR ────────────────
+  // Identical plan, identical ages, different calendar years. Only the tax
+  // tables should move, and they should move by exactly the year difference.
+  const planIn = (calendarYear) => {
+    const s = baseScenario({
+      myAge: 60, spouseAge: 60,
+      myBirthYear: calendarYear - 60, spouseBirthYear: calendarYear - 60,
+      myRetirementAge: 60, spouseRetirementAge: 60, legacyAge: 62,
+      state: 'Florida', inflationRate: 0.03, desiredRetirementIncome: 200000,
+      healthcareModel: 'none', medicalInflation: 0,
+    });
+    s.accts = [{ id: 1, name: '401k', type: '401k', balance: 5000000,
+                 contribution: 0, cagr: 0, startAge: 60, stopAge: 60, owner: 'me' }];
+    s.streams = [];
+    return computeProjections(s.pi, s.accts, s.streams, [], [], [], calendarYear);
+  };
+
+  const at2026 = planIn(2026)[0];
+  const at2029 = planIn(2029)[0];
+
+  eq(at2026.year, 2026, 'the 2026 run starts in 2026');
+  eq(at2029.year, 2029, 'the 2029 run starts in 2029');
+
+  // Year 0 of the 2026 run sits ON the base year, so it gets the raw table.
+  approx(at2026.federalDeduction, STANDARD_DEDUCTION_2026.married_joint,
+    'a 2026 projection year uses the 2026 standard deduction verbatim', 1e-9);
+
+  // Year 0 of the 2029 run is three years of indexing past the base year. Before
+  // this fix it also got the raw 2026 figure, because its offset from "today"
+  // was zero.
+  // Row fields are rounded to whole dollars on the way out, so compare rounded.
+  eq(at2029.federalDeduction,
+     Math.round(indexTo(STANDARD_DEDUCTION_2026.married_joint, 3, 0.03)),
+    'a 2029 projection year indexes the standard deduction three years forward');
+  gt(at2029.federalDeduction, at2026.federalDeduction,
+    'and that is strictly more deduction than the base year — the bug was giving less');
+
+  // A wider deduction and wider brackets mean less tax on the same real income.
+  lt(at2029.federalTax, at2026.federalTax,
+    'the same withdrawal three years later pays less nominal federal tax, because the schedule moved');
+
+  // The offset is the year difference, not the age difference: the two runs have
+  // identical ages by construction, so anything that moved did so because of the
+  // calendar, which is precisely the property that was broken.
+  eq(at2026.myAge, at2029.myAge, 'both runs are the same age — only the calendar differs');
+
+  // ── The spending clock did NOT move ────────────────────────────────────────
+  // Spending is expressed in today's dollars and inflates from today, so year 0
+  // of both runs must want the same nominal amount. If taxIndexYears had leaked
+  // into the spending path, this would drift with the calendar year.
+  approx(at2029.netIncome, at2026.netIncome,
+    'year-0 net spending is unchanged — the two clocks stayed separate', 0.02);
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

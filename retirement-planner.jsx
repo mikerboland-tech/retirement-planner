@@ -9,7 +9,8 @@
 const PlannerEngine = (typeof window !== 'undefined' && window.PlannerEngine) || {};
 const {
   MAX_AGE, BROKERAGE_COST_BASIS_ESTIMATE, MAX_ITERATIONS_FOR_TAX_CALC,
-  MONTE_CARLO_TAX_ESTIMATE, SAVE_DEBOUNCE_MS, PRE_TAX_TYPES, ROTH_TYPES,
+  MONTE_CARLO_TAX_ESTIMATE, SAVE_DEBOUNCE_MS, BASE_TAX_YEAR, indexTo,
+  PRE_TAX_TYPES, ROTH_TYPES,
   BROKERAGE_TYPES, HSA_TYPES, isPreTaxAccount, isRothAccount, isBrokerageAccount,
   isHSAAccount, FEDERAL_TAX_BRACKETS_2026, STANDARD_DEDUCTION_2026,
   calculateFederalTax, calculateSocialSecurityTaxableAmount,
@@ -1702,9 +1703,11 @@ function TaxYearSnapshot({ projections, personalInfo }) {
   const p = projections.find(pr => pr.myAge === selectedAge);
   if (!p) return null;
   
-  const yearsFromNow = selectedAge - personalInfo.myAge;
-  const inflationFactor = Math.pow(1 + personalInfo.inflationRate, yearsFromNow);
-  
+  // Indexes tax tables only (the deduction fallback and the bracket walk below),
+  // so it runs on the tax clock: years since BASE_TAX_YEAR, not years since the
+  // user's current age. See engine BASE_TAX_YEAR.
+  const inflationFactor = indexTo(1, p.year - BASE_TAX_YEAR, personalInfo.inflationRate);
+
   // ── ALL VALUES READ FROM UNIFIED ENGINE ──────────────────────────────────────
   const rothConversion = p.rothConversion || 0;
   const filingStatus = p.filingStatus || personalInfo.filingStatus;
@@ -2320,24 +2323,30 @@ function suggestPreTaxFloor(baselineProj, pi) {
     if (age == null) continue;
     const yearsFromNow = age - myAge;
     if (yearsFromNow < 0) continue;
-    const inflationFactor = Math.pow(1 + inflation, yearsFromNow);
+    // Two different clocks, previously conflated into one factor. The QCD limit,
+    // standard deduction and bracket tops are TAX figures and index from
+    // BASE_TAX_YEAR; the final deflation converts a nominal future dollar back to
+    // today's purchasing power and so measures from TODAY. They coincide only
+    // while the app runs in the base year. See engine BASE_TAX_YEAR.
+    const taxFactor = indexTo(1, row.year - BASE_TAX_YEAR, inflation);
+    const todayFactor = Math.pow(1 + inflation, yearsFromNow);
     const fs = row.filingStatus || pi.filingStatus || 'married_joint';
     // (1) QCD giving this year, capped at the household QCD limit
     let qcdYear = 0;
     if (age >= QCD_START_AGE) {
-      const householdQCD = (fs === 'married_joint' ? 2 : 1) * QCD_ANNUAL_LIMIT * inflationFactor;
+      const householdQCD = (fs === 'married_joint' ? 2 : 1) * QCD_ANNUAL_LIMIT * taxFactor;
       qcdYear = Math.min(row.charitableGiving || 0, householdQCD);
     }
     // (2) room remaining under the top of the 12% bracket (post-std-deduction)
     const fsBrackets = FEDERAL_TAX_BRACKETS_2026[fs] || FEDERAL_TAX_BRACKETS_2026.married_joint;
     const twelve = fsBrackets.find(b => b.rate === 0.12);
-    const adjDed = (STANDARD_DEDUCTION_2026[fs] || STANDARD_DEDUCTION_2026.married_joint) * inflationFactor;
+    const adjDed = (STANDARD_DEDUCTION_2026[fs] || STANDARD_DEDUCTION_2026.married_joint) * taxFactor;
     let lowRoom = 0;
     if (twelve) {
       const netTaxable = Math.max(0, (row.taxableIncome || 0) - adjDed);
-      lowRoom = Math.max(0, twelve.max * inflationFactor - netTaxable);
+      lowRoom = Math.max(0, twelve.max * taxFactor - netTaxable);
     }
-    total += (qcdYear + lowRoom) / inflationFactor; // deflate to today's $
+    total += (qcdYear + lowRoom) / todayFactor; // deflate to today's $
   }
   return Math.round(total);
 }
@@ -3123,8 +3132,9 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
   const taxPlanningData = projections
     .filter(p => p.myAge >= ageRange.start && p.myAge <= ageRange.end)
     .map(p => {
-      const yearsFromNow = p.myAge - personalInfo.myAge;
-      const inflationFactor = Math.pow(1 + personalInfo.inflationRate, yearsFromNow);
+      // Tax clock: bracket edges and the deduction fallback index from
+      // BASE_TAX_YEAR, not from the user's current age. See engine BASE_TAX_YEAR.
+      const inflationFactor = indexTo(1, p.year - BASE_TAX_YEAR, personalInfo.inflationRate);
       const baseBrackets = FEDERAL_TAX_BRACKETS_2026[personalInfo.filingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
       // The engine's own deduction for this year — includes the age-65 additional
       // standard deduction and the OBBBA senior deduction, which a bare
@@ -3437,7 +3447,8 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
             magi: Math.max(0, acaMagi - p.rothConversion),
             householdSize,
             benchmarkPremium: p.acaGrossPremium,
-            yearsFromNow: p.myAge - personalInfo.myAge,
+            // FPL indexes from BASE_TAX_YEAR, matching how the engine calls this.
+            yearsFromNow: p.year - BASE_TAX_YEAR,
             inflationRate: personalInfo.inflationRate,
           });
           const subsidyLost = Math.max(0, Math.round(without.subsidy - (p.acaSubsidy || 0)));
@@ -11043,8 +11054,11 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
         const computeMarginalForAge = (targetAge) => {
           const p = projections.find(pr => pr.myAge === targetAge);
           if (!p) return null;
-          const yearsFromNow = targetAge - personalInfo.myAge;
-          const inflationFactor = Math.pow(1 + personalInfo.inflationRate, yearsFromNow);
+          // Tax tables index from BASE_TAX_YEAR, not from the user's current age.
+          // An age offset only equals the tax offset while the app runs in the
+          // base year; deriving it from the row's calendar year keeps this card
+          // agreeing with the engine in every later year. (See engine BASE_TAX_YEAR.)
+          const taxIndexYears = p.year - BASE_TAX_YEAR;
           const extra = 1000;
           const rothConv = p.rothConversion || 0;
           const currentNonSS = p.earnedIncome + p.pension + p.otherIncome + p.portfolioWithdrawal + rothConv - (p.qcd || 0);
@@ -11055,17 +11069,17 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
           
           // Total tax deltas (include torpedo effect)
           const retIncome = p.pension; // Only pension is exempt from state tax (not 401k/IRA withdrawals)
-          const currentFed = calculateFederalTax(currentGross, personalInfo.filingStatus, yearsFromNow, personalInfo.inflationRate);
-          const currentSt = calculateStateTax(currentGross, personalInfo.state, personalInfo.filingStatus, yearsFromNow, personalInfo.inflationRate, currentTaxableSS, retIncome, { federalTaxPaid: currentFed, primaryAge: targetAge, spouseAge: personalInfo.spouseAge + (targetAge - personalInfo.myAge) });
-          const newFed = calculateFederalTax(newGross, personalInfo.filingStatus, yearsFromNow, personalInfo.inflationRate);
-          const newSt = calculateStateTax(newGross, personalInfo.state, personalInfo.filingStatus, yearsFromNow, personalInfo.inflationRate, newTaxableSS, retIncome, { federalTaxPaid: newFed, primaryAge: targetAge, spouseAge: personalInfo.spouseAge + (targetAge - personalInfo.myAge) });
+          const currentFed = calculateFederalTax(currentGross, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate);
+          const currentSt = calculateStateTax(currentGross, personalInfo.state, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate, currentTaxableSS, retIncome, { federalTaxPaid: currentFed, primaryAge: targetAge, spouseAge: personalInfo.spouseAge + (targetAge - personalInfo.myAge) });
+          const newFed = calculateFederalTax(newGross, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate);
+          const newSt = calculateStateTax(newGross, personalInfo.state, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate, newTaxableSS, retIncome, { federalTaxPaid: newFed, primaryAge: targetAge, spouseAge: personalInfo.spouseAge + (targetAge - personalInfo.myAge) });
           const fedDelta = newFed - currentFed;
           const stDelta = newSt - currentSt;
           
           // Direct deltas (without torpedo - keep SS taxable unchanged)
           const directGross = currentGross + extra;
-          const directFed = calculateFederalTax(directGross, personalInfo.filingStatus, yearsFromNow, personalInfo.inflationRate);
-          const directSt = calculateStateTax(directGross, personalInfo.state, personalInfo.filingStatus, yearsFromNow, personalInfo.inflationRate, currentTaxableSS, retIncome, { federalTaxPaid: directFed, primaryAge: targetAge, spouseAge: personalInfo.spouseAge + (targetAge - personalInfo.myAge) });
+          const directFed = calculateFederalTax(directGross, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate);
+          const directSt = calculateStateTax(directGross, personalInfo.state, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate, currentTaxableSS, retIncome, { federalTaxPaid: directFed, primaryAge: targetAge, spouseAge: personalInfo.spouseAge + (targetAge - personalInfo.myAge) });
           const directFedDelta = directFed - currentFed;
           const directStDelta = directSt - currentSt;
           
@@ -11073,8 +11087,8 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
           const torpedoCost = (fedDelta - directFedDelta) + (stDelta - directStDelta);
           
           const currentMAGI = p.earnedIncome + p.socialSecurity + p.pension + p.otherIncome + p.portfolioWithdrawal + rothConv;
-          const irm1 = targetAge >= 65 ? calculateIRMAA(currentMAGI, personalInfo.filingStatus, yearsFromNow, personalInfo.inflationRate) : { totalAnnual: 0, tier: 0 };
-          const irm2 = targetAge >= 65 ? calculateIRMAA(currentMAGI + extra, personalInfo.filingStatus, yearsFromNow, personalInfo.inflationRate) : { totalAnnual: 0, tier: 0 };
+          const irm1 = targetAge >= 65 ? calculateIRMAA(currentMAGI, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate) : { totalAnnual: 0, tier: 0 };
+          const irm2 = targetAge >= 65 ? calculateIRMAA(currentMAGI + extra, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate) : { totalAnnual: 0, tier: 0 };
           const irmDelta = irm2.totalAnnual - irm1.totalAnnual;
           const totalCost = fedDelta + stDelta + irmDelta;
           return {

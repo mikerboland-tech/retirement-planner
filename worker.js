@@ -36,6 +36,7 @@ const {
   reindexSSForInflation,
   conversionCostComponents,
   topMarginalBracket,
+  BASE_TAX_YEAR,
 } = E;
 
 self.onmessage = (e) => {
@@ -944,9 +945,13 @@ function runMarginalRateCurve(jobId, payload) {
       magi: baseRow.magi,
       marginalRate: components ? components.rate : null,
       taxOnlyRate: components ? components.taxOnlyRate : null,
+      // `idx` is the row's offset from the start of the projection, which is only
+      // the right bracket-indexing offset when the projection starts in
+      // BASE_TAX_YEAR. Derive it from the row's own calendar year instead, so the
+      // curve keeps agreeing with the engine's brackets in later years.
       bracket: topMarginalBracket(
         baseRow.taxableIncome, baseRow.filingStatus || personalInfo.filingStatus,
-        idx, personalInfo.inflationRate
+        baseRow.year - BASE_TAX_YEAR, personalInfo.inflationRate
       ),
       converted,
       irmaaDelta: components ? components.irmaaDelta : 0,
