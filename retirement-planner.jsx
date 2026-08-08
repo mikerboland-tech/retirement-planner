@@ -46,6 +46,7 @@ const {
   projectPayrollYearEnd, marginalRateOn, saltCapFor, projectedWithdrawalRate,
   detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling,
   rothConversionIsPlanned, withoutRothConversions, withRothConversionTarget,
+  taxBreakpoints,
   IRMAA_FILL_SAFETY_MARGIN,
 } = PlannerEngine;
 
@@ -3596,6 +3597,140 @@ function K1Row({ k1, onChange, onDelete, detail }) {
   );
 }
 
+// ── TAX BREAKPOINTS TABLE ────────────────────────────────────────────────────
+// One component, three homes: the Tax Planning tab (year-selectable), the
+// Current Year tab (pinned to this year), and the printed next-year report.
+// Reads engine.taxBreakpoints, so all three quote the same edges the engine
+// actually uses — a table that quoted its own copy would drift the moment a
+// threshold changed and would be worse than no table.
+function TaxBreakpointsTable({ projections, personalInfo, fixedAge = null, forPrint = false, title }) {
+  const ages = (projections || []).map(p => p.myAge);
+  const [selectedAge, setSelectedAge] = React.useState(
+    fixedAge !== null ? fixedAge : (ages[0] ?? personalInfo.myAge));
+  const [showAll, setShowAll] = React.useState(false);
+
+  const age = fixedAge !== null ? fixedAge : selectedAge;
+  const row = (projections || []).find(p => p.myAge === age);
+  if (!row) return null;
+
+  const medicareEligible = row.age65Count || 0;
+  const all = taxBreakpoints({ row, pi: personalInfo, numMedicareEligible: medicareEligible });
+  // Inactive rows are thresholds that exist but cannot bite this year — NIIT
+  // with no investment income, capital-gains rates with no gains. Hidden by
+  // default so the list shows what actually applies, but never deleted: "why
+  // isn't NIIT listed?" is a worse question than one extra row.
+  const rows = showAll ? all : all.filter(b => !b.inactive);
+  const approaching = rows.filter(b => !b.crossed);
+  const crossed = rows.filter(b => b.crossed);
+
+  const money = (v) => formatCurrency(Math.round(v));
+  const cost = (b) => {
+    if (b.crossingCost > 0) return `${money(b.crossingCost)} at once`;
+    if (b.crossingCostRate) return `${(b.crossingCostRate * 100).toFixed(1)}% per extra $`;
+    return '—';
+  };
+  const kindChip = (b) => {
+    const map = { cliff: ['CLIFF', 'bg-red-900/40 text-red-300'],
+                  phase: ['PHASE', 'bg-amber-900/40 text-amber-300'],
+                  rate:  ['RATE',  'bg-sky-900/40 text-sky-300'] };
+    const [label, cls] = map[b.kind] || ['', ''];
+    return <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${forPrint ? 'text-slate-600' : cls}`}>{label}</span>;
+  };
+
+  const body = (b, i) => (
+    <tr key={b.label} className={forPrint ? 'border-b border-slate-300'
+      : `border-b border-slate-800/70 ${i % 2 === 0 ? 'bg-slate-800/20' : ''}`}>
+      <td className={`py-1.5 pr-2 ${forPrint ? 'text-slate-900' : 'text-slate-200'}`}>
+        {b.label} {!forPrint && kindChip(b)}
+        {b.note && <span className={`block text-[10px] ${forPrint ? 'text-slate-600' : 'text-slate-500'}`}>{b.note}</span>}
+      </td>
+      <td className={`py-1.5 px-2 text-[11px] ${forPrint ? 'text-slate-600' : 'text-slate-400'}`}>{b.basis}</td>
+      <td className={`py-1.5 px-2 text-right tabular-nums ${forPrint ? 'text-slate-900' : 'text-slate-300'}`}>{money(b.threshold)}</td>
+      <td className={`py-1.5 px-2 text-right tabular-nums ${forPrint ? 'text-slate-900' : 'text-slate-300'}`}>{money(b.current)}</td>
+      <td className={`py-1.5 px-2 text-right tabular-nums font-medium ${
+        forPrint ? 'text-slate-900' : (b.crossed ? 'text-slate-500' : (b.distance < 25000 ? 'text-amber-300' : 'text-emerald-400'))}`}>
+        {b.crossed ? `over by ${money(-b.distance)}` : money(b.distance)}
+      </td>
+      <td className={`py-1.5 pl-2 text-right tabular-nums text-[11px] ${forPrint ? 'text-slate-700' : 'text-slate-400'}`}>{cost(b)}</td>
+    </tr>
+  );
+
+  const head = (
+    <tr className={forPrint ? 'border-b-2 border-slate-400 text-slate-700 text-left'
+                            : 'border-b border-slate-700 text-slate-400 text-left'}>
+      <th className="py-1.5 pr-2 font-medium">Threshold</th>
+      <th className="py-1.5 px-2 font-medium">Measured on</th>
+      <th className="py-1.5 px-2 font-medium text-right">Edge</th>
+      <th className="py-1.5 px-2 font-medium text-right">Yours</th>
+      <th className="py-1.5 px-2 font-medium text-right">Headroom</th>
+      <th className="py-1.5 pl-2 font-medium text-right">Crossing costs</th>
+    </tr>
+  );
+
+  return (
+    <div className={forPrint ? 'mb-6' : cardStyle}>
+      <div className="flex flex-wrap items-end justify-between gap-3 mb-2">
+        <div>
+          <h4 className={`font-semibold ${forPrint ? 'text-base text-slate-900' : 'text-lg text-slate-100'}`}>
+            {title || 'Income thresholds this year'}
+          </h4>
+          <p className={`text-xs mt-1 max-w-2xl ${forPrint ? 'text-slate-600' : 'text-slate-400'}`}>
+            Every edge a year can cross, and how much room is left before each. They are measured on
+            four different quantities — provisional income, MAGI, taxable income and wages — which is
+            why no single number tells you whether you are near one.
+          </p>
+        </div>
+        {fixedAge === null && !forPrint && (
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">Age</label>
+            <select value={selectedAge} onChange={e => setSelectedAge(Number(e.target.value))}
+              className="bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-100">
+              {ages.map(a => {
+                const r = projections.find(p => p.myAge === a);
+                return <option key={a} value={a}>{a} ({r.year})</option>;
+              })}
+            </select>
+          </div>
+        )}
+      </div>
+
+      {medicareEligible === 0 && (
+        <p className={`text-[11px] mb-2 ${forPrint ? 'text-slate-600' : 'text-slate-500'}`}>
+          Nobody is on Medicare at age {age}, so the IRMAA rows are not charged this year — but this
+          year&rsquo;s MAGI still sets the premium two years from now, which is why they are listed.
+        </p>
+      )}
+
+      <div className="overflow-x-auto">
+        <table className={`w-full ${forPrint ? 'text-[11px]' : 'text-sm'}`}>
+          <thead>{head}</thead>
+          <tbody>
+            {approaching.length > 0 && (
+              <tr><td colSpan={6} className={`pt-3 pb-1 text-[10px] uppercase tracking-wide font-semibold ${
+                forPrint ? 'text-slate-500' : 'text-slate-500'}`}>Not yet crossed — nearest first</td></tr>
+            )}
+            {approaching.map(body)}
+            {crossed.length > 0 && (
+              <tr><td colSpan={6} className={`pt-3 pb-1 text-[10px] uppercase tracking-wide font-semibold ${
+                forPrint ? 'text-slate-500' : 'text-slate-500'}`}>Already past</td></tr>
+            )}
+            {crossed.map(body)}
+          </tbody>
+        </table>
+      </div>
+
+      {!forPrint && (
+        <button onClick={() => setShowAll(!showAll)}
+          className="mt-2 text-[11px] text-slate-500 hover:text-slate-300 underline">
+          {showAll ? 'Hide thresholds that cannot apply this year'
+                   : `Show ${all.length - rows.length} threshold${all.length - rows.length === 1 ? '' : 's'} that cannot apply this year`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+
 function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, projections, setPersonalInfo }) {
   const [openInfoCard, setOpenInfoCard] = React.useState(null);
   const [showPrior, setShowPrior] = React.useState(false);
@@ -3896,6 +4031,15 @@ function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, pro
           </div>
         )}
       </div>
+
+      {/* Pinned to this year: on this tab the question is always "what can I
+          still do before December 31", so a year selector would be noise. */}
+      <TaxBreakpointsTable
+        projections={projections}
+        personalInfo={personalInfo}
+        fixedAge={personalInfo.myAge}
+        title={`Income thresholds for ${cy.taxYear}`}
+      />
 
       {/* ── Decisions ──────────────────────────────────────────────────── */}
       <div className={cardStyle}>
@@ -4515,6 +4659,8 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
       })()}
 
       {/* Tax Year Snapshot */}
+      <TaxBreakpointsTable projections={projections} personalInfo={personalInfo} />
+
       <TaxYearSnapshot
         projections={projections}
         personalInfo={personalInfo}
@@ -13431,6 +13577,20 @@ function NextYearReport({ projections, personalInfo, accounts, incomeStreams, on
             })}
           </ol>
         )}
+
+        {/* The thresholds themselves, on the printed page. The action list says
+            what to do; this says where the edges are, which is what makes a
+            mid-year decision checkable against a statement without reopening
+            the app. Print styling only — no chips, no toggles, no selector. */}
+        <div style={{ marginTop: 28, borderTop: '1px solid #e2e8f0', paddingTop: 16 }}>
+          <TaxBreakpointsTable
+            projections={projections}
+            personalInfo={personalInfo}
+            fixedAge={personalInfo.myAge}
+            forPrint={true}
+            title={`Income thresholds for ${currentYear}`}
+          />
+        </div>
 
         <p style={{ fontSize: 11, color: '#64748b', marginTop: 24, lineHeight: 1.5, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
           This report is a directional planning tool generated from the assumptions in your plan, not tax or

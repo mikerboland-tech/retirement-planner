@@ -3295,10 +3295,10 @@ const calculateSocialSecurityTaxableAmount = (ssIncome, otherIncome, filingStatu
   
   // Define thresholds based on filing status
   const thresholds = filingStatus === 'married_joint' 
-    ? { base: 32000, max: 44000 }
+    ? { base: SS_PROVISIONAL_THRESHOLDS.married_joint.base, max: SS_PROVISIONAL_THRESHOLDS.married_joint.max }
     : filingStatus === 'married_separate'
     ? { base: 0, max: 0 } // Married filing separately has $0 thresholds if living together
-    : { base: 25000, max: 34000 }; // Single, Head of Household
+    : { base: SS_PROVISIONAL_THRESHOLDS.single.base, max: SS_PROVISIONAL_THRESHOLDS.single.max }; // Single, Head of Household
   
   // Special case: Married filing separately with any combined income means 85% taxable
   if (filingStatus === 'married_separate' && combinedIncome > 0) {
@@ -3389,14 +3389,7 @@ const calculateCapitalGainsTax = (capitalGains, taxableIncome, filingStatus, yea
 
 // Net Investment Income Tax (NIIT) - 3.8% on investment income for high earners
 const calculateNIIT = (investmentIncome, magi, filingStatus) => {
-  const thresholds = {
-    single: 200000,
-    married_joint: 250000,
-    married_separate: 125000,
-    head_of_household: 200000
-  };
-  
-  const threshold = thresholds[filingStatus] || thresholds.married_joint;
+  const threshold = NIIT_THRESHOLDS[filingStatus] || NIIT_THRESHOLDS.married_joint;
   
   if (magi <= threshold) return 0;
   
@@ -4508,6 +4501,32 @@ const projectPayrollYearEnd = (row = {}, opts = {}) => {
   };
 };
 
+// ── THRESHOLDS THAT WERE INLINE ──────────────────────────────────────────────
+// These two sets were literals inside the functions that used them, which was
+// fine while nothing else needed to know where the edges were. The breakpoint
+// table needs to name them, and a table that quotes a number the engine does not
+// actually use is worse than no table — so they are hoisted rather than copied.
+//
+// Neither is inflation-indexed. IRC §86 has fixed the Social Security
+// provisional-income thresholds at these figures since 1984 and 1993, and §1411
+// fixed the NIIT thresholds in 2013. They are not oversights: Congress wrote
+// them without indexation, which is why an ever-growing share of benefits is
+// taxable each year and why the NIIT reaches steadily further down.
+const SS_PROVISIONAL_THRESHOLDS = {
+  married_joint:    { base: 32000, max: 44000 },
+  single:           { base: 25000, max: 34000 },
+  head_of_household:{ base: 25000, max: 34000 },
+  // MFS living together has $0 thresholds — 85% of benefits from the first dollar.
+  married_separate: { base: 0, max: 0 },
+};
+
+const NIIT_THRESHOLDS = {
+  single: 200000,
+  married_joint: 250000,
+  married_separate: 125000,
+  head_of_household: 200000,
+};
+
 // ── ROTH CONVERSION MODE: ONE DEFINITION ─────────────────────────────────────
 // There are three ways to specify a conversion — a fixed amount, fill to a tax
 // bracket, fill to an IRMAA tier — and a dozen places that need to ask "is one
@@ -4814,6 +4833,202 @@ const compareTraditionalVsRoth = (cy, pi, futureMarginalRate, opts = {}) => {
       cappedByLimit: p.projected.deferral.cappedByLimit,
     })),
   };
+};
+
+
+// ── EVERY THRESHOLD A YEAR CAN CROSS ─────────────────────────────────────────
+// A year's tax is not a smooth function of income. It is a smooth function with
+// a dozen edges cut into it, and the edges are measured on FOUR DIFFERENT BASES:
+//
+//   provisional income  Social Security taxability (§86)
+//   MAGI                IRMAA, NIIT, the senior deduction, the SALT cap
+//   taxable income      ordinary brackets, LTCG rates, §199A
+//   wages               additional Medicare
+//
+// That is the whole reason this table is worth building. "Am I near a cliff?"
+// cannot be answered by looking at one number, because the thresholds are not
+// commensurable — the top of the 22% bracket and the first IRMAA edge are not
+// even measured on the same quantity, so neither dominates the other and you
+// have to check both.
+//
+// Returns one row per threshold with the year's own figure on the matching
+// basis, the distance to the edge, and what crossing it costs. Sorted by
+// distance so whatever binds first is at the top.
+//
+// `crossingCost` is the marginal cost of the FIRST dollar past the edge:
+//   - a cliff (IRMAA, ACA) charges a lump sum for that dollar
+//   - a phase-out (senior deduction, SALT, §199A) charges a rate on every
+//     further dollar, so the figure is per-dollar and flagged as such
+//   - a bracket edge simply raises the rate from there on
+const taxBreakpoints = ({ row, pi = {}, numMedicareEligible = null } = {}) => {
+  if (!row) return [];
+  const fs = row.effectiveFilingStatus || row.filingStatus || pi.filingStatus || 'married_joint';
+  const idx = (row.year || BASE_TAX_YEAR) - BASE_TAX_YEAR;
+  const infl = pi.inflationRate ?? 0.03;
+  const ix = (v) => indexTo(v, idx, infl);
+
+  const magi = row.magi || 0;
+  const agi = row.taxableIncome || 0;                  // the row's AGI, before deductions
+  const preferential = (row.realizedCapitalGains || 0) + (row.brokerageDividends || 0);
+  const taxable = Math.max(0, agi - (row.federalDeduction || 0));
+  const ordinaryTaxable = Math.max(0, taxable - preferential);
+  const ss = row.socialSecurity || 0;
+  // §86 provisional income: everything else, plus half of benefits. Tax-exempt
+  // interest belongs here too; the projection does not carry a muni figure, so
+  // it is absent rather than assumed.
+  const provisional = Math.max(0, (row.nonSSIncome || 0)) + ss / 2;
+  const wages = row.earnedIncome || 0;
+
+  const out = [];
+  const add = (o) => {
+    if (o.threshold === null || o.threshold === undefined || !Number.isFinite(o.threshold)) return;
+    out.push({
+      ...o,
+      distance: o.threshold - o.current,
+      crossed: o.current > o.threshold,
+    });
+  };
+
+  // ── Social Security taxability (§86), on provisional income ──────────────
+  {
+    const t = SS_PROVISIONAL_THRESHOLDS[fs] || SS_PROVISIONAL_THRESHOLDS.married_joint;
+    if (ss > 0 && t.max > 0) {
+      const share = ss > 0 ? (row.taxableSS || 0) / ss : 0;
+      add({ label: 'Social Security 50% taxable', basis: 'provisional income',
+            threshold: t.base, current: provisional, kind: 'phase',
+            note: 'Above this, up to half of benefits becomes taxable.',
+            statutory: true });
+      add({ label: 'Social Security 85% taxable', basis: 'provisional income',
+            threshold: t.max, current: provisional, kind: 'phase',
+            note: share >= 0.849
+              ? 'Already at the 85% ceiling — further income adds no more taxable benefits.'
+              : 'Above this, up to 85% of benefits becomes taxable.',
+            atCeiling: share >= 0.849, statutory: true });
+    }
+  }
+
+  // ── IRMAA, on MAGI, landing two years later ──────────────────────────────
+  {
+    const eligible = numMedicareEligible !== null ? numMedicareEligible : (row.age65Count || 0);
+    const table = IRMAA_THRESHOLDS_2025[fs]
+      || IRMAA_THRESHOLDS_2025[fs === 'head_of_household' ? 'single' : 'married_joint'];
+    if (table) {
+      for (let i = 0; i < table.length - 1; i++) {
+        const edge = indexTo(table[i].maxIncome, idx + IRMAA_TIER_LOOKBACK_YEARS, infl);
+        const step = ((table[i + 1].partB + table[i + 1].partD) - (table[i].partB + table[i].partD))
+                   * 12 * Math.max(1, eligible || 1);
+        add({ label: `IRMAA tier ${i + 1} begins`, basis: 'MAGI',
+              threshold: edge, current: magi, kind: 'cliff',
+              crossingCost: step, appliesAtAge: (row.myAge || 0) + IRMAA_TIER_LOOKBACK_YEARS,
+              note: eligible > 0
+                ? `Crossing by $1 costs ${Math.round(step).toLocaleString()} for the year, paid at age ${(row.myAge || 0) + 2}.`
+                : `Would cost ${Math.round(step).toLocaleString()}/yr once on Medicare. This year's MAGI sets the premium two years out.`,
+              inactive: eligible === 0 && (row.myAge || 0) + 2 < 65 });
+      }
+    }
+  }
+
+  // ── Net investment income tax (§1411), on MAGI. Never indexed. ───────────
+  {
+    const t = NIIT_THRESHOLDS[fs] || NIIT_THRESHOLDS.married_joint;
+    const nii = preferential;
+    add({ label: 'Net investment income tax (3.8%)', basis: 'MAGI',
+          threshold: t, current: magi, kind: 'phase',
+          crossingCostRate: 0.038,
+          note: nii > 0
+            ? 'Above this, 3.8% applies to the lesser of investment income or the excess.'
+            : 'Above this, 3.8% would apply to any investment income. You have none this year.',
+          statutory: true, inactive: nii <= 0 });
+  }
+
+  // ── Senior deduction phase-out (OBBBA §70103), on MAGI ───────────────────
+  {
+    const taxYear = row.year || BASE_TAX_YEAR;
+    const age65 = row.age65OnReturn || row.age65Count || 0;
+    if (age65 > 0 && taxYear >= SENIOR_DEDUCTION_FIRST_YEAR && taxYear <= SENIOR_DEDUCTION_LAST_YEAR) {
+      const start = ix(SENIOR_DEDUCTION_PHASEOUT_START[fs] ?? SENIOR_DEDUCTION_PHASEOUT_START.single);
+      add({ label: 'Senior deduction starts phasing out', basis: 'MAGI',
+            threshold: start, current: magi, kind: 'phase',
+            crossingCostRate: SENIOR_DEDUCTION_PHASEOUT_RATE,
+            note: `Above this you lose ${(SENIOR_DEDUCTION_PHASEOUT_RATE * 100).toFixed(0)}c of deduction per person per extra dollar — taxed at your bracket on top of the dollar itself.`,
+            expires: SENIOR_DEDUCTION_LAST_YEAR });
+    }
+  }
+
+  // ── SALT cap phase-down (OBBBA §70102), on MAGI ──────────────────────────
+  {
+    const sched = saltCapSchedule(row.year || BASE_TAX_YEAR, fs);
+    if (Number.isFinite(sched.phaseoutStart)) {
+      add({ label: 'SALT cap starts phasing down', basis: 'MAGI',
+            threshold: sched.phaseoutStart, current: magi, kind: 'phase',
+            crossingCostRate: SALT_PHASEOUT_RATE,
+            note: `Above this the ${Math.round(sched.cap).toLocaleString()} cap falls 30c per dollar, to a floor of ${Math.round(sched.floor).toLocaleString()}. Only bites if you itemize.` });
+    }
+  }
+
+  // ── Ordinary brackets, on taxable income ─────────────────────────────────
+  {
+    const brackets = FEDERAL_TAX_BRACKETS_2026[fs] || FEDERAL_TAX_BRACKETS_2026.married_joint;
+    brackets.forEach((b, i) => {
+      if (b.max === Infinity) return;
+      const next = brackets[i + 1];
+      if (!next) return;
+      add({ label: `${(next.rate * 100).toFixed(0)}% bracket begins`, basis: 'taxable income',
+            threshold: ix(b.max), current: ordinaryTaxable, kind: 'rate',
+            crossingCostRate: next.rate - b.rate,
+            note: `Rate goes from ${(b.rate * 100).toFixed(0)}% to ${(next.rate * 100).toFixed(0)}% from here on.` });
+    });
+  }
+
+  // ── Long-term capital gains rates, on taxable income ─────────────────────
+  {
+    const t = CAPITAL_GAINS_THRESHOLDS_2025[fs] || CAPITAL_GAINS_THRESHOLDS_2025.married_joint;
+    add({ label: 'Capital gains 15% rate begins', basis: 'taxable income',
+          threshold: ix(t.zeroRate), current: taxable, kind: 'rate',
+          crossingCostRate: 0.15,
+          note: 'Below this, long-term gains and qualified dividends are taxed at 0%.',
+          inactive: preferential <= 0 });
+    add({ label: 'Capital gains 20% rate begins', basis: 'taxable income',
+          threshold: ix(t.fifteenRate), current: taxable, kind: 'rate',
+          crossingCostRate: 0.05,
+          note: 'Long-term gains go from 15% to 20% from here on.',
+          inactive: preferential <= 0 });
+  }
+
+  // ── §199A threshold, on taxable income ───────────────────────────────────
+  {
+    const t = ix(QBI_THRESHOLD_2026[fs] ?? QBI_THRESHOLD_2026.married_joint);
+    const range = ix(QBI_PHASEIN_RANGE_2026[fs] ?? QBI_PHASEIN_RANGE_2026.married_joint);
+    add({ label: 'QBI deduction starts phasing down (§199A)', basis: 'taxable income',
+          threshold: t, current: taxable, kind: 'phase',
+          note: `Above this the W-2 wage limit phases in over ${Math.round(range).toLocaleString()}, and a service business loses the deduction entirely.`,
+          inactive: true, onlyIf: 'you have qualified business income' });
+  }
+
+  // ── Additional Medicare tax, on wages ────────────────────────────────────
+  {
+    const t = FICA_ADDITIONAL_MEDICARE_THRESHOLD[fs] ?? FICA_ADDITIONAL_MEDICARE_THRESHOLD.married_joint;
+    add({ label: 'Additional Medicare tax (0.9%)', basis: 'wages',
+          threshold: t, current: wages, kind: 'phase',
+          crossingCostRate: FICA_ADDITIONAL_MEDICARE_RATE,
+          note: 'Applies to wages above this. Not indexed — the threshold has been the same since 2013.',
+          statutory: true, inactive: wages <= 0 });
+  }
+
+  // ── ACA subsidy cliff, on MAGI, pre-65 only ──────────────────────────────
+  if ((row.acaGrossPremium || 0) > 0 && row.acaFplPercent !== null && row.acaFplPercent !== undefined) {
+    const fpl400 = row.acaFplPercent > 0 ? magi * (400 / row.acaFplPercent) : null;
+    add({ label: 'ACA subsidy ends (400% FPL)', basis: 'MAGI',
+          threshold: fpl400, current: magi, kind: 'cliff',
+          crossingCost: row.acaSubsidy || 0,
+          note: `Crossing forfeits this year's premium credit of ${Math.round(row.acaSubsidy || 0).toLocaleString()}.` });
+  }
+
+  // Nearest binding edge first; already-crossed ones after, most recent first.
+  return out.sort((a, b) => {
+    if (a.crossed !== b.crossed) return a.crossed ? 1 : -1;
+    return a.crossed ? b.threshold - a.threshold : a.distance - b.distance;
+  });
 };
 
 
@@ -7028,6 +7243,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     buildTaxSituation, compareTraditionalVsRoth, projectedWithdrawalRate,
     detailedCurrentYearDecision, taxFieldsFromReturn,
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
+    SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,
     rothConversionModeOf, rothConversionIsPlanned,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,

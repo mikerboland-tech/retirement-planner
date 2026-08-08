@@ -5732,6 +5732,124 @@ section('P48 — the SS torpedo charge is incremental: nothing is charged for ta
   }
 }
 
+section('P49 — the income-threshold table: every edge a year can cross, on the basis it is measured on');
+{
+  // A year's tax is a smooth function with a dozen edges cut into it, and the
+  // edges sit on FOUR different quantities: provisional income, MAGI, taxable
+  // income, and wages. That is the reason this table exists — the top of the 22%
+  // bracket and the first IRMAA edge are not measured on the same thing, so
+  // neither dominates and a single number cannot tell you whether you are near
+  // one.
+  const { taxBreakpoints, SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS,
+          IRMAA_THRESHOLDS_2025, FEDERAL_TAX_BRACKETS_2026,
+          SENIOR_DEDUCTION_PHASEOUT_START, calculateSocialSecurityTaxableAmount } = engine;
+
+  // ── The hoisted constants must still be the ones the engine uses ─────────
+  // These were literals inside the functions that consumed them. A table that
+  // quotes its own copy of a threshold is worse than no table, so the extraction
+  // is pinned against the behaviour it was extracted from.
+  eq(SS_PROVISIONAL_THRESHOLDS.married_joint.base, 32000, 'MFJ 50% tier at $32,000 (§86, unindexed since 1984)');
+  eq(SS_PROVISIONAL_THRESHOLDS.married_joint.max, 44000, 'MFJ 85% tier at $44,000 (unindexed since 1993)');
+  eq(SS_PROVISIONAL_THRESHOLDS.married_separate.base, 0, 'MFS living together has no threshold at all');
+  eq(NIIT_THRESHOLDS.married_joint, 250000, 'NIIT at $250,000 MFJ (§1411, unindexed since 2013)');
+  // Behavioural check that the hoist did not change the function.
+  approx(calculateSocialSecurityTaxableAmount(40000, 32000 - 20000, 'married_joint'), 0,
+    'at the 50% threshold exactly, no benefits are taxable yet', 1e-6);
+
+  const pi = {
+    myAge: 67, spouseAge: 67, myBirthYear: TODAY_YEAR - 67, spouseBirthYear: TODAY_YEAR - 67,
+    myRetirementAge: 67, spouseRetirementAge: 67, legacyAge: 75,
+    filingStatus: 'married_joint', state: 'Missouri', inflationRate: 0,
+    desiredRetirementIncome: 130000, withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+    healthcareModel: 'none', medicalInflation: 0,
+  };
+  const accts = [
+    { id: 1, name: 'IRA', type: 'traditional_ira', balance: 2500000, contribution: 0, cagr: 0, startAge: 67, stopAge: 67, owner: 'me' },
+    { id: 2, name: 'Brok', type: 'brokerage', balance: 900000, contribution: 0, cagr: 0, startAge: 67, stopAge: 67, owner: 'joint', costBasisPercent: 0.5 },
+  ];
+  const streams = [
+    { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 67, endAge: 95, cola: 0, owner: 'me' },
+    { id: 2, name: 'Sp SS', type: 'social_security', amount: 30000, startAge: 67, endAge: 95, cola: 0, owner: 'spouse' },
+  ];
+  const row = computeProjections(pi, accts, streams, [], [], [], TODAY_YEAR)[0];
+  const bp = taxBreakpoints({ row, pi, numMedicareEligible: 2 });
+  const find = (re) => bp.find(b => re.test(b.label));
+
+  // ── Every family is represented ──────────────────────────────────────────
+  gt(bp.length, 12, 'the table covers more than a dozen thresholds');
+  const bases = new Set(bp.map(b => b.basis));
+  eq(bases.has('provisional income'), true, 'Social Security is measured on provisional income');
+  eq(bases.has('MAGI'), true, 'IRMAA, NIIT, the senior deduction and SALT are measured on MAGI');
+  eq(bases.has('taxable income'), true, 'brackets, capital-gains rates and §199A are on taxable income');
+  eq(bases.has('wages'), true, 'additional Medicare is on wages');
+
+  // ── The figures quoted are the engine's own ──────────────────────────────
+  eq(find(/85% taxable/).threshold, SS_PROVISIONAL_THRESHOLDS.married_joint.max,
+    'the SS row quotes the constant the tax function uses');
+  eq(find(/Net investment income/).threshold, NIIT_THRESHOLDS.married_joint,
+    'the NIIT row quotes §1411');
+  eq(find(/22% bracket begins/).threshold, FEDERAL_TAX_BRACKETS_2026.married_joint[1].max,
+    'a bracket row is the top of the bracket BELOW it — where the higher rate starts');
+
+  // ── IRMAA is indexed to the year the surcharge is PAID ───────────────────
+  // A conversion now sets a premium two years out, so quoting this year's
+  // threshold would tighten every edge by one year of indexation.
+  {
+    const inflated = taxBreakpoints({ row: { ...row, year: TODAY_YEAR },
+      pi: { ...pi, inflationRate: 0.03 }, numMedicareEligible: 2 });
+    const tier1 = inflated.find(b => /IRMAA tier 1/.test(b.label));
+    approx(tier1.threshold, IRMAA_THRESHOLDS_2025.married_joint[0].maxIncome * Math.pow(1.03, 2),
+      'the IRMAA edge is indexed two years forward, not to this year', 1e-6);
+    eq(tier1.appliesAtAge, row.myAge + 2, 'and the row says which age actually pays it');
+  }
+
+  // ── Cliffs carry a dollar cost, phase-outs a rate ────────────────────────
+  {
+    const irmaa = find(/IRMAA tier 1/);
+    eq(irmaa.kind, 'cliff', 'IRMAA is a cliff, not a phase-out');
+    gt(irmaa.crossingCost, 0, 'so crossing by one dollar costs a whole lump sum');
+    const niit = find(/Net investment income/);
+    eq(niit.crossingCostRate, 0.038, 'NIIT is a rate on every further dollar');
+    const bracket = find(/24% bracket begins/);
+    approx(bracket.crossingCostRate, 0.02, 'a bracket edge costs only the step between rates', 1e-9);
+  }
+
+  // ── Distance, direction, and ordering ────────────────────────────────────
+  {
+    bp.forEach(b => {
+      approx(b.distance, b.threshold - b.current, `${b.label}: distance is edge minus current`, 1e-6);
+      eq(b.crossed, b.current > b.threshold, `${b.label}: crossed flag matches the figures`);
+    });
+    const notCrossed = bp.filter(b => !b.crossed);
+    for (let i = 1; i < notCrossed.length; i++) {
+      eq(notCrossed[i].distance >= notCrossed[i - 1].distance, true,
+        'upcoming thresholds are ordered nearest-first, so what binds next is at the top');
+    }
+    const firstCrossedIdx = bp.findIndex(b => b.crossed);
+    if (firstCrossedIdx >= 0) {
+      eq(bp.slice(firstCrossedIdx).every(b => b.crossed), true,
+        'and everything already passed sorts after everything upcoming');
+    }
+  }
+
+  // ── The senior deduction row appears only when it can apply ─────────────
+  {
+    eq(!!find(/Senior deduction/), true, 'a 67-year-old household sees the senior deduction phase-out');
+    eq(find(/Senior deduction/).threshold, SENIOR_DEDUCTION_PHASEOUT_START.married_joint,
+      'at the MFJ phase-out start');
+    const young = { ...pi, myAge: 50, spouseAge: 50, myBirthYear: TODAY_YEAR - 50,
+                    spouseBirthYear: TODAY_YEAR - 50, myRetirementAge: 50, spouseRetirementAge: 50, legacyAge: 58 };
+    const youngRow = computeProjections(young, accts, [], [], [], [], TODAY_YEAR)[0];
+    const youngBp = taxBreakpoints({ row: youngRow, pi: young });
+    eq(youngBp.some(b => /Senior deduction/.test(b.label)), false,
+      'a household with nobody 65+ does not see a deduction it cannot claim');
+  }
+
+  // ── Degenerate input ─────────────────────────────────────────────────────
+  eq(taxBreakpoints({}).length, 0, 'no row, no thresholds — and no throw');
+  eq(taxBreakpoints({ row: null, pi }).length, 0, 'a null row is handled too');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
