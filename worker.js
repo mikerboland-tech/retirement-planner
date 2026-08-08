@@ -37,6 +37,8 @@ const {
   conversionCostComponents,
   topMarginalBracket,
   BASE_TAX_YEAR,
+  withoutRothConversions, withRothConversionTarget, rothConversionIsPlanned,
+  rothConversionModeOf,
 } = E;
 
 self.onmessage = (e) => {
@@ -774,7 +776,7 @@ function runRothOptimizer(jobId, payload) {
   starts.forEach(s => ends.forEach(e => { if (e >= s) windows.push({ startAge: s, endAge: e }); }));
 
   const brackets = ['10%', '12%', '22%', '24%', '32%'];
-  const noConversionPI = { ...personalInfo, rothConversionAmount: 0, rothConversionBracket: '', rothConversionStartAge: 0, rothConversionEndAge: 0 };
+  const noConversionPI = { ...withoutRothConversions(personalInfo), rothConversionStartAge: 0, rothConversionEndAge: 0 };
   const strategies = [{ label: 'No conversions (baseline)', bracket: '', window: null, pi: noConversionPI }];
 
   // Score the strategy the user ACTUALLY has configured, alongside the
@@ -782,11 +784,18 @@ function runRothOptimizer(jobId, payload) {
   // and no way to see where their own plan sits — which is the single comparison
   // they opened this tab for. It matters most for a fixed-amount strategy, which
   // the bracket sweep below can never reproduce.
-  const hasCurrent = (personalInfo.rothConversionAmount > 0) || !!personalInfo.rothConversionBracket;
+  const hasCurrent = rothConversionIsPlanned(personalInfo);
   if (hasCurrent) {
-    const amt = personalInfo.rothConversionAmount > 0
+    // Three modes to describe, not two. Falling through to the bracket label for
+    // an IRMAA-tier plan produced "fill to undefined" — the row was correct, its
+    // name was not, and a wrong name on the row the user is looking for is worse
+    // than no row.
+    const mode = rothConversionModeOf(personalInfo);
+    const amt = mode === 'fixed'
       ? '$' + Math.round(personalInfo.rothConversionAmount).toLocaleString() + '/yr'
-      : 'fill to ' + personalInfo.rothConversionBracket;
+      : mode === 'irmaa'
+        ? 'stay in IRMAA tier ' + personalInfo.rothConversionIrmaaTier
+        : 'fill to ' + personalInfo.rothConversionBracket;
     const w = E.getDefaultRothConversionWindow(personalInfo);
     const sAge = personalInfo.rothConversionStartAge > 0 ? personalInfo.rothConversionStartAge : w.startAge;
     const eAge = personalInfo.rothConversionEndAge > 0 ? personalInfo.rothConversionEndAge : w.endAge;
@@ -802,7 +811,7 @@ function runRothOptimizer(jobId, payload) {
   windows.forEach(w => brackets.forEach(b => strategies.push({
     label: `Fill to ${b} bracket, ages ${w.startAge}–${w.endAge}`,
     bracket: b, window: w,
-    pi: { ...personalInfo, rothConversionAmount: 0, rothConversionBracket: b, rothConversionStartAge: w.startAge, rothConversionEndAge: w.endAge },
+    pi: withRothConversionTarget(personalInfo, { bracket: b, startAge: w.startAge, endAge: w.endAge }),
   })));
 
   const scored = [];
@@ -889,6 +898,9 @@ function runMarginalRateCurve(jobId, payload) {
     ...personalInfo,
     rothConversionAmount: 0,
     rothConversionBracket: '',
+    // Cleared too, or a plan filling to an IRMAA tier keeps converting in the
+    // baseline and the probe measures a difference that is not the probe.
+    rothConversionIrmaaTier: null,
     rothConversionStartAge: 0,
     rothConversionEndAge: 0,
     rothConversionPreTaxFloor: 0,
@@ -905,6 +917,8 @@ function runMarginalRateCurve(jobId, payload) {
     const probePI = {
       ...basePI,
       rothConversionAmount: probe,
+      rothConversionBracket: '',
+      rothConversionIrmaaTier: null,
       rothConversionStartAge: age,
       rothConversionEndAge: age,
       // Fixed nominal, NOT inflation-indexed. This is a derivative, so every

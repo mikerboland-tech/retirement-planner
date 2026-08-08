@@ -45,6 +45,7 @@ const {
   computeTaxReturn, buildTaxSituation, compareTraditionalVsRoth,
   projectPayrollYearEnd, marginalRateOn, saltCapFor, projectedWithdrawalRate,
   detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling,
+  rothConversionIsPlanned, withoutRothConversions, withRothConversionTarget,
   IRMAA_FILL_SAFETY_MARGIN,
 } = PlannerEngine;
 
@@ -509,11 +510,7 @@ const formatCurrency = (value) => {
 // neither a conversion amount nor a bracket label, so every one of those
 // predicates would have read it as "no conversion planned" and hidden the
 // column, skipped the validation, or described the strategy wrongly.
-const conversionIsActive = (pi) => !!pi && (
-  (pi.rothConversionAmount || 0) > 0
-  || !!pi.rothConversionBracket
-  || Number.isInteger(pi.rothConversionIrmaaTier)
-);
+const conversionIsActive = (pi) => rothConversionIsPlanned(pi);
 
 const conversionModeLabel = (pi) => {
   if (!pi) return '';
@@ -2520,10 +2517,16 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
   const planToSettings = (pi) => {
     const dw = getDefaultRothConversionWindow(pi);
     return {
-      mode: pi.rothConversionBracket ? 'bracket' : 'fixed',
+      // Three constraints now. IRMAA is checked first because a plan set to fill
+      // an IRMAA tier carries no bracket label and no fixed amount, so testing
+      // for the bracket first would seed the simulator as 'fixed' at $0 and
+      // silently show the user a do-nothing strategy instead of their own.
+      mode: Number.isInteger(pi.rothConversionIrmaaTier) ? 'irmaa'
+          : (pi.rothConversionBracket ? 'bracket' : 'fixed'),
       startAge: pi.rothConversionStartAge || dw.startAge,
       endAge: pi.rothConversionEndAge || dw.endAge,
       targetBracket: pi.rothConversionBracket || '22%',
+      irmaaTier: Number.isInteger(pi.rothConversionIrmaaTier) ? pi.rothConversionIrmaaTier : 0,
       fixedAmount: pi.rothConversionAmount || 0,
       taxSource: pi.rothConversionTaxSource || 'withdrawal',
       preTaxFloor: pi.rothConversionPreTaxFloor || 0,
@@ -2609,18 +2612,17 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
       rothConversionStartAge: conversionSettings.startAge,
       rothConversionEndAge: conversionSettings.endAge,
       rothConversionBracket: conversionSettings.mode === 'bracket' ? conversionSettings.targetBracket : '',
+      rothConversionIrmaaTier: conversionSettings.mode === 'irmaa' ? conversionSettings.irmaaTier : null,
       rothConversionTaxSource: conversionSettings.taxSource,
       rothConversionPreTaxFloor: conversionSettings.preTaxFloor
     };
     const withProj = computeProjections(withPI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
 
     // Projection WITHOUT any conversions (baseline)
-    const withoutPI = {
-      ...personalInfo,
-      rothConversionAmount: 0,
-      rothConversionBracket: '',
-      rothConversionPreTaxFloor: 0
-    };
+    // Every mode cleared, not just amount and bracket. Clearing a subset left an
+    // IRMAA tier standing, so the "without conversions" baseline still converted
+    // and the entire with-versus-without comparison compared a plan to itself.
+    const withoutPI = { ...withoutRothConversions(personalInfo), rothConversionPreTaxFloor: 0 };
     const withoutProj = computeProjections(withoutPI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
     
     // Build year-by-year comparison for the conversion window
@@ -2710,6 +2712,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
       ...prev,
       rothConversionAmount: conversionSettings.mode === 'fixed' ? conversionSettings.fixedAmount : 0,
       rothConversionBracket: conversionSettings.mode === 'bracket' ? conversionSettings.targetBracket : '',
+      rothConversionIrmaaTier: conversionSettings.mode === 'irmaa' ? conversionSettings.irmaaTier : null,
       rothConversionStartAge: conversionSettings.startAge,
       rothConversionEndAge: conversionSettings.endAge,
       rothConversionTaxSource: conversionSettings.taxSource,
@@ -2737,6 +2740,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
             className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
           >
             <option value="bracket">Fill to Bracket</option>
+            <option value="irmaa">Fill to IRMAA Tier</option>
             <option value="fixed">Fixed Amount</option>
           </select>
         </div>
@@ -2758,7 +2762,25 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
             className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
           />
         </div>
-        {conversionSettings.mode === 'bracket' ? (
+        {conversionSettings.mode === 'irmaa' ? (
+          <div className="col-span-2">
+            <label className="block text-sm text-slate-400 mb-1">Stay Within IRMAA Tier</label>
+            <select
+              value={conversionSettings.irmaaTier}
+              onChange={e => setConversionSettings({...conversionSettings, irmaaTier: Number(e.target.value)})}
+              className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
+            >
+              {irmaaTierOptions(personalInfo.filingStatus,
+                  personalInfo.filingStatus === 'married_joint' ? 2 : 1)
+                .filter(o => !o.isTop)
+                .map(o => (
+                  <option key={o.index} value={o.index}>
+                    MAGI up to {formatCurrency(o.ceiling)} — surcharge {formatCurrency(o.annualSurchargePerHousehold)}/yr
+                  </option>
+                ))}
+            </select>
+          </div>
+        ) : conversionSettings.mode === 'bracket' ? (
           <div>
             <label className="block text-sm text-slate-400 mb-1">Fill Up To</label>
             <select
@@ -3186,10 +3208,14 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
   const applyStrategy = (row) => {
     setPersonalInfo(prev => ({
       ...prev,
-      rothConversionAmount: 0,
-      rothConversionBracket: row.bracket || '',
-      rothConversionStartAge: row.startAge || 0,
-      rothConversionEndAge: row.endAge || 0,
+      // withRothConversionTarget clears the other modes. Setting the bracket
+      // alone left any existing IRMAA tier in place, and the tier wins in the
+      // engine — so Apply appeared to do nothing at all.
+      ...withRothConversionTarget(prev, {
+        bracket: row.bracket || '',
+        startAge: row.startAge || 0,
+        endAge: row.endAge || 0,
+      }),
     }));
     setAppliedLabel(row.label);
   };

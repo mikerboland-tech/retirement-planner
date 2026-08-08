@@ -5332,6 +5332,142 @@ section('P44 — filling to an IRMAA tier, which is a different target from fill
   }
 }
 
+section('P45 — a third conversion mode must not be detectable by the absence of the other two');
+{
+  // Adding the IRMAA mode broke seven places at once, and broke them SILENTLY.
+  // Each had asked "is a conversion planned?" as `amount > 0 || bracket`, or had
+  // built a no-conversion baseline by clearing exactly those two fields. A plan
+  // filling to an IRMAA tier has neither — so the baselines kept converting, and
+  // the with-versus-without comparison the simulator rests on was measuring a
+  // plan against itself.
+  //
+  // The general lesson: a mode flag that can be absent is not safe to detect by
+  // its absence. These tests pin the shared helpers that replaced the inline
+  // predicates, and the two worker paths that were most badly wrong.
+  const { rothConversionModeOf, rothConversionIsPlanned,
+          withoutRothConversions, withRothConversionTarget } = engine;
+
+  // ── Mode detection ───────────────────────────────────────────────────────
+  eq(rothConversionModeOf({ rothConversionIrmaaTier: 0 }), 'irmaa',
+    'tier 0 is a planned conversion — and 0 is falsy, which is exactly how it got missed');
+  eq(rothConversionModeOf({ rothConversionBracket: '22%' }), 'bracket', 'a bracket label is bracket mode');
+  eq(rothConversionModeOf({ rothConversionAmount: 50000 }), 'fixed', 'an amount is fixed mode');
+  eq(rothConversionModeOf({}), 'none', 'an empty plan converts nothing');
+  eq(rothConversionModeOf(null), 'none', 'and a missing plan does not throw');
+  eq(rothConversionIsPlanned({ rothConversionIrmaaTier: 0 }), true,
+    'the predicate agrees — this is the case six inline copies got wrong');
+  eq(rothConversionIsPlanned({}), false, 'and still says no when nothing is set');
+
+  // ── Clearing must clear EVERY mode ───────────────────────────────────────
+  {
+    const messy = { rothConversionAmount: 1000, rothConversionBracket: '24%',
+                    rothConversionIrmaaTier: 2, other: 'kept' };
+    const off = withoutRothConversions(messy);
+    eq(rothConversionIsPlanned(off), false, 'all three modes are cleared together');
+    eq(off.rothConversionIrmaaTier, null, 'including the tier, which is the one that was left standing');
+    eq(off.other, 'kept', 'and unrelated plan fields survive');
+  }
+
+  // ── Setting one target must clear the others ─────────────────────────────
+  {
+    const fromIrmaa = withRothConversionTarget({ rothConversionIrmaaTier: 0 }, { bracket: '24%' });
+    eq(rothConversionModeOf(fromIrmaa), 'bracket',
+      'targeting a bracket from an IRMAA plan lands in bracket mode, not back in IRMAA');
+    eq(fromIrmaa.rothConversionIrmaaTier, null,
+      'because the tier is cleared — otherwise it wins in the engine and the new target does nothing');
+    const fromBracket = withRothConversionTarget({ rothConversionBracket: '22%' }, { irmaaTier: 1 });
+    eq(rothConversionModeOf(fromBracket), 'irmaa', 'and the reverse direction works too');
+    eq(fromBracket.rothConversionBracket, '', 'with the bracket cleared');
+  }
+
+  // ── The baseline must actually be a baseline ─────────────────────────────
+  // This is the bug that mattered most: a "without conversions" projection built
+  // from an IRMAA plan by clearing amount and bracket still converted every year.
+  {
+    const pi = {
+      myAge: 64, spouseAge: 64, myBirthYear: TODAY_YEAR - 64, spouseBirthYear: TODAY_YEAR - 64,
+      myRetirementAge: 64, spouseRetirementAge: 64, legacyAge: 72,
+      filingStatus: 'married_joint', state: 'Florida', inflationRate: 0,
+      desiredRetirementIncome: 120000, withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+      healthcareModel: 'none', medicalInflation: 0,
+      rothConversionIrmaaTier: 0, rothConversionStartAge: 64, rothConversionEndAge: 71,
+    };
+    const accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 3000000, contribution: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 100000, contribution: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me' },
+      { id: 3, name: 'Brok', type: 'brokerage', balance: 700000, contribution: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', costBasisPercent: 0.5 },
+    ];
+    const conv = (rows) => rows.reduce((s, r) => s + (r.rothConversion || 0), 0);
+
+    const withRows = computeProjections(pi, accts, [], [], [], [], TODAY_YEAR);
+    gt(conv(withRows), 0, 'the IRMAA-tier plan does convert');
+
+    // The OLD way of building a baseline — clear amount and bracket only.
+    const oldWay = { ...pi, rothConversionAmount: 0, rothConversionBracket: '' };
+    gt(conv(computeProjections(oldWay, accts, [], [], [], [], TODAY_YEAR)), 0,
+      'clearing only amount and bracket leaves the tier converting — the baseline was never a baseline');
+
+    // The correct way.
+    const newWay = withoutRothConversions(pi);
+    eq(conv(computeProjections(newWay, accts, [], [], [], [], TODAY_YEAR)), 0,
+      'withoutRothConversions produces a genuinely conversion-free projection');
+  }
+
+  // ── The optimizer sweep must produce DIFFERENT candidates ────────────────
+  // Every candidate inherited the user's IRMAA tier, the tier overrode each
+  // candidate's bracket, and the sweep returned the same strategy twelve times
+  // under twelve different names.
+  {
+    // Same vm shim P25 uses to exercise the shipped worker rather than a copy;
+    // those requires are block-scoped there, so they are re-declared here.
+    const vmMod = require('vm');
+    const fsMod = require('fs');
+    const pathMod = require('path');
+    const ROOT = pathMod.join(__dirname, '..');
+    const sb = {}; sb.self = sb; sb.globalThis = sb;
+    sb.location = { search: '?v=test' }; sb.__out = [];
+    sb.URLSearchParams = URLSearchParams;
+    sb.importScripts = (spec) => vmMod.runInContext(
+      fsMod.readFileSync(pathMod.join(ROOT, spec.split('?')[0]), 'utf8'), sb);
+    sb.postMessage = (m) => { if (m.type !== 'progress') sb.__out.push(m); };
+    vmMod.createContext(sb);
+    vmMod.runInContext(fsMod.readFileSync(pathMod.join(ROOT, 'worker.js'), 'utf8'), sb);
+
+    const personalInfo = {
+      myAge: 64, spouseAge: 64, myBirthYear: TODAY_YEAR - 64, spouseBirthYear: TODAY_YEAR - 64,
+      myRetirementAge: 64, spouseRetirementAge: 64, legacyAge: 80,
+      filingStatus: 'married_joint', state: 'Florida', inflationRate: 0,
+      desiredRetirementIncome: 120000, withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+      healthcareModel: 'none',
+      rothConversionIrmaaTier: 0, rothConversionStartAge: 64, rothConversionEndAge: 72,
+    };
+    const accounts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 3000000, contribution: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 100000, contribution: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me' },
+      { id: 3, name: 'Brok', type: 'brokerage', balance: 700000, contribution: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', costBasisPercent: 0.5 },
+    ];
+    sb.onmessage({ data: { jobId: 1, type: 'rothOptimizer', payload: {
+      personalInfo, accounts, incomeStreams: [], assets: [], oneTimeEvents: [],
+      recurringExpenses: [], heirTaxRate: 0.25 } } });
+
+    const res = sb.__out.find(m => m.type === 'result');
+    gt(res ? 1 : 0, 0, 'the optimizer returns a result for an IRMAA-mode plan');
+    const rows = res.data.results;
+    gt(rows.length, 3, 'with several candidate strategies');
+    const distinct = new Set(rows.map(r => Math.round(r.lifetimeTax || 0))).size;
+    eq(distinct, rows.length,
+      'and every candidate scores differently — inheriting the tier made them identical');
+
+    // The user's own row has to be named correctly, or the comparison they
+    // opened the tab for is the one row they cannot find.
+    const current = rows.find(r => r.isCurrent);
+    gt(current ? 1 : 0, 0, 'the user\'s current plan appears as its own row');
+    eq(/undefined/.test(current.label), false,
+      'and is not labelled "fill to undefined" — three modes to describe, not two');
+    eq(/IRMAA tier/.test(current.label), true, 'it names the IRMAA tier it is actually using');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

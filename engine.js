@@ -4450,6 +4450,51 @@ const projectPayrollYearEnd = (row = {}, opts = {}) => {
   };
 };
 
+// ── ROTH CONVERSION MODE: ONE DEFINITION ─────────────────────────────────────
+// There are three ways to specify a conversion — a fixed amount, fill to a tax
+// bracket, fill to an IRMAA tier — and a dozen places that need to ask "is one
+// planned?", "which?", or "give me this plan with conversions switched off".
+//
+// Before these helpers each of those places tested `amount > 0 || bracket`
+// inline. Adding the IRMAA mode broke every one of them at once, and broke them
+// SILENTLY: a plan filling to an IRMAA tier has neither a bracket label nor an
+// amount, so a no-conversion baseline built by clearing those two still
+// converted, and the with-versus-without comparison that the whole simulator
+// rests on was measuring a plan against itself.
+//
+// The lesson is that a mode flag which can be absent is not safe to detect by
+// its absence. These live in the engine rather than the UI so the Web Worker —
+// which builds its own baselines and candidate strategies — shares them.
+const rothConversionModeOf = (pi) => {
+  if (!pi) return 'none';
+  if (Number.isInteger(pi.rothConversionIrmaaTier)) return 'irmaa';
+  if (pi.rothConversionBracket) return 'bracket';
+  if ((pi.rothConversionAmount || 0) > 0) return 'fixed';
+  return 'none';
+};
+
+const rothConversionIsPlanned = (pi) => rothConversionModeOf(pi) !== 'none';
+
+// A copy of the plan with every conversion mode cleared. Clearing a subset is
+// the bug this exists to prevent: whatever is left standing keeps converting.
+const withoutRothConversions = (pi) => ({
+  ...pi,
+  rothConversionAmount: 0,
+  rothConversionBracket: '',
+  rothConversionIrmaaTier: null,
+});
+
+// A copy of the plan converting to exactly ONE target. Used to build candidate
+// strategies for the optimizer sweep, where leaving an inherited mode in place
+// would let it override the candidate and make every candidate identical.
+const withRothConversionTarget = (pi, target = {}) => ({
+  ...withoutRothConversions(pi),
+  ...(target.bracket ? { rothConversionBracket: target.bracket } : {}),
+  ...(Number.isInteger(target.irmaaTier) ? { rothConversionIrmaaTier: target.irmaaTier } : {}),
+  ...(target.amount > 0 ? { rothConversionAmount: target.amount } : {}),
+  ...(target.startAge !== undefined ? { rothConversionStartAge: target.startAge } : {}),
+  ...(target.endAge !== undefined ? { rothConversionEndAge: target.endAge } : {}),
+});
 // ── IRMAA AS A CONVERSION CEILING ────────────────────────────────────────────
 // Filling to the top of a tax bracket and filling to the top of an IRMAA tier
 // are different targets that cannot be reconciled, because they are measured on
@@ -6925,6 +6970,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     buildTaxSituation, compareTraditionalVsRoth, projectedWithdrawalRate,
     detailedCurrentYearDecision, taxFieldsFromReturn,
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
+    rothConversionModeOf, rothConversionIsPlanned,
+    withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,
     routeK1, applyPartnerBasis, applyPassiveLossRules, computeScheduleD,
     qbiDeduction, safeHarborRequirement, computeScheduleA,
