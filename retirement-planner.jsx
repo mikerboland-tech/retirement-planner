@@ -2652,6 +2652,9 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
       analysis.push({
         age,
         year: withYear.year,
+        // Why the headline rate is what it is. A total cannot answer "I'm in the
+        // 22% bracket, so why does this say 35%?" — the split can.
+        costComponents: cost,
         // Without conversions (baseline)
         baseIncome: withoutYear.totalIncome,
         baseTaxableIncome: withoutYear.taxableIncome,
@@ -3069,7 +3072,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
               <th className="text-right py-2 px-2 text-slate-400 font-medium">Tax (w/ conv)</th>
               <th className="text-right py-2 px-2 text-slate-400 font-medium">Total Cost</th>
               <th className="text-right py-2 px-2 text-slate-400 font-medium" title="What each converted dollar costs, all in: income tax plus the IRMAA it triggers two years later plus any ACA subsidy it burns. This is a marginal rate on the converted dollars — it is expected to sit ABOVE your tax bracket, and hovering a row shows why.">
-                Cost per $ Converted <span className="text-slate-600">ⓘ</span>
+                Cost per $ Converted <span className="text-slate-600" title="All-in: income tax, the IRMAA it triggers two years later, and any ACA subsidy it burns. Hover a figure for the breakdown.">ⓘ</span>
               </th>
               <th className="text-right py-2 px-2 text-slate-400 font-medium">IRMAA Δ</th>
               <th className="text-right py-2 px-2 text-slate-400 font-medium">Cumulative</th>
@@ -3093,15 +3096,44 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                     reads as an explanation rather than an accusation. */}
                 <td
                   className="py-2 px-2 text-right text-amber-400"
-                  title={row.costComponents ? [
-                    `Converted ${formatCurrency(row.costComponents.converted)}`,
-                    `Income tax:      ${formatCurrency(row.costComponents.taxDeltaExIrmaa)}  (${(row.costComponents.ratePoints.incomeTax * 100).toFixed(1)} pts)`,
-                    `IRMAA at ${row.age + 2}:    ${formatCurrency(row.costComponents.irmaaDelta)}  (${(row.costComponents.ratePoints.irmaa * 100).toFixed(1)} pts)`,
-                    `ACA subsidy lost: ${formatCurrency(row.costComponents.acaSubsidyLost)}  (${(row.costComponents.ratePoints.aca * 100).toFixed(1)} pts)`,
-                    `Total:           ${formatCurrency(row.costComponents.totalCost)}  (${(row.costComponents.rate * 100).toFixed(1)}%)`,
-                    '',
-                    'Above your bracket because a conversion dollar also pulls Social Security into taxability and stacks capital gains into a higher rate.',
-                  ].join('\n') : undefined}
+                  title={row.costComponents ? (() => {
+                    const c = row.costComponents;
+                    const f = c.federalRatePoints, d = c.federalBreakdown;
+                    const line = (label, dollars, pts) =>
+                      `  ${label.padEnd(30)}${formatCurrency(dollars).padStart(10)}   ${(pts * 100).toFixed(1).padStart(5)} pts`;
+                    const out = [
+                      `Converted ${formatCurrency(c.converted)} — all-in cost ${(c.rate * 100).toFixed(1)}%`,
+                      '',
+                      line('Ordinary tax on it', d.ordinary, f.ordinary),
+                    ];
+                    // Each of these is a real reason the figure sits above the
+                    // bracket, and each is invisible unless it is named.
+                    if (Math.abs(d.ssTorpedo) > 1) {
+                      out.push(line('Social Security torpedo', d.ssTorpedo, f.ssTorpedo));
+                      out.push(`      (+${formatCurrency(d.ssMadeTaxable)} of SS became taxable)`);
+                    }
+                    if (Math.abs(d.deductionPhaseout) > 1) {
+                      out.push(line('Senior deduction lost', d.deductionPhaseout, f.deductionPhaseout));
+                      out.push(`      (${formatCurrency(d.deductionLost)} of deduction phased out at 6%/$)`);
+                    }
+                    if (Math.abs(d.preferential) > 1) {
+                      out.push(line('Capital gains / NIIT', d.preferential, f.preferential));
+                    }
+                    if (Math.abs(c.stateDelta) > 1) out.push(line('State tax', c.stateDelta, f.state));
+                    if (Math.abs(c.irmaaDelta) > 1) {
+                      out.push(line(`IRMAA at age ${row.age + 2}`, c.irmaaDelta, c.ratePoints.irmaa));
+                    }
+                    if (Math.abs(c.acaSubsidyLost) > 1) {
+                      out.push(line('ACA subsidy lost', c.acaSubsidyLost, c.ratePoints.aca));
+                    }
+                    out.push('  ' + '-'.repeat(48));
+                    out.push(line('Total', c.totalCost, c.rate));
+                    out.push('');
+                    out.push('The ordinary line is usually BELOW your headline bracket:');
+                    out.push('filling TO the top of a bracket taxes the early dollars lower.');
+                    out.push('Everything under it is why the total lands above it.');
+                    return out.join('\n');
+                  })() : undefined}
                 >
                   {row.conversionAmount > 0 ? `${(row.effectiveRate * 100).toFixed(1)}%` : '—'}
                 </td>

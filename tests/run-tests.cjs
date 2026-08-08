@@ -5567,6 +5567,87 @@ section('P46 — the optimizer sweeps IRMAA tiers, and says so when distinct tar
   }
 }
 
+section('P47 — the cost per dollar converted, decomposed into why it exceeds the bracket');
+{
+  // "I am in the 22% bracket, so why does this say 35%?" is the single most
+  // common thing to ask of this figure, and a total cannot answer it. Three
+  // separate effects stack on top of the bracket, and each is invisible unless
+  // it is named:
+  //
+  //   the ordinary tax is usually BELOW the headline bracket, because filling TO
+  //   the top of 22% taxes the early dollars at 10% and 12%;
+  //   the conversion drags Social Security into taxability (Pub 915);
+  //   it phases out the OBBBA senior deduction at 6 cents per dollar per person,
+  //   which is new for 2025-2028 and easy to miss entirely;
+  //   and it stacks beneath capital gains, pushing them up a rate.
+  const { conversionCostComponents, federalTaxOnTaxableIncome } = engine;
+
+  const pi = {
+    myAge: 67, spouseAge: 67, myBirthYear: TODAY_YEAR - 67, spouseBirthYear: TODAY_YEAR - 67,
+    myRetirementAge: 67, spouseRetirementAge: 67, legacyAge: 75,
+    filingStatus: 'married_joint', state: 'Missouri', inflationRate: 0,
+    desiredRetirementIncome: 110000, withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+    healthcareModel: 'none', medicalInflation: 0,
+    rothConversionStartAge: 67, rothConversionEndAge: 74, rothConversionTaxSource: 'brokerage',
+  };
+  const accts = [
+    { id: 1, name: 'IRA', type: 'traditional_ira', balance: 2500000, contribution: 0, cagr: 0, startAge: 67, stopAge: 67, owner: 'me' },
+    { id: 2, name: 'Roth', type: 'roth_ira', balance: 100000, contribution: 0, cagr: 0, startAge: 67, stopAge: 67, owner: 'me' },
+    { id: 3, name: 'Brok', type: 'brokerage', balance: 900000, contribution: 0, cagr: 0, startAge: 67, stopAge: 67, owner: 'joint', costBasisPercent: 0.5 },
+  ];
+  const streams = [
+    { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 67, endAge: 95, cola: 0, owner: 'me' },
+    { id: 2, name: 'Sp SS', type: 'social_security', amount: 30000, startAge: 67, endAge: 95, cola: 0, owner: 'spouse' },
+  ];
+  const without = computeProjections(pi, accts, streams, [], [], [], TODAY_YEAR);
+  const with22 = computeProjections({ ...pi, rothConversionBracket: '22%' }, accts, streams, [], [], [], TODAY_YEAR);
+  const converted = with22[0].rothConversion;
+  gt(converted, 0, 'the fill converts something to decompose');
+
+  const c = conversionCostComponents(with22, without, 67, converted);
+  const d = c.federalBreakdown, f = c.federalRatePoints;
+
+  // ── The parts must reconstruct the whole ─────────────────────────────────
+  // A decomposition that does not sum to the figure it explains is worse than
+  // none, because it invites the reader to trust a part while the total is off.
+  approx(d.ordinary + d.ssTorpedo + d.deductionPhaseout + d.preferential, c.federalDelta,
+    'the four federal components sum to the federal delta exactly', 1e-6);
+  approx(f.ordinary + f.ssTorpedo + f.deductionPhaseout + f.preferential,
+    c.federalDelta / converted, 'and the rate points sum to the federal rate', 1e-9);
+  approx(f.state, c.stateDelta / converted, 'state is reported as its own rate point', 1e-9);
+
+  // ── The ordinary line sits BELOW the headline bracket ────────────────────
+  // This is the part that surprises people: filling TO the top of 22% means the
+  // early dollars are taxed at 10% and 12%, so the average on the conversion is
+  // under 22% before anything else is added.
+  lt(f.ordinary, 0.22,
+    'the ordinary tax on the conversion averages below the 22% bracket it fills to');
+  gt(f.ordinary, 0.10, 'but above the bottom bracket, since it climbs through them');
+
+  // ── Each add-on is real and positive ─────────────────────────────────────
+  gt(d.ssMadeTaxable, 0, 'the conversion drags Social Security into taxability');
+  gt(d.ssTorpedo, 0, 'which costs real tax on top of the conversion itself');
+  gt(d.deductionLost, 0, 'and phases out part of the senior deduction');
+  gt(d.deductionPhaseout, 0, 'which costs tax again, at the bracket rate');
+
+  // ── The headline exceeds the bracket, and the parts say why ──────────────
+  gt(c.rate, 0.22, 'so the all-in rate lands above the 22% bracket');
+  gt(c.rate, f.ordinary, 'strictly above what the conversion alone would cost');
+  // State belongs in the gap too: the all-in rate is federal AND state AND the
+  // surcharge AND the subsidy. Leaving it out of this sum was my own error and
+  // the residue it left was exactly Missouri's 5.6%.
+  approx(c.rate - f.ordinary,
+    f.ssTorpedo + f.deductionPhaseout + f.preferential + f.state
+      + c.ratePoints.irmaa + c.ratePoints.aca + (c.ficaDelta / converted),
+    'and the gap is exactly the add-ons — no unexplained residue', 1e-6);
+
+  // ── Degenerate inputs ────────────────────────────────────────────────────
+  eq(conversionCostComponents(with22, without, 67, 0), null,
+    'nothing converted, nothing to decompose');
+  eq(conversionCostComponents(null, without, 67, 1000), null, 'a missing projection returns null');
+  eq(conversionCostComponents(with22, without, 999, 1000), null, 'as does an age outside the plan');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

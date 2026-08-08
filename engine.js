@@ -2689,10 +2689,53 @@ const conversionCostComponents = (withProj, withoutProj, age, convertedAmount) =
   const ficaDelta = d(w, o, 'ficaTax');
   const totalCost = taxDeltaExIrmaa + irmaaDelta + acaSubsidyLost;
 
+  // ── WHY THE FEDERAL NUMBER EXCEEDS THE BRACKET ────────────────────────────
+  // "I am in the 22% bracket, so why does this say 35%?" is the single most
+  // common thing to ask of this figure, and a total cannot answer it. The
+  // federal delta is separated into the four things that actually move it, by
+  // adding one at a time to the same bracket walk the engine uses:
+  //
+  //   ordinary   the conversion taxed at the brackets it climbs through. This is
+  //              usually BELOW the headline bracket, because filling TO the top
+  //              of 22% taxes the early dollars at 10% and 12%.
+  //   ssTorpedo  Social Security dragged into taxability by the conversion
+  //              (Pub 915 combined income). Budgeting for the torpedo in
+  //              spending does not remove it from the cost of the next dollar.
+  //   deduction  the OBBBA senior deduction phasing out at 6 cents per dollar of
+  //              MAGI, per person. New for 2025-2028 and easy to miss entirely.
+  //   preferential  capital gains pushed up a rate by the conversion stacking
+  //              beneath them, plus any NIIT it triggers.
+  //
+  // Residual arithmetic lands in `preferential` rather than being hidden, so the
+  // four parts always sum to federalDelta exactly.
+  const fs = w.filingStatus || o.filingStatus || 'married_joint';
+  const idx = (w.year || BASE_TAX_YEAR) - BASE_TAX_YEAR;
+  const infl = 0.03;
+  const ordinaryOf = (r) => Math.max(0,
+    (r.taxableIncome || 0) - (r.realizedCapitalGains || 0) - (r.federalDeduction || 0));
+  const T = (x) => federalTaxOnTaxableIncome(x, fs, idx, infl);
+  const ordBase = ordinaryOf(o);
+  const ssExtra = (w.taxableSS || 0) - (o.taxableSS || 0);
+  const deductionLost = (o.federalDeduction || 0) - (w.federalDeduction || 0);
+  const ordinaryCost = T(ordBase + convertedAmount) - T(ordBase);
+  const ssTorpedoCost = T(ordBase + convertedAmount + ssExtra) - T(ordBase + convertedAmount);
+  const deductionCost = T(ordBase + convertedAmount + ssExtra + deductionLost)
+                      - T(ordBase + convertedAmount + ssExtra);
+  const preferentialCost = federalDelta - ordinaryCost - ssTorpedoCost - deductionCost;
+
   const pct = (n) => n / convertedAmount;
   return {
     converted: convertedAmount,
     federalDelta, stateDelta, ficaDelta, irmaaDelta, acaSubsidyLost,
+    // Federal broken into its causes; these four sum to federalDelta.
+    federalBreakdown: {
+      ordinary: ordinaryCost,
+      ssTorpedo: ssTorpedoCost,
+      deductionPhaseout: deductionCost,
+      preferential: preferentialCost,
+      ssMadeTaxable: ssExtra,
+      deductionLost,
+    },
     // Income tax only, no surcharge, no subsidy — comparable to a bracket.
     taxDeltaExIrmaa,
     // What totalTax alone would have said, kept so the UI can show the gap.
@@ -2704,6 +2747,15 @@ const conversionCostComponents = (withProj, withoutProj, age, convertedAmount) =
       incomeTax: pct(taxDeltaExIrmaa),
       irmaa: pct(irmaaDelta),
       aca: pct(acaSubsidyLost),
+    },
+    // The same split expressed as rate points, so a stacked explanation of the
+    // headline percentage adds up to it.
+    federalRatePoints: {
+      ordinary: pct(ordinaryCost),
+      ssTorpedo: pct(ssTorpedoCost),
+      deductionPhaseout: pct(deductionCost),
+      preferential: pct(preferentialCost),
+      state: pct(stateDelta),
     },
   };
 };
