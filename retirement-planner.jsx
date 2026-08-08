@@ -3108,9 +3108,18 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                     ];
                     // Each of these is a real reason the figure sits above the
                     // bracket, and each is invisible unless it is named.
+                    // Always stated, even at zero. "Why is my SS being taxed
+                    // again when my spending already maxes it out?" is only
+                    // answerable if the before/after share is on screen — and
+                    // when it reads 85.0% -> 85.0% the charge is visibly zero.
+                    const sh = (v) => (v === null || v === undefined ? '—' : (v * 100).toFixed(1) + '%');
                     if (Math.abs(d.ssTorpedo) > 1) {
                       out.push(line('Social Security torpedo', d.ssTorpedo, f.ssTorpedo));
-                      out.push(`      (+${formatCurrency(d.ssMadeTaxable)} of SS became taxable)`);
+                      out.push(`      SS taxable ${sh(d.ssTaxableShareBefore)} -> ${sh(d.ssTaxableShareAfter)}`);
+                      out.push(`      (+${formatCurrency(d.ssMadeTaxable)} newly taxable — only this is charged)`);
+                    } else if (d.ssTaxableShareBefore !== null && d.ssTaxableShareBefore > 0) {
+                      out.push(`  Social Security torpedo              $0`);
+                      out.push(`      SS taxable ${sh(d.ssTaxableShareBefore)} -> ${sh(d.ssTaxableShareAfter)}, so nothing is charged`);
                     }
                     if (Math.abs(d.deductionPhaseout) > 1) {
                       out.push(line('Senior deduction lost', d.deductionPhaseout, f.deductionPhaseout));

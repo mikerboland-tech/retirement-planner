@@ -5648,6 +5648,90 @@ section('P47 — the cost per dollar converted, decomposed into why it exceeds t
   eq(conversionCostComponents(with22, without, 999, 1000), null, 'as does an age outside the plan');
 }
 
+section('P48 — the SS torpedo charge is incremental: nothing is charged for tax that was owed anyway');
+{
+  // Challenged, and worth pinning permanently: does the cost-per-dollar figure
+  // blend in Social Security tax the household would owe with or without the
+  // conversion? It must not. The charge is a difference between two projections,
+  // so it can only ever reflect SS that the conversion NEWLY drags into
+  // taxability — and once spending alone has driven benefits to the 85%
+  // statutory ceiling there is nothing left to drag, so the charge is zero.
+  const { conversionCostComponents, calculateSocialSecurityTaxableAmount } = engine;
+  const SS_TOTAL = 78000;
+  const CEILING = SS_TOTAL * 0.85;
+
+  // ── The ceiling itself ───────────────────────────────────────────────────
+  // §86 caps the taxable portion at 85% of benefits, however large other income
+  // grows. Without this cap the incremental charge would never reach zero.
+  for (const other of [200000, 500000, 5000000]) {
+    approx(calculateSocialSecurityTaxableAmount(SS_TOTAL, other, 'married_joint'), CEILING,
+      `$${other.toLocaleString()} of other income still taxes only 85% of benefits`, 1e-6);
+  }
+
+  const plan = (spend) => ({
+    myAge: 67, spouseAge: 67, myBirthYear: TODAY_YEAR - 67, spouseBirthYear: TODAY_YEAR - 67,
+    myRetirementAge: 67, spouseRetirementAge: 67, legacyAge: 75,
+    filingStatus: 'married_joint', state: 'Missouri', inflationRate: 0,
+    desiredRetirementIncome: spend, withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+    healthcareModel: 'none', medicalInflation: 0,
+    rothConversionStartAge: 67, rothConversionEndAge: 74, rothConversionTaxSource: 'brokerage',
+  });
+  const accts = [
+    { id: 1, name: 'IRA', type: 'traditional_ira', balance: 2500000, contribution: 0, cagr: 0, startAge: 67, stopAge: 67, owner: 'me' },
+    { id: 2, name: 'Roth', type: 'roth_ira', balance: 100000, contribution: 0, cagr: 0, startAge: 67, stopAge: 67, owner: 'me' },
+    { id: 3, name: 'Brok', type: 'brokerage', balance: 900000, contribution: 0, cagr: 0, startAge: 67, stopAge: 67, owner: 'joint', costBasisPercent: 0.5 },
+  ];
+  const streams = [
+    { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 67, endAge: 95, cola: 0, owner: 'me' },
+    { id: 2, name: 'Sp SS', type: 'social_security', amount: 30000, startAge: 67, endAge: 95, cola: 0, owner: 'spouse' },
+  ];
+  const measure = (spend) => {
+    const pi = plan(spend);
+    const wo = computeProjections(pi, accts, streams, [], [], [], TODAY_YEAR);
+    const w = computeProjections({ ...pi, rothConversionBracket: '22%' }, accts, streams, [], [], [], TODAY_YEAR);
+    const conv = w[0].rothConversion;
+    return { wo, w, conv, c: conv > 0 ? conversionCostComponents(w, wo, 67, conv) : null };
+  };
+
+  // ── Spending BELOW the ceiling: the conversion does drag SS in, and is charged
+  {
+    const m = measure(110000);
+    lt(m.wo[0].taxableSS, CEILING - 1, 'at this spending level the baseline has not reached the 85% ceiling');
+    gt(m.c.federalBreakdown.ssMadeTaxable, 0, 'so the conversion makes more SS taxable');
+    gt(m.c.federalBreakdown.ssTorpedo, 0, 'and is charged for exactly that');
+    approx(m.c.federalBreakdown.ssTaxableShareAfter, 0.85,
+      'which pushes benefits to the ceiling', 1e-6);
+  }
+
+  // ── Spending AT the ceiling: nothing newly taxable, nothing charged ──────
+  // This is the case that was in dispute. If the figure blended in tax owed
+  // regardless of the conversion, this charge would be positive. It is zero.
+  for (const spend of [130000, 160000]) {
+    const m = measure(spend);
+    if (!m.c) { pass++; continue; }   // no room left to convert at this spending
+    approx(m.wo[0].taxableSS, CEILING,
+      `at $${spend.toLocaleString()} of spending the baseline ALREADY taxes 85% of benefits`, 1e-6);
+    eq(Math.round(m.c.federalBreakdown.ssMadeTaxable), 0,
+      'so the conversion makes no additional SS taxable');
+    eq(Math.round(m.c.federalBreakdown.ssTorpedo), 0,
+      'and the torpedo charge is exactly zero — no tax owed anyway is blended in');
+    approx(m.c.federalBreakdown.ssTaxableShareBefore, m.c.federalBreakdown.ssTaxableShareAfter,
+      'the before and after shares are identical, which is what makes that verifiable', 1e-9);
+  }
+
+  // ── The general property, not just these fixtures ────────────────────────
+  // Every component is a difference of two projections, so a household with NO
+  // Social Security at all can never be charged a torpedo.
+  {
+    const pi = plan(110000);
+    const wo = computeProjections(pi, accts, [], [], [], [], TODAY_YEAR);
+    const w = computeProjections({ ...pi, rothConversionBracket: '22%' }, accts, [], [], [], [], TODAY_YEAR);
+    const c = conversionCostComponents(w, wo, 67, w[0].rothConversion);
+    eq(Math.round(c.federalBreakdown.ssTorpedo), 0, 'no Social Security, no torpedo charge');
+    eq(c.federalBreakdown.ssTaxableShareBefore, null, 'and the share is reported as absent rather than 0%');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

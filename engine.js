@@ -2735,6 +2735,12 @@ const conversionCostComponents = (withProj, withoutProj, age, convertedAmount) =
       preferential: preferentialCost,
       ssMadeTaxable: ssExtra,
       deductionLost,
+      // The share of benefits taxable before and after. When the plan's own
+      // spending already drives SS to the 85% statutory ceiling, the conversion
+      // makes none of it newly taxable and ssTorpedo is exactly zero — this pair
+      // is what lets a reader confirm that rather than take it on trust.
+      ssTaxableShareBefore: (o.socialSecurity || 0) > 0 ? (o.taxableSS || 0) / o.socialSecurity : null,
+      ssTaxableShareAfter: (w.socialSecurity || 0) > 0 ? (w.taxableSS || 0) / w.socialSecurity : null,
     },
     // Income tax only, no surcharge, no subsidy — comparable to a bracket.
     taxDeltaExIrmaa,
