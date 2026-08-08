@@ -44,7 +44,8 @@ const {
   conversionCostComponents, topMarginalBracket,
   computeTaxReturn, buildTaxSituation, compareTraditionalVsRoth,
   projectPayrollYearEnd, marginalRateOn, saltCapFor, projectedWithdrawalRate,
-  detailedCurrentYearDecision,
+  detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling,
+  IRMAA_FILL_SAFETY_MARGIN,
 } = PlannerEngine;
 
 // ============================================
@@ -500,6 +501,30 @@ const newK1Row = () => ({
 const formatCurrency = (value) => {
   if (value === undefined || value === null || isNaN(value)) return '$0';
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(value);
+};
+
+// Is a Roth conversion planned at all, and in which mode? Three modes now —
+// fixed amount, fill to a tax bracket, fill to an IRMAA tier — and six places
+// used to test for the first two inline. A plan set to fill an IRMAA tier has
+// neither a conversion amount nor a bracket label, so every one of those
+// predicates would have read it as "no conversion planned" and hidden the
+// column, skipped the validation, or described the strategy wrongly.
+const conversionIsActive = (pi) => !!pi && (
+  (pi.rothConversionAmount || 0) > 0
+  || !!pi.rothConversionBracket
+  || Number.isInteger(pi.rothConversionIrmaaTier)
+);
+
+const conversionModeLabel = (pi) => {
+  if (!pi) return '';
+  if (Number.isInteger(pi.rothConversionIrmaaTier)) {
+    const opt = irmaaTierOptions(pi.filingStatus, pi.filingStatus === 'married_joint' ? 2 : 1)[pi.rothConversionIrmaaTier];
+    return opt && opt.ceiling
+      ? `staying under ${formatCurrency(opt.ceiling)} MAGI (IRMAA tier ${pi.rothConversionIrmaaTier})`
+      : 'staying within an IRMAA tier';
+  }
+  if (pi.rothConversionBracket) return `filling to the ${pi.rothConversionBracket} bracket`;
+  return `${formatCurrency(pi.rothConversionAmount || 0)}/yr`;
 };
 
 const formatPercent = (value) => `${(value * 100).toFixed(1)}%`;
@@ -4337,8 +4362,8 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
         <p className="text-xs text-slate-500 mt-3">
           💡 <strong>Roth Conversion Strategy:</strong> The highlighted rows (first 10 years of retirement) often present the best Roth conversion opportunities.
           <strong className="text-purple-400"> Purple rows</strong> show years where a planned conversion is already executing — the Taxable Income and Room columns already include that conversion, so Room shows what's <em>still available</em> above your planned amount.
-          {(personalInfo.rothConversionAmount > 0 || personalInfo.rothConversionBracket) && (
-            <span className="text-purple-400"> Your planned conversion is active (ages {personalInfo.rothConversionStartAge || getDefaultRothConversionWindow(personalInfo).startAge}–{personalInfo.rothConversionEndAge || getDefaultRothConversionWindow(personalInfo).endAge}{personalInfo.rothConversionBracket ? `, filling to ${personalInfo.rothConversionBracket} bracket` : `, ${formatCurrency(personalInfo.rothConversionAmount)}/yr`}).</span>
+          {conversionIsActive(personalInfo) && (
+            <span className="text-purple-400"> Your planned conversion is active (ages {personalInfo.rothConversionStartAge || getDefaultRothConversionWindow(personalInfo).startAge}–{personalInfo.rothConversionEndAge || getDefaultRothConversionWindow(personalInfo).endAge}{`, ${conversionModeLabel(personalInfo)}`}).</span>
           )}
         </p>
       </div>
@@ -7290,7 +7315,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
         
         // Whether the user has Roth conversions enabled. Affects banner display
         // and whether the ranking table shows a "Roth Conv." column.
-        const rothConversionActive = (personalInfo.rothConversionAmount || 0) > 0 || !!personalInfo.rothConversionBracket;
+        const rothConversionActive = conversionIsActive(personalInfo);
         
         return (
           <>
@@ -7343,7 +7368,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                   conversion amount changes with SS claim age, which is the whole point
                   of comparing scenarios. */}
               {(() => {
-                const conversionActive = (personalInfo.rothConversionAmount || 0) > 0 || personalInfo.rothConversionBracket;
+                const conversionActive = conversionIsActive(personalInfo);
                 if (!conversionActive) {
                   return (
                     <div className="mb-4 p-3 bg-slate-800/50 border border-slate-700 rounded-lg text-sm">
@@ -7353,8 +7378,8 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                   );
                 }
                 // Build the config description
-                const mode = personalInfo.rothConversionBracket
-                  ? `fill to ${personalInfo.rothConversionBracket} bracket`
+                const mode = conversionIsActive(personalInfo)
+                  ? conversionModeLabel(personalInfo)
                   : `${formatCurrency(personalInfo.rothConversionAmount || 0)}/yr ${personalInfo.rothConversionInflationAdjust === false ? '(fixed nominal)' : "(today's $, indexed)"}`;
                 const ssDefaultWindow = getDefaultRothConversionWindow(personalInfo);
                 const ages = `ages ${personalInfo.rothConversionStartAge || ssDefaultWindow.startAge}–${personalInfo.rothConversionEndAge || ssDefaultWindow.endAge}`;
@@ -7664,7 +7689,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                 <p><span className="text-slate-300 font-medium">Portfolio preservation:</span> Claiming later means drawing down your portfolio faster in the gap years before SS starts. But once the higher benefit kicks in, withdrawals drop and the portfolio recovers — sometimes significantly. The portfolio trajectory chart above shows these crossover dynamics clearly.</p>
                 <p><span className="text-slate-300 font-medium">Don't trust a single deterministic answer:</span> The "Analysis Sensitivity Controls" above let you test how the optimal claim age responds to different return assumptions (the CAGR slider) and to sequence-of-returns risk (the Monte Carlo toggle). The optimal age can flip between early and late depending on these. Try ±2% on the CAGR slider before committing to a strategy.</p>
                 {isMarried && <p><span className="text-slate-300 font-medium">Survivor benefits matter:</span> {personalInfo.survivorModelEnabled ? 'Your survivor modeling is ON — when the first spouse passes, the survivor inherits the higher SS benefit. This significantly favors the higher earner claiming later.' : '⚠️ Your survivor modeling is currently OFF. Enable it in Personal Info → Survivor Modeling to see how the surviving spouse inheriting the higher SS benefit affects these results — it often changes the optimal strategy.'}</p>}
-                {((personalInfo.rothConversionAmount || 0) > 0 || personalInfo.rothConversionBracket) && (
+                {conversionIsActive(personalInfo) && (
                   <p><span className="text-slate-300 font-medium">Roth conversion interaction:</span> Your active Roth conversion strategy is reflected in every scenario. The 'Roth Conv.' column in the ranking table shows lifetime conversion amounts — SS claim age changes how much bracket room you have for cheap conversions. See the conversion total range in the banner above the analysis.</p>
                 )}
                 <p><span className="text-slate-300 font-medium">Life expectancy uncertainty:</span> These projections assume you live to age {legacyAge}. If longevity is shorter, earlier claiming may win; if longer, delayed claiming becomes increasingly valuable. Adjust the life expectancy slider at the top of the tab to test different assumptions.</p>
@@ -8365,7 +8390,7 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
     }
     
     // Check if Roth conversion window starts before retirement
-    if ((info.rothConversionAmount > 0 || info.rothConversionBracket) && info.rothConversionStartAge < info.myRetirementAge) {
+    if (conversionIsActive(info) && info.rothConversionStartAge < info.myRetirementAge) {
       warnings.push({
         type: 'roth_before_retirement',
         severity: 'info',
@@ -8604,7 +8629,7 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
     // silently converts nothing, so a user can configure a whole strategy, see it
     // reflected nowhere, and have no idea why.
     {
-      const wantsConversions = (info.rothConversionAmount || 0) > 0 || !!info.rothConversionBracket;
+      const wantsConversions = conversionIsActive(info);
       const hasRoth = accounts.some(a => ROTH_TYPES.includes(a.type));
       if (wantsConversions && !hasRoth) {
         warnings.push({
@@ -8848,33 +8873,60 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
         <div className="border-t border-slate-700/50 mt-5 pt-5">
           <h4 className="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wide">Planned Roth Conversion Strategy</h4>
           
-          {/* Mode toggle */}
-          <div className="flex gap-2 mb-4">
-            <button
-              onClick={() => handleChange('rothConversionBracket', '')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
-                !(localInfo.rothConversionBracket)
-                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
-                  : 'text-slate-400 border-slate-600/50 hover:text-slate-200 hover:bg-slate-700/50'
-              }`}
-            >
-              Fixed Amount
-            </button>
-            <button
-              onClick={() => { handleChange('rothConversionAmount', 0); handleChange('rothConversionBracket', '22%'); }}
-              className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
-                localInfo.rothConversionBracket
-                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
-                  : 'text-slate-400 border-slate-600/50 hover:text-slate-200 hover:bg-slate-700/50'
-              }`}
-            >
-              Fill to Bracket
-            </button>
-          </div>
+          {/* Mode toggle. Three modes, mutually exclusive — switching one clears
+              the others, or the engine would see two ceilings at once. */}
+          {(() => {
+            const irmaaMode = Number.isInteger(localInfo.rothConversionIrmaaTier);
+            const bracketMode = !!localInfo.rothConversionBracket && !irmaaMode;
+            const btn = (active) => `px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+              active ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                     : 'text-slate-400 border-slate-600/50 hover:text-slate-200 hover:bg-slate-700/50'}`;
+            return (
+              <div className="flex flex-wrap gap-2 mb-4">
+                <button
+                  onClick={() => { handleChange('rothConversionBracket', ''); handleChange('rothConversionIrmaaTier', null); }}
+                  className={btn(!bracketMode && !irmaaMode)}
+                >Fixed Amount</button>
+                <button
+                  onClick={() => { handleChange('rothConversionAmount', 0); handleChange('rothConversionIrmaaTier', null); handleChange('rothConversionBracket', '22%'); }}
+                  className={btn(bracketMode)}
+                >Fill to Bracket</button>
+                <button
+                  onClick={() => { handleChange('rothConversionAmount', 0); handleChange('rothConversionBracket', ''); handleChange('rothConversionIrmaaTier', 0); }}
+                  className={btn(irmaaMode)}
+                >Fill to IRMAA Tier</button>
+              </div>
+            );
+          })()}
 
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             {/* Fixed amount input OR bracket selector */}
-            {!localInfo.rothConversionBracket ? (
+            {Number.isInteger(localInfo.rothConversionIrmaaTier) ? (
+              <div className="col-span-2">
+                <label className={compactLabelStyle}>Stay Within IRMAA Tier</label>
+                <select
+                  value={localInfo.rothConversionIrmaaTier}
+                  onChange={e => handleChange('rothConversionIrmaaTier', Number(e.target.value))}
+                  className={compactInputStyle}
+                >
+                  {irmaaTierOptions(localInfo.filingStatus,
+                      localInfo.filingStatus === 'married_joint' ? 2 : 1)
+                    .filter(o => !o.isTop)
+                    .map(o => (
+                      <option key={o.index} value={o.index}>
+                        MAGI up to {formatCurrency(o.ceiling)} — surcharge {formatCurrency(o.annualSurchargePerHousehold)}/yr
+                      </option>
+                    ))}
+                </select>
+                <p className="text-[10px] text-slate-500 mt-1 leading-snug">
+                  Converts up to {formatCurrency(IRMAA_FILL_SAFETY_MARGIN)} below that MAGI edge, measured against the
+                  threshold for the year the surcharge is actually paid — IRMAA runs on a two-year lookback, so a
+                  conversion now sets the premium two years from now. Crossing an edge by a single dollar costs the
+                  whole tier step, which is why the tool stops short of it rather than on it.
+                  {' '}Before age 63 there is no IRMAA consequence yet, so in those years this simply acts as a MAGI ceiling.
+                </p>
+              </div>
+            ) : !localInfo.rothConversionBracket ? (
               <div>
                 <label className={compactLabelStyle}>Annual Conversion Amount</label>
                 <CurrencyCell

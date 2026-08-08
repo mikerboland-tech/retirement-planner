@@ -4450,6 +4450,64 @@ const projectPayrollYearEnd = (row = {}, opts = {}) => {
   };
 };
 
+// ── IRMAA AS A CONVERSION CEILING ────────────────────────────────────────────
+// Filling to the top of a tax bracket and filling to the top of an IRMAA tier
+// are different targets that cannot be reconciled, because they are measured on
+// different bases: a bracket top is TAXABLE INCOME, an IRMAA edge is MAGI. For
+// MFJ in 2026 the top of the 22% bracket is $211,400 of taxable income, which is
+// roughly $243,600 of MAGI — about $25,600 past the first IRMAA edge at
+// $218,000, and still nowhere near the next one at $274,000. So "fill to 22%"
+// buys a surcharge and gets nothing for it.
+//
+// The asymmetry in what the two cost is the reason this matters. Stepping from
+// the 22% bracket into the 24% costs two cents on the next dollar. Crossing an
+// IRMAA edge by ONE dollar costs the whole tier step — for a married couple both
+// on Medicare, $2,297 to $3,473 depending on the edge — which is an effectively
+// infinite marginal rate on that dollar.
+//
+// Timing: IRMAA runs on a two-year lookback, so a conversion in year Y sets the
+// premium paid in Y+2, and the edge that matters is the one indexed to Y+2 (not
+// to Y). Before age 63 a conversion has no IRMAA consequence at all, because the
+// person is not yet on Medicare when the surcharge would land — the ceiling
+// still applies as a plain MAGI target in those years, which is a coherent thing
+// to want, but it is not buying anything.
+const IRMAA_TIER_LOOKBACK_YEARS = 2;
+// How far under the edge to stop. A projected MAGI that lands exactly ON an edge
+// is one rounding error, one unexpected 1099, or one fund distribution away from
+// crossing it and owing the whole surcharge. A thousand dollars of headroom
+// costs at most a few hundred in forgone conversion and removes that cliff risk.
+// Surfaced in the UI rather than hidden, so the tradeoff is the user's to see.
+const IRMAA_FILL_SAFETY_MARGIN = 1000;
+
+// The MAGI ceiling for a given IRMAA tier, indexed to the year the surcharge is
+// actually paid. `tierIndex` is the tier you want to STAY IN, so the ceiling is
+// that tier's own maxIncome. The top tier has no ceiling and returns null.
+const irmaaTierCeiling = (tierIndex, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
+  const table = IRMAA_THRESHOLDS_2025[filingStatus]
+    || IRMAA_THRESHOLDS_2025[filingStatus === 'head_of_household' ? 'single' : 'married_joint']
+    || IRMAA_THRESHOLDS_2025.married_joint;
+  const tier = table[tierIndex];
+  if (!tier || tier.maxIncome === Infinity) return null;
+  // Indexed to Y+2 because that is the year whose thresholds the surcharge is
+  // measured against — using this year's would tighten the ceiling every year by
+  // exactly one year of indexation.
+  return indexTo(tier.maxIncome, yearsFromNow + IRMAA_TIER_LOOKBACK_YEARS, inflationRate);
+};
+
+// Labels for the tier picker, priced per household so the choice is legible.
+// The surcharge shown is what STAYING IN this tier costs per year once on
+// Medicare, which is what makes "one tier lower" a quantified decision.
+const irmaaTierOptions = (filingStatus, numMedicareEligible = 2) => {
+  const table = IRMAA_THRESHOLDS_2025[filingStatus]
+    || IRMAA_THRESHOLDS_2025[filingStatus === 'head_of_household' ? 'single' : 'married_joint']
+    || IRMAA_THRESHOLDS_2025.married_joint;
+  return table.map((t, i) => ({
+    index: i,
+    ceiling: t.maxIncome === Infinity ? null : t.maxIncome,
+    annualSurchargePerHousehold: (t.partB + t.partD) * 12 * Math.max(1, numMedicareEligible),
+    isTop: t.maxIncome === Infinity,
+  }));
+};
 // ── FEEDING THE DETAILED RETURN INTO PROJECTION YEAR 0 ───────────────────────
 // Year 0 of a projection is normally a synthetic full year built from a salary
 // scalar. When the Current Year tab has been filled in, most of that year has
@@ -5878,12 +5936,17 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       ? pi.rothConversionEndAge
       : defaultWindow.endAge;
     const conversionBracket = pi.rothConversionBracket || ''; // e.g. '22%', '24%', '32%'
+    // IRMAA-fill mode. Mutually exclusive with bracket-fill; the UI enforces
+    // that, and if both somehow arrive the IRMAA ceiling wins, since it is the
+    // strictly more expensive limit to breach.
+    const conversionIrmaaTier = Number.isInteger(pi.rothConversionIrmaaTier)
+      ? pi.rothConversionIrmaaTier : null;
 
     if (myAge >= conversionStartAge && myAge <= conversionEndAge) {
       // Determine the target conversion amount for this year
       let targetConversion = 0;
 
-      if (conversionBracket) {
+      if (conversionBracket || conversionIrmaaTier !== null) {
         // ── BRACKET-FILL MODE ────────────────────────────────────────────────
         // Convert up to the top of the chosen bracket. Two things make this a
         // solve rather than a subtraction:
@@ -5938,12 +6001,22 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           nonSSIncomeAfterDeduction + totalRMD + preTaxWithdrawals - anticipatedQCD);
 
         const bracketIdx = RATE_TO_BRACKET_IDX[conversionBracket];
-        if (bracketIdx === undefined) {
-          // Unrecognized bracket label — skip this year rather than silently
-          // mis-bracketing into the prior 22% fallback.
+        // In IRMAA mode the ceiling is a MAGI edge, so no bracket label is
+        // needed; in bracket mode an unrecognized label is skipped rather than
+        // silently falling back to 22%.
+        const irmaaCeilingRaw = conversionIrmaaTier !== null
+          ? irmaaTierCeiling(conversionIrmaaTier, effectiveFilingStatus, taxIndexYears, pi.inflationRate)
+          : null;
+        // A null ceiling means the top tier, which has no edge above it — there
+        // is nothing left to avoid, so the mode has no opinion and converts 0
+        // rather than converting without limit.
+        const irmaaCap = irmaaCeilingRaw === null ? null
+          : Math.max(0, irmaaCeilingRaw - IRMAA_FILL_SAFETY_MARGIN);
+        if (conversionIrmaaTier !== null ? irmaaCap === null : bracketIdx === undefined) {
           targetConversion = 0;
         } else {
-          const bracketCap = baseBrackets[bracketIdx].max * inflationFactor;
+          const bracketCap = conversionIrmaaTier !== null
+            ? Infinity : baseBrackets[bracketIdx].max * inflationFactor;
           // Taxable income produced by converting X: the conversion plus the
           // extra taxable SS it drags in, less the deduction that X's own MAGI
           // supports. Capital gains are in the Pub 915 combined-income base (they
@@ -5962,9 +6035,17 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // slowly to land on the cent.
           // Upper bound: the answer with no taxable SS and the largest deduction
           // (both of which only move against the conversion as X grows).
-          const hiBound = Math.max(0, bracketCap
-            + deductionAt(ordinaryBeforeConversion + brokerageCapitalGains + preTaxDeduction)
-            - ordinaryBeforeConversion);
+          // Upper bound for the search. In bracket mode it is the answer with no
+          // taxable SS and the largest deduction (both only move against the
+          // conversion as X grows). In IRMAA mode the ceiling is already a MAGI
+          // figure, so no deduction is added back — doing so would set the bound
+          // a whole standard deduction too high, which is harmless for the
+          // bisection but makes the "bound is the answer" shortcut wrong.
+          const hiBound = conversionIrmaaTier !== null
+            ? Math.max(0, irmaaCap - ordinaryBeforeConversion)
+            : Math.max(0, bracketCap
+                + deductionAt(ordinaryBeforeConversion + brokerageCapitalGains + preTaxDeduction)
+                - ordinaryBeforeConversion);
 
           // ── THE CONVERSION'S OWN TAX BILL EATS BRACKET ROOM ─────────────────
           // Filling to the top of a bracket and then withdrawing MORE pre-tax to
@@ -6059,20 +6140,38 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // Total ordinary taxable income the year ends up with if X is converted.
           const taxableWithDrawAt = (X) => taxableAt(X) + taxDrawOrdinaryAt(X);
 
-          if (hiBound <= 0 || taxableWithDrawAt(0) >= bracketCap) {
-            targetConversion = 0; // already at or past the top of the bracket
-          } else if (taxableWithDrawAt(hiBound) <= bracketCap) {
-            targetConversion = hiBound; // no SS in play — the bound is the answer
+          // MAGI the year ends up with if X is converted. Same shape as
+          // taxableAt but WITHOUT subtracting the deduction and WITH the pre-tax
+          // deduction added back — that is what the engine means by magi, and it
+          // is the base IRMAA is measured on. Deducting here instead would
+          // understate MAGI by the standard deduction and let every conversion
+          // sail a full deduction past the edge it was trying to respect.
+          const magiAt = (X) => {
+            const nonSS = ordinaryBeforeConversion + X + brokerageCapitalGains;
+            const ssT = calculateSocialSecurityTaxableAmount(totalSocialSecurity, nonSS, effectiveFilingStatus);
+            return nonSS + ssT + preTaxDeduction;
+          };
+          const magiWithDrawAt = (X) => magiAt(X) + taxDrawOrdinaryAt(X);
+
+          // One bisection, two ceilings. Both measures are continuous and
+          // strictly increasing in X — each converted dollar adds itself plus up
+          // to $0.85 of newly taxable SS — so the same search works for either.
+          const measureAt = conversionIrmaaTier !== null ? magiWithDrawAt : taxableWithDrawAt;
+          const cap = conversionIrmaaTier !== null ? irmaaCap : bracketCap;
+
+          if (hiBound <= 0 || measureAt(0) >= cap) {
+            targetConversion = 0; // already at or past the ceiling before converting
+          } else if (measureAt(hiBound) <= cap) {
+            targetConversion = hiBound; // the bound is the answer
           } else {
             let lo = 0, hi = hiBound;
             // Halve to sub-cent precision (typically ~30 steps; the 60-step bound
             // covers any conceivable range and keeps the loop provably finite).
-            // taxableWithDrawAt is still strictly increasing in X: both terms are.
             for (let i = 0; i < 60 && hi - lo > 0.005; i++) {
               const mid = (lo + hi) / 2;
-              if (taxableWithDrawAt(mid) > bracketCap) hi = mid; else lo = mid;
+              if (measureAt(mid) > cap) hi = mid; else lo = mid;
             }
-            targetConversion = lo; // the side that never crosses the bracket top
+            targetConversion = lo; // the side that never crosses the ceiling
           }
         }
       } else if (conversionAmount > 0) {
@@ -6825,6 +6924,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     PAY_PERIODS_PER_YEAR, payPeriodsElapsed, projectPayrollYearEnd,
     buildTaxSituation, compareTraditionalVsRoth, projectedWithdrawalRate,
     detailedCurrentYearDecision, taxFieldsFromReturn,
+    irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
+    IRMAA_TIER_LOOKBACK_YEARS,
     routeK1, applyPartnerBasis, applyPassiveLossRules, computeScheduleD,
     qbiDeduction, safeHarborRequirement, computeScheduleA,
     applyItemizedBenefitCap, computeScheduleSE,

@@ -5231,6 +5231,107 @@ section('P43 — feeding the detailed current-year return into projection year 0
   }
 }
 
+section('P44 — filling to an IRMAA tier, which is a different target from filling to a bracket');
+{
+  // A tax bracket and an IRMAA tier cannot be reconciled, because they are
+  // measured on different bases: a bracket top is TAXABLE income, an IRMAA edge
+  // is MAGI. So "fill to the 22% bracket" sails past the first IRMAA edge and
+  // buys nothing for it — the next edge is nowhere near.
+  //
+  // What makes the difference expensive is the asymmetry in the penalties.
+  // Stepping from the 22% bracket to the 24% costs two cents on the next dollar.
+  // Crossing an IRMAA edge by ONE dollar costs the whole tier step.
+  const { irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
+          IRMAA_TIER_LOOKBACK_YEARS, IRMAA_THRESHOLDS_2025 } = engine;
+
+  // ── The ceiling, and the two-year lookback ───────────────────────────────
+  {
+    eq(IRMAA_TIER_LOOKBACK_YEARS, 2, 'IRMAA runs on a two-year lookback');
+    const mfj = IRMAA_THRESHOLDS_2025.married_joint;
+    eq(irmaaTierCeiling(0, 'married_joint', 0, 0), mfj[0].maxIncome,
+      'with no inflation the tier-0 ceiling is the published edge');
+    // A conversion made now sets the premium paid two years from now, so the
+    // edge that binds is the one indexed to THAT year. Indexing to this year
+    // instead would tighten the ceiling by a year of indexation, every year.
+    approx(irmaaTierCeiling(0, 'married_joint', 0, 0.03),
+           mfj[0].maxIncome * Math.pow(1.03, 2),
+      'and is indexed two years forward — the year the surcharge is actually paid', 1e-6);
+    eq(irmaaTierCeiling(mfj.length - 1, 'married_joint', 0, 0.03), null,
+      'the top tier has no ceiling above it, so it returns null rather than Infinity');
+    eq(irmaaTierCeiling(99, 'married_joint', 0, 0.03), null, 'and an out-of-range tier does too');
+    // HoH has no IRMAA table of its own and is priced on the single table.
+    eq(irmaaTierCeiling(0, 'head_of_household', 0, 0),
+       IRMAA_THRESHOLDS_2025.single[0].maxIncome, 'head of household uses the single table');
+  }
+
+  // ── The picker prices each tier per household ────────────────────────────
+  {
+    const opts = irmaaTierOptions('married_joint', 2);
+    eq(opts.length, IRMAA_THRESHOLDS_2025.married_joint.length, 'every tier is offered');
+    eq(opts[opts.length - 1].isTop, true, 'the last one is flagged as the top tier');
+    eq(opts[0].ceiling, IRMAA_THRESHOLDS_2025.married_joint[0].maxIncome, 'with its MAGI edge');
+    const one = irmaaTierOptions('married_joint', 1);
+    approx(opts[1].annualSurchargePerHousehold, one[1].annualSurchargePerHousehold * 2,
+      'a couple both on Medicare pays the surcharge twice', 1e-9);
+  }
+
+  // ── The fill lands under the edge, not on or past it ─────────────────────
+  {
+    const build = (over) => {
+      const s = baseScenario({
+        myAge: 64, spouseAge: 64, myBirthYear: TODAY_YEAR - 64, spouseBirthYear: TODAY_YEAR - 64,
+        myRetirementAge: 64, spouseRetirementAge: 64, legacyAge: 76,
+        state: 'Florida', inflationRate: 0, desiredRetirementIncome: 150000,
+        rothConversionStartAge: 64, rothConversionEndAge: 75,
+        withdrawalPriority: ['pretax', 'brokerage', 'roth'], ...over,
+      });
+      s.accts = [
+        { id: 1, name: 'IRA', type: 'traditional_ira', balance: 4000000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', contributor: 'me' },
+        { id: 2, name: 'Roth', type: 'roth_ira', balance: 100000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', contributor: 'me' },
+        { id: 3, name: 'Brokerage', type: 'brokerage', balance: 900000, contribution: 0, contributionGrowth: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', contributor: 'me', costBasisPercent: 0.5 },
+      ];
+      s.streams = [];
+      return computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR)[0];
+    };
+
+    const edge0 = irmaaTierCeiling(0, 'married_joint', 0, 0);
+    const edge1 = irmaaTierCeiling(1, 'married_joint', 0, 0);
+
+    const t0 = build({ rothConversionIrmaaTier: 0 });
+    gt(t0.rothConversion, 0, 'filling to tier 0 converts something');
+    lt(t0.magi, edge0, 'and lands strictly under the tier-0 edge');
+    approx(t0.magi, edge0 - IRMAA_FILL_SAFETY_MARGIN,
+      'stopping one safety margin short of it, not on it', 0.001);
+    eq(t0.irmaaInfo === null || t0.irmaaInfo.tier === 0, true, 'so the year stays in tier 0');
+
+    const t1 = build({ rothConversionIrmaaTier: 1 });
+    lt(t1.magi, edge1, 'tier 1 lands under its own edge');
+    gt(t1.rothConversion, t0.rothConversion, 'and converts more, being the looser ceiling');
+
+    // The whole point: the bracket target overshoots the IRMAA edge.
+    const b22 = build({ rothConversionBracket: '22%' });
+    gt(b22.magi, edge0,
+      'filling to the 22% bracket sails past the first IRMAA edge — different bases, so they cannot line up');
+    gt(b22.rothConversion, t0.rothConversion,
+      'it converts more, which is the tradeoff: more Roth, but a surcharge two years later');
+
+    // Bracket-fill behaviour must be untouched by the new mode existing.
+    const b24 = build({ rothConversionBracket: '24%' });
+    gt(b24.rothConversion, b22.rothConversion, 'the 24% fill still converts more than the 22% fill');
+
+    // A plan naming both is not ambiguous: the IRMAA ceiling is the stricter
+    // limit to breach, so it wins.
+    const both = build({ rothConversionBracket: '24%', rothConversionIrmaaTier: 0 });
+    approx(both.rothConversion, t0.rothConversion,
+      'naming a bracket AND a tier converts to the tier — the more expensive limit governs', 0.001);
+
+    // The top tier has no edge above it, so the mode has no opinion and must not
+    // convert without limit.
+    const top = build({ rothConversionIrmaaTier: IRMAA_THRESHOLDS_2025.married_joint.length - 1 });
+    eq(top.rothConversion, 0, 'the top tier has nothing left to avoid, so it converts nothing');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
