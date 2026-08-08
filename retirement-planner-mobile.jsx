@@ -17,7 +17,9 @@ const {
 //   - Use native HTML range sliders (great mobile UX, big touch targets)
 //   - Single filer only; couples can mentally adjust by halving spending
 //   - One synthetic portfolio account + one SS stream feeds the FULL engine
-//   - No data persistence — refresh = start over (intentional, lightweight)
+//   - Inputs auto-save to localStorage under a mobile-specific key, so a
+//     refresh restores them (see LOCAL PERSISTENCE below). This line used to say
+//     the opposite; persistence was added later and the claim was left behind.
 //
 // This file does NOT import or share state with the desktop version.
 // They live side-by-side as independent apps at separate URLs.
