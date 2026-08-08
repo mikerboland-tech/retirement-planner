@@ -5850,6 +5850,95 @@ section('P49 — the income-threshold table: every edge a year can cross, on the
   eq(taxBreakpoints({ row: null, pi }).length, 0, 'a null row is handled too');
 }
 
+section('P50 — the paycheck count is an input, because for biweekly it cannot be derived');
+{
+  // Reported: the biweekly count was off by one. It was, and it always could be.
+  // A biweekly schedule depends on which day the first check of the year landed,
+  // which no arithmetic on the paystub date can recover: on 7 August 2026 the
+  // true count is 15 or 16 depending on whether the year opened 2 January or
+  // 15 January.
+  //
+  // Being off by one is not cosmetic. perPeriodGross is YTD gross divided by
+  // this count, so an over-count deflates the per-check figure AND shortens the
+  // remaining run — two errors pushing the projection the same way.
+  const { projectPayrollYearEnd, payPeriodsElapsed, PAY_PERIODS_PER_YEAR } = engine;
+
+  const row = (rem) => ({
+    owner: 'me', asOfDate: '2026-08-07', payFrequency: 'biweekly',
+    ytd: { grossPay: 154000, preTax401kTraditional: 14500 }, remainder: rem || {},
+  });
+  const run = (rem) => projectPayrollYearEnd(row(rem), { taxYear: 2026, age: 54 });
+
+  // ── The estimate, and the fact that it is flagged as one ─────────────────
+  {
+    const est = run();
+    eq(est.periodsElapsed, 16, 'the calendar estimate on 7 Aug 2026 is 16 checks');
+    eq(est.estimatedPeriodsElapsed, 16, 'and the estimate is reported alongside');
+    eq(est.periodsElapsedOverridden, false, 'flagged as NOT user-set, so the UI can say "estimated"');
+    eq(est.periodsPerYearOverridden, false, 'same for the annual count');
+  }
+
+  // ── The override wins, and the whole projection moves with it ────────────
+  {
+    const est = run();
+    const fixed = run({ payPeriodsElapsed: 15 });
+    eq(fixed.periodsElapsed, 15, 'a supplied count is used verbatim');
+    eq(fixed.periodsElapsedOverridden, true, 'and is flagged as user-set');
+    eq(fixed.periodsRemaining, 26 - 15, 'the remaining run lengthens by one');
+    gt(fixed.perPeriodGross, est.perPeriodGross,
+      'the per-check figure rises, because the same YTD gross is spread over fewer checks');
+    gt(fixed.projected.grossPay, est.projected.grossPay,
+      'so the projected year rises — the two errors compound rather than cancel');
+    // On this fixture that is $16,683 on a $250k projection: 6.7%, from one check.
+    gt(fixed.projected.grossPay - est.projected.grossPay, 15000,
+      'and the size of a single-check error is material, not a rounding nicety');
+  }
+
+  // ── A biweekly year is not always 26 checks ──────────────────────────────
+  // 26 x 14 = 364 days, so the schedule drifts and roughly every eleventh year
+  // pays 27. Weekly likewise pays 53. Getting this wrong misstates the remaining
+  // run and the §402(g) projection together.
+  {
+    eq(PAY_PERIODS_PER_YEAR.biweekly, 26, 'the standard biweekly year is 26 checks');
+    const long = run({ payPeriodsElapsed: 15, payPeriodsPerYear: 27 });
+    eq(long.periodsPerYear, 27, 'a 27-check year is accepted');
+    eq(long.periodsRemaining, 12, 'and lengthens the remaining run by one more');
+    eq(long.periodsPerYearOverridden, true, 'flagged as user-set');
+    gt(long.projected.grossPay, run({ payPeriodsElapsed: 15 }).projected.grossPay,
+      'projecting one extra check raises the year');
+    // The deferral projection has to move with it, or the 402(g) headroom lies.
+    gt(long.projected.traditional401k, run({ payPeriodsElapsed: 15 }).projected.traditional401k,
+      'and one more check of deferrals goes in');
+  }
+
+  // ── The override is clamped to something possible ────────────────────────
+  {
+    eq(run({ payPeriodsElapsed: 99 }).periodsElapsed, 26,
+      'more checks than the year holds is clamped to the year');
+    eq(run({ payPeriodsElapsed: 99 }).periodsRemaining, 0, 'leaving no remaining run');
+    eq(run({ payPeriodsElapsed: -5 }).periodsElapsed, 0, 'a negative count floors at zero');
+    // Zero is a real answer — someone starting a job in December — and must not
+    // be confused with "not supplied".
+    const none = run({ payPeriodsElapsed: 0 });
+    eq(none.periodsElapsed, 0, 'zero checks so far is honoured, not treated as absent');
+    eq(none.periodsElapsedOverridden, true, 'and is correctly flagged as user-set');
+    eq(none.periodsRemaining, 26, 'with the whole year still to come');
+  }
+
+  // ── The estimator itself honours a non-standard year ─────────────────────
+  {
+    // 2 July is day 182 of 365 — just BEFORE the midpoint, not after it, which
+    // is why 27 x 0.4986 rounds down rather than up. My first expectation here
+    // said 14 and was simply wrong about the calendar.
+    eq(payPeriodsElapsed('2026-07-02', 'biweekly', 2026, 26), 13, 'just before mid-year, a 26-check year is 13');
+    eq(payPeriodsElapsed('2026-07-02', 'biweekly', 2026, 27), 13, 'and a 27-check year is still 13 there');
+    eq(payPeriodsElapsed('2026-08-07', 'biweekly', 2026, 27), 16,
+      'but later in the year the longer schedule does pull ahead');
+    eq(payPeriodsElapsed('2026-12-31', 'biweekly', 2026, 27), 27, 'and the year ends on the full count');
+    eq(payPeriodsElapsed('2026-01-01', 'biweekly', 2026, 27), 0, 'while 1 January has none yet');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

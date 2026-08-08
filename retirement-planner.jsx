@@ -3375,6 +3375,29 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
 
 // A labelled money cell for the dense YTD and K-1 grids. Wraps CurrencyCell so
 // every one of the ~30 numeric inputs on this tab behaves identically.
+// A small whole-number field for pay-period counts. Deliberately not
+// CurrencyCell: these are counts, and a "$" prefix on "16 checks" reads wrong.
+// Blank means "use the estimate", which is why it stores null rather than 0 —
+// 0 checks is a meaningful (if unusual) answer and must stay distinguishable
+// from "I have not told you".
+function CountField({ label, value, onChange, hint, placeholder }) {
+  return (
+    <div>
+      <label className="block text-[11px] text-slate-400 mb-1 leading-tight" title={hint || label}>{label}</label>
+      <input
+        type="number" min="0" step="1"
+        value={Number.isFinite(value) ? value : ''}
+        placeholder={placeholder}
+        onChange={(e) => {
+          const raw = e.target.value;
+          onChange(raw === '' ? null : Math.max(0, Math.floor(Number(raw))));
+        }}
+        className="w-full bg-slate-900/70 border border-slate-600/50 rounded px-2 py-1.5 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+      />
+    </div>
+  );
+}
+
 function MoneyField({ label, value, onChange, hint, wide }) {
   return (
     <div className={wide ? 'col-span-2' : ''}>
@@ -3447,8 +3470,14 @@ function PayrollRow({ row, onChange, onDelete, projected, hasSpouse }) {
 
       {projected && (
         <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-400 mb-2">
-          <span>{projected.periodsElapsed} of {projected.periodsPerYear} pay periods done,
-            <span className="text-slate-200"> {projected.periodsRemaining} left</span></span>
+          <span
+            title={projected.periodsElapsedOverridden
+              ? 'You set this count.'
+              : `Estimated from the paystub date. For a biweekly schedule this can be off by one — it depends which day the first check of the year landed. Correct it below if it is wrong.`}>
+            {projected.periodsElapsed} of {projected.periodsPerYear} paychecks done,
+            <span className="text-slate-200"> {projected.periodsRemaining} left</span>
+            {!projected.periodsElapsedOverridden && <span className="text-amber-400/80"> (estimated)</span>}
+          </span>
           <span>Projected gross <span className="text-slate-200">{formatCurrency(projected.projected.grossPay)}</span></span>
           <span title="W-2 Box 1 — reduced by traditional deferrals">
             Box 1 <span className="text-amber-300">{formatCurrency(projected.projected.fedTaxableWages)}</span></span>
@@ -3485,8 +3514,20 @@ function PayrollRow({ row, onChange, onDelete, projected, hasSpouse }) {
             current pay, deferral rate and withholding rate through December.
           </p>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <CountField
+              label="Paychecks received so far"
+              value={row.remainder.payPeriodsElapsed}
+              placeholder={projected ? String(projected.estimatedPeriodsElapsed) : ''}
+              onChange={(v) => setRem('payPeriodsElapsed', v)}
+              hint="Count them off your stub. The calendar can only guess this for a biweekly schedule, because it depends which day the first check of the year landed." />
+            <CountField
+              label="Paychecks in the whole year"
+              value={row.remainder.payPeriodsPerYear}
+              placeholder={projected ? String(projected.periodsPerYear) : ''}
+              onChange={(v) => setRem('payPeriodsPerYear', v)}
+              hint="26 for biweekly in most years — but 26 x 14 days is only 364, so roughly every eleventh year pays 27. Weekly likewise pays 53 some years." />
             <MoneyField label="Gross per paycheck" value={row.remainder.perPeriodGross} onChange={(v) => setRem('perPeriodGross', v)}
-              hint="Defaults to the YTD average." />
+              hint="Defaults to YTD gross divided by the paycheck count." />
             <MoneyField label="Bonus still to come" value={row.remainder.knownBonus} onChange={(v) => setRem('knownBonus', v)} />
             <div>
               <label className="block text-[11px] text-slate-400 mb-1">Traditional % (rest of year)</label>

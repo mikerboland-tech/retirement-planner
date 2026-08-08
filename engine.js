@@ -4381,8 +4381,25 @@ const PAY_PERIODS_PER_YEAR = { weekly: 52, biweekly: 26, semimonthly: 24, monthl
 // than from the YTD dollars, so it stays right when pay varies between periods
 // (bonus, commission, an unpaid week) — dividing YTD gross by a per-period
 // figure would silently mis-count the year in exactly those cases.
-const payPeriodsElapsed = (asOfDate, payFrequency = 'biweekly', taxYear = BASE_TAX_YEAR) => {
-  const per = PAY_PERIODS_PER_YEAR[payFrequency] || PAY_PERIODS_PER_YEAR.biweekly;
+//
+// THIS IS AN ESTIMATE, AND FOR BIWEEKLY IT CANNOT BE ANYTHING ELSE. A biweekly
+// schedule depends on which day the first check of the year landed, which no
+// amount of arithmetic on the paystub date can recover. On 7 August 2026 the
+// true count is 15 or 16 depending on whether the year opened on 2 January or
+// 15 January; this returns 16. Being off by one is not a rounding nicety — it
+// compounds, because perPeriodGross is YTD gross divided by this number, so an
+// over-count deflates the per-check figure AND shortens the remaining run,
+// pushing the projection the same way twice.
+//
+// So the count is an OVERRIDE first and an estimate second: callers pass
+// remainder.payPeriodsElapsed and this is only the default they see before they
+// correct it. Same for periodsPerYear — 26 x 14 days is 364, so a biweekly year
+// pays 27 checks roughly every eleventh year, and weekly pays 53.
+const payPeriodsElapsed = (asOfDate, payFrequency = 'biweekly', taxYear = BASE_TAX_YEAR,
+                           periodsPerYear = null) => {
+  const per = (Number.isFinite(periodsPerYear) && periodsPerYear > 0)
+    ? periodsPerYear
+    : (PAY_PERIODS_PER_YEAR[payFrequency] || PAY_PERIODS_PER_YEAR.biweekly);
   if (!asOfDate) return 0;
   const d = asOfDate instanceof Date ? asOfDate : new Date(asOfDate);
   if (isNaN(d.getTime())) return 0;
@@ -4402,13 +4419,20 @@ const payPeriodsElapsed = (asOfDate, payFrequency = 'biweekly', taxYear = BASE_T
 const projectPayrollYearEnd = (row = {}, opts = {}) => {
   const taxYear = opts.taxYear || row.taxYear || BASE_TAX_YEAR;
   const freq = row.payFrequency || 'biweekly';
-  const per = PAY_PERIODS_PER_YEAR[freq] || PAY_PERIODS_PER_YEAR.biweekly;
   const ytd = row.ytd || {};
   const rem = row.remainder || {};
+  // Checks in the whole year. Overridable because the standard figure is wrong
+  // in a 27-check biweekly year or a 53-check weekly one, and being wrong here
+  // misstates both the remaining run and the §402(g) projection.
+  const per = (Number.isFinite(rem.payPeriodsPerYear) && rem.payPeriodsPerYear > 0)
+    ? rem.payPeriodsPerYear
+    : (PAY_PERIODS_PER_YEAR[freq] || PAY_PERIODS_PER_YEAR.biweekly);
 
+  // Checks so far. The override is the point; the estimate is the default.
+  const estimatedElapsed = payPeriodsElapsed(row.asOfDate, freq, taxYear, per);
   const elapsed = Number.isFinite(rem.payPeriodsElapsed)
-    ? rem.payPeriodsElapsed
-    : payPeriodsElapsed(row.asOfDate, freq, taxYear);
+    ? Math.max(0, Math.min(per, rem.payPeriodsElapsed))
+    : estimatedElapsed;
   const remaining = Number.isFinite(rem.payPeriodsRemaining)
     ? Math.max(0, rem.payPeriodsRemaining)
     : Math.max(0, per - elapsed);
@@ -4476,6 +4500,11 @@ const projectPayrollYearEnd = (row = {}, opts = {}) => {
   return {
     payFrequency: freq, periodsPerYear: per,
     periodsElapsed: elapsed, periodsRemaining: remaining, perPeriodGross,
+    // What the calendar guessed, and whether the user has corrected it. Shown so
+    // an off-by-one is visible rather than silently propagating into the gross.
+    estimatedPeriodsElapsed: estimatedElapsed,
+    periodsElapsedOverridden: Number.isFinite(rem.payPeriodsElapsed),
+    periodsPerYearOverridden: Number.isFinite(rem.payPeriodsPerYear) && rem.payPeriodsPerYear > 0,
     deferral: {
       cap: deferralCap, catchUp, ytd: ytdDeferral,
       roomRemaining, projectedTotal: traditional + roth,
