@@ -5468,6 +5468,105 @@ section('P45 — a third conversion mode must not be detectable by the absence o
   }
 }
 
+section('P46 — the optimizer sweeps IRMAA tiers, and says so when distinct targets collapse');
+{
+  // Ranking bracket strategies by their IRMAA outcome (what the 'irmaa' goal
+  // does) is not the same as targeting an IRMAA edge. No bracket target can
+  // reproduce one, because a bracket top is taxable income and an edge is MAGI.
+  // So the sweep now carries both kinds of target.
+  const vmMod = require('vm');
+  const fsMod = require('fs');
+  const pathMod = require('path');
+  const ROOT = pathMod.join(__dirname, '..');
+
+  const runOptimizer = (personalInfo) => {
+    const sb = {}; sb.self = sb; sb.globalThis = sb;
+    sb.location = { search: '?v=test' }; sb.__out = [];
+    sb.URLSearchParams = URLSearchParams;
+    sb.importScripts = (spec) => vmMod.runInContext(
+      fsMod.readFileSync(pathMod.join(ROOT, spec.split('?')[0]), 'utf8'), sb);
+    sb.postMessage = (m) => { if (m.type !== 'progress') sb.__out.push(m); };
+    vmMod.createContext(sb);
+    vmMod.runInContext(fsMod.readFileSync(pathMod.join(ROOT, 'worker.js'), 'utf8'), sb);
+    const accounts = [
+      { id: 1, name: '401k', type: '401k', balance: 1400000, contribution: 24500, cagr: 0.06, startAge: 54, stopAge: 65, owner: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 200000, contribution: 7000, cagr: 0.06, startAge: 54, stopAge: 65, owner: 'me' },
+      { id: 3, name: 'Brok', type: 'brokerage', balance: 600000, contribution: 0, cagr: 0.05, startAge: 54, stopAge: 65, owner: 'joint', costBasisPercent: 0.4 },
+    ];
+    const incomeStreams = [
+      { id: 1, name: 'Salary', type: 'earned_income', amount: 250000, startAge: 54, endAge: 65, cola: 0.03, owner: 'me' },
+      { id: 2, name: 'My SS', type: 'social_security', amount: 48000, startAge: 67, endAge: 95, cola: 0.02, owner: 'me' },
+    ];
+    sb.onmessage({ data: { jobId: 1, type: 'rothOptimizer', payload: {
+      personalInfo, accounts, incomeStreams, assets: [], oneTimeEvents: [],
+      recurringExpenses: [], heirTaxRate: 0.25 } } });
+    const res = sb.__out.find(m => m.type === 'result');
+    return res ? res.data.results : null;
+  };
+
+  const basePi = {
+    myAge: 54, spouseAge: 52, myBirthYear: TODAY_YEAR - 54, spouseBirthYear: TODAY_YEAR - 52,
+    myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 92,
+    filingStatus: 'married_joint', state: 'Missouri', inflationRate: 0.03,
+    desiredRetirementIncome: 140000, withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+    healthcareModel: 'none',
+  };
+
+  // ── Both kinds of target are offered ─────────────────────────────────────
+  {
+    const rows = runOptimizer(basePi);
+    gt(rows ? 1 : 0, 0, 'the optimizer returns a result');
+    const brackets = rows.filter(r => /Fill to .*bracket/.test(r.label));
+    const tiers = rows.filter(r => Number.isInteger(r.irmaaTier));
+    gt(brackets.length, 0, 'bracket targets are still swept');
+    gt(tiers.length, 0, 'and IRMAA-tier targets are swept alongside them');
+    eq(tiers.every(r => /IRMAA tier/.test(r.label)), true, 'the tier rows name the tier');
+    eq(tiers.every(r => /MAGI/.test(r.label)), true, 'and the MAGI ceiling, since that is the base it binds on');
+    // The tier has to survive onto the row, or Apply cannot reproduce it.
+    eq(tiers.every(r => Number.isInteger(r.irmaaTier)), true,
+      'each tier row carries its tier index for the Apply button');
+    eq(brackets.every(r => r.irmaaTier === null), true,
+      'and bracket rows carry null rather than a stale index');
+  }
+
+  // ── The reported regression ──────────────────────────────────────────────
+  // A plan already set to fill an IRMAA tier used to collapse the entire sweep:
+  // every candidate inherited the tier, the tier overrode each candidate bracket,
+  // all outcomes were identical, and the dedup kept only the first — which is the
+  // 10% bracket, because that is the order the sweep runs in. The user saw two
+  // rows and concluded the optimizer was broken. It was.
+  {
+    const rows = runOptimizer({ ...basePi, rothConversionIrmaaTier: 0 });
+    gt(rows.length, 5, 'a plan already using IRMAA mode still gets a full sweep');
+    const labels = rows.map(r => r.label).join(' | ');
+    eq(/22% bracket/.test(labels), true, 'the 22% bracket is offered');
+    eq(/24% bracket/.test(labels), true, 'and the 24%');
+    const distinct = new Set(rows.map(r => Math.round(r.afterTaxLegacy))).size;
+    gt(distinct, 3, 'and the candidates score differently rather than collapsing to one');
+
+    // The user's own strategy is present and correctly named.
+    const current = rows.find(r => r.isCurrent);
+    gt(current ? 1 : 0, 0, 'their current plan appears as its own row');
+    eq(/IRMAA tier 0/.test(current.label), true, 'named for the tier it actually uses');
+  }
+
+  // ── A collapse is reported rather than hidden ────────────────────────────
+  // Distinct targets CAN legitimately produce identical results — a pre-tax
+  // floor or an exhausted balance stops conversions before the higher ceiling
+  // matters. Keeping the first silently made that read as "the lowest target is
+  // your only option". The surviving row now carries the count.
+  {
+    const rows = runOptimizer({ ...basePi, rothConversionPreTaxFloor: 3000000 });
+    const collapsed = rows.filter(r => r.equivalentCount > 1);
+    // Not asserted to exist on every plan — only that when it does, it is counted
+    // rather than silently dropped, and never claims fewer than the two it merged.
+    eq(collapsed.every(r => r.equivalentCount >= 2), true,
+      'any collapsed row reports how many targets produced the same outcome');
+    eq(rows.every(r => r.equivalentCount === undefined || r.equivalentCount >= 2), true,
+      'and a row that merged nothing carries no count at all');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

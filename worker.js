@@ -814,12 +814,27 @@ function runRothOptimizer(jobId, payload) {
     pi: withRothConversionTarget(personalInfo, { bracket: b, startAge: w.startAge, endAge: w.endAge }),
   })));
 
+  // IRMAA-tier targets, swept alongside the brackets. A bracket top and an IRMAA
+  // edge are measured on different bases — taxable income versus MAGI — so no
+  // bracket target can reproduce one of these, and ranking bracket strategies by
+  // their IRMAA outcome (which the 'irmaa' goal does) is not the same as
+  // targeting an edge. Only the tiers with an edge above them are swept; the top
+  // tier has nothing left to avoid.
+  const irmaaTiers = E.irmaaTierOptions(personalInfo.filingStatus,
+    personalInfo.filingStatus === 'married_joint' ? 2 : 1).filter(o => !o.isTop);
+  windows.forEach(w => irmaaTiers.forEach(t => strategies.push({
+    label: `Stay under $${Math.round(t.ceiling).toLocaleString()} MAGI (IRMAA tier ${t.index}), ages ${w.startAge}–${w.endAge}`,
+    bracket: '', irmaaTier: t.index, window: w,
+    pi: withRothConversionTarget(personalInfo, { irmaaTier: t.index, startAge: w.startAge, endAge: w.endAge }),
+  })));
+
   const scored = [];
   strategies.forEach((s, i) => {
     const proj = computeProjections(s.pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
     const score = E.scoreRothStrategy(proj, { legacyAge, retirementAge, heirTaxRate });
     scored.push({
       label: s.label, bracket: s.bracket,
+      irmaaTier: Number.isInteger(s.irmaaTier) ? s.irmaaTier : null,
       startAge: s.window ? s.window.startAge : null,
       endAge: s.window ? s.window.endAge : null,
       isCurrent: !!s.isCurrent,
@@ -836,13 +851,22 @@ function runRothOptimizer(jobId, payload) {
   // Listing eight identical rows buries the handful of genuine choices. The
   // baseline and the user's own plan are always kept, even if they coincide.
   const results = [];
-  const seen = new Set();
+  const seen = new Map();
   scored.forEach((r, idx) => {
     const keepAlways = idx === 0 || r.isCurrent;
     if (!keepAlways && r.lifetimeConversions === 0) return;
     const sig = r.afterTaxLegacy + '|' + r.lifetimeTax + '|' + r.lifetimeConversions;
-    if (!keepAlways && seen.has(sig)) return;
-    seen.add(sig);
+    if (!keepAlways && seen.has(sig)) {
+      // Distinct targets, identical outcome — usually because a pre-tax floor or
+      // an exhausted balance stopped the conversions before the higher ceiling
+      // mattered. Keeping the first silently and dropping the rest made the row
+      // read as "the 10% bracket is your only option", when what it really means
+      // is that the target stopped binding. Count them so the row can say so.
+      const kept = seen.get(sig);
+      kept.equivalentCount = (kept.equivalentCount || 1) + 1;
+      return;
+    }
+    if (!keepAlways) seen.set(sig, r);
     results.push(r);
   });
 

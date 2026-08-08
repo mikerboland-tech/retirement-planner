@@ -3211,8 +3211,12 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
       // withRothConversionTarget clears the other modes. Setting the bracket
       // alone left any existing IRMAA tier in place, and the tier wins in the
       // engine — so Apply appeared to do nothing at all.
+      // A row can now be a bracket target OR an IRMAA tier. Passing only the
+      // bracket would clear the tier and apply an empty bracket — Apply would
+      // silently turn the recommended strategy off.
       ...withRothConversionTarget(prev, {
         bracket: row.bracket || '',
+        irmaaTier: Number.isInteger(row.irmaaTier) ? row.irmaaTier : undefined,
         startAge: row.startAge || 0,
         endAge: row.endAge || 0,
       }),
@@ -3276,9 +3280,17 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
               </tr>
             </thead>
             <tbody>
-              {ranked.slice(0, 8).map((r) => (
+              {ranked.slice(0, 10).map((r) => (
                 <tr key={r.label} className={`border-b border-slate-800 ${best && r.label === best.label ? 'bg-amber-900/20' : ''}`}>
-                  <td className="py-2 pr-3 text-slate-200">{best && r.label === best.label ? '★ ' : ''}{r.label}</td>
+                  <td className="py-2 pr-3 text-slate-200">
+                    {best && r.label === best.label ? '★ ' : ''}{r.label}
+                    {r.equivalentCount > 1 && (
+                      <span className="block text-[10px] text-slate-500">
+                        {r.equivalentCount} targets give this same result — the ceiling stopped binding before the
+                        higher ones mattered
+                      </span>
+                    )}
+                  </td>
                   <td className="py-2 pr-3 text-slate-300">{formatCurrency(r.lifetimeConversions)}</td>
                   <td className="py-2 pr-3 text-slate-200">
                     {formatCurrency(r.afterTaxLegacy)}
