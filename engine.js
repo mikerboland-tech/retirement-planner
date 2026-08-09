@@ -5087,6 +5087,133 @@ const taxBreakpoints = ({ row, pi = {}, numMedicareEligible = null } = {}) => {
 };
 
 
+// ── WHAT THE NEXT DOLLAR COSTS, IN A PROJECTION YEAR ─────────────────────────
+// conversionCostComponents answers this by differencing two whole projections,
+// which is right for the simulator but far too expensive for a card that
+// re-renders on a slider drag. This reconstructs the year's tax from the row and
+// re-runs it with `probe` more ordinary income, so the answer costs a handful of
+// arithmetic rather than a second 40-year projection.
+//
+// It is a DIFFERENCE, so the reconstruction only has to be consistent, not
+// perfect: any bias in rebuilding the base cancels when the two are subtracted.
+// `reconstructionError` is reported anyway — if the rebuilt base drifts far from
+// the row's own federalTax the marginal figure deserves less trust, and hiding
+// that would be worse than not offering the figure.
+//
+// The components are the same five that make a marginal rate exceed a bracket:
+// the bracket itself, Social Security dragged into taxability, the senior
+// deduction phasing out, preferential gains being re-rated or NIIT switching on,
+// and state. IRMAA is added separately because it is a cliff two years out
+// rather than a rate on this dollar.
+const marginalCostOfNextDollar = ({ row, pi = {}, probe = 1000, numMedicareEligible = null } = {}) => {
+  if (!row || !(probe > 0)) return null;
+  const fs = row.effectiveFilingStatus || row.filingStatus || pi.filingStatus || 'married_joint';
+  const idx = (row.year || BASE_TAX_YEAR) - BASE_TAX_YEAR;
+  const infl = pi.inflationRate ?? 0.03;
+  const taxYear = row.year || BASE_TAX_YEAR;
+
+  const ss = row.socialSecurity || 0;
+  const preTaxDeduction = row.preTaxDeduction || 0;
+  const preferential = (row.realizedCapitalGains || 0) + (row.brokerageDividends || 0);
+  const age65Count = row.age65Count || 0;
+  const eligible = numMedicareEligible !== null ? numMedicareEligible : age65Count;
+  // Derived from AGI rather than read from row.nonSSIncome. That field is the
+  // pre-withdrawal figure — on a retired year it reads 0 while AGI is $193,347,
+  // because the withdrawals that make up the year's income are added later in
+  // the loop. Using it put the rebuilt base $127,047 low, which drove taxable SS
+  // to 4.5% instead of 85% and made the marginal rate come out at 0.0%. AGI
+  // minus taxable SS is the post-withdrawal non-SS income by construction.
+  const baseNonSS = (row.taxableIncome || 0) - (row.taxableSS || 0);
+
+  // Rebuild the year at a given extra amount of ORDINARY income.
+  const at = (extra) => {
+    const nonSS = baseNonSS + extra;
+    const taxableSS = calculateSocialSecurityTaxableAmount(ss, nonSS, fs);
+    const agi = nonSS + taxableSS;
+    const magi = agi + preTaxDeduction;
+    const deduction = getFederalDeduction(fs, idx, infl, { age65Count, taxYear, magi });
+    const ordinaryBase = Math.max(0, agi - preferential);
+    const ordinaryTaxable = Math.max(0, ordinaryBase - deduction);
+    const unusedDeduction = Math.max(0, deduction - ordinaryBase);
+    const taxableGains = Math.max(0, preferential - unusedDeduction);
+    const ordinaryTax = federalTaxOnTaxableIncome(ordinaryTaxable, fs, idx, infl);
+    const gainsTax = calculateCapitalGainsTax(taxableGains, ordinaryTaxable + taxableGains, fs, idx, infl);
+    const niit = calculateNIIT(preferential, magi, fs);
+    const stateTax = calculateStateTax(agi, pi.state || 'None', fs, idx, infl, taxableSS,
+      row.pension || 0, { primaryAge: row.myAge || 0, spouseAge: row.spouseAge || 0 });
+    // The surcharge this dollar triggers TWO YEARS out, priced at that year's
+    // thresholds — the same convention the conversion solver uses.
+    const irmaa = eligible > 0
+      ? calculateIRMAASurcharge(magi, fs, idx + IRMAA_TIER_LOOKBACK_YEARS, infl, eligible).totalSurcharge
+      : 0;
+    return { taxableSS, agi, magi, deduction, ordinaryTaxable, ordinaryTax, gainsTax, niit, stateTax, irmaa,
+             federal: ordinaryTax + gainsTax + niit };
+  };
+
+  const a = at(0), b = at(probe);
+  const per = (v) => v / probe;
+
+  // Attribute the federal move by adding one effect at a time, exactly as
+  // conversionCostComponents does, so the two readouts explain a rate the same
+  // way rather than in two different vocabularies.
+  const T = (x) => federalTaxOnTaxableIncome(x, fs, idx, infl);
+  const ordBase = Math.max(0, a.agi - preferential - a.deduction);
+  const ssExtra = b.taxableSS - a.taxableSS;
+  const deductionLost = a.deduction - b.deduction;
+  const bracketCost = T(ordBase + probe) - T(ordBase);
+  const ssCost = T(ordBase + probe + ssExtra) - T(ordBase + probe);
+  const deductionCost = T(ordBase + probe + ssExtra + deductionLost) - T(ordBase + probe + ssExtra);
+  const preferentialCost = (b.federal - a.federal) - bracketCost - ssCost - deductionCost;
+
+  const stateCost = b.stateTax - a.stateTax;
+  const irmaaCost = b.irmaa - a.irmaa;
+  const total = (b.federal - a.federal) + stateCost + irmaaCost;
+
+  return {
+    probe,
+    // How far the rebuilt base sits from the engine's own figure for the year.
+    reconstructionError: (row.federalOrdinaryTax !== undefined && row.capitalGainsTax !== undefined)
+      ? a.federal - ((row.federalOrdinaryTax || 0) + (row.capitalGainsTax || 0) + (row.niitTax || 0))
+      : null,
+    totalCost: total,
+    rate: per(total),
+    federalRate: per(b.federal - a.federal),
+    stateRate: per(stateCost),
+    irmaaRate: per(irmaaCost),
+    components: {
+      bracket: bracketCost,
+      ssTorpedo: ssCost,
+      deductionPhaseout: deductionCost,
+      preferential: preferentialCost,
+      state: stateCost,
+      irmaa: irmaaCost,
+    },
+    ratePoints: {
+      bracket: per(bracketCost),
+      ssTorpedo: per(ssCost),
+      deductionPhaseout: per(deductionCost),
+      preferential: per(preferentialCost),
+      state: per(stateCost),
+      irmaa: per(irmaaCost),
+    },
+    detail: {
+      ssMadeTaxable: ssExtra,
+      ssTaxableShareBefore: ss > 0 ? a.taxableSS / ss : null,
+      ssTaxableShareAfter: ss > 0 ? b.taxableSS / ss : null,
+      deductionLost,
+      // Whether this dollar actually crossed an IRMAA edge, which is what makes
+      // the rate spike rather than merely rise.
+      crossedIrmaaEdge: irmaaCost > 0,
+    },
+    // The nearest edges, so "why is it that high" and "how much room is left"
+    // are answered by the same card.
+    nextThresholds: taxBreakpoints({ row, pi, numMedicareEligible: eligible })
+      .filter(t => !t.crossed && !t.inactive)
+      .slice(0, 3),
+  };
+};
+
+
 function computeProjections(pi, accts, streams, assetList, events = [], recurringExpensesList = [], currentYearArg, opts = {}) {
   // currentYear used to be captured from RetirementPlanner's closure. It's now an
   // explicit parameter (with a fallback) so this function can be moved to module
@@ -7181,6 +7308,14 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       magi: Math.round(reportedMagi), // Modified Adjusted Gross Income (gains-inclusive AGI with pre-tax deduction added back)
       stateTaxableIncome: Math.round(stateTaxableIncome), // State taxable income after SS/retirement exclusions and deduction
       federalTax: Math.round(federalTax),
+      // federalTax is a total: ordinary brackets PLUS preferential gains, NIIT
+      // and the two penalties. Reporting only the total meant a view could show
+      // "federal tax" and a bracket walk that did not add up to it, with no way
+      // to say where the difference went. Broken out so the parts are nameable.
+      federalOrdinaryTax: Math.round(federalTax - capitalGainsTax - niitTax
+                                     - earlyWithdrawalPenalty - hsaPenalty),
+      capitalGainsTax: Math.round(capitalGainsTax),
+      niitTax: Math.round(niitTax),
       // Present only on year 0, and only when the Current Year tab supplied a
       // return. `detailedCurrentYear` says the override took; when it did not,
       // `detailedCurrentYearReason` says why, so a view can explain the
@@ -7299,6 +7434,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     detailedCurrentYearDecision, taxFieldsFromReturn,
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
     SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,
+    marginalCostOfNextDollar,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,

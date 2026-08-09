@@ -47,7 +47,7 @@ const {
   detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling,
   rothConversionIsPlanned, withoutRothConversions, withRothConversionTarget,
   rothConversionModeLabel, rothConversionModeOf,
-  taxBreakpoints,
+  taxBreakpoints, marginalCostOfNextDollar,
   IRMAA_FILL_SAFETY_MARGIN,
 } = PlannerEngine;
 
@@ -1943,6 +1943,11 @@ function TaxYearSnapshot({ projections, personalInfo }) {
   // IRMAA display (read from unified engine data)
   const isMedicareAge = selectedAge >= 65;
   const irmaa = p.irmaaInfo; // Engine-computed IRMAA tier detail
+  // Cheap enough to run inline: it rebuilds this one year's tax twice rather
+  // than running a second 40-year projection, so a slider drag stays instant.
+  const marginal = React.useMemo(
+    () => marginalCostOfNextDollar({ row: p, pi: personalInfo, probe: 1000 }),
+    [p, personalInfo]);
   
   const totalTax = p.totalTax;
   const effectiveRate = grossTaxableIncome > 0 ? (totalTax / grossTaxableIncome * 100) : 0;
@@ -2264,6 +2269,124 @@ function TaxYearSnapshot({ projections, personalInfo }) {
         </div>
       )}
       
+      {/* ── Every tax this year, in one list ─────────────────────────────── */}
+      {/* The bracket walk above covers ordinary income only. federalTax also
+          contains preferential gains, NIIT and two penalties, so a reader who
+          added up the bracket rows and compared them to "federal tax" would find
+          a gap with nothing on screen to explain it. */}
+      <div className="mb-5">
+        <h5 className="text-sm font-semibold text-slate-300 mb-2 border-b border-slate-700 pb-1">Every Tax This Year</h5>
+        <div className="space-y-1 text-xs">
+          {[
+            ['Federal — ordinary income', p.federalOrdinaryTax, 'The bracket walk above.'],
+            ['Federal — long-term gains & qualified dividends', p.capitalGainsTax, 'Taxed on their own 0/15/20% schedule, stacked above ordinary income.'],
+            ['Net investment income tax', p.niitTax, '3.8% on investment income once MAGI passes the §1411 threshold. Never indexed.'],
+            ['§72(t) early withdrawal penalty', p.earlyWithdrawalPenalty, '10% additional tax on pre-59½ distributions without an exception.'],
+            ['HSA non-qualified penalty', p.hsaPenalty, '20% additional tax under §223(f) before age 65.'],
+            [`State — ${personalInfo.state}`, p.stateTax, null],
+            ['FICA / payroll', p.ficaTax, 'Social Security and Medicare on earned income.'],
+            ['Medicare IRMAA surcharge', p.irmaaSurcharge, 'Set by MAGI from two years ago, not this year.'],
+          ].filter(([, v]) => (v || 0) !== 0).map(([label, v, note]) => (
+            <div key={label} className="flex justify-between items-start gap-3 py-0.5">
+              <span className="text-slate-400">
+                {label}
+                {note && <span className="block text-[10px] text-slate-600">{note}</span>}
+              </span>
+              <span className="text-slate-200 tabular-nums whitespace-nowrap">{formatCurrency(v)}</span>
+            </div>
+          ))}
+          <div className="flex justify-between border-t border-slate-700 pt-1 mt-1">
+            <span className="text-slate-300 font-medium">Everything above</span>
+            <span className="text-slate-100 font-semibold tabular-nums">
+              {formatCurrency((p.federalTax || 0) + (p.stateTax || 0) + (p.ficaTax || 0) + (p.irmaaSurcharge || 0))}
+            </span>
+          </div>
+          {(p.acaSubsidy || 0) > 0 && (
+            <div className="flex justify-between text-emerald-400/90 pt-1">
+              <span>ACA premium credit (not a tax — a subsidy this income still qualifies for)</span>
+              <span className="tabular-nums">−{formatCurrency(p.acaSubsidy)}</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── What one more dollar costs ───────────────────────────────────── */}
+      {marginal && (
+        <div className="mb-5">
+          <h5 className="text-sm font-semibold text-slate-300 mb-2 border-b border-slate-700 pb-1">
+            The Next Dollar — Income or Roth Conversion
+          </h5>
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 mb-2">
+            <span className="text-3xl font-semibold text-amber-400">{(marginal.rate * 100).toFixed(1)}%</span>
+            <span className="text-xs text-slate-400">
+              all-in on the next {formatCurrency(marginal.probe)} of ordinary income
+            </span>
+            {Math.abs(marginal.rate - (p.currentBracket || 0)) > 0.001 && (
+              <span className="text-[11px] text-slate-500">
+                — your ordinary bracket alone is {(marginal.ratePoints.bracket * 100).toFixed(0)}%
+              </span>
+            )}
+          </div>
+          <div className="space-y-0.5 text-xs">
+            {[
+              ['Ordinary brackets', marginal.components.bracket, marginal.ratePoints.bracket, null],
+              ['Social Security dragged into tax', marginal.components.ssTorpedo, marginal.ratePoints.ssTorpedo,
+                marginal.detail.ssTaxableShareBefore !== null
+                  ? `taxable share ${(marginal.detail.ssTaxableShareBefore * 100).toFixed(1)}% → ${(marginal.detail.ssTaxableShareAfter * 100).toFixed(1)}%`
+                  : null],
+              ['Senior deduction phasing out', marginal.components.deductionPhaseout, marginal.ratePoints.deductionPhaseout,
+                marginal.detail.deductionLost > 0 ? `${formatCurrency(marginal.detail.deductionLost)} of deduction lost` : null],
+              ['Capital gains re-rated / NIIT', marginal.components.preferential, marginal.ratePoints.preferential, null],
+              [`State — ${personalInfo.state}`, marginal.components.state, marginal.ratePoints.state, null],
+              ['Medicare IRMAA, two years out', marginal.components.irmaa, marginal.ratePoints.irmaa,
+                marginal.detail.crossedIrmaaEdge ? 'this dollar crosses a tier edge' : null],
+            ].filter(([, v]) => Math.abs(v || 0) >= 0.5).map(([label, v, rate, note]) => (
+              <div key={label} className="flex justify-between items-start gap-3">
+                <span className="text-slate-400">
+                  {label}
+                  {note && <span className="block text-[10px] text-amber-400/70">{note}</span>}
+                </span>
+                <span className="text-slate-300 tabular-nums whitespace-nowrap">
+                  {formatCurrency(v)} <span className="text-slate-500">({(rate * 100).toFixed(1)} pts)</span>
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {marginal.nextThresholds.length > 0 && (
+            <div className="mt-3 pt-2 border-t border-slate-700/60">
+              <p className="text-[11px] text-slate-500 mb-1">
+                How far this year can go before the rate changes:
+              </p>
+              {marginal.nextThresholds.map(t => (
+                <div key={t.label} className="flex justify-between items-start gap-3 text-xs py-0.5">
+                  <span className="text-slate-400">
+                    {t.label}
+                    <span className="text-[10px] text-slate-600"> · on {t.basis}</span>
+                  </span>
+                  <span className="whitespace-nowrap">
+                    <span className={t.distance < 25000 ? 'text-amber-300' : 'text-emerald-400'}>
+                      {formatCurrency(t.distance)} of room
+                    </span>
+                    {t.crossingCost > 0 && (
+                      <span className="text-red-400/80"> · then {formatCurrency(t.crossingCost)} at once</span>
+                    )}
+                    {!t.crossingCost && t.crossingCostRate
+                      ? <span className="text-slate-500"> · then +{(t.crossingCostRate * 100).toFixed(1)}%/$</span> : null}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          {Math.abs(marginal.reconstructionError || 0) > 25 && (
+            <p className="text-[10px] text-slate-600 mt-2">
+              Rebuilt tax for this year differs from the projection&rsquo;s own figure by
+              {' '}{formatCurrency(Math.abs(marginal.reconstructionError))}; treat the split above as indicative.
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Summary */}
       <div>
         <h5 className="text-sm font-semibold text-slate-300 mb-2 border-b border-slate-700 pb-1">Tax Summary — Age {selectedAge}</h5>

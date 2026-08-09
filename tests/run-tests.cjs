@@ -6036,6 +6036,123 @@ section('P51 — describing the conversion strategy: one definition, because thr
   }
 }
 
+section('P52 — what the next dollar costs, reconstructed from one row rather than a second projection');
+{
+  // The simulator answers this by differencing two whole projections. That is
+  // right there and far too expensive for a card that re-renders on a slider
+  // drag, so this rebuilds the single year's tax and re-runs it with more
+  // ordinary income. Being a DIFFERENCE, the reconstruction only has to be
+  // consistent — but it is checked against the row anyway, because a rebuild
+  // that has drifted makes the split untrustworthy and hiding that is worse than
+  // not offering it.
+  const { marginalCostOfNextDollar, FEDERAL_TAX_BRACKETS_2026 } = engine;
+
+  const build = (over, streams) => {
+    const s = baseScenario({
+      myAge: 67, spouseAge: 67, myBirthYear: TODAY_YEAR - 67, spouseBirthYear: TODAY_YEAR - 67,
+      myRetirementAge: 67, spouseRetirementAge: 67, legacyAge: 72,
+      state: 'Missouri', inflationRate: 0, desiredRetirementIncome: 150000,
+      healthcareModel: 'none', medicalInflation: 0,
+      withdrawalPriority: ['pretax', 'brokerage', 'roth'], ...over,
+    });
+    s.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 3000000, contribution: 0, cagr: 0, startAge: 67, stopAge: 67, owner: 'me' },
+      { id: 2, name: 'Brok', type: 'brokerage', balance: 1200000, contribution: 0, cagr: 0, startAge: 67, stopAge: 67, owner: 'joint', costBasisPercent: 0.4 },
+    ];
+    s.streams = streams !== undefined ? streams : [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 67, endAge: 95, cola: 0, owner: 'me' },
+      { id: 2, name: 'Sp SS', type: 'social_security', amount: 30000, startAge: 67, endAge: 95, cola: 0, owner: 'spouse' },
+    ];
+    return { pi: s.pi, row: computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR)[0] };
+  };
+
+  // ── The row must expose the parts of federalTax ──────────────────────────
+  // federalTax is a total: ordinary PLUS preferential gains, NIIT and two
+  // penalties. Reporting only the total let a view show a bracket walk that did
+  // not add up to it, with nothing on screen to say where the gap went.
+  {
+    const { row } = build({});
+    const parts = (row.federalOrdinaryTax || 0) + (row.capitalGainsTax || 0) + (row.niitTax || 0)
+                + (row.earlyWithdrawalPenalty || 0) + (row.hsaPenalty || 0);
+    eq(parts, row.federalTax, 'the broken-out federal components sum to federalTax exactly');
+    gt(row.federalOrdinaryTax, 0, 'ordinary tax is reported on its own');
+    gt(row.capitalGainsTax, 0, 'and so is the preferential piece, which the bracket walk never showed');
+  }
+
+  // ── The reconstruction must match the row it was rebuilt from ────────────
+  // This is the assertion that would have caught the bug found while building
+  // this: row.nonSSIncome is the PRE-withdrawal figure and reads 0 in a retired
+  // year while AGI is $193,347. Using it put the base $127,047 low, drove taxable
+  // SS to 4.5% instead of 85%, and produced a marginal rate of 0.0%.
+  {
+    const { row, pi } = build({});
+    const m = marginalCostOfNextDollar({ row, pi, probe: 1000 });
+    eq(Math.abs(m.reconstructionError) < 1, true,
+      'the rebuilt year matches the projection it came from, to within a dollar');
+    gt(m.rate, 0, 'so the marginal rate is a real number rather than zero');
+  }
+
+  // ── The parts reconstruct the whole ──────────────────────────────────────
+  {
+    const { row, pi } = build({});
+    const m = marginalCostOfNextDollar({ row, pi, probe: 1000 });
+    const c = m.components;
+    approx(c.bracket + c.ssTorpedo + c.deductionPhaseout + c.preferential + c.state + c.irmaa,
+      m.totalCost, 'the six components sum to the total cost', 1e-6);
+    approx(Object.values(m.ratePoints).reduce((a, b) => a + b, 0), m.rate,
+      'and the rate points sum to the rate', 1e-9);
+    approx(m.totalCost / m.probe, m.rate, 'the rate is the cost over the probe', 1e-9);
+  }
+
+  // ── It exceeds the bracket, and names why ────────────────────────────────
+  {
+    const { row, pi } = build({});
+    const m = marginalCostOfNextDollar({ row, pi, probe: 1000 });
+    gt(m.rate, m.ratePoints.bracket,
+      'the all-in rate exceeds the ordinary bracket, which is the point of showing it');
+    gt(m.ratePoints.state, 0, 'Missouri contributes');
+    gt(m.detail.deductionLost, 0, 'and the senior deduction is being phased out at this income');
+    gt(m.ratePoints.deductionPhaseout, 0, 'which costs real tax on top of the bracket');
+  }
+
+  // ── The torpedo term respects the 85% ceiling ────────────────────────────
+  // Same property P48 pins for the conversion readout: once spending has taken
+  // benefits to the ceiling, another dollar drags none in and is charged nothing.
+  {
+    const { row, pi } = build({});
+    const m = marginalCostOfNextDollar({ row, pi, probe: 1000 });
+    approx(m.detail.ssTaxableShareBefore, 0.85, 'this plan is already at the 85% ceiling', 1e-3);
+    eq(Math.round(m.components.ssTorpedo), 0, 'so no torpedo is charged on the next dollar');
+    eq(Math.round(m.detail.ssMadeTaxable), 0, 'because nothing more became taxable');
+  }
+
+  // ── No Social Security at all ────────────────────────────────────────────
+  {
+    const { row, pi } = build({}, []);
+    const m = marginalCostOfNextDollar({ row, pi, probe: 1000 });
+    eq(Math.round(m.components.ssTorpedo), 0, 'no benefits, no torpedo');
+    eq(m.detail.ssTaxableShareBefore, null, 'and the share is absent rather than 0%');
+  }
+
+  // ── The nearest edges come with the answer ───────────────────────────────
+  {
+    const { row, pi } = build({});
+    const m = marginalCostOfNextDollar({ row, pi, probe: 1000 });
+    gt(m.nextThresholds.length, 0, 'the upcoming thresholds ride along with the rate');
+    eq(m.nextThresholds.every(t => !t.crossed), true, 'only ones not yet crossed');
+    eq(m.nextThresholds.every(t => !t.inactive), true, 'and only ones that can actually bite');
+    eq(m.nextThresholds.length <= 3, true, 'capped at three, so the card stays readable');
+    for (let i = 1; i < m.nextThresholds.length; i++) {
+      eq(m.nextThresholds[i].distance >= m.nextThresholds[i - 1].distance, true,
+        'nearest first, so what binds next is named first');
+    }
+  }
+
+  // ── Degenerate input ─────────────────────────────────────────────────────
+  eq(marginalCostOfNextDollar({}), null, 'no row, no answer — and no throw');
+  eq(marginalCostOfNextDollar({ row: build({}).row, probe: 0 }), null, 'a zero probe would divide by zero');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
