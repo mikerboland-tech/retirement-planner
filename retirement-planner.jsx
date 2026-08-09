@@ -3645,8 +3645,18 @@ function TaxBreakpointsTable({ projections, personalInfo, fixedAge = null, forPr
     fixedAge !== null ? fixedAge : (ages[0] ?? personalInfo.myAge));
   const [showAll, setShowAll] = React.useState(false);
 
-  const age = fixedAge !== null ? fixedAge : selectedAge;
-  const row = (projections || []).find(p => p.myAge === age);
+  // The projection's own range, not legacyAge — a plan can end earlier (both
+  // spouses gone) or run longer, and a slider that can select a year with no row
+  // would blank the table.
+  const minAge = ages.length ? Math.min(...ages) : personalInfo.myAge;
+  const maxAge = ages.length ? Math.max(...ages) : personalInfo.myAge;
+  const requested = fixedAge !== null ? fixedAge : selectedAge;
+  // Clamp rather than return null: if the plan shortens under a selected age,
+  // showing the nearest year beats showing nothing.
+  const age = Math.max(minAge, Math.min(maxAge, requested));
+  const row = (projections || []).find(p => p.myAge === age)
+    || (projections || []).find(p => p.myAge >= age)
+    || (projections || [])[0];
   if (!row) return null;
 
   const medicareEligible = row.age65Count || 0;
@@ -3705,10 +3715,13 @@ function TaxBreakpointsTable({ projections, personalInfo, fixedAge = null, forPr
 
   return (
     <div className={forPrint ? 'mb-6' : cardStyle}>
-      <div className="flex flex-wrap items-end justify-between gap-3 mb-2">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
         <div>
           <h4 className={`font-semibold ${forPrint ? 'text-base text-slate-900' : 'text-lg text-slate-100'}`}>
-            {title || 'Income thresholds this year'}
+            {/* No "this year" in the default: the slider can be anywhere in the
+                plan, and the selected year is already shown beside it. The
+                Current Year tab passes its own title with the year in it. */}
+            {title || `Income thresholds at age ${age}`}
           </h4>
           <p className={`text-xs mt-1 max-w-2xl ${forPrint ? 'text-slate-600' : 'text-slate-400'}`}>
             Every edge a year can cross, and how much room is left before each. They are measured on
@@ -3717,15 +3730,25 @@ function TaxBreakpointsTable({ projections, personalInfo, fixedAge = null, forPr
           </p>
         </div>
         {fixedAge === null && !forPrint && (
-          <div>
-            <label className="block text-xs text-slate-400 mb-1">Age</label>
-            <select value={selectedAge} onChange={e => setSelectedAge(Number(e.target.value))}
-              className="bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-100">
-              {ages.map(a => {
-                const r = projections.find(p => p.myAge === a);
-                return <option key={a} value={a}>{a} ({r.year})</option>;
-              })}
-            </select>
+          <div className="flex items-center gap-2">
+            <span className="text-slate-400 text-sm">Age:</span>
+            <input
+              type="range"
+              min={minAge}
+              max={maxAge}
+              value={age}
+              onChange={e => setSelectedAge(Number(e.target.value))}
+              className="w-32 accent-amber-500"
+            />
+            <input
+              type="number"
+              min={minAge}
+              max={maxAge}
+              value={age}
+              onChange={e => setSelectedAge(Math.max(minAge, Math.min(maxAge, Number(e.target.value))))}
+              className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center text-sm"
+            />
+            <span className="text-slate-500 text-xs">(Year {row.year})</span>
           </div>
         )}
       </div>
