@@ -802,6 +802,11 @@ function runRothOptimizer(jobId, payload) {
     strategies.push({
       label: `Your current plan (${amt}, ages ${sAge}–${eAge})`,
       bracket: personalInfo.rothConversionBracket || '',
+      // Carried so Apply on this row reproduces the strategy. Without it, the
+      // row's tier reads null and Apply would clear the user's own setting —
+      // the one row where that is least forgivable.
+      irmaaTier: Number.isInteger(personalInfo.rothConversionIrmaaTier)
+        ? personalInfo.rothConversionIrmaaTier : undefined,
       window: { startAge: sAge, endAge: eAge },
       pi: personalInfo,
       isCurrent: true,

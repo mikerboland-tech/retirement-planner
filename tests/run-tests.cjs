@@ -5939,6 +5939,103 @@ section('P50 — the paycheck count is an input, because for biweekly it cannot 
   }
 }
 
+section('P51 — describing the conversion strategy: one definition, because three copies were all wrong');
+{
+  // Reported: the Plan Summary Report's profile section said "None planned"
+  // while the Key Outcomes section of the SAME REPORT showed $1.3M converted.
+  // Key Outcomes reads the projection; the profile re-derived the mode by
+  // testing for a bracket and then for an amount, and an IRMAA-tier plan has
+  // neither.
+  //
+  // That was the third recurrence. The durable fix is not another sweep: the
+  // label now lives in the engine, where it can be tested, and the UI holds a
+  // one-line alias. A description that can be re-implemented will be, and will
+  // be re-implemented wrong.
+  const { rothConversionModeLabel, rothConversionModeOf, irmaaTierOptions } = engine;
+  const mfj = (o) => ({ filingStatus: 'married_joint', ...o });
+
+  // ── Every mode produces a description, and none of them is the empty case ──
+  {
+    const irmaa = rothConversionModeLabel(mfj({ rothConversionIrmaaTier: 0 }));
+    eq(/IRMAA tier 0/.test(irmaa), true, 'an IRMAA plan is described by its tier');
+    eq(/MAGI/.test(irmaa), true, 'and by the ceiling it is aiming under, since that is the basis it binds on');
+    eq(/none planned/i.test(irmaa), false,
+      'and is NEVER described as no plan — the exact failure that was reported');
+
+    // Tier 0 is the case that slipped through, because 0 is falsy.
+    eq(rothConversionModeOf(mfj({ rothConversionIrmaaTier: 0 })), 'irmaa',
+      'tier 0 counts as a planned conversion despite being falsy');
+
+    eq(/22% bracket/.test(rothConversionModeLabel(mfj({ rothConversionBracket: '22%' }))), true,
+      'a bracket plan names its bracket');
+    eq(/50,000/.test(rothConversionModeLabel(mfj({ rothConversionAmount: 50000 }))), true,
+      'a fixed plan names its amount');
+    eq(rothConversionModeLabel(mfj({})), 'none planned',
+      'and only a genuinely empty plan reads as none planned');
+  }
+
+  // ── Every tier has a description ─────────────────────────────────────────
+  // The top tier has no ceiling above it, so the ceiling-based phrasing has to
+  // degrade to something true rather than to "undefined".
+  {
+    const opts = irmaaTierOptions('married_joint', 2);
+    opts.forEach((o, i) => {
+      const label = rothConversionModeLabel(mfj({ rothConversionIrmaaTier: i }));
+      eq(/undefined|NaN|null/.test(label), false,
+        `tier ${i} produces a clean description with no undefined in it`);
+      eq(label.length > 10, true, `tier ${i} produces something a reader can use`);
+    });
+  }
+
+  // ── The formatter is injected, so the engine stays UI-free ───────────────
+  {
+    const plain = rothConversionModeLabel(mfj({ rothConversionAmount: 50000 }));
+    const custom = rothConversionModeLabel(mfj({ rothConversionAmount: 50000 }), () => 'XYZ');
+    eq(/XYZ/.test(custom), true, 'a supplied formatter is used');
+    eq(plain !== custom, true, 'and the default is a real fallback rather than the same string');
+  }
+
+  // ── The optimizer's own-plan row must carry its tier ─────────────────────
+  // The row the user is most likely to click Apply on is their current plan. It
+  // carried a bracket but no tier, so Apply would have cleared the tier and
+  // switched their conversions off — on the one row where that is least
+  // forgivable.
+  {
+    const vmMod = require('vm'), fsMod = require('fs'), pathMod = require('path');
+    const ROOT = pathMod.join(__dirname, '..');
+    const sb = {}; sb.self = sb; sb.globalThis = sb;
+    sb.location = { search: '?v=test' }; sb.__out = []; sb.URLSearchParams = URLSearchParams;
+    sb.importScripts = (spec) => vmMod.runInContext(
+      fsMod.readFileSync(pathMod.join(ROOT, spec.split('?')[0]), 'utf8'), sb);
+    sb.postMessage = (m) => { if (m.type !== 'progress') sb.__out.push(m); };
+    vmMod.createContext(sb);
+    vmMod.runInContext(fsMod.readFileSync(pathMod.join(ROOT, 'worker.js'), 'utf8'), sb);
+
+    const personalInfo = {
+      myAge: 64, spouseAge: 64, myBirthYear: TODAY_YEAR - 64, spouseBirthYear: TODAY_YEAR - 64,
+      myRetirementAge: 64, spouseRetirementAge: 64, legacyAge: 80,
+      filingStatus: 'married_joint', state: 'Florida', inflationRate: 0,
+      desiredRetirementIncome: 120000, withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+      healthcareModel: 'none', rothConversionIrmaaTier: 1,
+      rothConversionStartAge: 64, rothConversionEndAge: 72,
+    };
+    const accounts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 3000000, contribution: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 100000, contribution: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me' },
+      { id: 3, name: 'Brok', type: 'brokerage', balance: 700000, contribution: 0, cagr: 0, startAge: 64, stopAge: 64, owner: 'me', costBasisPercent: 0.5 },
+    ];
+    sb.onmessage({ data: { jobId: 1, type: 'rothOptimizer', payload: {
+      personalInfo, accounts, incomeStreams: [], assets: [], oneTimeEvents: [],
+      recurringExpenses: [], heirTaxRate: 0.25 } } });
+    const rows = sb.__out.find(m => m.type === 'result').data.results;
+    const current = rows.find(r => r.isCurrent);
+    gt(current ? 1 : 0, 0, 'the user\'s own plan is scored as its own row');
+    eq(current.irmaaTier, 1,
+      'and carries its tier, so Apply reproduces the strategy instead of switching it off');
+    eq(/IRMAA tier 1/.test(current.label), true, 'and is named for the tier it uses');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

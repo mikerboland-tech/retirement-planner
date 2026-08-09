@@ -46,6 +46,7 @@ const {
   projectPayrollYearEnd, marginalRateOn, saltCapFor, projectedWithdrawalRate,
   detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling,
   rothConversionIsPlanned, withoutRothConversions, withRothConversionTarget,
+  rothConversionModeLabel, rothConversionModeOf,
   taxBreakpoints,
   IRMAA_FILL_SAFETY_MARGIN,
 } = PlannerEngine;
@@ -369,6 +370,10 @@ const DEFAULT_PERSONAL_INFO = {
   rothConversionStartAge: 0,     // Age to begin converting (0 = use smart default: myRetirementAge)
   rothConversionEndAge: 0,       // Age to stop converting (0 = use smart default: rmdStartAge - 1)
   rothConversionBracket: '',     // If set ('22%','24%','32%'), fill to this bracket instead of fixed amount
+  rothConversionIrmaaTier: null, // If an integer, fill to that IRMAA tier's MAGI edge instead. Mutually
+                                 // exclusive with the two above; null means "not this mode". Listed here
+                                 // so the third mode is discoverable next to the other two rather than
+                                 // existing only where it happens to be read.
   rothConversionTaxSource: 'withdrawal', // 'withdrawal' = tax paid via normal withdrawal priority, 'brokerage' = tax paid from brokerage account
   rothConversionPreTaxFloor: 0,  // Preserve this much pre-tax balance (today's $); stop converting once pre-tax hits it (0 = no floor)
   // §72(t) SEPP: substantially equal periodic payments let you tap a pre-tax
@@ -512,18 +517,8 @@ const formatCurrency = (value) => {
 // predicates would have read it as "no conversion planned" and hidden the
 // column, skipped the validation, or described the strategy wrongly.
 const conversionIsActive = (pi) => rothConversionIsPlanned(pi);
+const conversionModeLabel = (pi) => rothConversionModeLabel(pi, formatCurrency);
 
-const conversionModeLabel = (pi) => {
-  if (!pi) return '';
-  if (Number.isInteger(pi.rothConversionIrmaaTier)) {
-    const opt = irmaaTierOptions(pi.filingStatus, pi.filingStatus === 'married_joint' ? 2 : 1)[pi.rothConversionIrmaaTier];
-    return opt && opt.ceiling
-      ? `staying under ${formatCurrency(opt.ceiling)} MAGI (IRMAA tier ${pi.rothConversionIrmaaTier})`
-      : 'staying within an IRMAA tier';
-  }
-  if (pi.rothConversionBracket) return `filling to the ${pi.rothConversionBracket} bracket`;
-  return `${formatCurrency(pi.rothConversionAmount || 0)}/yr`;
-};
 
 const formatPercent = (value) => `${(value * 100).toFixed(1)}%`;
 
@@ -1840,10 +1835,10 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
           </p>
         </div>
       )}
-      {(personalInfo.rothConversionAmount || 0) > 0 && (
+      {conversionIsActive(personalInfo) && (
         <div className="p-3 bg-purple-900/20 border border-purple-700/30 rounded-lg">
           <p className="text-sm text-purple-300">
-            <strong>🔄 Roth Conversions Active ({formatCurrency(personalInfo.rothConversionAmount)}/yr, ages {personalInfo.rothConversionStartAge || getDefaultRothConversionWindow(personalInfo).startAge}–{personalInfo.rothConversionEndAge || getDefaultRothConversionWindow(personalInfo).endAge}):</strong> Purple-highlighted rows show years where conversions execute. The converted amount increases taxable income (and federal/state tax) that year but shifts assets to tax-free Roth growth. Watch the "Portfolio" column — pre-tax balance decreases while Roth balance grows, reducing future RMDs.
+            <strong>🔄 Roth Conversions Active ({conversionModeLabel(personalInfo)}, ages {personalInfo.rothConversionStartAge || getDefaultRothConversionWindow(personalInfo).startAge}–{personalInfo.rothConversionEndAge || getDefaultRothConversionWindow(personalInfo).endAge}):</strong> Purple-highlighted rows show years where conversions execute. The converted amount increases taxable income (and federal/state tax) that year but shifts assets to tax-free Roth growth. Watch the "Portfolio" column — pre-tax balance decreases while Roth balance grows, reducing future RMDs.
           </p>
         </div>
       )}
@@ -9283,7 +9278,9 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
               Each year during the specified age range, funds are moved from the largest pre-tax account to the largest Roth account. 
               The conversion is added to your taxable income for that year. 
               Roth conversions appear as <strong className="text-purple-400">purple-highlighted rows</strong> in the Detailed Table.
-              {localInfo.rothConversionBracket ? ` Fill-to-bracket mode converts enough each year to fully utilize the ${localInfo.rothConversionBracket} bracket (based on other income).` : ''}
+              {Number.isInteger(localInfo.rothConversionIrmaaTier)
+                ? ` IRMAA-tier mode converts up to just under that MAGI edge each year, measured against the threshold for the year the surcharge is actually paid.`
+                : (localInfo.rothConversionBracket ? ` Fill-to-bracket mode converts enough each year to fully utilize the ${localInfo.rothConversionBracket} bracket (based on other income).` : '')}
               {localInfo.rothConversionTaxSource === 'brokerage'
                 ? ' Tax on conversions is paid by withdrawing from your brokerage account, preserving pre-tax and Roth balances.'
                 : ' Tax on conversions is covered by the normal withdrawal solver (using your withdrawal priority order), which may pull additional pre-tax funds.'}
@@ -13682,9 +13679,14 @@ function PlanSummaryReport({ projections, personalInfo, accounts, incomeStreams,
 
   const priorityLabels = { pretax: 'Pre-Tax', brokerage: 'Brokerage & HSA', roth: 'Roth' };
   const priority = (pi.withdrawalPriority || ['pretax', 'brokerage', 'roth']).map(k => priorityLabels[k] || k).join(' → ');
-  const rothStrategy = pi.rothConversionBracket
-    ? `Fill the ${pi.rothConversionBracket} federal bracket each year`
-    : (pi.rothConversionAmount > 0 ? `Convert ${fmt(pi.rothConversionAmount)}/yr` : 'None planned');
+  // Three modes to describe. Testing for a bracket and then an amount reported
+  // "None planned" for an IRMAA-tier strategy — while the Key Outcomes section
+  // of the same report correctly showed $1.3M converted, because that reads the
+  // projection rather than re-deriving the mode. A report contradicting itself
+  // on the same page is worse than either half being wrong alone.
+  const rothStrategy = conversionIsActive(pi)
+    ? conversionModeLabel(pi).replace(/^filling to the/, 'Fill the').replace(/^staying under/, 'Stay under')
+    : 'None planned';
 
   const overlay = (
     <div className="report-overlay fixed inset-0 bg-black/60 flex items-start justify-center z-50 overflow-y-auto py-8 px-4">

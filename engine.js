@@ -4659,6 +4659,32 @@ const irmaaTierOptions = (filingStatus, numMedicareEligible = 2) => {
     isTop: t.maxIncome === Infinity,
   }));
 };
+// A one-line description of the conversion strategy, for anywhere that reports
+// what the plan is doing. It lives here rather than in the UI because it kept
+// being re-implemented there and kept being re-implemented WRONG: three separate
+// places described the strategy by testing for a bracket and then for an amount,
+// and each of them reported "None planned" for an IRMAA-tier plan. The Plan
+// Summary Report did it while the Key Outcomes section of the same page
+// correctly showed $1.3M converted — a report contradicting itself.
+//
+// `fmt` formats a dollar amount; the default keeps the engine free of UI
+// dependencies while still producing something readable in a test.
+const rothConversionModeLabel = (pi, fmt = (v) => '$' + Math.round(v).toLocaleString()) => {
+  switch (rothConversionModeOf(pi)) {
+    case 'irmaa': {
+      const opts = irmaaTierOptions(pi.filingStatus,
+        pi.filingStatus === 'married_joint' ? 2 : 1);
+      const o = opts[pi.rothConversionIrmaaTier];
+      return o && o.ceiling
+        ? `staying under ${fmt(o.ceiling)} MAGI (IRMAA tier ${pi.rothConversionIrmaaTier})`
+        : 'staying within an IRMAA tier';
+    }
+    case 'bracket': return `filling to the ${pi.rothConversionBracket} bracket`;
+    case 'fixed':   return `${fmt(pi.rothConversionAmount || 0)}/yr`;
+    default:        return 'none planned';
+  }
+};
+
 // ── FEEDING THE DETAILED RETURN INTO PROJECTION YEAR 0 ───────────────────────
 // Year 0 of a projection is normally a synthetic full year built from a salary
 // scalar. When the Current Year tab has been filled in, most of that year has
@@ -7273,7 +7299,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     detailedCurrentYearDecision, taxFieldsFromReturn,
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
     SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,
-    rothConversionModeOf, rothConversionIsPlanned,
+    rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,
     routeK1, applyPartnerBasis, applyPassiveLossRules, computeScheduleD,
