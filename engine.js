@@ -7312,8 +7312,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // and the two penalties. Reporting only the total meant a view could show
       // "federal tax" and a bracket walk that did not add up to it, with no way
       // to say where the difference went. Broken out so the parts are nameable.
-      federalOrdinaryTax: Math.round(federalTax - capitalGainsTax - niitTax
-                                     - earlyWithdrawalPenalty - hsaPenalty),
+      federalOrdinaryTax: Math.round(federalTax) - Math.round(capitalGainsTax)
+                        - Math.round(niitTax) - Math.round(earlyWithdrawalPenalty)
+                        - Math.round(hsaPenalty),
       capitalGainsTax: Math.round(capitalGainsTax),
       niitTax: Math.round(niitTax),
       // Present only on year 0, and only when the Current Year tab supplied a
@@ -7367,7 +7368,15 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       healthcareLTC: healthcareResult.ltc,
       recurringExpenses: totalRecurringExpenses, // Total categorized recurring expenses
       recurringExpensesByCategory: recurringResult.byCategory, // Breakdown by category
-      totalTax: Math.round(federalTax + stateTax + totalFICA + irmaaSurcharge),
+      // Summed from the ROUNDED components rather than rounding the unrounded
+      // sum. The two differ by a dollar or two, which sounds immaterial until two
+      // views of the same year disagree: the Dashboard's tax line plots this
+      // field while a breakdown adds up the parts, and a reader who checks one
+      // against the other finds a discrepancy with no explanation. Being off by
+      // $1 in a planning projection costs nothing; being visibly inconsistent
+      // costs the reader's confidence in every other number on the page.
+      totalTax: Math.round(federalTax) + Math.round(stateTax)
+              + Math.round(totalFICA) + Math.round(irmaaSurcharge),
       netIncome: Math.round(earnedIncome + totalGuaranteedIncome + portfolioWithdrawal + conversionTaxWithdrawal - federalTax - stateTax - totalFICA - irmaaSurcharge),
       filingStatus: effectiveFilingStatus, // Actual filing status used (may differ from input after survivor event)
       preTaxBalance: Math.round(finalPreTaxBalance),

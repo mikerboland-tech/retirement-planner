@@ -6153,6 +6153,92 @@ section('P52 — what the next dollar costs, reconstructed from one row rather t
   eq(marginalCostOfNextDollar({ row: build({}).row, probe: 0 }), null, 'a zero probe would divide by zero');
 }
 
+section('P53 — a row\'s tax components must sum to its totals, or two views of the same year disagree');
+{
+  // Reported: the Dashboard's tax line and the Tax Year Snapshot showed slightly
+  // different total tax for the same age. Both read the same field from the same
+  // row, so the difference was not between them — it was between row.totalTax
+  // and a breakdown that added up the row's own components.
+  //
+  // totalTax rounded the UNROUNDED sum while every component rounded itself, so
+  // the two disagreed by a dollar or two. In a projection that is immaterial as
+  // a quantity and fatal as an inconsistency: a reader who checks one figure
+  // against another and finds them disagreeing has no way to know which of the
+  // remaining numbers to trust.
+  //
+  // Both totals are now summed from the rounded components, so they reconcile by
+  // construction rather than by luck.
+  const check = (row) => {
+    const taxParts = row.federalTax + row.stateTax + row.ficaTax + row.irmaaSurcharge;
+    const fedParts = row.federalOrdinaryTax + row.capitalGainsTax + row.niitTax
+                   + row.earlyWithdrawalPenalty + row.hsaPenalty;
+    return { taxOk: taxParts === row.totalTax, fedOk: fedParts === row.federalTax,
+             taxParts, fedParts };
+  };
+
+  // ── A broad sweep, because a one-dollar rounding bug hides in most cases ──
+  // The reported symptom appeared on exactly one age of one plan. Checking a
+  // single fixture would have reproduced nothing, which is why this sweeps
+  // spending levels and states across every year of every projection.
+  {
+    let rows = 0, taxFails = 0, fedFails = 0;
+    for (let spend = 100000; spend <= 220000; spend += 1997) {
+      for (const state of ['Missouri', 'California', 'Florida', 'New York']) {
+        const s = baseScenario({
+          myAge: 60, spouseAge: 58, myBirthYear: TODAY_YEAR - 60, spouseBirthYear: TODAY_YEAR - 58,
+          myRetirementAge: 60, spouseRetirementAge: 60, legacyAge: 72,
+          state, inflationRate: 0.03, desiredRetirementIncome: spend,
+          healthcareModel: 'none', medicalInflation: 0,
+          withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+        });
+        s.accts = [
+          { id: 1, name: 'IRA', type: 'traditional_ira', balance: 3000000, contribution: 0, cagr: 0.05, startAge: 60, stopAge: 60, owner: 'me' },
+          { id: 2, name: 'Brok', type: 'brokerage', balance: 1200000, contribution: 0, cagr: 0.04, startAge: 60, stopAge: 60, owner: 'joint', costBasisPercent: 0.4 },
+        ];
+        computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR).forEach(r => {
+          rows++;
+          const c = check(r);
+          if (!c.taxOk) taxFails++;
+          if (!c.fedOk) fedFails++;
+        });
+      }
+    }
+    gt(rows, 2000, 'the sweep covers a few thousand projection years');
+    eq(taxFails, 0,
+      'federal + state + FICA + IRMAA equals totalTax in EVERY row — this failed before the fix');
+    eq(fedFails, 0,
+      'and ordinary + gains + NIIT + penalties equals federalTax in every row');
+  }
+
+  // ── The specific shape of the old bug ────────────────────────────────────
+  // Rounding a sum is not the same as summing rounded parts. Pinned as
+  // arithmetic so the reason the fix exists survives the fix itself.
+  {
+    const a = 1.4, b = 1.4, c = 1.4;
+    eq(Math.round(a + b + c), 4, 'rounding the sum of three 1.4s gives 4');
+    eq(Math.round(a) + Math.round(b) + Math.round(c), 3, 'summing them rounded gives 3');
+    // The engine now uses the second form for both totals, so a breakdown always
+    // adds up to the figure printed beside it.
+  }
+
+  // ── Both totals stay non-negative and finite ─────────────────────────────
+  {
+    const s = baseScenario({
+      myAge: 60, spouseAge: 60, myBirthYear: TODAY_YEAR - 60, spouseBirthYear: TODAY_YEAR - 60,
+      myRetirementAge: 60, spouseRetirementAge: 60, legacyAge: 66,
+      state: 'Florida', inflationRate: 0, desiredRetirementIncome: 40000,
+      healthcareModel: 'none', medicalInflation: 0,
+    });
+    s.accts = [{ id: 1, name: 'Roth', type: 'roth_ira', balance: 2000000, contribution: 0, cagr: 0, startAge: 60, stopAge: 60, owner: 'me' }];
+    s.streams = [];
+    computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR).forEach(r => {
+      eq(Number.isFinite(r.totalTax), true, 'a tax-free year still reports a finite total');
+      eq(r.totalTax >= 0, true, 'and never a negative one');
+      eq(check(r).taxOk, true, 'and still reconciles when every component is zero');
+    });
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
