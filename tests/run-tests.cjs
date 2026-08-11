@@ -6239,6 +6239,195 @@ section('P53 — a row\'s tax components must sum to its totals, or two views of
   }
 }
 
+section('P54 — the survivor\'s tax bill: what halved thresholds cost the spouse left behind');
+{
+  // At the first death the survivor files jointly for that year and SINGLE from
+  // the next. Every threshold halves at once — brackets, standard deduction,
+  // IRMAA tiers, the NIIT floor — while income barely falls, because the
+  // survivor keeps the LARGER Social Security benefit and the whole portfolio.
+  // The engine already switches filing status on death, but nothing ever priced
+  // the switch. These assertions pin the two figures that matter and the ways
+  // the comparison could quietly lie: pricing the joint case wrong (so the
+  // penalty is measured from a fake baseline), or guessing the SS split when the
+  // income streams could have supplied it.
+  const { survivorTaxComparison, survivorSSLoss } = engine;
+
+  const build = (over, streams) => {
+    const s = baseScenario({
+      myAge: 70, spouseAge: 70, myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 70,
+      myRetirementAge: 70, spouseRetirementAge: 70, legacyAge: 75,
+      state: 'Missouri', inflationRate: 0, desiredRetirementIncome: 150000,
+      healthcareModel: 'none', medicalInflation: 0,
+      withdrawalPriority: ['pretax', 'brokerage', 'roth'], ...over,
+    });
+    s.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 2500000, contribution: 0, cagr: 0, startAge: 70, stopAge: 70, owner: 'me' },
+    ];
+    s.streams = streams !== undefined ? streams : [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 67, endAge: 95, cola: 0, owner: 'me' },
+      { id: 2, name: 'Sp SS', type: 'social_security', amount: 26000, startAge: 67, endAge: 95, cola: 0, owner: 'spouse' },
+    ];
+    return { pi: s.pi, streams: s.streams,
+             row: computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR)[0] };
+  };
+
+  // ── The joint side must reproduce the row it came from ───────────────────
+  // The whole comparison is a difference. If the joint baseline is rebuilt
+  // wrong, the penalty is wrong by exactly that error and nothing on screen
+  // says so — the same failure mode that produced a 0.0% marginal rate in P52.
+  {
+    const { row, pi, streams } = build({});
+    const c = survivorTaxComparison({ row, pi, streams });
+    approx(c.joint.federal, row.federalTax, 'the joint case rebuilds the row\'s own federal tax', 2);
+    approx(c.joint.stateTax, row.stateTax, 'and its state tax', 2);
+    approx(c.joint.taxableSS, row.taxableSS, 'and the same taxable Social Security', 2);
+  }
+
+  // ── The filing-status penalty is real, and positive ──────────────────────
+  {
+    const { row, pi, streams } = build({});
+    const c = survivorTaxComparison({ row, pi, streams });
+    gt(c.filingPenalty, 0, 'identical income taxed as single costs more — the headline figure');
+    gt(c.filingStatusOnly.federal, c.joint.federal, 'federal tax rises');
+    lt(c.filingStatusOnly.deduction, c.joint.deduction, 'because the deduction roughly halves');
+    eq(c.filingStatusOnly.agi, c.joint.agi, 'while AGI is held fixed — this isolates the STATUS change');
+  }
+
+  // ── At this income the survivor jumps a bracket AND an IRMAA tier ────────
+  // The two-brackets-and-a-tier result is the reason the report exists. Pinned
+  // on a concrete fixture so a change to either schedule that quietly flattens
+  // the effect gets caught.
+  {
+    const { row, pi, streams } = build({});
+    const c = survivorTaxComparison({ row, pi, streams });
+    eq(c.bracketJumped, true, 'a $2.5M IRA at 70 puts the survivor in a higher bracket');
+    eq(c.irmaaTierJumped, true, 'and a higher IRMAA tier, on unchanged income');
+    gt(c.filingStatusOnly.irmaa, c.joint.irmaa, 'one Medicare premium at halved thresholds still costs more than two');
+  }
+
+  // ── The realistic case is cheaper than the structural one, and still worse ──
+  // The survivor loses the smaller benefit, so income falls and the bill falls
+  // with it — but not back to the joint figure. Both halves of that have to
+  // hold, or the report is telling the reader the wrong story.
+  {
+    const { row, pi, streams } = build({});
+    const c = survivorTaxComparison({ row, pi, streams });
+    lt(c.survivorRealistic.total, c.filingStatusOnly.total, 'losing a benefit lowers the bill from the fixed-income case');
+    gt(c.realisticDelta, 0, 'but it still exceeds what the couple paid together');
+    lt(c.realisticDelta, c.filingPenalty, 'so the realistic delta sits below the structural penalty');
+  }
+
+  // ── The SS split is derived from the streams, not guessed ────────────────
+  {
+    const { row, pi, streams } = build({});
+    const c = survivorTaxComparison({ row, pi, streams });
+    eq(c.lostSS, 26000, 'the household loses the SMALLER of the two benefits');
+    eq(c.lostSSAssumed, false, 'and knows it, rather than falling back to a 50/50 guess');
+    eq(survivorSSLoss(streams, row), 26000, 'the helper says the same thing on its own');
+
+    const guessed = survivorTaxComparison({ row, pi });
+    eq(guessed.lostSSAssumed, true, 'without streams the 50/50 fallback is flagged as an assumption');
+    approx(guessed.lostSS, row.socialSecurity / 2, 'and it is exactly half', 1);
+
+    const explicit = survivorTaxComparison({ row, pi, streams, smallerSSBenefit: 10000 });
+    eq(explicit.lostSS, 10000, 'an explicit split overrides both');
+    eq(explicit.lostSSAssumed, false, 'and is never labelled an assumption');
+  }
+
+  // ── One claimer means the household loses nothing ────────────────────────
+  // The survivor steps up to the deceased's benefit when it is larger, so a
+  // household where only one person has claimed loses no Social Security at
+  // all. Getting this wrong overstates the loss by the entire benefit.
+  {
+    const { row, pi, streams } = build({}, [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 67, endAge: 95, cola: 0, owner: 'me' },
+    ]);
+    eq(survivorSSLoss(streams, row), 0, 'with one claimer, nothing is lost — the survivor inherits the benefit');
+    const c = survivorTaxComparison({ row, pi, streams });
+    eq(c.lostSS, 0, 'so the realistic case keeps the full benefit');
+    approx(c.realisticDelta, c.filingPenalty, 'and collapses onto the pure filing-status penalty', 1);
+  }
+
+  // ── A stream that has not started yet counts as zero ─────────────────────
+  {
+    const { row, pi, streams } = build({}, [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 67, endAge: 95, cola: 0, owner: 'me' },
+      { id: 2, name: 'Sp SS (later)', type: 'social_security', amount: 30000, startAge: 72, endAge: 95, cola: 0, owner: 'spouse' },
+    ]);
+    eq(survivorSSLoss(streams, row), 0, 'a benefit not yet claimed at 70 cannot be lost at 70');
+  }
+
+  // ── Nothing claimed yet is a known zero; no streams at all is unknown ─────
+  // The distinction matters only because the report prints a caveat when the
+  // split is a guess. Reporting "not yet started" as unknown made every plan
+  // announce a 50/50 assumption it had never actually used.
+  {
+    const { row, pi } = build({});
+    const notYet = [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 75, endAge: 95, cola: 0, owner: 'me' },
+      { id: 2, name: 'Sp SS', type: 'social_security', amount: 30000, startAge: 75, endAge: 95, cola: 0, owner: 'spouse' },
+    ];
+    eq(survivorSSLoss(notYet, row), 0, 'neither benefit started at 70 means nothing can be lost at 70');
+    eq(survivorTaxComparison({ row, pi, streams: notYet }).lostSSAssumed, false,
+      'and that is a known answer, not a guess to be caveated');
+    eq(survivorSSLoss([], row), null, 'a plan with no Social Security at all genuinely cannot say');
+    eq(survivorSSLoss([{ id: 1, type: 'pension', owner: 'me', amount: 30000, startAge: 60, endAge: 95 }], row), null,
+      'and neither can one holding only a pension');
+  }
+
+  // ── A single filer has no survivor transition ────────────────────────────
+  {
+    const s = baseScenario({
+      myAge: 70, myBirthYear: TODAY_YEAR - 70, myRetirementAge: 70, legacyAge: 72,
+      hasSpouse: false, filingStatus: 'single', state: 'Missouri', inflationRate: 0,
+      desiredRetirementIncome: 80000, healthcareModel: 'none', medicalInflation: 0,
+    });
+    s.accts = [{ id: 1, name: 'IRA', type: 'traditional_ira', balance: 1000000, contribution: 0, cagr: 0, startAge: 70, stopAge: 70, owner: 'me' }];
+    s.streams = [];
+    const row = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR)[0];
+    eq(survivorTaxComparison({ row, pi: s.pi }), null, 'a single filer gets null, not a fabricated widow');
+  }
+
+  // ── Degenerate inputs return null rather than throwing ───────────────────
+  {
+    eq(survivorTaxComparison({}), null, 'no row, no answer — and no throw');
+    eq(survivorTaxComparison(), null, 'nor with no argument at all');
+    eq(survivorSSLoss(null, null), null, 'the SS helper is equally unbothered');
+  }
+
+  // ── Every year of a couple\'s projection prices without blowing up ────────
+  // The report walks the whole projection, so one bad year is one broken page.
+  {
+    const s = baseScenario({
+      myAge: 62, spouseAge: 60, myBirthYear: TODAY_YEAR - 62, spouseBirthYear: TODAY_YEAR - 60,
+      myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 90,
+      state: 'Missouri', desiredRetirementIncome: 120000,
+    });
+    s.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 1500000, contribution: 0, cagr: 0.05, startAge: 62, stopAge: 65, owner: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 300000, contribution: 0, cagr: 0.05, startAge: 62, stopAge: 65, owner: 'me' },
+    ];
+    s.streams = [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 42000, startAge: 67, endAge: 95, cola: 0.02, owner: 'me' },
+      { id: 2, name: 'Sp SS', type: 'social_security', amount: 22000, startAge: 67, endAge: 95, cola: 0.02, owner: 'spouse' },
+    ];
+    const rows = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+    let priced = 0, worst = 0;
+    rows.forEach(r => {
+      const c = survivorTaxComparison({ row: r, pi: s.pi, streams: s.streams });
+      if (!c) return;
+      priced++;
+      eq(Number.isFinite(c.filingPenalty), true, `year ${r.year} produces a finite penalty`);
+      eq(Number.isFinite(c.realisticDelta), true, `year ${r.year} produces a finite realistic delta`);
+      eq(c.joint.total >= 0, true, `year ${r.year} never prices a negative joint bill`);
+      eq(c.survivorRealistic.total >= 0, true, `year ${r.year} never prices a negative survivor bill`);
+      if (c.filingPenalty > worst) worst = c.filingPenalty;
+    });
+    gt(priced, 25, 'the whole married projection is priceable');
+    gt(worst, 0, 'and somewhere in it the survivor pays materially more');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

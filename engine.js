@@ -5214,6 +5214,132 @@ const marginalCostOfNextDollar = ({ row, pi = {}, probe = 1000, numMedicareEligi
 };
 
 
+// ── THE SURVIVOR'S TAX BILL ──────────────────────────────────────────────────
+// When the first spouse dies, the survivor files jointly for that year and as a
+// SINGLE filer from the next one. Every threshold that governs their tax roughly
+// halves at once — bracket edges, the standard deduction, the IRMAA tiers, the
+// NIIT floor — while income barely falls, because they keep the larger Social
+// Security benefit (losing only the smaller) and the entire portfolio.
+//
+// The result is routinely two brackets and an IRMAA tier higher for a household
+// whose SPENDING has just gone down. It is the most under-discussed risk in
+// retirement tax, and the projection already carries everything needed to price
+// it — the engine switches effectiveFilingStatus on death, but nothing has ever
+// shown a reader what that switch costs.
+//
+// Computed from ONE row rather than a second projection, by re-running the same
+// year's income through the single-filer schedules. Two figures are produced and
+// they answer different questions:
+//
+//   filingStatusOnly  the same income taxed as single. Isolates the structural
+//                     penalty — what the halved thresholds cost, holding income
+//                     fixed. This is the number that surprises people.
+//   survivorRealistic the same year with the smaller Social Security benefit
+//                     gone as well, which is what actually happens.
+// Which Social Security benefit the household loses at the first death. The
+// survivor receives the GREATER of their own benefit or the deceased's, so the
+// household loses the smaller of the two — and loses nothing at all if only one
+// person has claimed, because the survivor steps up to the deceased's benefit if
+// that is the larger one. A person who has not started (or has stopped) counts
+// as zero, which makes that case fall out of the same min().
+const survivorSSLoss = (streams, row) => {
+  if (!Array.isArray(streams) || !row) return null;
+  const yearsFromNow = row.yearsFromNow ?? 0;
+  const at = owner => (streams || [])
+    .filter(s => s && s.type === 'social_security' && s.owner === owner)
+    .reduce((sum, s) => sum + streamAmountAtAge(s, owner === 'me' ? row.myAge : row.spouseAge, yearsFromNow), 0);
+  const mine = at('me');
+  const theirs = at('spouse');
+  // A year before either benefit starts loses nothing — that is a known 0, not a
+  // missing answer, and returning null there would have the caller announce a
+  // 50/50 guess it never made. Null is reserved for a plan carrying no Social
+  // Security streams at all, where the split is genuinely unknown.
+  if (mine <= 0 && theirs <= 0) {
+    return streams.some(x => x && x.type === 'social_security') ? 0 : null;
+  }
+  return Math.min(mine, theirs);
+};
+
+const survivorTaxComparison = ({ row, pi = {}, smallerSSBenefit = null, streams = null } = {}) => {
+  if (!row) return null;
+  const idx = (row.year || BASE_TAX_YEAR) - BASE_TAX_YEAR;
+  const infl = pi.inflationRate ?? 0.03;
+  const state = pi.state || 'None';
+
+  // Only meaningful for a couple. A single filer has no survivor transition.
+  const jointStatus = row.effectiveFilingStatus || row.filingStatus || pi.filingStatus;
+  if (jointStatus !== 'married_joint') return null;
+
+  const ss = row.socialSecurity || 0;
+  const preferential = (row.realizedCapitalGains || 0) + (row.brokerageDividends || 0);
+  const preTaxDeduction = row.preTaxDeduction || 0;
+  const nonSSBase = (row.taxableIncome || 0) - (row.taxableSS || 0);
+  const pension = row.pension || 0;
+
+  // One 65+ person instead of two, and one Medicare premium instead of two.
+  const survivorAge65 = Math.min(1, row.age65Count || 0);
+  const jointAge65 = row.age65Count || 0;
+
+  const priceYear = (filingStatus, nonSS, ssAmount, age65Count, medicareCount) => {
+    const taxableSS = calculateSocialSecurityTaxableAmount(ssAmount, nonSS, filingStatus);
+    const agi = nonSS + taxableSS;
+    const magi = agi + preTaxDeduction;
+    const deduction = getFederalDeduction(filingStatus, idx, infl,
+      { age65Count, taxYear: row.year || BASE_TAX_YEAR, magi });
+    const ordinaryBase = Math.max(0, agi - preferential);
+    const ordinaryTaxable = Math.max(0, ordinaryBase - deduction);
+    const unused = Math.max(0, deduction - ordinaryBase);
+    const taxableGains = Math.max(0, preferential - unused);
+    const federal = federalTaxOnTaxableIncome(ordinaryTaxable, filingStatus, idx, infl)
+      + calculateCapitalGainsTax(taxableGains, ordinaryTaxable + taxableGains, filingStatus, idx, infl)
+      + calculateNIIT(preferential, magi, filingStatus);
+    const stateTax = calculateStateTax(agi, state, filingStatus, idx, infl, taxableSS, pension,
+      { primaryAge: row.myAge || 0, spouseAge: row.spouseAge || 0 });
+    // IRMAA is per person, so a survivor pays one surcharge rather than two —
+    // but against thresholds that have halved, which usually more than cancels
+    // the saving.
+    const irmaa = medicareCount > 0
+      ? calculateIRMAASurcharge(magi, filingStatus, idx, infl, medicareCount).totalSurcharge
+      : 0;
+    return {
+      filingStatus, nonSS, taxableSS, agi, magi, deduction, ordinaryTaxable,
+      federal, stateTax, irmaa,
+      total: federal + stateTax + irmaa,
+      bracket: topMarginalBracket(ordinaryTaxable, filingStatus, idx, infl),
+      irmaaTier: medicareCount > 0 ? calculateIRMAA(magi, filingStatus, idx, infl).tier : null,
+    };
+  };
+
+  const joint = priceYear('married_joint', nonSSBase, ss, jointAge65, jointAge65);
+  const filingStatusOnly = priceYear('single', nonSSBase, ss, survivorAge65, Math.min(1, jointAge65));
+
+  // The realistic case: the survivor keeps the LARGER benefit. Without a split
+  // the engine can only estimate — a 50/50 household loses half, which is the
+  // most favourable assumption, so it is stated rather than hidden.
+  const derivedLoss = smallerSSBenefit !== null ? null : survivorSSLoss(streams, row);
+  const lostSS = smallerSSBenefit !== null ? smallerSSBenefit
+    : (derivedLoss !== null ? Math.min(derivedLoss, ss) : ss * 0.5);
+  const survivorRealistic = priceYear('single', nonSSBase, Math.max(0, ss - lostSS),
+    survivorAge65, Math.min(1, jointAge65));
+
+  return {
+    year: row.year, myAge: row.myAge,
+    joint, filingStatusOnly, survivorRealistic,
+    lostSS,
+    // True only when neither an explicit split nor the income streams could
+    // supply one, i.e. the 50/50 fallback is in play and the figure is soft.
+    lostSSAssumed: smallerSSBenefit === null && derivedLoss === null,
+    // What the halved thresholds cost, holding income fixed. The headline.
+    filingPenalty: filingStatusOnly.total - joint.total,
+    // What the survivor actually faces: the penalty net of the income they lost.
+    realisticDelta: survivorRealistic.total - joint.total,
+    bracketJumped: filingStatusOnly.bracket > joint.bracket,
+    irmaaTierJumped: filingStatusOnly.irmaaTier !== null && joint.irmaaTier !== null
+      && filingStatusOnly.irmaaTier > joint.irmaaTier,
+  };
+};
+
+
 function computeProjections(pi, accts, streams, assetList, events = [], recurringExpensesList = [], currentYearArg, opts = {}) {
   // currentYear used to be captured from RetirementPlanner's closure. It's now an
   // explicit parameter (with a fallback) so this function can be moved to module
@@ -7259,6 +7385,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     
     years.push({
       year, myAge, spouseAge,
+      // Offset from today (0 = current year). Distinct from the tax-table
+      // index (taxIndexYears, measured from BASE_TAX_YEAR); this one drives
+      // spending/COLA growth. Exposed so callers that re-price a row — the
+      // survivor comparison, for one — can re-derive a stream's amount.
+      yearsFromNow,
       desiredIncome: Math.round(desiredIncome),
       earnedIncome: Math.round(earnedIncome),
       socialSecurity: Math.round(totalSocialSecurity),
@@ -7443,7 +7574,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     detailedCurrentYearDecision, taxFieldsFromReturn,
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
     SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,
-    marginalCostOfNextDollar,
+    marginalCostOfNextDollar, survivorTaxComparison, survivorSSLoss,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,

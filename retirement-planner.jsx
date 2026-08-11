@@ -48,6 +48,8 @@ const {
   rothConversionIsPlanned, withoutRothConversions, withRothConversionTarget,
   rothConversionModeLabel, rothConversionModeOf,
   taxBreakpoints, marginalCostOfNextDollar,
+  survivorTaxComparison, survivorSSLoss,
+  getFederalDeduction, NIIT_THRESHOLDS,
   IRMAA_FILL_SAFETY_MARGIN,
 } = PlannerEngine;
 
@@ -13959,6 +13961,353 @@ function PlanSummaryReport({ projections, personalInfo, accounts, incomeStreams,
   return ReactDOM.createPortal(overlay, document.body);
 }
 
+// ============================================
+// The Survivor's Tax Bill — what the widow(er) year costs.
+//
+// When the first spouse dies, the survivor files jointly for that year and as a
+// SINGLE filer from the next one. Every threshold governing their tax roughly
+// halves at once — bracket edges, the standard deduction, the IRMAA tiers, the
+// NIIT floor — while income barely falls, because the survivor keeps the larger
+// Social Security benefit and the entire portfolio. Two brackets and an IRMAA
+// tier higher on a household whose SPENDING just went down.
+//
+// The engine has always switched filing status on death; nothing ever showed
+// what the switch costs. Same portal + print plumbing as the other reports.
+// ============================================
+function SurvivorTaxReport({ projections, personalInfo, incomeStreams, onClose }) {
+  const pi = personalInfo;
+  const preparedOn = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const fmt = (n) => '$' + Math.round(n || 0).toLocaleString('en-US');
+  const fmtK = (n) => (Math.abs(n) >= 1000000 ? '$' + (n / 1000000).toFixed(2) + 'M' : '$' + Math.round((n || 0) / 1000) + 'K');
+  const pct = (n) => (n * 100).toFixed(0) + '%';
+
+  // One comparison per projection year. survivorTaxComparison returns null for a
+  // year that is not married-filing-jointly, which quietly excludes both a single
+  // filer's whole plan and — when survivor modeling is on — the years after the
+  // modeled death, where the projection is ALREADY single and there is nothing
+  // left to compare.
+  const rows = useMemo(() => (projections || [])
+    .map(r => survivorTaxComparison({ row: r, pi, streams: incomeStreams }))
+    .filter(Boolean), [projections, pi, incomeStreams]);
+
+  const th = { textAlign: 'left', padding: '4px 8px', borderBottom: '2px solid #0f172a', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.03em', color: '#334155' };
+  const thR = { ...th, textAlign: 'right' };
+  const td = { padding: '4px 8px', borderBottom: '1px solid #e2e8f0', fontSize: 12 };
+  const tdR = { ...td, textAlign: 'right' };
+  const h2 = { fontSize: 16, fontWeight: 700, margin: '22px 0 8px', paddingBottom: 4, borderBottom: '1px solid #cbd5e1', breakAfter: 'avoid' };
+  const statBox = { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6, padding: '8px 12px' };
+  const statLabel = { fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#64748b', margin: 0 };
+  const statValue = { fontSize: 17, fontWeight: 700, margin: '2px 0 0' };
+  const note = { fontSize: 11, color: '#64748b', margin: '6px 0 0', lineHeight: 1.5 };
+
+  // The worst year is the report's anchor. Chosen on TODAY'S dollars, not
+  // nominal ones: at 2.5% inflation a nominal comparison picks the last year of
+  // the plan almost every time, which makes "worst year" a synonym for "age 94"
+  // and tells the reader nothing. Deflating puts the anchor where the halved
+  // thresholds actually bite hardest — usually a peak-RMD year, which is the
+  // point, since the survivor inherits the RMD schedule with the portfolio.
+  const infl = pi.inflationRate ?? 0.03;
+  const thisYear = new Date().getFullYear();
+  const real = (n, year) => (n || 0) / Math.pow(1 + infl, Math.max(0, year - thisYear));
+  const worst = rows.reduce(
+    (a, b) => (!a || real(b.filingPenalty, b.year) > real(a.filingPenalty, a.year) ? b : a), null);
+  const firstJump = rows.find(r => r.bracketJumped);
+  const firstIrmaaJump = rows.find(r => r.irmaaTierJumped);
+  const lifetimePenalty = rows.reduce((s, r) => s + r.filingPenalty, 0);
+  const lifetimePenaltyReal = rows.reduce((s, r) => s + real(r.filingPenalty, r.year), 0);
+  const avgPenaltyReal = rows.length ? lifetimePenaltyReal / rows.length : 0;
+  // Only the anchor year's caveat matters — a plan can know the split in the
+  // years that count and not in the ones before either benefit started.
+  const assumedSplit = !!(worst && worst.lostSSAssumed);
+  // The projection row behind the anchor year, for the figures the comparison
+  // does not carry (gross Social Security received).
+  const worstRow = worst ? (projections || []).find(p => p.year === worst.year) || {} : {};
+
+  // What the thresholds themselves do, priced in the anchor year's dollars.
+  // Deduction comes from the engine so the 65+ and OBBBA senior pieces are the
+  // real ones rather than a flat halving; the rest are genuinely halved.
+  const thresholdRows = useMemo(() => {
+    if (!worst) return [];
+    const idx = worst.year - BASE_TAX_YEAR;
+    const infl = pi.inflationRate ?? 0.03;
+    const scale = indexTo(1, idx, infl);
+    const bracket22 = (FEDERAL_TAX_BRACKETS_2026 || {});
+    const edgeOf = (status, rate) => {
+      const list = bracket22[status] || [];
+      const b = list.find(x => x.rate === rate);
+      return b && Number.isFinite(b.max) ? b.max * scale : null;
+    };
+    // The base tier's ceiling: the first MAGI figure that, once exceeded, starts
+    // costing a surcharge. Halving THAT is what puts a survivor into IRMAA on
+    // income the couple carried surcharge-free.
+    const irmaaEdge = (status) => {
+      const list = (IRMAA_THRESHOLDS_2025 || {})[status] || [];
+      return list.length && Number.isFinite(list[0].maxIncome) ? list[0].maxIncome * scale : null;
+    };
+    const out = [
+      { label: 'Standard deduction (incl. age 65+ add-on)', joint: worst.joint.deduction, single: worst.filingStatusOnly.deduction },
+      { label: 'Top of the 22% bracket (taxable income)', joint: edgeOf('married_joint', 0.22), single: edgeOf('single', 0.22) },
+      { label: 'Top of the 24% bracket (taxable income)', joint: edgeOf('married_joint', 0.24), single: edgeOf('single', 0.24) },
+      { label: 'First IRMAA surcharge tier (MAGI)', joint: irmaaEdge('married_joint'), single: irmaaEdge('single') },
+      { label: 'Net investment income tax floor (MAGI)', joint: (NIIT_THRESHOLDS || {}).married_joint, single: (NIIT_THRESHOLDS || {}).single },
+    ];
+    return out.filter(r => r.joint != null && r.single != null);
+  }, [worst, pi.inflationRate]);
+
+  const overlay = (
+    <div className="report-overlay fixed inset-0 bg-black/60 flex items-start justify-center z-50 overflow-y-auto py-8 px-4">
+      <div id="report-print" style={{ background: '#ffffff', color: '#0f172a' }} className="w-full max-w-4xl rounded-xl shadow-2xl p-8">
+        <div className="print-hide flex justify-end gap-2 mb-6">
+          <button onClick={() => window.print()} className={buttonPrimary}>Print / Save as PDF</button>
+          <button onClick={onClose} className={buttonSecondary}>Close</button>
+        </div>
+
+        <div style={{ borderBottom: '2px solid #0f172a', paddingBottom: 12, marginBottom: 16 }}>
+          <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0 }}>The Survivor's Tax Bill</h1>
+          <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>
+            What filing single costs the spouse left behind &nbsp;·&nbsp; Prepared {preparedOn}
+          </p>
+        </div>
+
+        {rows.length === 0 ? (
+          <p style={{ fontSize: 15, color: '#475569', lineHeight: 1.6 }}>
+            This report compares a married couple's tax bill with what the surviving spouse would pay
+            filing as a single taxpayer. Your plan does not have any married-filing-jointly years to
+            compare — either you file as a single taxpayer, or survivor modeling has already moved the
+            projection to a single filer for its whole length.
+          </p>
+        ) : (<>
+
+        <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.6, margin: '0 0 4px' }}>
+          At the first death the survivor files jointly for that year, then as a <strong>single</strong> taxpayer
+          for every year after. Almost every number that governs their tax roughly halves at once — the
+          standard deduction, the bracket edges, the IRMAA tiers, the investment-income surtax floor.
+          Income barely moves, because the survivor keeps the larger Social Security benefit and the entire
+          portfolio, with the same required distributions. The result is a higher tax bill on a household
+          that is now spending less.
+        </p>
+
+        <h2 style={h2}>The Cost, Year by Year</h2>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+          <div style={statBox}>
+            <p style={statLabel}>Worst Year</p>
+            <p style={{ ...statValue, color: '#dc2626' }}>{fmt(worst.filingPenalty)}</p>
+            <p style={{ ...note, marginTop: 0 }}>
+              extra tax in {worst.year}, at age {worst.myAge} &middot; {fmt(real(worst.filingPenalty, worst.year))} in today's dollars
+            </p>
+          </div>
+          <div style={statBox}>
+            <p style={statLabel}>Typical Year</p>
+            <p style={statValue}>{fmt(avgPenaltyReal)}</p>
+            <p style={{ ...note, marginTop: 0 }}>
+              average across {rows.length} joint years, in today's dollars
+            </p>
+          </div>
+          <div style={statBox}>
+            <p style={statLabel}>First Bracket Jump</p>
+            <p style={statValue}>{firstJump ? `${firstJump.year} (age ${firstJump.myAge})` : 'None'}</p>
+            <p style={{ ...note, marginTop: 0 }}>
+              {firstJump ? `${pct(firstJump.joint.bracket)} → ${pct(firstJump.filingStatusOnly.bracket)}` : 'same bracket throughout'}
+            </p>
+          </div>
+          <div style={statBox}>
+            <p style={statLabel}>First IRMAA Tier Jump</p>
+            <p style={statValue}>{firstIrmaaJump ? `${firstIrmaaJump.year} (age ${firstIrmaaJump.myAge})` : 'None'}</p>
+            <p style={{ ...note, marginTop: 0 }}>
+              {firstIrmaaJump
+                ? `tier ${firstIrmaaJump.joint.irmaaTier} → ${firstIrmaaJump.filingStatusOnly.irmaaTier}`
+                : 'no Medicare surcharge change'}
+            </p>
+          </div>
+        </div>
+
+        <h2 style={h2}>Side by Side — {worst.year}, the Worst Year</h2>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={th}>Same year, three ways</th>
+              <th style={thR}>Married, both living</th>
+              <th style={thR}>Survivor, same income</th>
+              <th style={thR}>Survivor, realistic</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style={td}>Social Security received</td>
+              <td style={tdR}>{fmt(worstRow.socialSecurity)}</td>
+              <td style={tdR}>{fmt(worstRow.socialSecurity)}</td>
+              <td style={tdR}>{fmt(Math.max(0, (worstRow.socialSecurity || 0) - worst.lostSS))}</td>
+            </tr>
+            <tr>
+              <td style={td}>Adjusted gross income</td>
+              <td style={tdR}>{fmt(worst.joint.agi)}</td>
+              <td style={tdR}>{fmt(worst.filingStatusOnly.agi)}</td>
+              <td style={tdR}>{fmt(worst.survivorRealistic.agi)}</td>
+            </tr>
+            <tr>
+              <td style={td}>Standard deduction</td>
+              <td style={tdR}>{fmt(worst.joint.deduction)}</td>
+              <td style={tdR}>{fmt(worst.filingStatusOnly.deduction)}</td>
+              <td style={tdR}>{fmt(worst.survivorRealistic.deduction)}</td>
+            </tr>
+            <tr>
+              <td style={td}>Top marginal bracket</td>
+              <td style={tdR}>{pct(worst.joint.bracket)}</td>
+              <td style={{ ...tdR, color: worst.bracketJumped ? '#dc2626' : undefined, fontWeight: worst.bracketJumped ? 700 : undefined }}>{pct(worst.filingStatusOnly.bracket)}</td>
+              <td style={tdR}>{pct(worst.survivorRealistic.bracket)}</td>
+            </tr>
+            <tr>
+              <td style={td}>Federal income tax</td>
+              <td style={tdR}>{fmt(worst.joint.federal)}</td>
+              <td style={tdR}>{fmt(worst.filingStatusOnly.federal)}</td>
+              <td style={tdR}>{fmt(worst.survivorRealistic.federal)}</td>
+            </tr>
+            <tr>
+              <td style={td}>State income tax</td>
+              <td style={tdR}>{fmt(worst.joint.stateTax)}</td>
+              <td style={tdR}>{fmt(worst.filingStatusOnly.stateTax)}</td>
+              <td style={tdR}>{fmt(worst.survivorRealistic.stateTax)}</td>
+            </tr>
+            <tr>
+              <td style={td}>Medicare IRMAA surcharge</td>
+              <td style={tdR}>{fmt(worst.joint.irmaa)}</td>
+              <td style={{ ...tdR, color: worst.irmaaTierJumped ? '#dc2626' : undefined, fontWeight: worst.irmaaTierJumped ? 700 : undefined }}>{fmt(worst.filingStatusOnly.irmaa)}</td>
+              <td style={tdR}>{fmt(worst.survivorRealistic.irmaa)}</td>
+            </tr>
+            <tr style={{ background: '#f8fafc' }}>
+              <td style={{ ...td, fontWeight: 700 }}>Total tax</td>
+              <td style={{ ...tdR, fontWeight: 700 }}>{fmt(worst.joint.total)}</td>
+              <td style={{ ...tdR, fontWeight: 700, color: '#dc2626' }}>{fmt(worst.filingStatusOnly.total)}</td>
+              <td style={{ ...tdR, fontWeight: 700 }}>{fmt(worst.survivorRealistic.total)}</td>
+            </tr>
+            <tr>
+              <td style={{ ...td, fontWeight: 700 }}>Difference vs. filing jointly</td>
+              <td style={tdR}>—</td>
+              <td style={{ ...tdR, fontWeight: 700, color: '#dc2626' }}>+{fmt(worst.filingPenalty)}</td>
+              <td style={{ ...tdR, fontWeight: 700, color: '#dc2626' }}>+{fmt(worst.realisticDelta)}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p style={note}>
+          <strong>Survivor, same income</strong> holds income fixed and changes only the filing status. It
+          isolates what the halved thresholds cost by themselves — the figure that surprises people.
+          <strong> Survivor, realistic</strong> also drops the Social Security the household stops
+          receiving: the survivor keeps the larger of the two checks and loses the other.
+          {worst.lostSS > 0
+            ? ` In ${worst.year} that is ${fmt(worst.lostSS)}${assumedSplit ? ', estimated as half the household benefit because your plan does not split Social Security by person' : ''}. The bill falls from the first case but stays well above what the couple paid together, because the thresholds fell faster than the income did.`
+            : ` In ${worst.year} neither benefit has started, so nothing is lost and the two survivor columns are identical — the entire difference is the filing status.`}
+        </p>
+
+        <h2 style={h2}>Why It Happens — the Thresholds Themselves ({worst.year})</h2>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={th}>Threshold</th>
+              <th style={thR}>Married filing jointly</th>
+              <th style={thR}>Single</th>
+              <th style={thR}>Change</th>
+            </tr>
+          </thead>
+          <tbody>
+            {thresholdRows.map(t => (
+              <tr key={t.label}>
+                <td style={td}>{t.label}</td>
+                <td style={tdR}>{fmt(t.joint)}</td>
+                <td style={tdR}>{fmt(t.single)}</td>
+                <td style={{ ...tdR, color: '#dc2626' }}>
+                  {t.joint > 0 ? `−${Math.round((1 - t.single / t.joint) * 100)}%` : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p style={note}>
+          Figures for {worst.year} in that year's dollars. The deduction rows come from your plan's own
+          ages, so the age-65 add-on and the senior deduction are the real amounts rather than a flat
+          halving. Note that the NIIT floor is not inflation-indexed by statute — it is the same dollar
+          figure every year, so it binds harder as the plan runs.
+        </p>
+
+        <h2 style={h2}>What This Means for Roth Conversions</h2>
+        <div style={{ borderLeft: '4px solid #d97706', background: '#fffbeb', borderRadius: 6, padding: '12px 16px', breakInside: 'avoid' }}>
+          <p style={{ fontSize: 14, color: '#334155', margin: 0, lineHeight: 1.6 }}>
+            The conversion window is usually described as closing at the first required distribution. It
+            closes earlier than that: <strong>it closes at the first death</strong>. Every dollar converted
+            while both spouses are living is taxed at joint rates against joint thresholds. The same dollar
+            left in a pre-tax account and withdrawn by the survivor is taxed at single rates against
+            thresholds roughly half the size
+            {firstJump ? ` — in this plan, ${pct(firstJump.joint.bracket)} becomes ${pct(firstJump.filingStatusOnly.bracket)} from ${firstJump.year} on` : ''}
+            {firstIrmaaJump ? `, with a Medicare surcharge tier crossed on top of it` : ''}.
+          </p>
+          <p style={{ fontSize: 14, color: '#334155', margin: '10px 0 0', lineHeight: 1.6 }}>
+            Across the {rows.length} joint years in this plan, the filing-status change alone is worth{' '}
+            <strong>{fmtK(lifetimePenaltyReal)}</strong> in today's dollars ({fmtK(lifetimePenalty)} nominal)
+            if the survivor faced it in every one of them. That
+            figure is not a prediction — nobody pays it in every year — but it is the size of the prize that
+            filling the joint brackets now is competing for. It is a reason to convert <em>more</em> in the
+            joint years than a bracket-only rule would suggest, and a reason not to leave the whole window
+            to the last few years before required distributions begin.
+          </p>
+        </div>
+
+        <h2 style={h2}>Every Joint Year</h2>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={th}>Year</th><th style={th}>Age</th>
+              <th style={thR}>AGI</th>
+              <th style={thR}>Tax filing jointly</th>
+              <th style={thR}>Tax as survivor</th>
+              <th style={thR}>Extra</th>
+              <th style={th}>Bracket</th>
+              <th style={th}>IRMAA tier</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.year} style={worst && r.year === worst.year ? { background: '#fef3c7' } : undefined}>
+                <td style={td}>{r.year}</td>
+                <td style={td}>{r.myAge}</td>
+                <td style={tdR}>{fmt(r.joint.agi)}</td>
+                <td style={tdR}>{fmt(r.joint.total)}</td>
+                <td style={tdR}>{fmt(r.filingStatusOnly.total)}</td>
+                <td style={{ ...tdR, color: r.filingPenalty > 0 ? '#dc2626' : undefined, fontWeight: 600 }}>
+                  {r.filingPenalty > 0 ? '+' + fmt(r.filingPenalty) : '—'}
+                </td>
+                <td style={{ ...td, color: r.bracketJumped ? '#dc2626' : undefined }}>
+                  {pct(r.joint.bracket)} → {pct(r.filingStatusOnly.bracket)}
+                </td>
+                <td style={{ ...td, color: r.irmaaTierJumped ? '#dc2626' : undefined }}>
+                  {r.joint.irmaaTier === null
+                    ? '—'
+                    : `${r.joint.irmaaTier} → ${r.filingStatusOnly.irmaaTier}`}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p style={note}>
+          Highlighted row = the worst year. &quot;Tax as survivor&quot; holds that year's income fixed and
+          changes only the filing status, so the columns are directly comparable. Red marks a year where
+          the survivor lands in a higher bracket or a higher Medicare surcharge tier than the couple did.
+          All figures are nominal (future) dollars.
+        </p>
+
+        </>)}
+
+        <p style={{ fontSize: 11, color: '#64748b', marginTop: 24, lineHeight: 1.5, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
+          This report is a directional planning tool generated from the assumptions in your plan, not tax or
+          investment advice. It prices each year twice under 2026 tax law inflated forward; it does not model
+          estate tax, step-up in basis, beneficiary elections, or the year-of-death return itself (which is
+          still filed jointly). Confirm decisions with a qualified professional.
+        </p>
+      </div>
+    </div>
+  );
+
+  return ReactDOM.createPortal(overlay, document.body);
+}
+
 // Small chooser shown by the sidebar "Reports" button.
 function ReportMenu({ onPick, onClose }) {
   return (
@@ -13973,6 +14322,10 @@ function ReportMenu({ onPick, onClose }) {
           <button onClick={() => onPick('next12')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
             <div className="font-semibold text-slate-100">✅ Your Next 12 Months</div>
             <div className="text-xs text-slate-400 mt-1">Action checklist for this year: RMDs, conversion room, IRMAA watch, estimated taxes.</div>
+          </button>
+          <button onClick={() => onPick('survivor')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
+            <div className="font-semibold text-slate-100">🕯️ The Survivor's Tax Bill</div>
+            <div className="text-xs text-slate-400 mt-1">What filing single costs the surviving spouse: halved brackets, deduction, and IRMAA tiers — and why the conversion window closes at the first death.</div>
           </button>
         </div>
         <div className="flex justify-end mt-5">
@@ -15961,6 +16314,14 @@ function RetirementPlanner() {
           projections={projections}
           personalInfo={personalInfo}
           accounts={accounts}
+          incomeStreams={incomeStreams}
+          onClose={() => setShowReport(null)}
+        />
+      )}
+      {showReport === 'survivor' && (
+        <SurvivorTaxReport
+          projections={projections}
+          personalInfo={personalInfo}
           incomeStreams={incomeStreams}
           onClose={() => setShowReport(null)}
         />
