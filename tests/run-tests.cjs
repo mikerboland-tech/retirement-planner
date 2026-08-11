@@ -6428,6 +6428,125 @@ section('P54 — the survivor\'s tax bill: what halved thresholds cost the spous
   }
 }
 
+section('P55 — why each conversion is the size it is: the binding constraint, reported');
+{
+  // A roadmap that prints amounts and nothing else cannot tell a year that
+  // filled its bracket from one that ran the IRA dry — both are just numbers.
+  // The engine has always known which clamp fired; it simply never said. These
+  // assertions pin each constraint to a scenario that can only produce it.
+  const build = (piOver, acctOver) => {
+    const s = baseScenario({
+      myAge: 60, spouseAge: 58, myBirthYear: TODAY_YEAR - 60, spouseBirthYear: TODAY_YEAR - 58,
+      myRetirementAge: 62, spouseRetirementAge: 62, legacyAge: 90,
+      state: 'Missouri', inflationRate: 0, desiredRetirementIncome: 110000,
+      healthcareModel: 'none', medicalInflation: 0,
+      withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+      rothConversionStartAge: 62, rothConversionEndAge: 75, ...piOver,
+    });
+    s.accts = acctOver || [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 1400000, contribution: 0, cagr: 0.05, startAge: 60, stopAge: 62, owner: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 100000, contribution: 0, cagr: 0.05, startAge: 60, stopAge: 62, owner: 'me' },
+      { id: 3, name: 'Brok', type: 'brokerage', balance: 500000, contribution: 0, cagr: 0.05, startAge: 60, stopAge: 62, owner: 'joint', costBasisPercent: 0.6 },
+    ];
+    s.streams = [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 44000, startAge: 70, endAge: 95, cola: 0, owner: 'me' },
+      { id: 2, name: 'Sp SS', type: 'social_security', amount: 22000, startAge: 67, endAge: 95, cola: 0, owner: 'spouse' },
+    ];
+    const rows = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+    return { rows, at: age => rows.find(r => r.myAge === age) };
+  };
+
+  // ── No strategy configured says so, in every year ────────────────────────
+  {
+    const { rows } = build({ rothConversionStartAge: 0, rothConversionEndAge: 0 });
+    eq(rows.every(r => r.rothConversionLimit === 'none'), true,
+      'a plan with no conversion strategy reports none, not an empty bracket');
+    eq(rows.every(r => (r.rothConversion || 0) === 0), true, 'and converts nothing');
+  }
+
+  // ── Outside the window is distinguishable from inside it with no room ────
+  {
+    const { at } = build({ rothConversionBracket: '24%' });
+    eq(at(60).rothConversionLimit, 'window', 'before the start age, the window is the reason');
+    eq(at(61).rothConversionLimit, 'window', 'still the window the year before it opens');
+    eq(at(62).rothConversionLimit, 'ceiling', 'the first year inside it fills to the bracket');
+    eq(at(76).rothConversionLimit, 'window', 'and it closes again after the end age');
+  }
+
+  // ── Filling a bracket is the intended state, and is labelled as such ─────
+  {
+    const { at } = build({ rothConversionBracket: '24%' });
+    const r = at(62);
+    eq(r.rothConversionLimit, 'ceiling', 'a bracket-fill year is bound by its ceiling');
+    gt(r.rothConversion, 0, 'and actually converts');
+    // The label's whole job is to separate this from 'balance'. A ceiling year
+    // has money left it chose not to convert; a balance year does not. That is
+    // the distinction worth pinning here — bracket-fill precision itself is
+    // P24's problem, not this pack's.
+    gt(r.preTaxBalance, 0, 'and stopped with pre-tax money still in the account, by choice');
+  }
+
+  // ── An IRMAA-tier ceiling reports the same way ───────────────────────────
+  {
+    const { at } = build({ rothConversionIrmaaTier: 1 });
+    eq(at(62).rothConversionLimit, 'ceiling', 'an IRMAA-tier target is a ceiling too');
+    gt(at(62).rothConversion, 0, 'and it converts something');
+  }
+
+  // ── A fixed amount that is delivered in full is not "ceiling" ────────────
+  // The distinction matters: a fixed-amount year that hits its number has
+  // headroom left over, and telling the reader it was "bound by the ceiling"
+  // hides exactly the room they might want to use.
+  {
+    const { at } = build({ rothConversionAmount: 40000, rothConversionInflationAdjust: false });
+    eq(at(62).rothConversionLimit, 'target', 'a fixed amount delivered in full reports target');
+    approx(at(62).rothConversion, 40000, 'at the amount asked for', 1);
+  }
+
+  // ── The pre-tax floor is its own answer ──────────────────────────────────
+  {
+    const { at } = build({ rothConversionAmount: 400000, rothConversionInflationAdjust: false,
+                           rothConversionPreTaxFloor: 1200000 });
+    const r = at(62);
+    eq(r.rothConversionLimit, 'floor', 'the preserve-pre-tax floor is reported when it binds');
+    lt(r.rothConversion, 400000, 'and it really did cut the amount asked for');
+  }
+
+  // ── Running the IRA dry reports balance, not ceiling ─────────────────────
+  // This is the case a bare amount column cannot express: the plan stops
+  // converting while the strategy still says to convert, because there is
+  // nothing left. A reader who cannot see that will go looking for a bug.
+  {
+    const { rows, at } = build({ rothConversionBracket: '32%' }, [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 200000, contribution: 0, cagr: 0, startAge: 60, stopAge: 62, owner: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 100000, contribution: 0, cagr: 0, startAge: 60, stopAge: 62, owner: 'me' },
+      { id: 3, name: 'Brok', type: 'brokerage', balance: 900000, contribution: 0, cagr: 0, startAge: 60, stopAge: 62, owner: 'joint', costBasisPercent: 0.6 },
+    ]);
+    const dry = rows.find(r => r.myAge > 62 && r.myAge <= 75 && (r.preTaxBalance || 0) <= 0);
+    eq(!!dry, true, 'a small IRA against a 32% target does run out inside the window');
+    eq(dry.rothConversionLimit, 'balance', 'and the year it does says so');
+    eq(dry.rothConversion, 0, 'converting nothing, because there is nothing to convert');
+  }
+
+  // ── Income already above the ceiling is "no room", not "ceiling" ─────────
+  // Filling to 10% while drawing six figures of pre-tax income converts $0 —
+  // but for the opposite reason to an empty account, and the fix is different.
+  {
+    const { at } = build({ rothConversionBracket: '10%' });
+    const r = at(62);
+    eq(r.rothConversion, 0, 'a 10% target leaves nothing to convert at this income');
+    eq(r.rothConversionLimit, 'noRoom', 'and the reason is that income already cleared the ceiling');
+  }
+
+  // ── Every row carries a reason, always ───────────────────────────────────
+  {
+    const valid = ['none', 'window', 'ceiling', 'noRoom', 'target', 'floor', 'balance'];
+    const { rows } = build({ rothConversionBracket: '24%' });
+    eq(rows.every(r => valid.includes(r.rothConversionLimit)), true,
+      'no year is left without an explanation, or given one nobody can render');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

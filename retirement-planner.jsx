@@ -48,7 +48,7 @@ const {
   rothConversionIsPlanned, withoutRothConversions, withRothConversionTarget,
   rothConversionModeLabel, rothConversionModeOf,
   taxBreakpoints, marginalCostOfNextDollar,
-  survivorTaxComparison, survivorSSLoss,
+  survivorTaxComparison, survivorSSLoss, scoreRothStrategy,
   getFederalDeduction, NIIT_THRESHOLDS,
   IRMAA_FILL_SAFETY_MARGIN,
 } = PlannerEngine;
@@ -14308,6 +14308,360 @@ function SurvivorTaxReport({ projections, personalInfo, incomeStreams, onClose }
   return ReactDOM.createPortal(overlay, document.body);
 }
 
+// ============================================
+// Roth Conversion Roadmap — the plan's conversion strategy, year by year, with
+// the one thing an amount column can never say: WHY each year is that size.
+//
+// A conversion of $0 can mean four different things — the window is shut, the
+// income already cleared the ceiling, the pre-tax floor is protecting a balance,
+// or the IRA is empty — and each has a different fix. The engine now reports the
+// binding constraint on every row (rothConversionLimit), which is what turns a
+// column of numbers into a plan someone can act on.
+//
+// Runs a second projection with conversions off so the "what it changes" section
+// is a real difference rather than an assertion. That is expensive, but a report
+// is opened deliberately, not re-rendered on a slider drag.
+// ============================================
+// See the bracket calculation in RothRoadmapReport: a conversion solved against
+// a bracket top can finish a few hundred dollars past it, because the draw that
+// pays its tax bill is sized afterwards and is itself ordinary income.
+const BRACKET_FILL_EDGE_TOLERANCE = 1000;
+
+const CONVERSION_LIMIT_COPY = {
+  ceiling:  { label: 'Filled the target',   tone: 'good',    detail: 'Converted everything the target allows without crossing it.' },
+  target:   { label: 'Hit the set amount',  tone: 'neutral', detail: 'Delivered the fixed amount in full — there may be room left above it.' },
+  noRoom:   { label: 'No room left',        tone: 'warn',    detail: 'Income already reached the ceiling before any conversion.' },
+  balance:  { label: 'Pre-tax exhausted',   tone: 'warn',    detail: 'The strategy still called for a conversion; the account had nothing left.' },
+  floor:    { label: 'Preserve-floor',      tone: 'neutral', detail: 'Stopped by the pre-tax balance you asked the plan to keep.' },
+  window:   { label: 'Outside the window',  tone: 'muted',   detail: 'This year falls outside the conversion start/end ages.' },
+  none:     { label: 'No strategy',         tone: 'muted',   detail: 'No Roth conversion strategy is configured.' },
+};
+
+function RothRoadmapReport({ projections, personalInfo, accounts, incomeStreams, assets,
+                             oneTimeEvents, recurringExpenses, onClose }) {
+  const pi = personalInfo;
+  const preparedOn = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const fmt = (n) => '$' + Math.round(n || 0).toLocaleString('en-US');
+  // Rounding to thousands turns anything under $500 into "$0K", which reads as a
+  // formatting failure rather than as zero. Below a thousand, print the figure.
+  const fmtK = (n) => (Math.abs(n) >= 1000000 ? '$' + (n / 1000000).toFixed(2) + 'M'
+    : Math.abs(n) < 1000 ? fmt(n)
+    : '$' + Math.round((n || 0) / 1000) + 'K');
+  const pct1 = (n) => (n * 100).toFixed(1) + '%';
+
+  const planned = conversionIsActive(pi);
+  const strategy = conversionModeLabel(pi);
+  const infl = pi.inflationRate ?? 0.03;
+  const thisYear = new Date().getFullYear();
+  const real = (n, year) => (n || 0) / Math.pow(1 + infl, Math.max(0, year - thisYear));
+
+  // The baseline: the identical plan with every conversion mode cleared. Every
+  // mode, not a subset — leaving one standing is what once made the simulator
+  // compare a plan to itself.
+  const baseline = useMemo(() => {
+    if (!planned) return null;
+    const withoutPI = { ...withoutRothConversions(pi), rothConversionPreTaxFloor: 0 };
+    return computeProjections(withoutPI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
+  }, [planned, pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
+
+  const rows = useMemo(() => {
+    const out = [];
+    let cumulative = 0, cumulativeCost = 0;
+    (projections || []).forEach(r => {
+      const amount = r.rothConversion || 0;
+      if (amount <= 0 && (r.rothConversionLimit === 'window' || r.rothConversionLimit === 'none')) return;
+      const cost = baseline ? conversionCostComponents(projections, baseline, r.myAge, amount) : null;
+      cumulative += amount;
+      cumulativeCost += cost ? cost.totalCost : 0;
+      out.push({
+        year: r.year, myAge: r.myAge, amount,
+        limit: r.rothConversionLimit || 'none',
+        cost: cost ? cost.totalCost : null,
+        rate: cost ? cost.rate : null,
+        taxableIncome: r.taxableIncome, magi: r.magi,
+        // The statutory bracket the year lands in, so the "per $" column can be
+        // read against it. The gap between the two is the entire argument for
+        // pricing a conversion properly instead of quoting a bracket.
+        //
+        // Measured with a $1,000 tolerance, and that is not cosmetic tidying.
+        // A bracket-fill year genuinely lands a few hundred dollars over its
+        // target: the engine solves the conversion against the ceiling, then
+        // sizes the withdrawal that pays the conversion's tax bill, and that
+        // withdrawal is ordinary income too. The estimate used during the solve
+        // is settled to the dollar but the executed draw is not identical, so a
+        // year filled to the top of 24% typically ends ~$150 inside 32%.
+        // Reporting "32%" there would be true and useless. The residual is
+        // called out in the footnote rather than hidden.
+        bracket: topMarginalBracket(
+          Math.max(0, (r.taxableIncome || 0) - (r.realizedCapitalGains || 0)
+                      - (r.brokerageDividends || 0) - (r.federalDeduction || 0)
+                      - BRACKET_FILL_EDGE_TOLERANCE),
+          r.filingStatus || pi.filingStatus || 'married_joint',
+          r.year - BASE_TAX_YEAR, infl),
+        preTaxBalance: r.preTaxBalance, rothBalance: r.rothBalance,
+        cumulative, cumulativeCost,
+      });
+    });
+    return out;
+  }, [projections, baseline]);
+
+  const converting = rows.filter(r => r.amount > 0);
+  const totalConverted = converting.reduce((s, r) => s + r.amount, 0);
+  const totalCost = converting.reduce((s, r) => s + (r.cost || 0), 0);
+  const blendedRate = totalConverted > 0 ? totalCost / totalConverted : 0;
+  const firstConv = converting[0];
+  const lastConv = converting[converting.length - 1];
+  // Years the strategy asked for a conversion and got nothing. These are the
+  // rows worth acting on — each has a different remedy.
+  const stalled = rows.filter(r => r.amount <= 0 && (r.limit === 'noRoom' || r.limit === 'balance' || r.limit === 'floor'));
+
+  // What it changes. Scored on the same terms the Roth optimizer ranks by, so
+  // this report and that tool cannot tell different stories about one plan.
+  const effect = useMemo(() => {
+    if (!baseline) return null;
+    const opts = { legacyAge: pi.legacyAge || 95, retirementAge: pi.myRetirementAge,
+                   heirTaxRate: pi.heirTaxRate ?? 0.25 };
+    const w = scoreRothStrategy(projections, opts);
+    const o = scoreRothStrategy(baseline, opts);
+    if (!w || !o) return null;
+    const rmdSum = (proj) => (proj || []).reduce((s, p) => s + (p.rmd || 0), 0);
+    const firstRmd = (proj) => (proj || []).find(p => (p.rmd || 0) > 0);
+    return {
+      w, o,
+      lifetimeRmdWith: rmdSum(projections), lifetimeRmdWithout: rmdSum(baseline),
+      firstRmdWith: firstRmd(projections), firstRmdWithout: firstRmd(baseline),
+    };
+  }, [baseline, projections, pi]);
+
+  const th = { textAlign: 'left', padding: '4px 8px', borderBottom: '2px solid #0f172a', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.03em', color: '#334155' };
+  const thR = { ...th, textAlign: 'right' };
+  const td = { padding: '4px 8px', borderBottom: '1px solid #e2e8f0', fontSize: 12 };
+  const tdR = { ...td, textAlign: 'right' };
+  const h2 = { fontSize: 16, fontWeight: 700, margin: '22px 0 8px', paddingBottom: 4, borderBottom: '1px solid #cbd5e1', breakAfter: 'avoid' };
+  const statBox = { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6, padding: '8px 12px' };
+  const statLabel = { fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#64748b', margin: 0 };
+  const statValue = { fontSize: 17, fontWeight: 700, margin: '2px 0 0' };
+  const note = { fontSize: 11, color: '#64748b', margin: '6px 0 0', lineHeight: 1.5 };
+  const TONE = { good: '#059669', neutral: '#334155', warn: '#b45309', muted: '#94a3b8' };
+
+  const overlay = (
+    <div className="report-overlay fixed inset-0 bg-black/60 flex items-start justify-center z-50 overflow-y-auto py-8 px-4">
+      <div id="report-print" style={{ background: '#ffffff', color: '#0f172a' }} className="w-full max-w-4xl rounded-xl shadow-2xl p-8">
+        <div className="print-hide flex justify-end gap-2 mb-6">
+          <button onClick={() => window.print()} className={buttonPrimary}>Print / Save as PDF</button>
+          <button onClick={onClose} className={buttonSecondary}>Close</button>
+        </div>
+
+        <div style={{ borderBottom: '2px solid #0f172a', paddingBottom: 12, marginBottom: 16 }}>
+          <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0 }}>Roth Conversion Roadmap</h1>
+          <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>
+            Year by year, what to convert and what stops it &nbsp;·&nbsp; Prepared {preparedOn}
+          </p>
+        </div>
+
+        {!planned ? (
+          <p style={{ fontSize: 15, color: '#475569', lineHeight: 1.6 }}>
+            No Roth conversion strategy is configured in this plan. Turn one on under Personal Info —
+            choose a target bracket, an IRMAA tier to stay under, or a fixed annual amount — and this
+            report will lay out what gets converted in each year, what stops it, and what it costs.
+          </p>
+        ) : converting.length === 0 ? (
+          <p style={{ fontSize: 15, color: '#475569', lineHeight: 1.6 }}>
+            This plan is set to convert by {strategy}, but no year in the projection actually converts
+            anything. {stalled.length > 0
+              ? `The reason on every year is the same one: ${CONVERSION_LIMIT_COPY[stalled[0].limit].detail.toLowerCase()}`
+              : 'Check that the conversion window overlaps the projection and that a pre-tax and a Roth account both exist.'}
+          </p>
+        ) : (<>
+
+        <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.6, margin: '0 0 4px' }}>
+          This plan converts by <strong>{strategy}</strong>, between ages{' '}
+          <strong>{firstConv.myAge}</strong> and <strong>{lastConv.myAge}</strong>. Each dollar moved from a
+          pre-tax account to a Roth is taxed as ordinary income now so that it — and everything it earns
+          afterwards — is never taxed again, and never forced out by a required distribution. The question
+          is never whether to convert; it is how much, in which years, and what stops the plan short.
+        </p>
+
+        <h2 style={h2}>The Strategy in Four Numbers</h2>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+          <div style={statBox}>
+            <p style={statLabel}>Total Converted</p>
+            <p style={statValue}>{fmtK(totalConverted)}</p>
+            <p style={{ ...note, marginTop: 0 }}>across {converting.length} years</p>
+          </div>
+          <div style={statBox}>
+            <p style={statLabel}>Tax Paid to Convert</p>
+            <p style={statValue}>{fmtK(totalCost)}</p>
+            <p style={{ ...note, marginTop: 0 }}>income tax, IRMAA and lost ACA subsidy</p>
+          </div>
+          <div style={statBox}>
+            <p style={statLabel}>Blended Cost per Dollar</p>
+            <p style={{ ...statValue, color: blendedRate > 0.30 ? '#b45309' : '#0f172a' }}>{pct1(blendedRate)}</p>
+            <p style={{ ...note, marginTop: 0 }}>all-in, not just the bracket</p>
+          </div>
+          <div style={statBox}>
+            <p style={statLabel}>Pre-Tax Left at {lastConv.myAge}</p>
+            <p style={statValue}>{fmtK(lastConv.preTaxBalance)}</p>
+            <p style={{ ...note, marginTop: 0 }}>
+              {effect ? `vs ${fmtK((baseline.find(p => p.myAge === lastConv.myAge) || {}).preTaxBalance)} without converting` : 'at the last converting year'}
+            </p>
+          </div>
+        </div>
+
+        <h2 style={h2}>The Roadmap</h2>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={th}>Year</th><th style={th}>Age</th>
+              <th style={thR}>Convert</th>
+              <th style={th}>What stopped it</th>
+              <th style={thR}>Bracket</th>
+              <th style={thR}>Cost</th>
+              <th style={thR}>Per $</th>
+              <th style={thR}>Pre-tax left</th>
+              <th style={thR}>Cumulative</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => {
+              const c = CONVERSION_LIMIT_COPY[r.limit] || CONVERSION_LIMIT_COPY.none;
+              return (
+                <tr key={r.year} style={r.amount <= 0 ? { background: '#fffbeb' } : undefined}>
+                  <td style={td}>{r.year}</td>
+                  <td style={td}>{r.myAge}</td>
+                  <td style={{ ...tdR, fontWeight: r.amount > 0 ? 600 : 400 }}>{r.amount > 0 ? fmt(r.amount) : '—'}</td>
+                  <td style={{ ...td, color: TONE[c.tone] }}>{c.label}</td>
+                  <td style={tdR}>{(r.bracket * 100).toFixed(0)}%</td>
+                  <td style={tdR}>{r.cost != null ? fmt(r.cost) : '—'}</td>
+                  <td style={{ ...tdR, fontWeight: 600, color: r.rate != null && r.rate > r.bracket * 1.25 ? '#b45309' : undefined }}>
+                    {r.rate != null ? pct1(r.rate) : '—'}
+                  </td>
+                  <td style={tdR}>{fmt(r.preTaxBalance)}</td>
+                  <td style={tdR}>{fmt(r.cumulative)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <p style={note}>
+          Shaded rows converted nothing. &quot;Bracket&quot; is the statutory rate the year reaches;
+          &quot;per $&quot; is what the conversion actually costs — the extra income tax it causes, the
+          Medicare surcharge it triggers <em>two years later</em>, and any ACA premium subsidy it burns,
+          divided by the amount converted. The gap between the two columns is the point of this report.
+          It comes from three places a bracket cannot show: the conversion drags Social Security into tax,
+          it crosses surcharge and phaseout edges, and — unless you have set the tax to come from a taxable
+          account — the withdrawal that pays the tax bill is itself taxable income, which is why filling to
+          the top of a bracket costs more per dollar than the bracket says. That last effect also means a
+          bracket-fill year usually ends a few hundred dollars <em>past</em> the bracket it was aiming at;
+          the column reports the bracket filled, within $1,000. Nominal (future) dollars.
+          {' '}{pi.rothConversionTaxSource === 'brokerage'
+            ? 'This plan pays the conversion tax from a taxable account, so the bill does not add ordinary income of its own — the cheaper of the two options.'
+            : 'This plan pays the conversion tax from pre-tax withdrawals, so every tax dollar is itself taxed. Paying it from a taxable account instead (Personal Info → conversion tax source) removes that layer and is usually the single largest reduction available to this column.'}
+        </p>
+
+        <h2 style={h2}>What Stopped It — and What to Do About It</h2>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead><tr><th style={th}>Reason</th><th style={th}>Years</th><th style={th}>What it means</th></tr></thead>
+          <tbody>
+            {Object.keys(CONVERSION_LIMIT_COPY)
+              .filter(k => rows.some(r => r.limit === k))
+              .map(k => {
+                const hits = rows.filter(r => r.limit === k);
+                const c = CONVERSION_LIMIT_COPY[k];
+                return (
+                  <tr key={k}>
+                    <td style={{ ...td, color: TONE[c.tone], fontWeight: 600, whiteSpace: 'nowrap' }}>{c.label}</td>
+                    <td style={{ ...td, whiteSpace: 'nowrap' }}>
+                      {hits.length === 1 ? hits[0].year : `${hits[0].year}–${hits[hits.length - 1].year} (${hits.length})`}
+                    </td>
+                    <td style={td}>{c.detail}</td>
+                  </tr>
+                );
+              })}
+          </tbody>
+        </table>
+        {stalled.length > 0 && (
+          <div style={{ borderLeft: '4px solid #d97706', background: '#fffbeb', borderRadius: 6, padding: '12px 16px', marginTop: 12, breakInside: 'avoid' }}>
+            <p style={{ fontSize: 14, color: '#334155', margin: 0, lineHeight: 1.6 }}>
+              <strong>{stalled.length} year{stalled.length === 1 ? '' : 's'} inside your window converted nothing.</strong>{' '}
+              {stalled.some(r => r.limit === 'balance')
+                ? 'Where the pre-tax account ran dry, the window is longer than the money — the strategy is finished and the remaining years are doing nothing. '
+                : ''}
+              {stalled.some(r => r.limit === 'noRoom')
+                ? 'Where income had already cleared the ceiling, the target is set below what this plan’s own withdrawals produce — a higher bracket or tier would convert something rather than nothing. '
+                : ''}
+              {stalled.some(r => r.limit === 'floor')
+                ? 'Where the preserve-pre-tax floor bound it, that floor is doing what you asked; the question is only whether you still want it that high. '
+                : ''}
+            </p>
+          </div>
+        )}
+
+        {effect && (<>
+          <h2 style={h2}>What It Changes</h2>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th style={th}>Measured to age {pi.legacyAge || 95}</th>
+                <th style={thR}>With conversions</th>
+                <th style={thR}>Without</th>
+                <th style={thR}>Difference</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                { k: 'Lifetime income tax + surcharges', a: effect.w.lifetimeTax, b: effect.o.lifetimeTax, lowerBetter: true },
+                { k: 'Lifetime Medicare IRMAA', a: effect.w.lifetimeIRMAA, b: effect.o.lifetimeIRMAA, lowerBetter: true },
+                { k: 'Lifetime required distributions', a: effect.lifetimeRmdWith, b: effect.lifetimeRmdWithout, lowerBetter: true },
+                { k: 'Pre-tax balance at the end', a: effect.w.endPreTax, b: effect.o.endPreTax, lowerBetter: true },
+                { k: 'Roth balance at the end', a: effect.w.endRoth, b: effect.o.endRoth, lowerBetter: false },
+                { k: `After-tax legacy (heirs at ${Math.round((pi.heirTaxRate ?? 0.25) * 100)}%)`, a: effect.w.afterTaxLegacy, b: effect.o.afterTaxLegacy, lowerBetter: false },
+              ].map(m => {
+                const diff = m.a - m.b;
+                const good = m.lowerBetter ? diff < 0 : diff > 0;
+                return (
+                  <tr key={m.k} style={m.k.startsWith('After-tax') ? { background: '#f8fafc' } : undefined}>
+                    <td style={{ ...td, fontWeight: m.k.startsWith('After-tax') ? 700 : 400 }}>{m.k}</td>
+                    <td style={tdR}>{fmt(m.a)}</td>
+                    <td style={tdR}>{fmt(m.b)}</td>
+                    <td style={{ ...tdR, fontWeight: 700, color: Math.abs(diff) < 1 ? '#64748b' : (good ? '#059669' : '#dc2626') }}>
+                      {diff === 0 ? '—' : (diff > 0 ? '+' : '−') + fmt(Math.abs(diff))}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <p style={note}>
+            Green is the direction that favours the plan: less lifetime tax, smaller forced distributions,
+            more after-tax legacy. Lifetime income tax usually goes <em>up</em> with conversions — that is
+            the bill being paid on purpose, early and at a chosen rate, instead of later at whatever rate
+            the survivor or the heirs face. The line that decides whether it was worth it is the last one.
+            {effect.firstRmdWithout && effect.firstRmdWith
+              ? ` The first required distribution falls from ${fmt(effect.firstRmdWithout.rmd)} to ${fmt(effect.firstRmdWith.rmd)} in ${effect.firstRmdWith.year}.`
+              : effect.firstRmdWithout
+                ? ` Converting removes the required distributions entirely — without it the first would be ${fmt(effect.firstRmdWithout.rmd)} in ${effect.firstRmdWithout.year}.`
+                : ''}
+          </p>
+        </>)}
+
+        </>)}
+
+        <p style={{ fontSize: 11, color: '#64748b', marginTop: 24, lineHeight: 1.5, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
+          This report is a directional planning tool generated from the assumptions in your plan, not tax or
+          investment advice. The comparison runs your plan twice — once as configured, once with every
+          conversion setting cleared — under 2026 tax law inflated forward at your stated inflation rate.
+          It does not model state-specific conversion treatment beyond your state's own schedule, the
+          five-year rule on converted principal, or recharacterization (repealed for conversions).
+          Confirm decisions with a qualified professional.
+        </p>
+      </div>
+    </div>
+  );
+
+  return ReactDOM.createPortal(overlay, document.body);
+}
+
 // Small chooser shown by the sidebar "Reports" button.
 function ReportMenu({ onPick, onClose }) {
   return (
@@ -14322,6 +14676,10 @@ function ReportMenu({ onPick, onClose }) {
           <button onClick={() => onPick('next12')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
             <div className="font-semibold text-slate-100">✅ Your Next 12 Months</div>
             <div className="text-xs text-slate-400 mt-1">Action checklist for this year: RMDs, conversion room, IRMAA watch, estimated taxes.</div>
+          </button>
+          <button onClick={() => onPick('roadmap')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
+            <div className="font-semibold text-slate-100">🗺️ Roth Conversion Roadmap</div>
+            <div className="text-xs text-slate-400 mt-1">Year by year: what converts, what stops it, what each dollar costs all-in, and what the whole strategy changes.</div>
           </button>
           <button onClick={() => onPick('survivor')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
             <div className="font-semibold text-slate-100">🕯️ The Survivor's Tax Bill</div>
@@ -16315,6 +16673,18 @@ function RetirementPlanner() {
           personalInfo={personalInfo}
           accounts={accounts}
           incomeStreams={incomeStreams}
+          onClose={() => setShowReport(null)}
+        />
+      )}
+      {showReport === 'roadmap' && (
+        <RothRoadmapReport
+          projections={projections}
+          personalInfo={personalInfo}
+          accounts={accounts}
+          incomeStreams={incomeStreams}
+          assets={assets}
+          oneTimeEvents={oneTimeEvents}
+          recurringExpenses={recurringExpenses}
           onClose={() => setShowReport(null)}
         />
       )}

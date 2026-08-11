@@ -6548,6 +6548,19 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     //   • There are no pre-tax funds available to convert
     //   • There is no Roth account to receive the funds
     let rothConversionThisYear = 0;
+    // WHY this year's conversion is the size it is. The engine has always known
+    // — the answer falls out of which clamp fired — but only the amount was ever
+    // reported, which leaves a reader unable to tell a year that filled its
+    // bracket from one that ran out of IRA to convert. Both look like a number.
+    //   'none'    no conversion strategy configured
+    //   'window'  outside the conversion start/end age window
+    //   'ceiling' the target bracket or IRMAA tier ceiling bound it — the
+    //             intended state: the year converted everything the rule allows
+    //   'noRoom'  income already sat at or above the ceiling before converting
+    //   'target'  fixed-amount mode delivered the full amount asked for
+    //   'floor'   the preserve-pre-tax floor clipped it
+    //   'balance' the source account ran out
+    let conversionLimit = rothConversionModeOf(pi) === 'none' ? 'none' : 'window';
     let conversionTaxWithdrawal = 0; // Extra portfolio draw executed to pay the conversion's tax bill
     const conversionAmount = pi.rothConversionAmount || 0;
     // Use smart defaults when start/end ages aren't explicitly set.
@@ -6787,9 +6800,12 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
 
           if (hiBound <= 0 || measureAt(0) >= cap) {
             targetConversion = 0; // already at or past the ceiling before converting
+            conversionLimit = 'noRoom';
           } else if (measureAt(hiBound) <= cap) {
             targetConversion = hiBound; // the bound is the answer
+            conversionLimit = 'ceiling';
           } else {
+            conversionLimit = 'ceiling';
             let lo = 0, hi = hiBound;
             // Halve to sub-cent precision (typically ~30 steps; the 60-step bound
             // covers any conceivable range and keeps the loop provably finite).
@@ -6809,6 +6825,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         targetConversion = pi.rothConversionInflationAdjust === false
           ? conversionAmount
           : conversionAmount * inflationFactor;
+        conversionLimit = 'target';
       }
 
       // Pre-tax floor: stop converting once total pre-tax would drop below the
@@ -6821,7 +6838,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         const floorAdj = floorToday * inflationFactor;
         const totalPreTax = accts.filter(a => isPreTaxAccount(a.type))
           .reduce((s, a) => s + (accountBalances[a.id] || 0), 0);
-        targetConversion = Math.min(targetConversion, Math.max(0, totalPreTax - floorAdj));
+        const floorCap = Math.max(0, totalPreTax - floorAdj);
+        if (floorCap < targetConversion) conversionLimit = 'floor';
+        targetConversion = Math.min(targetConversion, floorCap);
       }
 
       if (targetConversion > 0) {
@@ -6843,6 +6862,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
 
         if (sourceAccount && destAccount && (accountBalances[sourceAccount.id] || 0) > 0) {
           // Limit the conversion to what's actually available in the source account
+          if (accountBalances[sourceAccount.id] < targetConversion) conversionLimit = 'balance';
           rothConversionThisYear = Math.min(targetConversion, accountBalances[sourceAccount.id]);
           // Move the money: reduce pre-tax, increase Roth
           accountBalances[sourceAccount.id] -= rothConversionThisYear;
@@ -7418,6 +7438,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       assetSaleTaxableGain: Math.round(assetSaleTaxableGain),
       assetSaleExcludedGain: Math.round(assetSaleExcludedGain),
       rothConversion: Math.round(rothConversionThisYear), // Planned Roth conversion executed this year
+      // What bound the conversion — see conversionLimit above. Reported so a
+      // roadmap can say "filled the 24% bracket" versus "the IRA ran dry"
+      // instead of showing two identical-looking dollar figures.
+      rothConversionLimit: rothConversionThisYear > 0 ? conversionLimit
+        : (conversionLimit === 'ceiling' || conversionLimit === 'target' ? 'balance' : conversionLimit),
       conversionTaxWithdrawal: Math.round(conversionTaxWithdrawal), // Extra portfolio draw that paid the conversion's tax bill
       charitableGiving: Math.round(isRetired ? desiredIncome * (charitablePercent / 100) : 0),
       totalIncome: Math.round(earnedIncome + totalGuaranteedIncome + portfolioWithdrawal + conversionTaxWithdrawal),
