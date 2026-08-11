@@ -6547,6 +6547,142 @@ section('P55 — why each conversion is the size it is: the binding constraint, 
   }
 }
 
+section('P56 — what breaks first: the shortfall ledger, and the edge of each assumption');
+{
+  // unfundedShortfall has been computed on every row since the withdrawal solver
+  // was written, and displayed in exactly one badge on one table. A plan can be
+  // short for six years in its sixties, recover when Social Security starts, and
+  // still print a healthy legacy on the dashboard. Nothing ever aggregated it.
+  const { planShortfall, breakingPoint } = engine;
+
+  const ctxFor = (over, acctOver, streamOver) => {
+    const s = baseScenario({
+      myAge: 62, spouseAge: 60, myBirthYear: TODAY_YEAR - 62, spouseBirthYear: TODAY_YEAR - 60,
+      myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 92,
+      state: 'Missouri', inflationRate: 0.025, desiredRetirementIncome: 130000,
+      healthcareModel: 'none', medicalInflation: 0,
+      withdrawalPriority: ['pretax', 'brokerage', 'roth'], ...over,
+    });
+    s.accts = acctOver || [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 2200000, contribution: 20000, cagr: 0.06, startAge: 62, stopAge: 65, owner: 'me' },
+      { id: 2, name: 'Brok', type: 'brokerage', balance: 600000, contribution: 0, cagr: 0.05, startAge: 62, stopAge: 65, owner: 'joint', costBasisPercent: 0.5 },
+    ];
+    s.streams = streamOver || [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 46000, startAge: 70, endAge: 95, cola: 0.025, owner: 'me' },
+    ];
+    return { pi: s.pi, accts: s.accts, streams: s.streams, assetList: [], events: [],
+             recurring: [], currentYear: TODAY_YEAR };
+  };
+  const projOf = (ctx) => computeProjections(ctx.pi, ctx.accts, ctx.streams, [], [], [], TODAY_YEAR);
+
+  // ── A funded plan reports no failure, and says how thin it got ───────────
+  {
+    const ctx = ctxFor({});
+    const f = planShortfall(projOf(ctx), { retirementAge: 65 });
+    eq(f.fails, false, 'a funded plan does not claim a shortfall');
+    eq(f.shortYearCount, 0, 'with no short years to count');
+    eq(f.totalShortfall, 0, 'and nothing to total');
+    eq(f.depletedYear, null, 'and never runs the portfolio to zero');
+    eq(f.thinnestYear !== null, true, 'but it still reports its thinnest year');
+    gt(f.thinnestYear.ratio, 1, 'which here carries more than a year of spending');
+  }
+
+  // ── A plan that runs dry names the year, and totals the gap ──────────────
+  {
+    const ctx = ctxFor({ desiredRetirementIncome: 400000 });
+    const f = planShortfall(projOf(ctx), { retirementAge: 65 });
+    eq(f.fails, true, 'spending far beyond the portfolio does fail');
+    eq(!!f.firstShortYear, true, 'and the first short year is identified');
+    gt(f.totalShortfall, 0, 'with a lifetime gap that is more than a rounding error');
+    gt(f.shortYearCount, 1, 'across more than one year');
+    eq(f.worstYear.unfundedShortfall >= f.firstShortYear.unfundedShortfall, true,
+      'and the worst year is at least as bad as the first');
+    eq(!!f.depletedYear, true, 'the portfolio is gone');
+    eq(f.recovers, false, 'so it never recovers');
+  }
+
+  // ── The case the dashboard hides: short early, whole again later ─────────
+  // Retire at 55 with Social Security twenty years out and most of the money in
+  // an IRA the plan will not touch before 59.5. The middle years go short and
+  // the ending balance still looks healthy — which is precisely why a legacy
+  // figure alone is not a verdict.
+  {
+    const ctx = ctxFor(
+      { myAge: 54, spouseAge: 54, myBirthYear: TODAY_YEAR - 54, spouseBirthYear: TODAY_YEAR - 54,
+        myRetirementAge: 55, spouseRetirementAge: 55, legacyAge: 90,
+        desiredRetirementIncome: 150000, inflationRate: 0.02 },
+      [{ id: 1, name: 'Cash-ish', type: 'brokerage', balance: 260000, contribution: 0, cagr: 0.04, startAge: 54, stopAge: 55, owner: 'joint', costBasisPercent: 0.9 }],
+      [{ id: 1, name: 'My SS', type: 'social_security', amount: 60000, startAge: 70, endAge: 95, cola: 0.02, owner: 'me' },
+       { id: 2, name: 'Pension', type: 'pension', amount: 320000, startAge: 70, endAge: 95, cola: 0.02, owner: 'me' }]);
+    const f = planShortfall(projOf(ctx), { retirementAge: 55 });
+    eq(f.fails, true, 'the bridge years genuinely cannot be funded');
+    eq(f.recovers, true, 'but income arriving later puts the plan back on its feet');
+    lt(f.lastShortYear.myAge, 90, 'and the shortfall is confined to the years before that income starts');
+    eq(f.thinnestYear.ratio, 0, 'while the portfolio itself never comes back — funded is not the same as solvent');
+  }
+
+  // ── Each assumption has an edge, and bisection finds it ──────────────────
+  // The invariant that makes this exact: the value returned must survive and the
+  // value just past it must fail. Asserting both is what separates a bisection
+  // from a number that merely looks plausible.
+  {
+    const ctx = ctxFor({});
+    ['returnDrop', 'inflation', 'spending'].forEach(dim => {
+      const b = breakingPoint(ctx, dim);
+      eq(b.alreadyFails, false, `${dim}: the base plan is funded, so there is an edge to find`);
+      eq(b.survivesRange, false, `${dim}: and the search range is wide enough to break it`);
+      gt(b.value, 0, `${dim}: the edge is a real value`);
+      gt(b.breaksAt, b.value, `${dim}: with failure strictly beyond it`);
+
+      const D = engine.STRESS_DIMENSIONS[dim];
+      const surviving = D.apply(b.value, ctx);
+      const failing = D.apply(b.breaksAt, ctx);
+      eq(planShortfall(projOf(surviving), { retirementAge: 65 }).fails, false,
+        `${dim}: the reported edge really does survive`);
+      eq(planShortfall(projOf(failing), { retirementAge: 65 }).fails, true,
+        `${dim}: and one step past it really does fail`);
+    });
+  }
+
+  // ── The edges sit where the plan's own assumptions can reach ─────────────
+  {
+    const ctx = ctxFor({});
+    const spend = breakingPoint(ctx, 'spending');
+    gt(spend.value, ctx.pi.desiredRetirementIncome,
+      'a funded plan can absorb more spending than it currently plans');
+    const inf = breakingPoint(ctx, 'inflation');
+    gt(inf.value, ctx.pi.inflationRate, 'and more inflation than it assumes');
+    const ret = breakingPoint(ctx, 'returnDrop');
+    lt(ret.value, 0.06, 'the return cushion is smaller than the assumed return itself');
+  }
+
+  // ── A plan already failing is said to be failing, not measured ───────────
+  {
+    const ctx = ctxFor({ desiredRetirementIncome: 500000 });
+    const b = breakingPoint(ctx, 'spending');
+    eq(b.alreadyFails, true, 'there is no cushion left to measure');
+    eq(b.value, null, 'so no edge is invented');
+  }
+
+  // ── A plan nothing in range can break says so too ────────────────────────
+  {
+    const ctx = ctxFor({ desiredRetirementIncome: 30000 }, [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 30000000, contribution: 0, cagr: 0.06, startAge: 62, stopAge: 65, owner: 'me' },
+    ]);
+    const b = breakingPoint(ctx, 'returnDrop');
+    eq(b.survivesRange, true, 'shaving every point of growth still does not break it');
+    eq(b.value, null, 'and no edge is fabricated inside a range that has none');
+  }
+
+  // ── Degenerate inputs ────────────────────────────────────────────────────
+  {
+    eq(planShortfall(null), null, 'no projection, no ledger');
+    eq(planShortfall([]), null, 'nor for an empty one');
+    eq(breakingPoint(null, 'spending'), null, 'no context, no search');
+    eq(breakingPoint(ctxFor({}), 'nonsense'), null, 'and no answer for a dimension that does not exist');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

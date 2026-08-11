@@ -5340,6 +5340,112 @@ const survivorTaxComparison = ({ row, pi = {}, smallerSSBenefit = null, streams 
 };
 
 
+// ── WHAT BREAKS FIRST ────────────────────────────────────────────────────────
+// The projection has always computed unfundedShortfall — spending dollars the
+// portfolio could not supply — and shown it in one badge on one table. A plan
+// can be short for six years in its sixties, recover when Social Security
+// starts, and still print a healthy legacy figure on the dashboard. Nothing
+// aggregated it, so nothing said so.
+//
+// planShortfall reduces a projection to its failure record.
+const planShortfall = (proj, { retirementAge = 0 } = {}) => {
+  if (!proj || proj.length === 0) return null;
+  const short = proj.filter(p => (p.unfundedShortfall || 0) > 0);
+  // Depletion is measured from retirement on. A pre-retirement zero is a plan
+  // that has not started saving yet, not a plan that has run out.
+  const depleted = proj.find(p => p.myAge >= retirementAge && (p.totalPortfolio || 0) <= 0);
+  const worst = short.reduce((a, b) => (!a || b.unfundedShortfall > a.unfundedShortfall ? b : a), null);
+  return {
+    fails: short.length > 0,
+    firstShortYear: short.length ? short[0] : null,
+    lastShortYear: short.length ? short[short.length - 1] : null,
+    shortYearCount: short.length,
+    totalShortfall: short.reduce((s, p) => s + (p.unfundedShortfall || 0), 0),
+    worstYear: worst,
+    // A plan can be short in some years and fully funded again later — the case
+    // a legacy figure hides completely. Measured on FUNDING, not on the
+    // portfolio: income arriving late (a pension, Social Security) can cover
+    // spending from then on even though the portfolio never comes back.
+    recovers: short.length > 0 && short[short.length - 1] !== proj[proj.length - 1],
+    depletedYear: depleted || null,
+    // How thin it ever gets: the smallest ratio of end-of-year portfolio to that
+    // year's spending target, from retirement on. Under 1 means the plan enters
+    // a year with less than a year of spending behind it.
+    thinnestYear: proj
+      .filter(p => p.myAge >= retirementAge && (p.desiredIncome || 0) > 0)
+      .reduce((a, b) => {
+        const r = (b.totalPortfolio || 0) / b.desiredIncome;
+        return (!a || r < a.ratio) ? { row: b, ratio: r } : a;
+      }, null),
+  };
+};
+
+// Bisect one assumption until the plan just fails. Every dimension here is
+// monotone — more spending, more inflation and lower returns can only hurt — so
+// a bisection is exact rather than a search that might miss a pocket.
+//
+// Reported as the value itself, not as a percentage of the assumption: "the plan
+// breaks if spending reaches $X" is actionable in a way that "breaks at +14%" is
+// not. Returns null when the plan fails already, or survives the whole range —
+// both of which are answers the caller must state rather than paper over.
+const STRESS_DIMENSIONS = {
+  // Percentage points shaved off EVERY account's growth rate.
+  returnDrop: {
+    lo: 0, hi: 0.10,
+    worseIsHigher: true,
+    apply: (v, ctx) => ({ ...ctx, accts: ctx.accts.map(a => ({ ...a, cagr: Math.max(0, (a.cagr || 0) - v) })) }),
+  },
+  // An absolute inflation rate, replacing the plan's own.
+  inflation: {
+    lo: 0, hi: 0.15,
+    worseIsHigher: true,
+    apply: (v, ctx) => ({ ...ctx, pi: { ...ctx.pi, inflationRate: v } }),
+  },
+  // An absolute annual spending target in today's dollars.
+  spending: {
+    lo: 0, hi: null, // hi derived from the plan's own spending
+    worseIsHigher: true,
+    apply: (v, ctx) => ({ ...ctx, pi: { ...ctx.pi, desiredRetirementIncome: v } }),
+  },
+};
+
+const breakingPoint = (ctx, dimension, { steps = 16 } = {}) => {
+  const dim = STRESS_DIMENSIONS[dimension];
+  if (!dim || !ctx || !ctx.pi) return null;
+  const run = (v) => {
+    const c = dim.apply(v, ctx);
+    const proj = computeProjections(c.pi, c.accts, c.streams, c.assetList || [],
+      c.events || [], c.recurring || [], c.currentYear);
+    return planShortfall(proj, { retirementAge: c.pi.myRetirementAge });
+  };
+  const lo = dim.lo;
+  const hi = dim.hi !== null ? dim.hi
+    : Math.max(1, (ctx.pi.desiredRetirementIncome || 0) * 5);
+
+  // The plan AS CONFIGURED, not the low end of the sweep. For the spending
+  // dimension the low end is $0/yr, which no plan fails — so testing the range
+  // rather than the plan reported a comfortable cushion for a plan that is
+  // already short today.
+  const base = computeProjections(ctx.pi, ctx.accts, ctx.streams, ctx.assetList || [],
+    ctx.events || [], ctx.recurring || [], ctx.currentYear);
+  const atBase = planShortfall(base, { retirementAge: ctx.pi.myRetirementAge });
+  if (!atBase || atBase.fails) return { dimension, alreadyFails: true, value: null, base: null };
+
+  const atLo = run(lo);
+  if (!atLo || atLo.fails) return { dimension, alreadyFails: true, value: null, base: lo };
+  const atHi = run(hi);
+  if (atHi && !atHi.fails) return { dimension, survivesRange: true, value: null, base: hi };
+
+  // Invariant: run(a) survives, run(b) fails. Halve until they meet.
+  let a = lo, b = hi;
+  for (let i = 0; i < steps; i++) {
+    const mid = (a + b) / 2;
+    if (run(mid).fails) b = mid; else a = mid;
+  }
+  // `a` is the last value that survives — the edge, stated conservatively.
+  return { dimension, value: a, breaksAt: b, alreadyFails: false, survivesRange: false };
+};
+
 function computeProjections(pi, accts, streams, assetList, events = [], recurringExpensesList = [], currentYearArg, opts = {}) {
   // currentYear used to be captured from RetirementPlanner's closure. It's now an
   // explicit parameter (with a fallback) so this function can be moved to module
@@ -7600,6 +7706,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
     SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,
     marginalCostOfNextDollar, survivorTaxComparison, survivorSSLoss,
+    planShortfall, breakingPoint, STRESS_DIMENSIONS,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,

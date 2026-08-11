@@ -49,6 +49,7 @@ const {
   rothConversionModeLabel, rothConversionModeOf,
   taxBreakpoints, marginalCostOfNextDollar,
   survivorTaxComparison, survivorSSLoss, scoreRothStrategy,
+  planShortfall, breakingPoint,
   getFederalDeduction, NIIT_THRESHOLDS,
   IRMAA_FILL_SAFETY_MARGIN,
 } = PlannerEngine;
@@ -14662,6 +14663,321 @@ function RothRoadmapReport({ projections, personalInfo, accounts, incomeStreams,
   return ReactDOM.createPortal(overlay, document.body);
 }
 
+// ============================================
+// What Breaks First — failure forensics.
+//
+// Every other view of this plan answers "does it work". This one assumes it
+// does not, and asks what gives way, in what order, and how much room there is
+// before it does. Two things make that possible and neither was on screen:
+//
+//   unfundedShortfall  computed on every row since the withdrawal solver was
+//                      written, displayed in one badge on one table. A plan can
+//                      be short for six years in its sixties, recover when
+//                      Social Security starts, and still print a healthy legacy.
+//   the edges          bisection on each assumption until the plan just fails,
+//                      which answers "how much is left" rather than the fixed
+//                      ±10% sweeps the Sensitivity tab runs.
+//
+// Deliberately not a duplicate of Stress Test (historical return sequences) or
+// Sensitivity (one-variable sweeps around the plan). This is the failure record.
+// ============================================
+function BreakingPointReport({ projections, personalInfo, accounts, incomeStreams, assets,
+                               oneTimeEvents, recurringExpenses, onClose }) {
+  const pi = personalInfo;
+  const preparedOn = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const fmt = (n) => '$' + Math.round(n || 0).toLocaleString('en-US');
+  const fmtK = (n) => (Math.abs(n) >= 1000000 ? '$' + (n / 1000000).toFixed(2) + 'M'
+    : Math.abs(n) < 1000 ? fmt(n) : '$' + Math.round((n || 0) / 1000) + 'K');
+  const pct1 = (n) => (n * 100).toFixed(1) + '%';
+  const retirementAge = pi.myRetirementAge;
+
+  const ledger = useMemo(
+    () => planShortfall(projections, { retirementAge }),
+    [projections, retirementAge]);
+
+  // The edges. Three bisections, sixteen halvings each — about 50 projections,
+  // which is 80ms. Cheap enough to do on open and far more useful than a fixed
+  // sweep, because it reports the value at which the plan gives way rather than
+  // a set of points that may all be on the same side of it.
+  const edges = useMemo(() => {
+    const ctx = { pi, accts: accounts, streams: incomeStreams, assetList: assets,
+                  events: oneTimeEvents, recurring: recurringExpenses,
+                  currentYear: new Date().getFullYear() };
+    return {
+      spending: breakingPoint(ctx, 'spending'),
+      inflation: breakingPoint(ctx, 'inflation'),
+      returnDrop: breakingPoint(ctx, 'returnDrop'),
+    };
+  }, [pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
+
+  // When each account type runs out. The order matters as much as the dates:
+  // it is the withdrawal priority playing out, and a Roth that empties before a
+  // pre-tax account means the priority is not doing what its owner thinks.
+  const depletions = useMemo(() => {
+    const kinds = [
+      { key: 'brokerageBalance', label: 'Taxable / brokerage' },
+      { key: 'preTaxBalance', label: 'Pre-tax (401k / IRA)' },
+      { key: 'rothBalance', label: 'Roth' },
+    ];
+    return kinds.map(k => {
+      const started = (projections || []).find(p => (p[k.key] || 0) > 0);
+      if (!started) return { ...k, everFunded: false };
+      const gone = (projections || []).find(p => p.myAge >= started.myAge && (p[k.key] || 0) <= 0);
+      const peak = (projections || []).reduce((a, p) => Math.max(a, p[k.key] || 0), 0);
+      return { ...k, everFunded: true, peak, goneYear: gone || null };
+    });
+  }, [projections]);
+
+  const retired = (projections || []).filter(p => p.myAge >= retirementAge);
+  // The plan's blended growth rate, balance-weighted, straight off the engine.
+  const baseCagr = (retired[0] || (projections || [])[0] || {}).weightedCAGR || 0.06;
+  const peakRate = retired.reduce((a, p) => {
+    const r = (p.totalPortfolio || 0) > 0 ? (p.portfolioWithdrawal || 0) / p.totalPortfolio : null;
+    return (r !== null && (!a || r > a.rate)) ? { rate: r, row: p } : a;
+  }, null);
+
+  const th = { textAlign: 'left', padding: '4px 8px', borderBottom: '2px solid #0f172a', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.03em', color: '#334155' };
+  const thR = { ...th, textAlign: 'right' };
+  const td = { padding: '4px 8px', borderBottom: '1px solid #e2e8f0', fontSize: 12 };
+  const tdR = { ...td, textAlign: 'right' };
+  const h2 = { fontSize: 16, fontWeight: 700, margin: '22px 0 8px', paddingBottom: 4, borderBottom: '1px solid #cbd5e1', breakAfter: 'avoid' };
+  const statBox = { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6, padding: '8px 12px' };
+  const statLabel = { fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#64748b', margin: 0 };
+  const statValue = { fontSize: 17, fontWeight: 700, margin: '2px 0 0' };
+  const note = { fontSize: 11, color: '#64748b', margin: '6px 0 0', lineHeight: 1.5 };
+
+  // Each edge, expressed the way its owner would state it out loud.
+  const edgeRows = [
+    {
+      key: 'spending',
+      label: 'Spending',
+      now: fmt(pi.desiredRetirementIncome) + '/yr',
+      edge: edges.spending,
+      atEdge: e => fmt(e.value) + '/yr',
+      room: e => `+${fmt(e.value - pi.desiredRetirementIncome)}/yr (${((e.value / Math.max(1, pi.desiredRetirementIncome) - 1) * 100).toFixed(0)}%)`,
+      // Ratio of cushion to the assumption, so the three are comparable.
+      slack: e => (e.value - pi.desiredRetirementIncome) / Math.max(1, pi.desiredRetirementIncome),
+      meaning: 'Today’s-dollar spending target the plan can absorb before some year goes unfunded.',
+    },
+    {
+      key: 'inflation',
+      label: 'Inflation',
+      now: pct1(pi.inflationRate || 0),
+      edge: edges.inflation,
+      atEdge: e => pct1(e.value),
+      room: e => `+${((e.value - (pi.inflationRate || 0)) * 100).toFixed(1)} points`,
+      slack: e => (e.value - (pi.inflationRate || 0)) / Math.max(0.001, pi.inflationRate || 0.001),
+      meaning: 'Sustained inflation rate the plan survives. It compounds against spending for the whole horizon, so the tolerance is usually narrow.',
+    },
+    {
+      key: 'returnDrop',
+      label: 'Investment returns',
+      now: 'as entered per account',
+      edge: edges.returnDrop,
+      atEdge: e => `−${(e.value * 100).toFixed(1)} points on every account`,
+      room: e => `${(e.value * 100).toFixed(1)} points of cushion`,
+      // Against the plan's OWN blended growth rate, not a stand-in. Dividing by a
+      // hard-coded 6% would rank this row differently for a conservative plan
+      // than for an aggressive one holding identical dollars of cushion.
+      slack: e => e.value / Math.max(0.005, baseCagr),
+      meaning: 'How much can come off every account’s growth rate at once. Not a bad year — a permanently lower return for the whole plan.',
+    },
+  ];
+  const measurable = edgeRows.filter(r => r.edge && !r.edge.alreadyFails && !r.edge.survivesRange && r.edge.value != null);
+  const tightest = measurable.reduce((a, b) => (!a || b.slack(b.edge) < a.slack(a.edge) ? b : a), null);
+
+  const overlay = (
+    <div className="report-overlay fixed inset-0 bg-black/60 flex items-start justify-center z-50 overflow-y-auto py-8 px-4">
+      <div id="report-print" style={{ background: '#ffffff', color: '#0f172a' }} className="w-full max-w-4xl rounded-xl shadow-2xl p-8">
+        <div className="print-hide flex justify-end gap-2 mb-6">
+          <button onClick={() => window.print()} className={buttonPrimary}>Print / Save as PDF</button>
+          <button onClick={onClose} className={buttonSecondary}>Close</button>
+        </div>
+
+        <div style={{ borderBottom: '2px solid #0f172a', paddingBottom: 12, marginBottom: 16 }}>
+          <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0 }}>What Breaks First</h1>
+          <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>
+            Where this plan gives way, and how much room is left &nbsp;·&nbsp; Prepared {preparedOn}
+          </p>
+        </div>
+
+        <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.6, margin: '0 0 4px' }}>
+          Every other view of this plan asks whether it works. This one assumes it does not, and asks what
+          gives way first. A plan almost never fails all at once: it goes short in a handful of years,
+          drains one account type ahead of the others, and runs out of margin in one assumption long before
+          the rest. Those three things are what follow.
+        </p>
+
+        <h2 style={h2}>The Verdict</h2>
+        {ledger && ledger.fails ? (
+          <div style={{ borderLeft: '4px solid #dc2626', background: '#fef2f2', borderRadius: 6, padding: '12px 16px', breakInside: 'avoid' }}>
+            <p style={{ fontSize: 15, fontWeight: 700, margin: 0, color: '#991b1b' }}>
+              This plan cannot fund its spending target in {ledger.shortYearCount} of its years.
+            </p>
+            <p style={{ fontSize: 14, color: '#334155', margin: '8px 0 0', lineHeight: 1.6 }}>
+              The first shortfall is in <strong>{ledger.firstShortYear.year}</strong>, at age{' '}
+              <strong>{ledger.firstShortYear.myAge}</strong>: against a spending target of{' '}
+              {fmt(ledger.firstShortYear.desiredIncome)}, guaranteed income and the portfolio together
+              leave the plan <strong>{fmt(ledger.firstShortYear.unfundedShortfall)}</strong> short. The worst year is{' '}
+              {ledger.worstYear.year}, short by {fmt(ledger.worstYear.unfundedShortfall)}. Across the whole
+              projection the gap totals <strong>{fmtK(ledger.totalShortfall)}</strong> of spending the plan
+              simply does not deliver.
+              {ledger.recovers
+                ? ` The shortfall ends after ${ledger.lastShortYear.year}: income arriving later — Social Security, a pension — covers the target from then on. That is the case a legacy figure hides completely, because the ending balance can look perfectly healthy while the years in between do not work.`
+                : ledger.depletedYear
+                  ? ` The portfolio itself is exhausted in ${ledger.depletedYear.year}, at age ${ledger.depletedYear.myAge}.`
+                  : ''}
+            </p>
+          </div>
+        ) : (
+          <div style={{ borderLeft: '4px solid #059669', background: '#f0fdf4', borderRadius: 6, padding: '12px 16px', breakInside: 'avoid' }}>
+            <p style={{ fontSize: 15, fontWeight: 700, margin: 0, color: '#065f46' }}>
+              This plan funds its spending target in every year to age {pi.legacyAge || 95}.
+            </p>
+            <p style={{ fontSize: 14, color: '#334155', margin: '8px 0 0', lineHeight: 1.6 }}>
+              No year comes up short.
+              {ledger && ledger.thinnestYear
+                ? ` The thinnest point is ${ledger.thinnestYear.row.year}, at age ${ledger.thinnestYear.row.myAge}, when the portfolio holds ${ledger.thinnestYear.ratio.toFixed(1)}× that year's spending — ${fmtK(ledger.thinnestYear.row.totalPortfolio)} against ${fmt(ledger.thinnestYear.row.desiredIncome)} of spending.`
+                : ''}
+              {peakRate
+                ? ` The heaviest draw is ${pct1(peakRate.rate)} of the portfolio in ${peakRate.row.year}.`
+                : ''}
+              {' '}That is the answer under this plan's own assumptions. The rest of this report is about how
+              wrong those assumptions can be.
+            </p>
+          </div>
+        )}
+
+        <h2 style={h2}>How Much Room Is Left</h2>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={th}>Assumption</th>
+              <th style={th}>Your plan</th>
+              <th style={th}>Breaks at</th>
+              <th style={th}>Room</th>
+              <th style={th}>What it means</th>
+            </tr>
+          </thead>
+          <tbody>
+            {edgeRows.map(r => {
+              const e = r.edge;
+              const isTightest = tightest && tightest.key === r.key;
+              return (
+                <tr key={r.key} style={isTightest ? { background: '#fef3c7' } : undefined}>
+                  <td style={{ ...td, fontWeight: 600, whiteSpace: 'nowrap' }}>{r.label}</td>
+                  <td style={{ ...td, whiteSpace: 'nowrap' }}>{r.now}</td>
+                  <td style={{ ...td, whiteSpace: 'nowrap', fontWeight: 600 }}>
+                    {!e || e.alreadyFails ? '—' : e.survivesRange ? 'not within range' : r.atEdge(e)}
+                  </td>
+                  <td style={{ ...td, whiteSpace: 'nowrap', color: '#059669', fontWeight: 600 }}>
+                    {!e || e.alreadyFails ? '—' : e.survivesRange ? 'more than tested' : r.room(e)}
+                  </td>
+                  <td style={{ ...td, fontSize: 11, color: '#475569' }}>{r.meaning}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <p style={note}>
+          Each row moves <em>one</em> assumption and holds everything else fixed, then narrows in on the
+          exact value at which some year first goes unfunded. Real trouble arrives as a combination — lower
+          returns <em>and</em> higher inflation — so treat each figure as an upper bound on that one risk,
+          not as a budget to spend.
+          {ledger && ledger.fails
+            ? ' This plan is already short, so there is no cushion to measure and the rows above show a dash.'
+            : tightest
+              ? ` The tightest of the three is ${tightest.label.toLowerCase()}: proportionally, that is where this plan runs out of room first.`
+              : ''}
+        </p>
+
+        <h2 style={h2}>The Order of Depletion</h2>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={th}>Account type</th>
+              <th style={thR}>Peak balance</th>
+              <th style={th}>Runs out</th>
+              <th style={th}>Balance at age {pi.legacyAge || 95}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {depletions.map(d => {
+              const last = (projections || [])[(projections || []).length - 1] || {};
+              return (
+                <tr key={d.key}>
+                  <td style={{ ...td, fontWeight: 600 }}>{d.label}</td>
+                  <td style={tdR}>{d.everFunded ? fmt(d.peak) : '—'}</td>
+                  <td style={{ ...td, color: d.goneYear ? '#dc2626' : '#059669' }}>
+                    {!d.everFunded ? 'never funded'
+                      : d.goneYear ? `${d.goneYear.year} (age ${d.goneYear.myAge})`
+                      : 'lasts the horizon'}
+                  </td>
+                  <td style={td}>{fmt(last[d.key])}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <p style={note}>
+          The order here is your withdrawal priority playing out —{' '}
+          {(pi.withdrawalPriority || ['pretax', 'brokerage', 'roth'])
+            .map(k => ({ pretax: 'pre-tax', brokerage: 'brokerage & HSA', roth: 'Roth' })[k] || k).join(' → ')}
+          {' '}— against required distributions, which force pre-tax money out whether or not it is wanted.
+          A Roth balance that empties before a pre-tax one is worth a second look: it usually means the
+          priority is set to spend the tax-free money first, which is the most expensive order there is.
+        </p>
+
+        {ledger && ledger.fails && (<>
+          <h2 style={h2}>Every Year That Comes Up Short</h2>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th style={th}>Year</th><th style={th}>Age</th>
+                <th style={thR}>Spending target</th>
+                <th style={thR}>Guaranteed income</th>
+                <th style={thR}>From portfolio</th>
+                <th style={thR}>Short by</th>
+                <th style={thR}>Portfolio left</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(projections || []).filter(p => (p.unfundedShortfall || 0) > 0).map(p => (
+                <tr key={p.year}>
+                  <td style={td}>{p.year}</td>
+                  <td style={td}>{p.myAge}</td>
+                  <td style={tdR}>{fmt(p.desiredIncome)}</td>
+                  <td style={tdR}>{fmt(p.totalGuaranteedIncome)}</td>
+                  <td style={tdR}>{fmt(p.portfolioWithdrawal)}</td>
+                  <td style={{ ...tdR, color: '#dc2626', fontWeight: 700 }}>{fmt(p.unfundedShortfall)}</td>
+                  <td style={tdR}>{fmt(p.totalPortfolio)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p style={note}>
+            &quot;Short by&quot; is spending the plan wanted and could not fund. It will not equal the
+            spending target minus the two income columns: the portfolio has to be drawn gross of the tax
+            that draw itself creates, so the gap is measured against what the plan actually needed to
+            withdraw, not against the after-tax figure. It is not borrowed, deferred or made up later. In reality a household absorbs it by spending less, which is worth saying
+            plainly: these rows are the years that would require a cut, and their size is the size of it.
+          </p>
+        </>)}
+
+        <p style={{ fontSize: 11, color: '#64748b', marginTop: 24, lineHeight: 1.5, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
+          This report is a directional planning tool generated from the assumptions in your plan, not tax or
+          investment advice. The edges are found by re-running your plan with one assumption moved at a time
+          under steady returns; they say nothing about the ORDER returns arrive in, which matters enormously
+          in the first decade of retirement — the Stress Test and Monte Carlo tabs cover that. Confirm
+          decisions with a qualified professional.
+        </p>
+      </div>
+    </div>
+  );
+
+  return ReactDOM.createPortal(overlay, document.body);
+}
+
 // Small chooser shown by the sidebar "Reports" button.
 function ReportMenu({ onPick, onClose }) {
   return (
@@ -14680,6 +14996,10 @@ function ReportMenu({ onPick, onClose }) {
           <button onClick={() => onPick('roadmap')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
             <div className="font-semibold text-slate-100">🗺️ Roth Conversion Roadmap</div>
             <div className="text-xs text-slate-400 mt-1">Year by year: what converts, what stops it, what each dollar costs all-in, and what the whole strategy changes.</div>
+          </button>
+          <button onClick={() => onPick('breaks')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
+            <div className="font-semibold text-slate-100">🧨 What Breaks First</div>
+            <div className="text-xs text-slate-400 mt-1">Failure forensics: every year that comes up short, the order your accounts drain, and how far each assumption can move before the plan gives way.</div>
           </button>
           <button onClick={() => onPick('survivor')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
             <div className="font-semibold text-slate-100">🕯️ The Survivor's Tax Bill</div>
@@ -16673,6 +16993,18 @@ function RetirementPlanner() {
           personalInfo={personalInfo}
           accounts={accounts}
           incomeStreams={incomeStreams}
+          onClose={() => setShowReport(null)}
+        />
+      )}
+      {showReport === 'breaks' && (
+        <BreakingPointReport
+          projections={projections}
+          personalInfo={personalInfo}
+          accounts={accounts}
+          incomeStreams={incomeStreams}
+          assets={assets}
+          oneTimeEvents={oneTimeEvents}
+          recurringExpenses={recurringExpenses}
           onClose={() => setShowReport(null)}
         />
       )}
