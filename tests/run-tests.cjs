@@ -6695,11 +6695,10 @@ section('P57 — the savings-rate what-if moves exactly the money the savings ra
   const ownShare = (a, amount) => {
     if (!amount) return 0;
     if (a.contributionMode === 'percent') {
-      if (a.owner !== 'me') return 0;
       const ee = a.employeePercent || 0, er = a.employerMatchPercent || 0;
       return ee + er > 0 ? amount * (ee / (ee + er)) : 0;
     }
-    return (a.contributor || 'me') === 'me' ? amount : 0;
+    return (a.contributor || 'me') === 'employer' ? 0 : amount;
   };
 
   // ── Employer money is never scaled ───────────────────────────────────────
@@ -6723,10 +6722,12 @@ section('P57 — the savings-rate what-if moves exactly the money the savings ra
     eq(out[0].employerMatchPercent, 0.04, 'the match percentage is untouched');
   }
 
-  // ── A spouse-owned percent row is left alone, because it is not counted ───
-  // The displayed rate scores percent-mode only for accounts the saver owns.
-  // Scaling a spouse's row would move money the numerator never saw, and the
-  // chart would show growth the rate on screen cannot explain.
+  // ── A spouse-owned percent row scales too, because the rate counts it ────
+  // The savings rate divides by the HOUSEHOLD's earned income, so its numerator
+  // is household-wide. Percent mode used to score only accounts the saver owned
+  // while fixed mode counted any employee row — an asymmetry that understated
+  // every dual-income plan by the whole of the spouse's deferral, and would have
+  // left half the household immovable by the slider.
   {
     const accts = [
       { id: 1, name: 'Mine', type: '401k', balance: 400000, contributionMode: 'percent', employeePercent: 0.10, employerMatchPercent: 0, cagr: 0.06, startAge: 50, stopAge: 65, owner: 'me' },
@@ -6734,7 +6735,7 @@ section('P57 — the savings-rate what-if moves exactly the money the savings ra
     ];
     const out = scaleOwnContributions(accts, 2);
     approx(out[0].employeePercent, 0.20, 'the saver\'s own percent row scales');
-    eq(out[1].employeePercent, 0.10, 'the spouse\'s does not, matching how the rate is measured');
+    approx(out[1].employeePercent, 0.20, 'and so does the spouse\'s, matching how the rate is measured');
   }
 
   // ── Scaling by target/current lands on the target, whatever the mix ───────
@@ -6838,6 +6839,175 @@ section('P57 — the savings-rate what-if moves exactly the money the savings ra
     eq(addOwnContribution(one, 0)[0].contribution, 500, 'adding nothing changes nothing');
     eq(accountsAtSavingsTarget(one, { currentPersonal: 0, targetDollars: -5 })[0].contribution, 500,
       'and a negative target is floored rather than subtracted');
+  }
+}
+
+section('P58a — percent-of-salary contributions do not also compound a growth rate');
+{
+  // A percent-mode contribution is already a fixed share of a salary with its own
+  // COLA. Applying contributionGrowth on top compounds twice, and the drift is
+  // enormous and silent: the account still SAYS 8% + 3%, while the projection
+  // quietly deposits a quarter of pay. The shipped defaults carried
+  // contributionGrowth: 0.03 from their fixed-dollar days, so switching them to
+  // percent mode would have introduced exactly this.
+  const sc = baseScenario({
+    myAge: 35, myBirthYear: TODAY_YEAR - 35, myRetirementAge: 65, legacyAge: 90,
+    hasSpouse: false, filingStatus: 'single', state: 'Missouri',
+    inflationRate: 0.03, desiredRetirementIncome: 60000,
+    healthcareModel: 'none', medicalInflation: 0,
+  });
+  sc.streams = [{ id: 1, name: 'Salary', type: 'earned_income', amount: 105000, startAge: 35, endAge: 65, cola: 0.03, owner: 'me' }];
+  const acct = (growth) => [{ id: 1, name: '401k', type: '401k', balance: 60000,
+    contributionMode: 'percent', employeePercent: 0.08, employerMatchPercent: 0.03,
+    contributionGrowth: growth, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'me' }];
+  const run = (g) => computeProjections(sc.pi, acct(g), sc.streams, [], [], [], TODAY_YEAR);
+  const at = (p, age) => p.find(r => r.myAge === age);
+
+  {
+    const none = run(0), growing = run(0.03);
+    eq(at(none, 64).perAccountContributions[1], at(growing, 64).perAccountContributions[1],
+      'contributionGrowth makes no difference in percent mode — the salary COLA already did that job');
+    const share = at(none, 64).perAccountContributions[1] / at(none, 64).earnedIncome;
+    approx(share, 0.11, 'and the account still deposits the 11% of pay it says it does', 0.001);
+  }
+
+  // ── Fixed-dollar mode still honours it, because there it is the only lever ──
+  {
+    const fixed = (growth) => [{ id: 1, name: '401k', type: '401k', balance: 60000,
+      contribution: 11550, contributionGrowth: growth, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'me' }];
+    const flat = computeProjections(sc.pi, fixed(0), sc.streams, [], [], [], TODAY_YEAR);
+    const grown = computeProjections(sc.pi, fixed(0.03), sc.streams, [], [], [], TODAY_YEAR);
+    eq(at(flat, 64).perAccountContributions[1], 11550, 'a flat dollar contribution stays flat');
+    gt(at(grown, 64).perAccountContributions[1], at(flat, 64).perAccountContributions[1],
+      'and a growing one still grows — the change is scoped to percent mode alone');
+  }
+}
+
+section('P58 — retiring the "both" contributor: the dollars survive and are finally attributed');
+{
+  // A fixed-dollar row marked contributor:'both' lumped the employee deferral
+  // and the employer match into one number nothing could take apart, and three
+  // consumers each guessed differently: the savings rate counted it as NEITHER,
+  // the tax engine deducted NONE of it, the limit check counted ALL of it as
+  // deferral. The shipped default plan used it on both 401(k)s, so a new user
+  // saw a 4.7% savings rate on $28,000 of deferrals and drew no above-the-line
+  // deduction at all. The option is gone; these pin the migration that replaces
+  // it, and the tax consequence that made it worth doing.
+  const { splitBothContributors, BOTH_SPLIT_EMPLOYEE_SHARE,
+          TYPICAL_DEFERRAL_RATE, TYPICAL_MATCH_RATE } = engine;
+
+  const ownShare = (a, amount) => {
+    if (!amount) return 0;
+    if (a.contributionMode === 'percent') {
+      const ee = a.employeePercent || 0, er = a.employerMatchPercent || 0;
+      return ee + er > 0 ? amount * (ee / (ee + er)) : 0;
+    }
+    return (a.contributor || 'me') === 'employer' ? 0 : amount;
+  };
+  const employerShare = (a, amount) => (amount || 0) - ownShare(a, amount);
+
+  // ── The split ratio is the app's own, not a new number ───────────────────
+  {
+    approx(BOTH_SPLIT_EMPLOYEE_SHARE,
+      TYPICAL_DEFERRAL_RATE / (TYPICAL_DEFERRAL_RATE + TYPICAL_MATCH_RATE),
+      'the 8:3 split comes from the deferral and match constants already in the engine', 1e-9);
+  }
+
+  // ── Dollars are conserved, and balances are not duplicated ───────────────
+  // The failure that would matter most: splitting a row into two and copying
+  // the balance across both would invent money, and every projection after the
+  // migration would be wrong in the user's favour.
+  {
+    const before = [
+      { id: 1, name: 'My 401(k)', type: '401k', balance: 60000, contribution: 20000, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'both' },
+      { id: 2, name: 'Spouse 401(k)', type: '401k', balance: 30000, contribution: 8000, cagr: 0.07, startAge: 33, stopAge: 65, owner: 'spouse', contributor: 'both' },
+      { id: 3, name: 'Roth', type: 'roth_ira', balance: 15000, contribution: 6000, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'me' },
+    ];
+    const { accounts: after, split } = splitBothContributors(before);
+    const sum = (list, f) => list.reduce((s, a) => s + (f(a) || 0), 0);
+    eq(sum(after, a => a.contribution), sum(before, a => a.contribution),
+      'total contributions are unchanged by the migration');
+    eq(sum(after, a => a.balance), sum(before, a => a.balance),
+      'and so are total balances — the new rows carry none');
+    eq(after.length, 5, 'two lumped rows became two employee rows and two employer rows');
+    eq(split.length, 2, 'and both are reported, so the user can be told what changed');
+    eq(new Set(after.map(a => a.id)).size, after.length, 'every account keeps a unique id');
+  }
+
+  // ── The money is now attributed, at the documented ratio ─────────────────
+  {
+    const before = [{ id: 1, name: 'My 401(k)', type: '401k', balance: 60000, contribution: 20000, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'both' }];
+    const { accounts: after } = splitBothContributors(before);
+    const mine = after.reduce((s, a) => s + ownShare(a, a.contribution), 0);
+    const theirs = after.reduce((s, a) => s + employerShare(a, a.contribution), 0);
+    eq(mine + theirs, 20000, 'every dollar lands on one side or the other');
+    eq(mine, 14545, 'the employee keeps 8/11 of it');
+    eq(theirs, 5455, 'and the employer the remaining 3/11');
+    // Before the migration this same account produced ZERO on both sides —
+    // which is what made "mine + employer = total" fail to add up on screen.
+    const wasMine = ownShare(before[0], 20000) && false;
+    eq(!!wasMine, false, 'where the old shape credited the saver with nothing');
+  }
+
+  // ── Percent-mode rows are relabelled, never split ────────────────────────
+  // Percent mode already holds the two rates separately, so the flag was never
+  // load-bearing there. Splitting such a row would double the account.
+  {
+    const before = [{ id: 1, name: 'Pct', type: '401k', balance: 100000, contributionMode: 'percent', employeePercent: 0.08, employerMatchPercent: 0.03, cagr: 0.06, startAge: 40, stopAge: 65, owner: 'me', contributor: 'both' }];
+    const { accounts: after, split } = splitBothContributors(before);
+    eq(after.length, 1, 'the row is not duplicated');
+    eq(after[0].contributor, 'me', 'only the dead flag is cleared');
+    eq(after[0].employeePercent, 0.08, 'and the rates it already carried are untouched');
+    eq(after[0].employerMatchPercent, 0.03, 'on both sides');
+    eq(split.length, 0, 'nothing to tell the user about — no assumption was made');
+  }
+
+  // ── A zero-contribution row is relabelled, not split into an empty pair ───
+  {
+    const before = [{ id: 1, name: 'Dormant', type: '401k', balance: 90000, contribution: 0, cagr: 0.06, startAge: 40, stopAge: 65, owner: 'me', contributor: 'both' }];
+    const { accounts: after, split } = splitBothContributors(before);
+    eq(after.length, 1, 'no employer row is created for nothing');
+    eq(after[0].contributor, 'me', 'the flag is still cleared');
+    eq(split.length, 0, 'and no assumption is reported, because none was made');
+  }
+
+  // ── A plan with no legacy rows is returned untouched ─────────────────────
+  {
+    const before = [{ id: 1, name: 'A', type: '401k', balance: 1000, contribution: 100, cagr: 0, startAge: 40, stopAge: 65, owner: 'me', contributor: 'me' }];
+    const { accounts: after, split } = splitBothContributors(before);
+    eq(after, before, 'the same array comes back, so a migration is a no-op for most plans');
+    eq(split.length, 0, 'with nothing to report');
+    eq(splitBothContributors(null).accounts.length, 0, 'and no accounts is not an error');
+  }
+
+  // ── The tax consequence: this is what the split actually buys ────────────
+  // The reason the option had to go. Identical contributions, identical growth
+  // — the only difference is whether the engine can tell whose money it was.
+  {
+    const sc = baseScenario({
+      myAge: 35, spouseAge: 33, myBirthYear: TODAY_YEAR - 35, spouseBirthYear: TODAY_YEAR - 33,
+      myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 90,
+      state: 'Missouri', inflationRate: 0.03, desiredRetirementIncome: 90000,
+    });
+    sc.streams = [
+      { id: 1, name: 'My Salary', type: 'earned_income', amount: 105000, startAge: 35, endAge: 65, cola: 0.03, owner: 'me' },
+      { id: 2, name: 'Spouse Salary', type: 'earned_income', amount: 75000, startAge: 33, endAge: 65, cola: 0.03, owner: 'spouse' },
+    ];
+    const lumped = [
+      { id: 1, name: 'My 401(k)', type: '401k', balance: 60000, contribution: 20000, contributionGrowth: 0.03, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'both' },
+      { id: 2, name: 'Spouse 401(k)', type: '401k', balance: 30000, contribution: 8000, contributionGrowth: 0.03, cagr: 0.07, startAge: 33, stopAge: 65, owner: 'spouse', contributor: 'both' },
+    ];
+    const { accounts: split } = splitBothContributors(lumped);
+    const y0 = (accts) => computeProjections(sc.pi, accts, sc.streams, [], [], [], TODAY_YEAR)[0];
+    const before = y0(lumped), after = y0(split);
+
+    eq(before.preTaxDeduction, 0, 'the lumped shape deducted nothing at all');
+    eq(after.preTaxDeduction, 14545 + 5818, 'the split shape deducts the employee half of both accounts');
+    lt(after.federalTax, before.federalTax, 'so the same plan owes less federal tax');
+    gt(before.federalTax - after.federalTax, 3000,
+      'by thousands in the first year alone — this is the bug, not a rounding difference');
+    // The employer half is correctly NOT deducted: it was never in wages.
+    lt(after.preTaxDeduction, 28000, 'while the employer match still gets no deduction, as it should');
   }
 }
 

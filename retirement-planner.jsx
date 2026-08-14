@@ -50,6 +50,7 @@ const {
   taxBreakpoints, marginalCostOfNextDollar,
   survivorTaxComparison, survivorSSLoss, scoreRothStrategy,
   planShortfall, breakingPoint, accountsAtSavingsTarget,
+  splitBothContributors,
   getFederalDeduction, NIIT_THRESHOLDS,
   IRMAA_FILL_SAFETY_MARGIN,
 } = PlannerEngine;
@@ -305,7 +306,7 @@ const STORAGE_KEY = 'retirement_planner_data';
 //     payments, prior-year return). Bumped rather than defaulted because this is
 //     a whole new top-level key: an older build round-tripping a v3 export would
 //     drop it silently, and the user would not find out until a tax number moved.
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 // Migrations run in order from the saved version up to SCHEMA_VERSION. Each is
 // a pure (data) => data. Absent entries are skipped, so a version that only adds
@@ -315,6 +316,16 @@ const migrations = {
   // v2 → v3: nothing to backfill. `currentYear` is merged from defaults on load,
   // exactly like personalInfo, so an older plan simply arrives with an empty one.
   3: (data) => ({ ...data, currentYear: data.currentYear || DEFAULT_CURRENT_YEAR }),
+  // v3 → v4: retire contributor:'both'. It could not be split, so the savings
+  // rate counted it as neither the saver's nor the employer's money and the tax
+  // engine deducted none of it. Legacy rows are split 8:3 into an employee row
+  // and an employer row — the dollars and the growth path are unchanged, they
+  // are simply attributed. The result is recorded so the app can tell the user
+  // what it did to their plan rather than silently editing it.
+  4: (data) => {
+    const { accounts, split } = splitBothContributors(data.accounts || []);
+    return split.length ? { ...data, accounts, contributorSplitNotice: split } : { ...data, accounts };
+  },
 };
 
 const DEFAULT_DASHBOARD_VISIBILITY = {
@@ -420,12 +431,27 @@ const DEFAULT_PERSONAL_INFO = {
   medicalInflation: 0.05         // Healthcare-specific inflation rate
 };
 
-// contributionGrowth is set to match inflationRate (3%) so real contributions stay
-// constant over the 30-year accumulation. 2% growth vs 3% inflation silently erodes
-// real contributions ~1%/yr (~26% by year 30) and produces an unsustainable scenario.
+// contributionGrowth is set to match inflationRate (3%) on the FIXED-DOLLAR rows so
+// real contributions stay constant over the 30-year accumulation. 2% growth vs 3%
+// inflation silently erodes real contributions ~1%/yr (~26% by year 30) and produces
+// an unsustainable scenario.
+//
+// The percent-of-salary rows carry no growth rate: a share of a salary that already
+// has its own COLA is inflation-tracking by construction, and stacking growth on top
+// would compound twice.
+// The two 401(k)s are percent-of-salary, which is the only entry mode that can
+// hold the employee deferral and the employer match as separate, attributable
+// numbers. They used to be a flat $20,000/$8,000 marked contributor:'both' — an
+// amount nothing could split, so it counted toward neither side of the savings
+// rate (which read 4.7%) and drew no pre-tax deduction at all.
+//
+// 8% / 3% are TYPICAL_DEFERRAL_RATE and TYPICAL_MATCH_RATE, the figures the
+// Guided Setup wizard has always estimated from. The cold-start defaults and the
+// wizard now agree; before this they held two different opinions about the same
+// typical saver.
 const DEFAULT_ACCOUNTS = [
-  { id: 1, name: 'My 401(k)', type: '401k', balance: 60000, contribution: 20000, contributionGrowth: 0.03, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'both' },
-  { id: 2, name: 'Spouse 401(k)', type: '401k', balance: 30000, contribution: 8000, contributionGrowth: 0.03, cagr: 0.07, startAge: 33, stopAge: 65, owner: 'spouse', contributor: 'both' },
+  { id: 1, name: 'My 401(k)', type: '401k', balance: 60000, contributionMode: 'percent', employeePercent: TYPICAL_DEFERRAL_RATE, employerMatchPercent: TYPICAL_MATCH_RATE, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'me' },
+  { id: 2, name: 'Spouse 401(k)', type: '401k', balance: 30000, contributionMode: 'percent', employeePercent: TYPICAL_DEFERRAL_RATE, employerMatchPercent: TYPICAL_MATCH_RATE, cagr: 0.07, startAge: 33, stopAge: 65, owner: 'spouse', contributor: 'me' },
   { id: 3, name: 'My Roth IRA', type: 'roth_ira', balance: 15000, contribution: 6000, contributionGrowth: 0.03, cagr: 0.07, startAge: 35, stopAge: 65, owner: 'me', contributor: 'me' },
   { id: 4, name: 'Savings', type: 'brokerage', balance: 15000, contribution: 2400, contributionGrowth: 0.03, cagr: 0.04, startAge: 35, stopAge: 65, owner: 'joint', contributor: 'me' }
 ];
@@ -10131,20 +10157,22 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
   );
 }
 
-// Split a contribution into the saver's own money vs. the employer's.
-// A percent-mode account can fold an employee deferral and an employer match into
-// one row (contributor 'both'); split it by the two percentages — the match was
-// never the saver's income. Fixed-mode rows fall back to the contributor field.
-// myContribShare is gated to owner==='me' so it only ever counts the PRIMARY saver's
-// own money toward the personal savings rate.
+// Split a contribution into the employee's own money vs. the employer's.
+// A percent-mode account folds a deferral and a match into one row; split it by the
+// two percentages — the match was never the saver's income. Fixed-mode rows fall
+// back to the contributor field, which is now only ever 'me' or 'employer'.
+// The employee's own share of an account's contribution. The savings rate divides
+// this by the HOUSEHOLD's earned income, so the numerator has to be household-wide
+// too: percent mode used to return 0 for a spouse-owned account while fixed mode
+// counted any row whose contributor was the employee, which understated every
+// dual-income plan by the whole of the spouse's deferral.
 function myContribShare(account, amount) {
   if (!amount) return 0;
   if (account.contributionMode === 'percent') {
-    if (account.owner !== 'me') return 0;
     const ee = account.employeePercent || 0, er = account.employerMatchPercent || 0;
     return ee + er > 0 ? amount * (ee / (ee + er)) : 0;
   }
-  return (account.contributor || 'me') === 'me' ? amount : 0;
+  return (account.contributor || 'me') === 'employer' ? 0 : amount;
 }
 function employerContribShare(account, amount) {
   if (!amount) return 0;
@@ -13267,10 +13295,15 @@ const ACCOUNT_TYPES = [
   { value: 'hsa', label: 'HSA' }
 ];
 
+// 'Both' used to be a third option here. It lumped the employee deferral and the
+// employer match into one unsplittable number, and every consumer guessed
+// differently — the savings rate counted it as neither, the tax engine deducted
+// none of it, the contribution-limit check counted all of it as deferral. Use
+// percent-of-salary mode when an account holds both: it carries employeePercent
+// and employerMatchPercent separately, which is the information 'Both' destroyed.
 const CONTRIBUTOR_TYPES = [
   { value: 'me', label: 'Me' },
-  { value: 'employer', label: 'Employer' },
-  { value: 'both', label: 'Both' }
+  { value: 'employer', label: 'Employer' }
 ];
 
 const INCOME_TYPES = [
@@ -15934,7 +15967,7 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
     const myMatchPct = w.match401kMode==='percent';
     const myMatchFolded = w.has401k && my401Pct && myMatchPct && num(w.match401kPercent)>0;
     if (w.has401k) {
-      if (my401Pct) { accts.push({id:aid++,name:'My '+planLabel[my401Type],type:my401Type,balance:num(w.balance401k),contribution:0,contributionMode:'percent',employeePercent:num(w.contrib401kPercent)/100,employerMatchPercent:myMatchFolded?num(w.match401kPercent)/100:0,contributionGrowth:0,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:myMatchFolded?'both':'me'}); }
+      if (my401Pct) { accts.push({id:aid++,name:'My '+planLabel[my401Type],type:my401Type,balance:num(w.balance401k),contribution:0,contributionMode:'percent',employeePercent:num(w.contrib401kPercent)/100,employerMatchPercent:myMatchFolded?num(w.match401kPercent)/100:0,contributionGrowth:0,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'}); }
       else { accts.push({id:aid++,name:'My '+planLabel[my401Type],type:my401Type,balance:num(w.balance401k),contribution:num(w.contrib401k),contributionGrowth:0.03,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'}); }
     }
     if (w.hasRoth401k) { accts.push({id:aid++,name:'My '+planLabel[myRoth401Type],type:myRoth401Type,balance:num(w.balanceRoth401k),contribution:num(w.contribRoth401k),contributionGrowth:0.03,cagr:0.07,startAge:myAge,stopAge:retAge,owner:'me',contributor:'me'}); }
@@ -15950,7 +15983,7 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
     const spMatchPct = w.spouseMatch401kMode==='percent';
     const spMatchFolded = w.hasSpouse && w.spouseHas401k && sp401Pct && spMatchPct && num(w.spouseMatch401kPercent)>0;
     if (w.hasSpouse&&w.spouseHas401k) {
-      if (sp401Pct) { accts.push({id:aid++,name:'Spouse '+planLabel[sp401Type],type:sp401Type,balance:num(w.spouseBalance401k),contribution:0,contributionMode:'percent',employeePercent:num(w.spouseContrib401kPercent)/100,employerMatchPercent:spMatchFolded?num(w.spouseMatch401kPercent)/100:0,contributionGrowth:0,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:spMatchFolded?'both':'spouse'}); }
+      if (sp401Pct) { accts.push({id:aid++,name:'Spouse '+planLabel[sp401Type],type:sp401Type,balance:num(w.spouseBalance401k),contribution:0,contributionMode:'percent',employeePercent:num(w.spouseContrib401kPercent)/100,employerMatchPercent:spMatchFolded?num(w.spouseMatch401kPercent)/100:0,contributionGrowth:0,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'me'}); }
       else { accts.push({id:aid++,name:'Spouse '+planLabel[sp401Type],type:sp401Type,balance:num(w.spouseBalance401k),contribution:num(w.spouseContrib401k),contributionGrowth:0.03,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'spouse'}); }
     }
     if (w.hasSpouse&&w.spouseHasRoth401k) { accts.push({id:aid++,name:'Spouse '+planLabel[spRoth401Type],type:spRoth401Type,balance:num(w.spouseBalanceRoth401k),contribution:num(w.spouseContribRoth401k),contributionGrowth:0.03,cagr:0.07,startAge:spouseAge,stopAge:spRetAge,owner:'spouse',contributor:'spouse'}); }
@@ -16623,6 +16656,15 @@ function RetirementPlanner() {
 
   const [showSetupWizard, setShowSetupWizard] = useState(() => !savedData);
 
+  // The v3 → v4 migration split any contributor:'both' account into an employee
+  // row and an employer row at an assumed 8:3. That is an edit to the user's own
+  // data based on information the app never captured, so it is announced rather
+  // than performed quietly — with the exact figures, so anyone whose real match
+  // differed knows precisely what to correct. Dismissal is not persisted on
+  // purpose: it lives only in this session, and the migration itself has already
+  // been written, so it cannot fire twice.
+  const [splitNotice, setSplitNotice] = useState(() => (savedData && savedData.contributorSplitNotice) || null);
+
   // The tour never launches itself. Finishing a nine-step wizard and then being
   // handed a nine-step tour is eighteen screens before you ever see your own
   // plan — the reward for setting up should be your numbers, not another modal.
@@ -16863,7 +16905,16 @@ function RetirementPlanner() {
           if (!merged.spouseBirthYear) merged.spouseBirthYear = currentYear - merged.spouseAge;
           setPersonalInfo(merged);
         }
-        if (data.accounts) setAccounts(data.accounts);
+        if (data.accounts) {
+          // An export written before v4 can still carry contributor:'both'. The
+          // localStorage migration never sees it, so the same split runs here —
+          // otherwise an imported plan silently keeps the unattributable rows,
+          // draws no pre-tax deduction, and reports a savings rate that ignores
+          // its largest account.
+          const { accounts: migrated, split } = splitBothContributors(data.accounts);
+          setAccounts(migrated);
+          if (split.length) setSplitNotice(split);
+        }
         if (data.incomeStreams) setIncomeStreams(data.incomeStreams);
         if (data.assets) setAssets(data.assets);
         if (data.oneTimeEvents) setOneTimeEvents(data.oneTimeEvents);
@@ -17303,6 +17354,50 @@ function RetirementPlanner() {
           handleImport={handleImport}
           handleReset={handleReset}
         />
+      )}
+      {splitNotice && splitNotice.length > 0 && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className={`${cardStyle} max-w-xl w-full`}>
+            <h3 className="text-xl font-bold text-slate-100 mb-3">Your 401(k) contributions were split</h3>
+            <p className="text-sm text-slate-300 leading-relaxed mb-3">
+              This plan had {splitNotice.length === 1 ? 'an account' : 'accounts'} whose contributor was set
+              to <strong>&ldquo;Both&rdquo;</strong> — one figure covering your deferral and your employer&rsquo;s
+              match together. Nothing could tell the two apart, so that money counted toward neither your
+              savings rate nor your employer&rsquo;s, and none of it was deducted from your taxable income.
+              It has been split so it finally counts:
+            </p>
+            <table className="w-full text-sm mb-3">
+              <thead>
+                <tr className="text-slate-500 text-xs uppercase tracking-wide">
+                  <th className="text-left font-semibold pb-1">Account</th>
+                  <th className="text-right font-semibold pb-1">Was</th>
+                  <th className="text-right font-semibold pb-1">You</th>
+                  <th className="text-right font-semibold pb-1">Employer</th>
+                </tr>
+              </thead>
+              <tbody>
+                {splitNotice.map((r, i) => (
+                  <tr key={i} className="border-t border-slate-700/50">
+                    <td className="py-1.5 text-slate-200">{r.name}</td>
+                    <td className="py-1.5 text-right text-slate-400">{formatCurrency(r.total)}</td>
+                    <td className="py-1.5 text-right text-sky-400 font-semibold">{formatCurrency(r.employee)}</td>
+                    <td className="py-1.5 text-right text-indigo-400 font-semibold">{formatCurrency(r.employer)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-xs text-slate-500 leading-relaxed mb-4">
+              The totals and your balances are unchanged — only the attribution. The 8:3 ratio is an
+              assumption, because the split was never recorded: it is a typical 8% deferral against the
+              most common employer formula. <strong className="text-slate-400">If your real numbers differ,
+              correct them on the Accounts tab</strong> — your deferral and the employer row are now
+              separate lines you can edit.
+            </p>
+            <div className="flex justify-end">
+              <button onClick={() => setSplitNotice(null)} className={buttonPrimary}>Got it</button>
+            </div>
+          </div>
+        </div>
       )}
       {showReport === 'menu' && (
         <ReportMenu onPick={(v) => setShowReport(v)} onClose={() => setShowReport(null)} />

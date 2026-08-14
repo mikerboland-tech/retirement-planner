@@ -5340,6 +5340,65 @@ const survivorTaxComparison = ({ row, pi = {}, smallerSSBenefit = null, streams 
 };
 
 
+// ── RETIRING THE 'both' CONTRIBUTOR ──────────────────────────────────────────
+// A fixed-dollar account marked contributor:'both' lumps the employee deferral
+// and the employer match into one number that nothing can take apart, and three
+// places in this codebase each guessed differently:
+//
+//   the savings rate      counted it as NEITHER, so the money vanished from the
+//                         numerator and from the employer tile — the card showed
+//                         mine + employer ≠ total and nobody noticed
+//   the tax engine        deducted NONE of it, because it could not tell how
+//                         much had actually left a paycheck
+//   checkContributionLimits  counted ALL of it as employee deferral
+//
+// The shipped default plan used 'both' on both 401(k)s, so a brand-new user's
+// $28,000 of deferrals showed a 4.7% savings rate and drew no above-the-line
+// deduction at all — roughly $6,200 of phantom federal tax in year one.
+//
+// The option is gone from the UI. This splits the legacy rows so the dollars
+// survive and are finally attributed, at the same 8:3 the rest of the app
+// already assumes (TYPICAL_DEFERRAL_RATE : TYPICAL_MATCH_RATE — Vanguard's
+// participant deferral against the most common 50%-of-first-6% formula).
+//
+// The split is an assumption and cannot be anything else: the information was
+// never captured. It is applied only to rows that carry no better answer —
+// percent mode already holds the two rates separately and is simply relabelled.
+const BOTH_SPLIT_EMPLOYEE_SHARE = TYPICAL_DEFERRAL_RATE / (TYPICAL_DEFERRAL_RATE + TYPICAL_MATCH_RATE);
+
+const splitBothContributors = (accounts) => {
+  if (!Array.isArray(accounts)) return { accounts: accounts || [], split: [] };
+  const legacy = accounts.filter(a => a && a.contributor === 'both');
+  if (legacy.length === 0) return { accounts, split: [] };
+
+  let nextId = accounts.reduce((m, a) => Math.max(m, Number(a && a.id) || 0), 0);
+  const out = [];
+  const split = [];
+
+  accounts.forEach(a => {
+    if (!a || a.contributor !== 'both') { out.push(a); return; }
+    // Percent mode never needed the flag: employeePercent and
+    // employerMatchPercent already say who paid what. Relabel and move on —
+    // splitting the row would double it.
+    if (a.contributionMode === 'percent') { out.push({ ...a, contributor: 'me' }); return; }
+
+    const total = a.contribution || 0;
+    if (total <= 0) { out.push({ ...a, contributor: 'me' }); return; }
+
+    const employee = Math.round(total * BOTH_SPLIT_EMPLOYEE_SHARE);
+    const employer = total - employee;
+    out.push({ ...a, contributor: 'me', contribution: employee });
+    // The employer's share becomes its own row so the dollars are unchanged.
+    // Balance 0 deliberately: the existing balance stays on the original row and
+    // duplicating it here would invent money.
+    out.push({ ...a, id: ++nextId, name: `${a.name || 'Account'} (employer)`,
+               contributor: 'employer', contribution: employer, balance: 0 });
+    split.push({ name: a.name, total, employee, employer });
+  });
+
+  return { accounts: out, split };
+};
+
 // ── SAVINGS-RATE WHAT-IF ─────────────────────────────────────────────────────
 // "What if I saved five more points?" is the one question a working saver can
 // actually act on this month, and the plan has never been able to answer it —
@@ -5348,8 +5407,8 @@ const survivorTaxComparison = ({ row, pi = {}, smallerSSBenefit = null, streams 
 // Answering it means rebuilding the account list with larger contributions and
 // re-running the projection, which is only honest if the rebuild moves exactly
 // the money the savings rate counts. These two helpers mirror the UI's
-// myContribShare rule EXACTLY: percent-mode counts the saver's own deferral on
-// accounts they own, fixed-mode counts rows whose contributor is the saver.
+// myContribShare rule EXACTLY: the employee's own deferral on every account in
+// the household, since the rate's denominator is household earned income.
 // Employer money is never touched — a match is the employer's contribution and
 // scaling it would inflate the answer with dollars the saver did not commit.
 //
@@ -5359,10 +5418,9 @@ const survivorTaxComparison = ({ row, pi = {}, smallerSSBenefit = null, streams 
 const scaleOwnContributions = (accts, factor) => (accts || []).map(a => {
   if (!a) return a;
   if (a.contributionMode === 'percent') {
-    if (a.owner !== 'me') return a;
     return { ...a, employeePercent: (a.employeePercent || 0) * factor };
   }
-  if ((a.contributor || 'me') !== 'me') return a;
+  if ((a.contributor || 'me') === 'employer') return a;
   return { ...a, contribution: (a.contribution || 0) * factor };
 });
 
@@ -6002,13 +6060,25 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         // In 'percent' mode the saver thinks "X% of paycheck" — the contribution scales
         // with the owner's salary COLA automatically, so contributionGrowth defaults to 0.
         let baseContribution = account.contribution;
+        let isPercentMode = false;
         if (account.contributionMode === 'percent') {
+          isPercentMode = true;
           const ownerSalary = account.owner === 'me' ? myEarnedIncome
                             : account.owner === 'spouse' ? spouseEarnedIncome
                             : 0;
           baseContribution = ownerSalary * ((account.employeePercent || 0) + (account.employerMatchPercent || 0));
         }
-        const adjustedContribution = baseContribution * Math.pow(1 + contributionGrowth, Math.max(0, yearsContributing));
+        // contributionGrowth is IGNORED in percent mode, and that is not a
+        // shortcut. The contribution is already a fixed share of a salary that
+        // grows with its own COLA, so applying growth on top compounds twice: an
+        // 11%-of-pay deferral with 3% growth reaches 25.9% of pay by age 64 —
+        // more than double what the saver entered, with nothing on screen saying
+        // so. The field belongs to fixed-dollar mode, where it is the only way to
+        // keep a contribution constant in real terms; switching such an account
+        // to percent mode used to carry its growth rate along silently.
+        const adjustedContribution = isPercentMode
+          ? baseContribution
+          : baseContribution * Math.pow(1 + contributionGrowth, Math.max(0, yearsContributing));
         accountBalances[account.id] += adjustedContribution;
         accountContributions[account.id] = Math.round(adjustedContribution);
         
@@ -7764,6 +7834,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     marginalCostOfNextDollar, survivorTaxComparison, survivorSSLoss,
     planShortfall, breakingPoint, STRESS_DIMENSIONS,
     scaleOwnContributions, addOwnContribution, accountsAtSavingsTarget,
+    splitBothContributors, BOTH_SPLIT_EMPLOYEE_SHARE,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,
