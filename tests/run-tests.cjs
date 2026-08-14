@@ -7011,6 +7011,143 @@ section('P58 — retiring the "both" contributor: the dollars survive and are fi
   }
 }
 
+section('P59 — the starter plan: internally consistent, and not balanced on a knife edge');
+{
+  // The default scenario is the first thing every new user sees, and it had been
+  // edited piecemeal across many releases until its parts no longer agreed:
+  // salaries raised without touching the spending target or the comment that
+  // justified it, Social Security amounts that contradicted their own pia field,
+  // birth years hardcoded to the year they were written, and — costliest —
+  // Social Security entered in today's dollars but consumed as the nominal
+  // benefit in the claim year. These read the ACTUAL defaults out of the source
+  // so the starter plan cannot drift again without a test failing.
+  const fs = require('fs');
+  const src = fs.readFileSync(__dirname + '/../retirement-planner.jsx', 'utf8');
+  const grab = (name) => {
+    const start = src.indexOf(`const ${name} = [`);
+    if (start < 0) return null;
+    const open = src.indexOf('[', start);
+    let depth = 0, i = open;
+    for (; i < src.length; i++) {
+      if (src[i] === '[') depth++;
+      else if (src[i] === ']') { depth--; if (depth === 0) break; }
+    }
+    // eslint-disable-next-line no-eval
+    return eval(src.slice(open, i + 1).replace(/TYPICAL_DEFERRAL_RATE/g, '0.08').replace(/TYPICAL_MATCH_RATE/g, '0.03'));
+  };
+  const piBlock = (() => {
+    const start = src.indexOf('const DEFAULT_PERSONAL_INFO = {');
+    return src.slice(start, src.indexOf('\n};', start));
+  })();
+  const piNum = (key) => {
+    const m = piBlock.match(new RegExp(`\\n\\s*${key}:\\s*([-\\d.]+)`));
+    return m ? Number(m[1]) : null;
+  };
+
+  const accounts = grab('DEFAULT_ACCOUNTS');
+  const streams = grab('DEFAULT_INCOME_STREAMS');
+  const assets = grab('DEFAULT_ASSETS');
+  const recurring = grab('DEFAULT_RECURRING_EXPENSES');
+  eq(!!(accounts && streams && assets && recurring), true, 'the defaults are readable from the source');
+
+  const myAge = piNum('myAge'), spouseAge = piNum('spouseAge');
+  const retAge = piNum('myRetirementAge'), spend = piNum('desiredRetirementIncome');
+  const salaries = streams.filter(s => s.type === 'earned_income');
+  const ss = streams.filter(s => s.type === 'social_security');
+  const household = salaries.reduce((s, x) => s + x.amount, 0);
+
+  // ── Social Security is in today's dollars, and says so ───────────────────
+  // The defect that mattered most. SSA quotes the statement figure in today's
+  // dollars; without the flag the engine took it as the nominal benefit in the
+  // claim year, delivering $15,728 of real value where $40,500 was intended.
+  {
+    eq(ss.length > 0, true, 'the starter plan includes Social Security');
+    ss.forEach(s => {
+      eq(s.todaysDollars, true, `${s.name} is flagged as today's dollars`);
+      eq(s.amount, s.pia * 12, `${s.name}: the annual amount and the monthly pia agree`);
+    });
+  }
+
+  // ── Ages, birth years and working years all agree ────────────────────────
+  {
+    const piSrc = piBlock;
+    eq(/myBirthYear:\s*DEFAULT_TODAY_YEAR\s*-\s*35/.test(piSrc), true,
+      'birth years are derived from the clock, not frozen at the year they were typed');
+    eq(/spouseBirthYear:\s*DEFAULT_TODAY_YEAR\s*-\s*33/.test(piSrc), true, 'for both people');
+    salaries.forEach(s => {
+      eq(s.endAge, retAge - 1,
+        `${s.name} stops the year before retirement — age ranges are inclusive here but a stopAge is exclusive`);
+    });
+    accounts.forEach(a => eq(a.stopAge, retAge, `${a.name} contributes right up to retirement`));
+    eq(salaries.find(s => s.owner === 'me').startAge, myAge, 'my salary starts at my age');
+    eq(salaries.find(s => s.owner === 'spouse').startAge, spouseAge, "and my spouse's at theirs");
+  }
+
+  // ── The spending target is a stated share of a real household income ──────
+  {
+    const replacement = spend / household;
+    gt(replacement, 0.55, 'the spending target is a credible share of gross pay');
+    lt(replacement, 0.72, 'and not above the conventional 70-80%-of-gross range');
+  }
+
+  // ── The plan works, and has room to be wrong ─────────────────────────────
+  // A starter scenario that fails out of the box is alarming; one that succeeds
+  // by $499 is worse, because every slider the user touches breaks it. This is
+  // the assertion the old defaults failed: spending broke at $95,499 against a
+  // $95,000 target, inflation at 3.01% against a 3.00% assumption.
+  {
+    const pi = {
+      myAge, spouseAge, myRetirementAge: retAge, spouseRetirementAge: retAge,
+      myBirthYear: TODAY_YEAR - myAge, spouseBirthYear: TODAY_YEAR - spouseAge,
+      filingStatus: 'married_joint', state: 'Alabama', desiredRetirementIncome: spend,
+      inflationRate: piNum('inflationRate'), withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+      charitableGivingPercent: 0, rothConversionAmount: 0, rothConversionStartAge: 0,
+      rothConversionEndAge: 0, heirTaxRate: 0.25, legacyAge: piNum('legacyAge'),
+      healthcareModel: 'none', ltcModel: 'none', medicalInflation: 0.05,
+      survivorModelEnabled: false, spendingPhasesEnabled: false,
+    };
+    const ctx = { pi, accts: accounts, streams, assetList: assets, events: [],
+                  recurring, currentYear: TODAY_YEAR };
+    const proj = computeProjections(pi, accounts, streams, assets, [], recurring, TODAY_YEAR);
+    const ledger = engine.planShortfall(proj, { retirementAge: retAge });
+    eq(ledger.fails, false, 'the starter plan funds every year of its own horizon');
+
+    const spendEdge = engine.breakingPoint(ctx, 'spending');
+    eq(spendEdge.alreadyFails, false, 'so there is a margin to measure');
+    gt(spendEdge.value / spend, 1.10, 'and at least 10% of spending headroom before it breaks');
+
+    const inflEdge = engine.breakingPoint(ctx, 'inflation');
+    gt(inflEdge.value - pi.inflationRate, 0.003,
+      'plus real room on inflation — the old defaults broke 0.01 points above their own assumption');
+
+    const retEdge = engine.breakingPoint(ctx, 'returnDrop');
+    gt(retEdge.value, 0.005, 'and a return cushion measured in points, not basis points');
+  }
+
+  // ── Social Security lands near what the 2026 formula actually pays ───────
+  // A cross-check against the statute rather than against our own constant:
+  // 90% of the first $1,286 of AIME, 32% to $7,749, 15% above (SSA 2026 bend
+  // points), taking each salary as a steady career average.
+  {
+    const piaFor = (salary) => {
+      const aime = salary / 12;
+      return Math.floor(0.9 * Math.min(aime, 1286)
+        + 0.32 * Math.max(0, Math.min(aime, 7749) - 1286)
+        + 0.15 * Math.max(0, aime - 7749));
+    };
+    salaries.forEach(sal => {
+      const benefit = ss.find(s => s.owner === sal.owner);
+      if (!benefit) return;
+      approx(benefit.pia, piaFor(sal.amount), `${benefit.name} matches the 2026 PIA formula for its salary`, 1);
+    });
+    // And stays inside the range SSA itself publishes for 2026.
+    ss.forEach(s => {
+      lt(s.pia, 4152, `${s.name} is below the 2026 maximum benefit at full retirement age`);
+      gt(s.pia, 2071, `${s.name} is above the 2026 average retired-worker benefit, as these salaries imply`);
+    });
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

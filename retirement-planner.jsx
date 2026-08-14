@@ -364,16 +364,33 @@ const EXPENSE_CATEGORIES = [
   { value: 'other', label: 'Other', icon: '📋' }
 ];
 
+// One read of the clock for every derived default below, so ages and birth years
+// cannot disagree with each other.
+const DEFAULT_TODAY_YEAR = new Date().getFullYear();
+
 const DEFAULT_PERSONAL_INFO = {
   myAge: 35,
   spouseAge: 33,
   myRetirementAge: 65,
   spouseRetirementAge: 65,
-  myBirthYear: 1991,  // For accurate RMD age calculation
-  spouseBirthYear: 1993, // For accurate RMD age calculation
+  // Derived, never hardcoded. These were literal 1991/1993, which agreed with
+  // myAge/spouseAge only during the year they were written — every year after,
+  // the starter plan claimed to be 35 while the RMD and FRA math ran off a
+  // birth year that made them older.
+  myBirthYear: DEFAULT_TODAY_YEAR - 35,
+  spouseBirthYear: DEFAULT_TODAY_YEAR - 33,
   filingStatus: 'married_joint',
   state: 'Alabama',
-  desiredRetirementIncome: 95000,  // ~70% of $135K household income (conventional replacement-rate guidance)
+  // 61% of the $180,000 household gross below. The familiar "70-80% of
+  // pre-retirement income" rule is quoted on GROSS pay, which for this couple
+  // still contains 7.65% FICA and an 11%-of-pay savings rate — both of which
+  // stop at retirement. Netting those out, 61% of gross is roughly 75% of what
+  // they actually live on today, which is the middle of the conventional range.
+  // It is also what this savings rate genuinely supports over a 33-year
+  // retirement: the plan clears it with ~16% of spending headroom, where 70% of
+  // gross would leave under 2%. A starter scenario should be comfortable, not
+  // balanced on a knife edge — but it must not be a fantasy either.
+  desiredRetirementIncome: 110000,
   inflationRate: 0.03,
   withdrawalPriority: ['pretax', 'brokerage', 'roth'], // Order: first to last
   charitableGivingPercent: 0, // Percentage of retirement spending donated to charity (enables QCD strategy)
@@ -459,15 +476,38 @@ const DEFAULT_ACCOUNTS = [
 // Salary COLA and SS COLA set to 3% to match inflation. Lower values silently erode
 // the real purchasing power of every income stream — SS benefits set at 2% COLA
 // lose ~25% of their value by age 95 vs. real-world SS which tracks CPI.
+//
+// Salaries end at retirementAge − 1: age ranges here are INCLUSIVE, while an
+// account's stopAge is exclusive, so `endAge: 65` against `stopAge: 65` had the
+// couple earning a full salary at 65 while contributing nothing — a phantom
+// year of pay after the age they retire. (The Guided Setup wizard already used
+// retAge − 1; only these defaults disagreed.)
+//
+// Social Security is in TODAY'S dollars, which is how SSA quotes it on the
+// statement people read these figures off — hence todaysDollars: true, so the
+// benefit is indexed up to the claim year instead of being taken as the nominal
+// 2058 amount. Without the flag this couple's benefit arrived worth $15,728 in
+// today's money instead of $40,500: a 61% understatement that the portfolio then
+// had to cover, and the single reason the starter plan used to sit one rounding
+// error away from failing.
+//
+// The amounts are the 2026 PIA formula applied to each salary as a steady career
+// average — 90% of the first $1,286 of AIME, 32% to $7,749, 15% above (SSA 2026
+// bend points) — and `pia` is the same figure monthly, so the two fields cannot
+// disagree. They did: 36000/yr sat next to a pia of 2400 ($28,800/yr), and the
+// engine reads BOTH (pia drives the spousal benefit).
 const DEFAULT_INCOME_STREAMS = [
-  { id: 1, name: 'My Salary', type: 'earned_income', amount: 105000, startAge: 35, endAge: 65, cola: 0.03, owner: 'me' },
-  { id: 2, name: 'Spouse Salary', type: 'earned_income', amount: 75000, startAge: 33, endAge: 65, cola: 0.03, owner: 'spouse' },
-  { id: 3, name: 'My Social Security', type: 'social_security', amount: 36000, startAge: 67, endAge: 95, cola: 0.03, owner: 'me', pia: 2400 },
-  { id: 4, name: 'Spouse Social Security', type: 'social_security', amount: 30000, startAge: 67, endAge: 95, cola: 0.03, owner: 'spouse', pia: 2000 }
+  { id: 1, name: 'My Salary', type: 'earned_income', amount: 105000, startAge: 35, endAge: 64, cola: 0.03, owner: 'me' },
+  { id: 2, name: 'Spouse Salary', type: 'earned_income', amount: 75000, startAge: 33, endAge: 64, cola: 0.03, owner: 'spouse' },
+  { id: 3, name: 'My Social Security', type: 'social_security', amount: 40500, startAge: 67, endAge: 95, cola: 0.03, owner: 'me', pia: 3375, todaysDollars: true },
+  { id: 4, name: 'Spouse Social Security', type: 'social_security', amount: 32940, startAge: 67, endAge: 95, cola: 0.03, owner: 'spouse', pia: 2745, todaysDollars: true }
 ];
 
+// Home value tracks the national median existing-home price (NAR, Q1 2026:
+// $404,300). It had drifted to $315,000 — roughly the 2019 median — which
+// understated both the balance sheet and the property tax below.
 const DEFAULT_ASSETS = [
-  { id: 1, name: 'Primary Residence', type: 'real_estate', value: 315000, appreciationRate: 0.03, mortgage: 260000, mortgagePayoffAge: 60 },
+  { id: 1, name: 'Primary Residence', type: 'real_estate', value: 405000, appreciationRate: 0.03, mortgage: 300000, mortgagePayoffAge: 60 },
   { id: 2, name: 'Vehicles', type: 'vehicle', value: 35000, appreciationRate: -0.10, mortgage: 0, mortgagePayoffAge: null }
 ];
 
@@ -477,7 +517,7 @@ const DEFAULT_ASSETS = [
 // The single placeholder below exists so the cash-flow tab isn't empty for first-time
 // users — they can edit/delete it once they understand the feature.
 const DEFAULT_RECURRING_EXPENSES = [
-  { id: 1, name: 'Property Tax', category: 'housing', amount: 4000, startAge: 35, endAge: 95, inflationRate: 0.03, owner: 'me' }
+  { id: 1, name: 'Property Tax', category: 'housing', amount: 4400, startAge: 35, endAge: 95, inflationRate: 0.03, owner: 'me' }
 ];
 
 // ── CURRENT-YEAR TAX DETAIL ──────────────────────────────────────────────────
@@ -15995,8 +16035,19 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
     const incs = []; let iid = 1;
     if (mySalary>0) incs.push({id:iid++,name:'My Salary',type:'earned_income',amount:mySalary,startAge:myAge,endAge:retAge-1,cola:num(w.mySalaryGrowth)/100,owner:'me'});
     if (w.hasSpouse&&spouseSalary>0) incs.push({id:iid++,name:'Spouse Salary',type:'earned_income',amount:spouseSalary,startAge:spouseAge,endAge:spRetAge-1,cola:num(w.spouseSalaryGrowth||w.mySalaryGrowth)/100,owner:'spouse'});
-    if (w.expectSS) { const mo=num(w.ssMonthly)||estimateSSMonthly(mySalary); const age=num(w.ssClaimAge)||67; const adj=calculateSSBenefit(mo,age,yr-myAge); incs.push({id:iid++,name:'My Social Security',type:'social_security',amount:adj*12,startAge:age,endAge:95,cola:0.02,owner:'me',pia:mo}); }
-    if (w.hasSpouse&&w.spouseExpectSS) { const mo=num(w.spouseSSMonthly)||estimateSSMonthly(spouseSalary); const age=num(w.spouseSSClaimAge)||67; const adj=calculateSSBenefit(mo,age,yr-spouseAge); incs.push({id:iid++,name:'Spouse Social Security',type:'social_security',amount:adj*12,startAge:age,endAge:95,cola:0.02,owner:'spouse',pia:mo}); }
+    // todaysDollars: the wizard asks for the monthly figure off an SSA statement,
+    // which SSA states in today's dollars, and estimateSSMonthly derives from
+    // today's salary. Without the flag the engine read it as the nominal benefit
+    // in the claim year, so every wizard-built plan understated Social Security
+    // by the whole inflation factor between now and claiming — 61% for someone
+    // aged 35 claiming at 67.
+    // COLA matches the plan's inflation rate rather than a flat 2%: Social
+    // Security tracks CPI, and 2% against 3% inflation quietly shaves a quarter
+    // off its real value by 95 (the same reasoning already written above
+    // DEFAULT_INCOME_STREAMS, which the wizard was contradicting).
+    const ssCola = newPI.inflationRate || 0.03;
+    if (w.expectSS) { const mo=num(w.ssMonthly)||estimateSSMonthly(mySalary); const age=num(w.ssClaimAge)||67; const adj=calculateSSBenefit(mo,age,yr-myAge); incs.push({id:iid++,name:'My Social Security',type:'social_security',amount:adj*12,startAge:age,endAge:95,cola:ssCola,owner:'me',pia:mo,todaysDollars:true}); }
+    if (w.hasSpouse&&w.spouseExpectSS) { const mo=num(w.spouseSSMonthly)||estimateSSMonthly(spouseSalary); const age=num(w.spouseSSClaimAge)||67; const adj=calculateSSBenefit(mo,age,yr-spouseAge); incs.push({id:iid++,name:'Spouse Social Security',type:'social_security',amount:adj*12,startAge:age,endAge:95,cola:ssCola,owner:'spouse',pia:mo,todaysDollars:true}); }
     if (w.hasPension) incs.push({id:iid++,name:'Pension',type:'pension',amount:num(w.pensionAmount),startAge:num(w.pensionStartAge)||retAge,endAge:95,cola:0.01,owner:w.pensionOwner||'me'});
     if (w.hasPension2) incs.push({id:iid++,name:'Pension 2',type:'pension',amount:num(w.pension2Amount),startAge:num(w.pension2StartAge)||retAge,endAge:95,cola:0.01,owner:w.pension2Owner||'spouse'});
     // Other income sources (rental, business, side work, etc.)
