@@ -5340,6 +5340,62 @@ const survivorTaxComparison = ({ row, pi = {}, smallerSSBenefit = null, streams 
 };
 
 
+// ── SAVINGS-RATE WHAT-IF ─────────────────────────────────────────────────────
+// "What if I saved five more points?" is the one question a working saver can
+// actually act on this month, and the plan has never been able to answer it —
+// the savings rate was a read-only statistic.
+//
+// Answering it means rebuilding the account list with larger contributions and
+// re-running the projection, which is only honest if the rebuild moves exactly
+// the money the savings rate counts. These two helpers mirror the UI's
+// myContribShare rule EXACTLY: percent-mode counts the saver's own deferral on
+// accounts they own, fixed-mode counts rows whose contributor is the saver.
+// Employer money is never touched — a match is the employer's contribution and
+// scaling it would inflate the answer with dollars the saver did not commit.
+//
+// (Not modeled: a match that rises with the deferral it matches. Most plans do
+// match up to a cap, so holding the match fixed makes the projection the
+// conservative one rather than the flattering one.)
+const scaleOwnContributions = (accts, factor) => (accts || []).map(a => {
+  if (!a) return a;
+  if (a.contributionMode === 'percent') {
+    if (a.owner !== 'me') return a;
+    return { ...a, employeePercent: (a.employeePercent || 0) * factor };
+  }
+  if ((a.contributor || 'me') !== 'me') return a;
+  return { ...a, contribution: (a.contribution || 0) * factor };
+});
+
+// Where new savings go when there is nothing to scale — a saver contributing $0
+// today has no mix to preserve, and factor arithmetic has nothing to multiply.
+// Preference order is pre-tax (the dollar that also cuts this year's tax bill),
+// then any account the saver owns, then whatever exists. Returns the list
+// unchanged when there is no account at all to receive it.
+const addOwnContribution = (accts, dollars) => {
+  if (!Array.isArray(accts) || accts.length === 0 || !(dollars > 0)) return accts || [];
+  const mine = accts.filter(a => a && (a.owner === 'me' || a.owner === 'joint'));
+  const pool = mine.length ? mine : accts;
+  const preTax = pool.filter(a => isPreTaxAccount(a.type));
+  const candidates = preTax.length ? preTax : pool;
+  const dest = candidates.reduce((best, a) =>
+    (a.balance || 0) > (best.balance || 0) ? a : best, candidates[0]);
+  return accts.map(a => a === dest
+    // Forced to fixed-dollar mode: a percent-mode row would need a salary to
+    // convert against, and the caller already knows the dollars.
+    ? { ...a, contributionMode: 'amount', contributor: 'me',
+        contribution: (a.contribution || 0) + dollars }
+    : a);
+};
+
+// The account list that makes the saver's own contributions equal targetDollars.
+// currentPersonal is what they contribute today, measured the same way — the UI
+// reads it off the projection's perAccountContributions so growth is included.
+const accountsAtSavingsTarget = (accts, { currentPersonal = 0, targetDollars = 0 } = {}) => {
+  if (!Array.isArray(accts)) return [];
+  if (currentPersonal > 0) return scaleOwnContributions(accts, Math.max(0, targetDollars) / currentPersonal);
+  return addOwnContribution(accts, Math.max(0, targetDollars));
+};
+
 // ── WHAT BREAKS FIRST ────────────────────────────────────────────────────────
 // The projection has always computed unfundedShortfall — spending dollars the
 // portfolio could not supply — and shown it in one badge on one table. A plan
@@ -7707,6 +7763,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,
     marginalCostOfNextDollar, survivorTaxComparison, survivorSSLoss,
     planShortfall, breakingPoint, STRESS_DIMENSIONS,
+    scaleOwnContributions, addOwnContribution, accountsAtSavingsTarget,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,

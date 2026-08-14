@@ -6683,6 +6683,164 @@ section('P56 — what breaks first: the shortfall ledger, and the edge of each a
   }
 }
 
+section('P57 — the savings-rate what-if moves exactly the money the savings rate counts');
+{
+  // "What if I saved five more points?" is answerable only if the rebuild moves
+  // the same dollars the displayed rate is measured on. Move more (an employer
+  // match, a spouse's percent-mode deferral) and the chart flatters the answer
+  // with money the saver never committed; move less and it understates it.
+  const { scaleOwnContributions, addOwnContribution, accountsAtSavingsTarget } = engine;
+
+  // Mirrors the UI's myContribShare, which is the rule under test.
+  const ownShare = (a, amount) => {
+    if (!amount) return 0;
+    if (a.contributionMode === 'percent') {
+      if (a.owner !== 'me') return 0;
+      const ee = a.employeePercent || 0, er = a.employerMatchPercent || 0;
+      return ee + er > 0 ? amount * (ee / (ee + er)) : 0;
+    }
+    return (a.contributor || 'me') === 'me' ? amount : 0;
+  };
+
+  // ── Employer money is never scaled ───────────────────────────────────────
+  {
+    const accts = [
+      { id: 1, name: 'My 401k', type: '401k', balance: 500000, contribution: 20000, contributor: 'me', cagr: 0.06, startAge: 50, stopAge: 65, owner: 'me' },
+      { id: 2, name: 'Match', type: '401k', balance: 100000, contribution: 8000, contributor: 'employer', cagr: 0.06, startAge: 50, stopAge: 65, owner: 'me' },
+    ];
+    const out = scaleOwnContributions(accts, 1.5);
+    eq(out[0].contribution, 30000, 'the saver\'s own contribution scales');
+    eq(out[1].contribution, 8000, 'the employer match does not — it is not the saver\'s money');
+  }
+
+  // ── Percent mode scales the deferral, not the match ──────────────────────
+  {
+    const accts = [
+      { id: 1, name: 'Pct', type: '401k', balance: 400000, contributionMode: 'percent', employeePercent: 0.10, employerMatchPercent: 0.04, cagr: 0.06, startAge: 50, stopAge: 65, owner: 'me' },
+    ];
+    const out = scaleOwnContributions(accts, 2);
+    approx(out[0].employeePercent, 0.20, 'the deferral doubles', 1e-9);
+    eq(out[0].employerMatchPercent, 0.04, 'the match percentage is untouched');
+  }
+
+  // ── A spouse-owned percent row is left alone, because it is not counted ───
+  // The displayed rate scores percent-mode only for accounts the saver owns.
+  // Scaling a spouse's row would move money the numerator never saw, and the
+  // chart would show growth the rate on screen cannot explain.
+  {
+    const accts = [
+      { id: 1, name: 'Mine', type: '401k', balance: 400000, contributionMode: 'percent', employeePercent: 0.10, employerMatchPercent: 0, cagr: 0.06, startAge: 50, stopAge: 65, owner: 'me' },
+      { id: 2, name: 'Theirs', type: '401k', balance: 400000, contributionMode: 'percent', employeePercent: 0.10, employerMatchPercent: 0, cagr: 0.06, startAge: 50, stopAge: 65, owner: 'spouse' },
+    ];
+    const out = scaleOwnContributions(accts, 2);
+    approx(out[0].employeePercent, 0.20, 'the saver\'s own percent row scales');
+    eq(out[1].employeePercent, 0.10, 'the spouse\'s does not, matching how the rate is measured');
+  }
+
+  // ── Scaling by target/current lands on the target, whatever the mix ───────
+  // The property that makes the slider honest: the rebuilt list contributes
+  // exactly what was asked for, across a mix of both entry modes plus employer
+  // money that must be excluded from both sides of the ratio.
+  {
+    const accts = [
+      { id: 1, name: 'A', type: '401k', balance: 500000, contribution: 15000, contributor: 'me', cagr: 0, startAge: 50, stopAge: 65, owner: 'me' },
+      { id: 2, name: 'B', type: 'roth_ira', balance: 100000, contribution: 7000, contributor: 'me', cagr: 0, startAge: 50, stopAge: 65, owner: 'me' },
+      { id: 3, name: 'Match', type: '401k', balance: 50000, contribution: 6000, contributor: 'employer', cagr: 0, startAge: 50, stopAge: 65, owner: 'me' },
+    ];
+    const current = accts.reduce((s, a) => s + ownShare(a, a.contribution), 0);
+    eq(current, 22000, 'today the saver puts in $22,000 of their own money');
+    const out = accountsAtSavingsTarget(accts, { currentPersonal: current, targetDollars: 33000 });
+    const after = out.reduce((s, a) => s + ownShare(a, a.contribution), 0);
+    approx(after, 33000, 'and the rebuilt list puts in exactly the target', 0.01);
+    eq(out[2].contribution, 6000, 'with the match still excluded from the total');
+    // Proportions preserved: the saver's tax mix should not change just because
+    // the amount did.
+    approx(out[0].contribution / out[1].contribution, 15000 / 7000,
+      'and their split between pre-tax and Roth is preserved', 1e-9);
+  }
+
+  // ── Scaling down works the same way ──────────────────────────────────────
+  {
+    const accts = [{ id: 1, name: 'A', type: '401k', balance: 500000, contribution: 20000, contributor: 'me', cagr: 0, startAge: 50, stopAge: 65, owner: 'me' }];
+    const out = accountsAtSavingsTarget(accts, { currentPersonal: 20000, targetDollars: 5000 });
+    approx(out[0].contribution, 5000, 'the slider can be dragged down as well as up', 0.01);
+    const zero = accountsAtSavingsTarget(accts, { currentPersonal: 20000, targetDollars: 0 });
+    eq(zero[0].contribution, 0, 'all the way to nothing');
+  }
+
+  // ── A saver contributing nothing today still gets an answer ──────────────
+  // There is no mix to preserve and nothing for a factor to multiply, so the
+  // new money has to be placed. Pre-tax first: it is the dollar that also cuts
+  // this year's tax bill.
+  {
+    const accts = [
+      { id: 1, name: 'Brokerage', type: 'brokerage', balance: 300000, contribution: 0, cagr: 0.05, startAge: 50, stopAge: 65, owner: 'me' },
+      { id: 2, name: '401k', type: '401k', balance: 120000, contribution: 0, cagr: 0.06, startAge: 50, stopAge: 65, owner: 'me' },
+    ];
+    const out = accountsAtSavingsTarget(accts, { currentPersonal: 0, targetDollars: 18000 });
+    eq(out[1].contribution, 18000, 'the pre-tax account receives it, not the larger brokerage');
+    eq(out[0].contribution, 0, 'which is left alone');
+    eq(out[1].contributionMode, 'amount', 'in fixed dollars, since there is no salary to take a percent of');
+    eq(out[1].contributor, 'me', 'and credited to the saver, or the rate would not move');
+    const after = out.reduce((s, a) => s + ownShare(a, a.contribution), 0);
+    eq(after, 18000, 'so the rebuilt list really does contribute the target');
+  }
+
+  // ── With no pre-tax account, the largest one the saver owns takes it ──────
+  {
+    const accts = [
+      { id: 1, name: 'Small', type: 'brokerage', balance: 20000, contribution: 0, cagr: 0.05, startAge: 50, stopAge: 65, owner: 'me' },
+      { id: 2, name: 'Big', type: 'roth_ira', balance: 200000, contribution: 0, cagr: 0.05, startAge: 50, stopAge: 65, owner: 'me' },
+      { id: 3, name: 'Bigger, theirs', type: 'roth_ira', balance: 900000, contribution: 0, cagr: 0.05, startAge: 50, stopAge: 65, owner: 'spouse' },
+    ];
+    const out = addOwnContribution(accts, 10000);
+    eq(out[1].contribution, 10000, 'the largest account the saver owns receives it');
+    eq(out[2].contribution, 0, 'not the larger one belonging to the spouse');
+  }
+
+  // ── The rebuilt plan really does compound more ───────────────────────────
+  // The end-to-end property the chart claims: same plan, larger contributions,
+  // a bigger portfolio at retirement — and untouched before saving starts.
+  {
+    const sc = baseScenario({
+      myAge: 45, spouseAge: 45, myBirthYear: TODAY_YEAR - 45, spouseBirthYear: TODAY_YEAR - 45,
+      myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 90,
+      state: 'Missouri', inflationRate: 0.025, desiredRetirementIncome: 70000,
+      healthcareModel: 'none', medicalInflation: 0,
+    });
+    sc.accts = [
+      { id: 1, name: '401k', type: '401k', balance: 400000, contribution: 20000, contributor: 'me', cagr: 0.06, startAge: 45, stopAge: 65, owner: 'me' },
+    ];
+    sc.streams = [
+      { id: 1, name: 'Salary', type: 'earned_income', amount: 200000, startAge: 45, endAge: 64, cola: 0.03, owner: 'me' },
+      { id: 2, name: 'My SS', type: 'social_security', amount: 40000, startAge: 67, endAge: 95, cola: 0.025, owner: 'me' },
+    ];
+    const base = computeProjections(sc.pi, sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+    const more = computeProjections(sc.pi,
+      accountsAtSavingsTarget(sc.accts, { currentPersonal: 20000, targetDollars: 30000 }),
+      sc.streams, [], [], [], TODAY_YEAR);
+    const at = (proj, age) => proj.find(p => p.myAge === age);
+    gt(at(more, 65).totalPortfolio, at(base, 65).totalPortfolio,
+      'saving more leaves a larger portfolio at retirement');
+    gt(at(more, 90).totalPortfolio, at(base, 90).totalPortfolio, 'and at the end of the plan');
+    // Twenty years of an extra $10k is $200k of contributions; the gap at
+    // retirement has to exceed that, or nothing compounded.
+    gt(at(more, 65).totalPortfolio - at(base, 65).totalPortfolio, 200000,
+      'by more than the extra dollars themselves — which is the whole point of the chart');
+  }
+
+  // ── Degenerate inputs ────────────────────────────────────────────────────
+  {
+    eq(scaleOwnContributions(null, 2).length, 0, 'no accounts, no crash');
+    eq(accountsAtSavingsTarget(null, {}).length, 0, 'nor for the wrapper');
+    eq(addOwnContribution([], 1000).length, 0, 'nowhere to put it is not an error');
+    const one = [{ id: 1, name: 'A', type: 'brokerage', balance: 1000, contribution: 500, cagr: 0, startAge: 50, stopAge: 65, owner: 'me' }];
+    eq(addOwnContribution(one, 0)[0].contribution, 500, 'adding nothing changes nothing');
+    eq(accountsAtSavingsTarget(one, { currentPersonal: 0, targetDollars: -5 })[0].contribution, 500,
+      'and a negative target is floored rather than subtracted');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

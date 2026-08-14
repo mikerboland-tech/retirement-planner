@@ -49,7 +49,7 @@ const {
   rothConversionModeLabel, rothConversionModeOf,
   taxBreakpoints, marginalCostOfNextDollar,
   survivorTaxComparison, survivorSSLoss, scoreRothStrategy,
-  planShortfall, breakingPoint,
+  planShortfall, breakingPoint, accountsAtSavingsTarget,
   getFederalDeduction, NIIT_THRESHOLDS,
   IRMAA_FILL_SAFETY_MARGIN,
 } = PlannerEngine;
@@ -10156,9 +10156,316 @@ function employerContribShare(account, amount) {
 }
 
 // ============================================
+// SavingsRateExplorer — drag the savings rate, watch the plan move.
+//
+// The savings rate has always been a read-only statistic: a number and a little
+// bar. But it is the one lever a working saver can actually pull this month, and
+// the interesting thing about it is not the rate — it is what four more points
+// of it are worth after twenty years of compounding, which no static figure can
+// show.
+//
+// The slider rebuilds the account list at the target rate and re-runs the SAME
+// computeProjections the rest of the app uses, so the answer carries the real
+// tax treatment of the extra deferral, the real contribution limits, and the
+// real withdrawal sequencing. It is not a compound-interest formula bolted on
+// the side. One projection is ~1.5ms, which is why this can track a drag.
+//
+// At module scope: defined inside AccountsTab it would be a new component
+// identity on every render, remounting the chart (and resetting the slider) on
+// every keystroke elsewhere in the tab.
+// ============================================
+
+// Two series, two jobs. The what-if is the line the reader is manipulating, so
+// it gets the vivid warm slot and a solid stroke; the plan-as-entered is a fixed
+// reference and recedes into the cool slot with a dashed stroke. The dash is the
+// non-color encoding — together with the end labels and the legend, identity
+// never rests on hue alone. Both slots are from the app's validated categorical
+// palette and pass all six checks against this surface (worst adjacent CVD ΔE
+// 26.8 protan / 32.4 tritan, normal-vision 31.8).
+const SR_BASE_COLOR = '#3987e5';
+const SR_WHATIF_COLOR = '#d95926';
+
+function SavingsRateTooltip({ active, payload, label, baseRate, targetRate }) {
+  if (!active || !payload || !payload.length) return null;
+  const row = payload[0] && payload[0].payload;
+  if (!row) return null;
+  const delta = (row.whatIf || 0) - (row.current || 0);
+  return (
+    <div className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-xs shadow-xl">
+      <div className="text-slate-300 font-semibold mb-1.5">Age {label} · {row.year}</div>
+      <div className="flex items-center gap-2 mb-0.5">
+        <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: SR_WHATIF_COLOR }} />
+        <span className="text-slate-400">At {targetRate.toFixed(1)}%</span>
+        <span className="text-slate-100 font-semibold ml-auto">{formatCurrency(row.whatIf)}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: SR_BASE_COLOR }} />
+        <span className="text-slate-400">At {baseRate.toFixed(1)}% (your plan)</span>
+        <span className="text-slate-100 font-semibold ml-auto">{formatCurrency(row.current)}</span>
+      </div>
+      {Math.abs(delta) >= 1 && (
+        <div className={`mt-1.5 pt-1.5 border-t border-slate-700 font-semibold ${delta > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+          {delta > 0 ? '+' : '−'}{formatCurrency(Math.abs(delta))} {delta > 0 ? 'more' : 'less'}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, personalInfo,
+                              projections, recurringExpenses, currentEarnedIncome,
+                              myContributions, savingsRate }) {
+  const [target, setTarget] = useState(null);   // null = follow the plan's own rate
+  const [infoOpen, setInfoOpen] = useState(false);
+  const pi = personalInfo;
+  const baseRate = savingsRate || 0;
+
+  // Re-anchor when the underlying plan changes, but only while the slider has
+  // not been touched. Snapping a dragged slider back mid-experiment would be
+  // maddening; leaving it stale after the accounts change would be wrong.
+  const targetRate = target === null ? baseRate : target;
+  // The plan's own rate is a raw ratio, and 12.857142857142856 in a number box is
+  // not a control. Rounded for DISPLAY only — rounding the value that drives the
+  // projection made the untouched slider compute a scenario a few hundredths of a
+  // point off the plan, so the tiles moved while still saying "unchanged".
+  const displayRate = Math.round(targetRate * 10) / 10;
+  const sliderMax = Math.max(30, Math.ceil((baseRate + 15) / 5) * 5);
+
+  const scenario = useMemo(() => {
+    const targetDollars = currentEarnedIncome * (targetRate / 100);
+    const accts = accountsAtSavingsTarget(accounts, {
+      currentPersonal: myContributions, targetDollars,
+    });
+    const proj = computeProjections(pi, accts, incomeStreams, assets,
+      oneTimeEvents, recurringExpenses);
+    const salaries = { me: 0, spouse: 0 };
+    (incomeStreams || []).forEach(st => {
+      if (st.type === 'earned_income') salaries[st.owner === 'spouse' ? 'spouse' : 'me'] += (st.amount || 0);
+    });
+    return { proj, accts, targetDollars, breaches: checkContributionLimits(accts, pi, salaries) };
+  }, [accounts, assets, incomeStreams, oneTimeEvents, pi, recurringExpenses,
+      currentEarnedIncome, myContributions, targetRate]);
+
+  const data = useMemo(() => (projections || []).map(p => {
+    const alt = scenario.proj.find(q => q.year === p.year);
+    return { age: p.myAge, year: p.year, current: p.totalPortfolio,
+             whatIf: alt ? alt.totalPortfolio : null };
+  }), [projections, scenario]);
+
+  if (!(currentEarnedIncome > 0) || data.length === 0) return null;
+
+  const at = (proj, age) => proj.find(p => p.myAge === age) || proj[proj.length - 1] || {};
+  const retAge = pi.myRetirementAge;
+  const endAge = pi.legacyAge || 95;
+  const baseAtRet = at(projections, retAge).totalPortfolio || 0;
+  const altAtRet = at(scenario.proj, retAge).totalPortfolio || 0;
+  const baseAtEnd = at(projections, endAge).totalPortfolio || 0;
+  const altAtEnd = at(scenario.proj, endAge).totalPortfolio || 0;
+  const extraPerYear = scenario.targetDollars - myContributions;
+
+  // What the extra dollars actually bought. Contributions are summed from the
+  // engine's own per-account figures over the working years, so a contribution
+  // that grows with salary is counted as it really lands rather than as
+  // extraPerYear × years — which would be wrong for every percent-mode saver
+  // and for anyone whose contributions inflate.
+  const ownSum = (proj, accts) => proj
+    .filter(p => p.myAge <= retAge)
+    .reduce((sum, p) => sum + (accts || []).reduce(
+      (s, a) => s + myContribShare(a, (p.perAccountContributions || {})[a.id] || 0), 0), 0);
+  const extraContributed = ownSum(scenario.proj, scenario.accts) - ownSum(projections, accounts);
+  const gainAtRet = altAtRet - baseAtRet;
+  const multiple = Math.abs(extraContributed) > 1 ? gainAtRet / extraContributed : null;
+
+  const changed = Math.abs(targetRate - baseRate) >= 0.05;
+  const up = targetRate > baseRate;
+  const deltaTone = !changed ? 'text-slate-400' : up ? 'text-emerald-400' : 'text-red-400';
+  const sign = (n) => (n >= 0 ? '+' : '−') + formatCurrency(Math.abs(n));
+  const iBase = data.reduce((a, r, i) => (r.current != null ? i : a), 0);
+  const iAlt = data.reduce((a, r, i) => (r.whatIf != null ? i : a), 0);
+
+  return (
+    <div className={cardStyle}>
+      <div className="flex items-center justify-between gap-2 mb-1">
+        <div className="flex items-center gap-2">
+          <h4 className="text-lg font-semibold text-slate-100">What If You Saved More?</h4>
+          <InfoCard
+            title="the savings rate explorer"
+            isOpen={infoOpen}
+            onToggle={() => setInfoOpen(!infoOpen)}
+            sections={[{
+              heading: 'How this works',
+              items: [
+                { icon: '🎚️', label: 'The slider', desc: 'Sets your gross savings rate — your own contributions as a percentage of earned income. Moving it scales every contribution you personally make, in proportion, so your split between pre-tax, Roth and taxable is preserved.' },
+                { icon: '🏢', label: 'Employer money', desc: 'Never scaled. A match is your employer\'s contribution, not yours, and it does not count toward your savings rate. If your match rises with your deferral, the real result is better than what you see here.' },
+                { icon: '🧮', label: 'Not a formula', desc: 'Each position of the slider re-runs the full projection engine — the same one behind every other number in this app — so the answer includes the tax effect of the extra deferral, IRS limits, RMDs and your withdrawal order.' },
+                { icon: '💸', label: 'Where it comes from', desc: 'The extra savings has to come out of spending. This chart shows what you gain, not what you give up; only you can price the second half.' },
+              ],
+              tip: 'Drag below your current rate too. Seeing what a few points of backsliding costs over thirty years is usually more persuasive than seeing what a few points of extra saving gains.'
+            }]}
+          />
+        </div>
+        {changed && (
+          <button
+            onClick={() => setTarget(null)}
+            className="text-xs px-2.5 py-1 rounded-full border border-slate-600 text-slate-400 hover:text-slate-200 hover:border-slate-500 transition-colors"
+          >
+            Reset to {baseRate.toFixed(1)}%
+          </button>
+        )}
+      </div>
+      <p className="text-xs text-slate-500 mb-4">
+        Your plan saves {baseRate.toFixed(1)}% of {formatCurrency(currentEarnedIncome)}. Drag to see what a
+        different rate does to the portfolio over the next {data.length} years.
+      </p>
+
+      {/* ── The control ─────────────────────────────────────────────────── */}
+      <div className="flex flex-wrap items-center gap-4 mb-5">
+        <div className="flex items-center gap-3 flex-1 min-w-[280px]">
+          <span className="text-slate-500 text-xs w-4 text-right">0%</span>
+          <input
+            type="range"
+            min={0} max={sliderMax} step={0.5}
+            value={displayRate}
+            onChange={e => setTarget(Number(e.target.value))}
+            className="flex-1 accent-orange-500"
+            aria-label="Savings rate"
+          />
+          <span className="text-slate-500 text-xs w-8">{sliderMax}%</span>
+          <input
+            type="number"
+            min={0} max={sliderMax} step={0.5}
+            value={displayRate}
+            onChange={e => setTarget(Math.max(0, Math.min(sliderMax, Number(e.target.value))))}
+            className="w-20 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center text-sm"
+          />
+        </div>
+        <div className="flex items-center gap-4">
+          <div>
+            <div className="text-slate-500 text-xs mb-0.5">You'd save</div>
+            <div className="text-lg font-bold" style={{ color: SR_WHATIF_COLOR }}>
+              {formatCurrency(scenario.targetDollars)}<span className="text-xs text-slate-500 font-normal">/yr</span>
+            </div>
+          </div>
+          <div className="w-px h-9 bg-slate-700" />
+          <div>
+            <div className="text-slate-500 text-xs mb-0.5">Change</div>
+            <div className={`text-lg font-bold ${deltaTone}`}>
+              {changed ? `${sign(extraPerYear)}/yr` : 'your plan'}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {scenario.breaches.length > 0 && (
+        <div className="mb-4 p-3 bg-amber-500/5 border border-amber-500/40 rounded-lg space-y-1">
+          <div className="text-xs font-semibold text-amber-300">
+            At {targetRate.toFixed(1)}% this plan would exceed an IRS limit
+          </div>
+          {scenario.breaches.map((b, i) => (
+            <p key={i} className="text-xs text-slate-400 leading-relaxed">{b.message}</p>
+          ))}
+          <p className="text-xs text-slate-500 leading-relaxed">
+            The projection does not silently cap contributions, so the line above assumes money the IRS
+            would not let you defer. Above the limit, the extra would have to go somewhere else — a
+            taxable brokerage account, or an HSA — which grows the same money under different tax rules.
+          </p>
+        </div>
+      )}
+
+      {/* ── The chart ───────────────────────────────────────────────────── */}
+      <div className="h-80">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={data} margin={{ top: 10, right: 76, left: 10, bottom: 5 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+            <XAxis dataKey="age" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
+            {/* One axis: both series are the same measure in the same units. */}
+            <YAxis
+              stroke="#94a3b8" tick={{ fill: '#94a3b8' }}
+              tickFormatter={v => v >= 1000000 ? `$${(v / 1000000).toFixed(1)}M` : `$${Math.round(v / 1000)}K`}
+            />
+            <Tooltip content={<SavingsRateTooltip baseRate={baseRate} targetRate={targetRate} />} />
+            {/* Recharts paints legend text in the series color by default. The
+                swatch already carries identity; the words are text and wear a
+                text color, so they stay legible at small sizes and in the
+                CVD/print case where the hue is not the signal. */}
+            <Legend formatter={(value) => <span style={{ color: '#cbd5e1' }}>{value}</span>} />
+            {/* Retirement is where the accumulation story ends and the drawdown
+                one begins; without it the reader cannot tell which half of the
+                curve they are looking at. */}
+            {retAge >= data[0].age && retAge <= data[data.length - 1].age && (
+              <ReferenceLine
+                x={retAge} stroke="#94a3b8" strokeDasharray="4 4"
+                label={{ value: 'retire', fill: '#94a3b8', fontSize: 11, position: 'insideTopLeft' }}
+              />
+            )}
+            <Line
+              type="monotone" dataKey="current" name={`Your plan (${baseRate.toFixed(1)}%)`}
+              stroke={SR_BASE_COLOR} strokeWidth={2} strokeDasharray="5 4" dot={false}
+              isAnimationActive={false}
+              label={lastPointLabel('your plan', SR_BASE_COLOR, iBase)}
+            />
+            <Line
+              type="monotone" dataKey="whatIf" name={`At ${targetRate.toFixed(1)}%`}
+              stroke={SR_WHATIF_COLOR} strokeWidth={2} dot={false}
+              isAnimationActive={false}
+              label={lastPointLabel(`${targetRate.toFixed(1)}%`, SR_WHATIF_COLOR, iAlt)}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* ── What it bought ──────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+        <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-3">
+          <div className="text-slate-500 text-xs mb-0.5">At retirement (age {retAge})</div>
+          <div className="text-lg font-bold text-slate-100">{formatCurrency(altAtRet)}</div>
+          <div className={`text-xs font-semibold ${deltaTone}`}>
+            {changed ? sign(gainAtRet) : 'unchanged'}
+          </div>
+        </div>
+        <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-3">
+          <div className="text-slate-500 text-xs mb-0.5">At age {endAge}</div>
+          <div className="text-lg font-bold text-slate-100">{formatCurrency(altAtEnd)}</div>
+          <div className={`text-xs font-semibold ${deltaTone}`}>
+            {changed ? sign(altAtEnd - baseAtEnd) : 'unchanged'}
+          </div>
+        </div>
+        <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-3">
+          <div className="text-slate-500 text-xs mb-0.5">
+            {up || !changed ? 'Extra contributed' : 'Contributions skipped'} by {retAge}
+          </div>
+          <div className="text-lg font-bold text-slate-100">
+            {changed ? sign(extraContributed) : '—'}
+          </div>
+          <div className="text-xs text-slate-500">out of pocket, in total</div>
+        </div>
+        <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-3">
+          {/* The ratio is the same arithmetic in both directions — both figures
+              flip sign together — but "what each extra dollar becomes" reads as
+              nonsense when the slider has gone DOWN, so the label follows the
+              direction the reader actually moved. */}
+          <div className="text-slate-500 text-xs mb-0.5">
+            {up || !changed ? 'What each extra dollar becomes' : 'What each dollar skipped costs'}
+          </div>
+          <div className="text-lg font-bold" style={{ color: changed && multiple ? SR_WHATIF_COLOR : undefined }}>
+            {changed && multiple && multiple > 0 ? `$${multiple.toFixed(2)}` : '—'}
+          </div>
+          <div className="text-xs text-slate-500">by age {retAge}, after growth</div>
+        </div>
+      </div>
+      <p className="text-xs text-slate-500 mt-3 leading-relaxed">
+        Both lines are the same projection engine with the same assumptions — only your contributions
+        differ. Balances are nominal (future) dollars. Moving the slider changes nothing in your saved
+        plan; edit the contributions above to make it real.
+      </p>
+    </div>
+  );
+}
+
+// ============================================
 // AccountsTab — Lifted to module scope
 // ============================================
-function AccountsTab({ accountTypes, accounts, contributorTypes, incomeStreams, personalInfo, projections, setAccounts, setEditingAccount, setShowAccountModal }) {
+function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setAccounts, setEditingAccount, setShowAccountModal }) {
   const [acctInfoOpen, setAcctInfoOpen] = useState(null);
   const [showIndividualAccounts, setShowIndividualAccounts] = useState(false);
   const [showIndividualContribs, setShowIndividualContribs] = useState(false);
@@ -10502,6 +10809,19 @@ function AccountsTab({ accountTypes, accounts, contributorTypes, incomeStreams, 
         </div>
       </div>
       
+      <SavingsRateExplorer
+        accounts={localAccounts}
+        assets={assets}
+        incomeStreams={incomeStreams}
+        oneTimeEvents={oneTimeEvents}
+        personalInfo={personalInfo}
+        projections={projections}
+        recurringExpenses={recurringExpenses}
+        currentEarnedIncome={currentEarnedIncome}
+        myContributions={myContributions}
+        savingsRate={savingsRate}
+      />
+
       {/* Year-by-Year Account Balances Table */}
       <div className={cardStyle}>
         <div className="flex items-center justify-between gap-2 mb-2">
@@ -16924,7 +17244,7 @@ function RetirementPlanner() {
           <div className="max-w-7xl mx-auto">
             {activeTab === 'dashboard' && <DashboardTab accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
             {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
-            {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
+            {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
             {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={projections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
             {activeTab === 'socialsecurity' && <SocialSecurityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
