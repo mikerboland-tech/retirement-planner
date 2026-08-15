@@ -7399,6 +7399,137 @@ section('P61 — BETR is a band, not a point: reproducing the paper and the case
   }
 }
 
+section('P62 — the "convert everything" bookend: what it buys and what it throws away');
+{
+  // Converting the whole pre-tax balance is worth measuring precisely because it
+  // is almost never right — it brackets the answer from the far side. Each
+  // argument cuts a different way and each is separately checkable, which is why
+  // this reports them separately instead of collapsing them into a verdict.
+  const { convertEverythingAnalysis } = engine;
+
+  const ctxFor = (over) => {
+    const sc = baseScenario({
+      myAge: 62, spouseAge: 60, myBirthYear: TODAY_YEAR - 62, spouseBirthYear: TODAY_YEAR - 60,
+      myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 92,
+      state: 'Missouri', inflationRate: 0.025, desiredRetirementIncome: 130000,
+      withdrawalPriority: ['pretax', 'brokerage', 'roth'], heirTaxRate: 0.25,
+      charitableGivingPercent: 8,
+      rothConversionBracket: '24%', rothConversionStartAge: 65, rothConversionEndAge: 75,
+      healthcareModel: 'none', medicalInflation: 0, ...over,
+    });
+    sc.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 2200000, contribution: 0, cagr: 0.06, startAge: 62, stopAge: 65, owner: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 250000, contribution: 0, cagr: 0.06, startAge: 62, stopAge: 65, owner: 'me' },
+      { id: 3, name: 'Brok', type: 'brokerage', balance: 900000, contribution: 0, cagr: 0.05, startAge: 62, stopAge: 65, owner: 'joint', costBasisPercent: 0.6 },
+    ];
+    sc.streams = [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 46000, startAge: 70, endAge: 95, cola: 0.025, owner: 'me', todaysDollars: true, pia: 3800 },
+      { id: 2, name: 'Sp SS', type: 'social_security', amount: 24000, startAge: 67, endAge: 95, cola: 0.025, owner: 'spouse', todaysDollars: true, pia: 2000 },
+    ];
+    return { pi: sc.pi, accts: sc.accts, streams: sc.streams, assetList: [],
+             events: [], recurring: [], currentYear: TODAY_YEAR };
+  };
+
+  const ctx = ctxFor({});
+  const a = convertEverythingAnalysis(ctx);
+  eq(!!a, true, 'a plan with a pre-tax balance can be taken to the bookend');
+
+  // ── The bisection really does empty the account, and only just ───────────
+  {
+    const run = (amount) => computeProjections(
+      { ...ctx.pi, rothConversionAmount: amount, rothConversionBracket: '',
+        rothConversionIrmaaTier: null, rothConversionInflationAdjust: false,
+        rothConversionStartAge: a.startAge, rothConversionEndAge: a.endAge },
+      ctx.accts, ctx.streams, [], [], [], TODAY_YEAR);
+    const endOf = (proj) => (proj.find(r => r.myAge >= a.endAge) || proj[proj.length - 1]).preTaxBalance;
+    lt(endOf(run(a.annualConversion)), 2, 'the reported amount drains the pre-tax balance');
+    gt(endOf(run(a.annualConversion * 0.8)), 1000,
+      'and 20% less does not — so the figure is the edge, not a round number');
+    eq(a.all.endPreTax <= 1, true, 'the convert-everything run ends with nothing pre-tax left');
+  }
+
+  // ── What it throws away: the QCD, and the cheap brackets ─────────────────
+  // A QCD needs an IRA to come out of. It is the only way to move money to
+  // charity without it ever appearing in income, and emptying the account ends
+  // that capacity for life.
+  {
+    gt(a.none.qcd, 0, 'a charitable household with an IRA gives through QCDs');
+    lt(a.all.qcd, a.none.qcd, 'and converting everything takes most of that away');
+    gt(a.against.qcdLost, 0, 'which is reported as a cost, not buried');
+
+    // The standard deduction and the 10%/12% bands are cheap ordinary income the
+    // household is entitled to fill every year. With no pre-tax balance there is
+    // nothing left to fill them with, for the rest of the plan.
+    gt(a.all.unusedLowBrackets, a.none.unusedLowBrackets,
+      'converting everything leaves the low brackets empty year after year');
+    gt(a.against.lowBracketsLeftUnused, 1000000,
+      'which on this plan is millions of dollars of cheap capacity never used');
+  }
+
+  // ── What it buys: no RMDs, less Social Security taxed, a safer widow ─────
+  {
+    gt(a.none.rmd, 0, 'leaving the IRA alone forces distributions');
+    lt(a.all.rmd, a.none.rmd * 0.02, 'converting everything all but eliminates them');
+    gt(a.forIt.rmdsRemoved, 0, 'reported as a benefit');
+
+    lt(a.all.ssTaxedShare, a.none.ssTaxedShare,
+      'less ordinary income means less of Social Security is taxed');
+    gt(a.forIt.ssTorpedoRemoved, 0, 'the torpedo shrinks');
+    // But it does NOT vanish: a taxable account still throws off dividends and
+    // gains that count toward provisional income. Worth pinning, because "convert
+    // everything and Social Security becomes tax-free" is the overclaim here.
+    gt(a.all.ssTaxedShare, 0,
+      'though it does not disappear — the taxable account still feeds provisional income');
+
+    lt(a.all.widowExposure, a.none.widowExposure,
+      'and the surviving spouse faces a smaller filing-status penalty afterwards');
+    gt(a.forIt.widowPenaltyRemoved, 0, 'reported as a benefit too');
+  }
+
+  // ── The widow figure is measured AFTER the window, and that matters ──────
+  // Inside the conversion window the household is deliberately manufacturing
+  // income, so a death in those years shows a huge filing-status penalty.
+  // Measuring the worst year across the whole plan made converting look like it
+  // INCREASED widow risk, when it does the opposite.
+  {
+    const worstAnywhere = computeProjections(
+      { ...ctx.pi, rothConversionAmount: a.annualConversion, rothConversionBracket: '',
+        rothConversionInflationAdjust: false, rothConversionStartAge: a.startAge,
+        rothConversionEndAge: a.endAge },
+      ctx.accts, ctx.streams, [], [], [], TODAY_YEAR)
+      .filter(r => r.myAge >= a.startAge && r.myAge <= a.endAge)
+      .reduce((w, r) => {
+        const c = engine.survivorTaxComparison({ row: r, pi: ctx.pi, streams: ctx.streams });
+        return c && c.filingPenalty > w ? c.filingPenalty : w;
+      }, 0);
+    gt(worstAnywhere, a.all.widowExposure,
+      'the in-window years really are worse — which is why they are excluded');
+  }
+
+  // ── Paying the bill decades early is priced, in today's dollars ──────────
+  {
+    eq(a.against.taxPaidEarlier !== null, true, 'the timing of the tax bill is priced');
+    eq(Number.isFinite(a.all.pvTax) && Number.isFinite(a.none.pvTax), true,
+      'both paths report a present-value tax total');
+  }
+
+  // ── The verdict is allowed to say "do not do this" ───────────────────────
+  {
+    eq(Number.isFinite(a.verdict), true, 'a verdict is produced');
+    eq(a.verdict === a.all.afterTaxLegacy - a.none.afterTaxLegacy, true,
+      'and it is exactly the legacy difference, sign included');
+  }
+
+  // ── Degenerate inputs ────────────────────────────────────────────────────
+  {
+    eq(convertEverythingAnalysis(null), null, 'no context, no analysis');
+    const noPreTax = ctxFor({});
+    noPreTax.accts = [{ id: 1, name: 'Roth only', type: 'roth_ira', balance: 500000, contribution: 0, cagr: 0.05, startAge: 62, stopAge: 65, owner: 'me' }];
+    eq(convertEverythingAnalysis(noPreTax), null,
+      'nothing pre-tax to convert means there is no bookend to draw');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

@@ -5532,6 +5532,167 @@ const presentValueOfTaxes = (proj, { discountRate = 0.03, baseYear = null, retir
   return { nominal: Math.round(nominal), present: Math.round(present), discountRate, baseYear: y0 };
 };
 
+// ── THE "CONVERT EVERYTHING" BOOKEND ─────────────────────────────────────────
+// Converting the whole pre-tax balance is worth analysing precisely because it
+// is almost never right — it brackets the answer from the far side, the way
+// "convert nothing" brackets it from the near side. What makes it interesting is
+// that the arguments cut both ways and each one is separately measurable:
+//
+//   AGAINST                                  FOR
+//   the QCD disappears with the balance      the Social Security torpedo ends
+//   the low brackets go unused every year    the widow's-year penalty ends
+//   a large tax bill is paid decades early   RMDs, and the IRMAA they cause, end
+//
+// A QCD needs an IRA to come out of: it is the only vehicle that moves money to
+// charity without ever appearing in income, and at 70+ it is worth more than the
+// same gift made from a taxable account by roughly the donor's marginal rate.
+// Empty the IRA and that capacity is gone for life. The unused low brackets are
+// the same argument in a different currency — the standard deduction plus the
+// 10% and 12% bands are cheap ordinary income the household is entitled to fill
+// every single year, and with no pre-tax balance there is nothing left to fill
+// them with.
+//
+// Set against that, an empty pre-tax balance means provisional income never
+// reaches the §86 thresholds, so Social Security stops being taxed; there is no
+// ordinary income to be re-taxed at the compressed single-filer brackets after a
+// death; and there are no required distributions at all.
+//
+// This runs the plan three ways and reports each effect separately rather than
+// collapsing them into one verdict, because which of them dominates is entirely
+// a fact about the household — how charitable they are, how large the benefit
+// split is, how long both spouses live.
+const convertEverythingAnalysis = (ctx, { steps = 14 } = {}) => {
+  if (!ctx || !ctx.pi || !Array.isArray(ctx.accts)) return null;
+  const pi = ctx.pi;
+  const run = (p) => computeProjections(p, ctx.accts, ctx.streams, ctx.assetList || [],
+    ctx.events || [], ctx.recurring || [], ctx.currentYear);
+
+  const preTaxNow = ctx.accts.filter(a => isPreTaxAccount(a.type))
+    .reduce((sum, a) => sum + (a.balance || 0), 0);
+  if (!(preTaxNow > 0)) return null;
+
+  const window = getDefaultRothConversionWindow(pi);
+  const startAge = pi.rothConversionStartAge > 0 ? pi.rothConversionStartAge : window.startAge;
+  const endAge = pi.rothConversionEndAge > 0 ? pi.rothConversionEndAge : window.endAge;
+  const years = Math.max(1, endAge - startAge + 1);
+
+  const base = { ...withoutRothConversions(pi), rothConversionPreTaxFloor: 0 };
+  const withAmount = (amount) => ({
+    ...base, rothConversionAmount: amount, rothConversionInflationAdjust: false,
+    rothConversionStartAge: startAge, rothConversionEndAge: endAge,
+    rothConversionTaxSource: pi.rothConversionTaxSource || 'withdrawal',
+  });
+
+  // The level annual conversion that just empties the pre-tax balance by the end
+  // of the window. Bisected rather than derived: balances grow, the conversion's
+  // own tax draw takes more out, and RMDs may already be running — no closed form
+  // survives all three.
+  const emptiedBy = (amount) => {
+    const proj = run(withAmount(amount));
+    const last = proj.find(r => r.myAge >= endAge) || proj[proj.length - 1];
+    return { proj, drained: (last.preTaxBalance || 0) <= 1 };
+  };
+  let lo = 0, hi = Math.max(preTaxNow, 1) * 3;
+  if (!emptiedBy(hi).drained) hi *= 4;
+  for (let i = 0; i < steps; i++) {
+    const mid = (lo + hi) / 2;
+    if (emptiedBy(mid).drained) hi = mid; else lo = mid;
+  }
+  const allProj = run(withAmount(hi));
+  const noneProj = run(base);
+  const currentProj = rothConversionIsPlanned(pi) ? run(pi) : null;
+
+  const opts = { legacyAge: pi.legacyAge || 95, retirementAge: pi.myRetirementAge,
+                 heirTaxRate: pi.heirTaxRate ?? 0.25 };
+  const retired = (proj) => proj.filter(r => r.myAge >= (pi.myRetirementAge || 0));
+
+  // Cheap ordinary-income capacity left on the table: the deduction plus the 10%
+  // and 12% bands, minus whatever ordinary income the year actually produced.
+  // Real money — every unfilled dollar is one that could have left the pre-tax
+  // account at 12% or less and never did.
+  const unusedLowBrackets = (proj) => retired(proj).reduce((sum, r) => {
+    const fs = r.filingStatus || pi.filingStatus || 'married_joint';
+    const idx = r.year - BASE_TAX_YEAR;
+    const brackets = FEDERAL_TAX_BRACKETS_2026[fs] || FEDERAL_TAX_BRACKETS_2026.married_joint;
+    const twelve = brackets.find(b => b.rate === 0.12);
+    if (!twelve || !Number.isFinite(twelve.max)) return sum;
+    const ceiling = twelve.max * indexTo(1, idx, pi.inflationRate ?? 0.03) + (r.federalDeduction || 0);
+    const ordinary = Math.max(0, (r.taxableIncome || 0) - (r.realizedCapitalGains || 0)
+                                 - (r.brokerageDividends || 0));
+    return sum + Math.max(0, ceiling - ordinary);
+  }, 0);
+
+  const qcdTotal = (proj) => retired(proj).reduce((s, r) => s + (r.qcd || 0), 0);
+  const rmdTotal = (proj) => retired(proj).reduce((s, r) => s + (r.rmd || 0), 0);
+  const irmaaTotal = (proj) => retired(proj).reduce((s, r) => s + (r.irmaaSurcharge || 0), 0);
+  // What share of benefits received actually got taxed, across the whole plan.
+  const ssTaxedShare = (proj) => {
+    const ss = retired(proj).reduce((s, r) => s + (r.socialSecurity || 0), 0);
+    const taxed = retired(proj).reduce((s, r) => s + (r.taxableSS || 0), 0);
+    return ss > 0 ? taxed / ss : null;
+  };
+  // The widow's-year exposure this plan still carries: the worst single year's
+  // filing-status penalty, in today's dollars so plans are comparable.
+  //
+  // Measured only AFTER the conversion window closes. Inside it the household is
+  // deliberately manufacturing income, so a death in those years shows a huge
+  // filing-status penalty — which made converting look like it INCREASED widow
+  // risk when it does the opposite. The exposure that matters is the steady
+  // state the survivor actually lives in, which is the post-window one.
+  const widowExposure = (proj) => {
+    const infl = pi.inflationRate ?? 0.03;
+    const y0 = proj[0] ? proj[0].year : BASE_TAX_YEAR;
+    return retired(proj).filter(r => r.myAge > endAge).reduce((worst, r) => {
+      const c = survivorTaxComparison({ row: r, pi, streams: ctx.streams });
+      if (!c) return worst;
+      const real = c.filingPenalty / Math.pow(1 + infl, Math.max(0, r.year - y0));
+      return real > worst ? real : worst;
+    }, 0);
+  };
+
+  const profile = (proj, label) => {
+    if (!proj) return null;
+    const s = scoreRothStrategy(proj, opts);
+    const pv = presentValueOfTaxes(proj, { discountRate: pi.inflationRate ?? 0.03,
+                                           baseYear: proj[0] && proj[0].year });
+    return {
+      label, ...s,
+      pvTax: pv ? pv.present : null,
+      unusedLowBrackets: Math.round(unusedLowBrackets(proj)),
+      qcd: Math.round(qcdTotal(proj)),
+      rmd: Math.round(rmdTotal(proj)),
+      irmaa: Math.round(irmaaTotal(proj)),
+      ssTaxedShare: ssTaxedShare(proj),
+      widowExposure: Math.round(widowExposure(proj)),
+      endPreTax: Math.round(s.endPreTax),
+    };
+  };
+
+  const none = profile(noneProj, 'Convert nothing');
+  const all = profile(allProj, 'Convert everything');
+  const current = profile(currentProj, 'Your plan');
+  if (!none || !all) return null;
+
+  return {
+    none, all, current,
+    annualConversion: Math.round(hi), startAge, endAge, years,
+    // Each argument, priced on its own, all measured against converting nothing.
+    against: {
+      qcdLost: none.qcd - all.qcd,
+      lowBracketsLeftUnused: all.unusedLowBrackets - none.unusedLowBrackets,
+      taxPaidEarlier: all.pvTax !== null && none.pvTax !== null ? all.pvTax - none.pvTax : null,
+    },
+    forIt: {
+      ssTorpedoRemoved: none.ssTaxedShare !== null && all.ssTaxedShare !== null
+        ? none.ssTaxedShare - all.ssTaxedShare : null,
+      widowPenaltyRemoved: none.widowExposure - all.widowExposure,
+      rmdsRemoved: none.rmd - all.rmd,
+      irmaaRemoved: none.irmaa - all.irmaa,
+    },
+    verdict: all.afterTaxLegacy - none.afterTaxLegacy,
+  };
+};
+
 // Where should the conversion tax come from? BETR answers that with a formula
 // resting on assumed growth, assumed drag and an assumed horizon. This answers
 // it by running the plan — three times, changing only the funding source — and
@@ -8088,6 +8249,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     splitBothContributors, BOTH_SPLIT_EMPLOYEE_SHARE,
     taxableGrowthFactor, breakEvenTaxRate, conversionFundingComparison,
     betrFromNetReturn, betrSensitivity, presentValueOfTaxes,
+    convertEverythingAnalysis,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,

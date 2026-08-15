@@ -51,7 +51,7 @@ const {
   survivorTaxComparison, survivorSSLoss, scoreRothStrategy,
   planShortfall, breakingPoint, accountsAtSavingsTarget,
   splitBothContributors, breakEvenTaxRate, conversionFundingComparison,
-  betrSensitivity, presentValueOfTaxes,
+  betrSensitivity, presentValueOfTaxes, convertEverythingAnalysis,
   getFederalDeduction, NIIT_THRESHOLDS,
   IRMAA_FILL_SAFETY_MARGIN,
 } = PlannerEngine;
@@ -14847,6 +14847,17 @@ function RothRoadmapReport({ projections, personalInfo, accounts, incomeStreams,
     });
   }, [planned, pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
 
+  // The far bookend: what converting the ENTIRE pre-tax balance would do. Four
+  // more projections plus a bisection; a report is opened deliberately.
+  const bookend = useMemo(() => {
+    if (!planned) return null;
+    return convertEverythingAnalysis({
+      pi, accts: accounts, streams: incomeStreams, assetList: assets,
+      events: oneTimeEvents, recurring: recurringExpenses,
+      currentYear: new Date().getFullYear(),
+    });
+  }, [planned, pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
+
   // The break-even future tax rate, in the Vanguard BETR sense, built entirely
   // from this plan's own numbers. Horizon runs from the last converting year to
   // the planning horizon — the paper leaves "years to distribution" undefined,
@@ -15257,6 +15268,104 @@ function RothRoadmapReport({ projections, personalInfo, accounts, incomeStreams,
               </p>
             </div>
           )}
+        </>)}
+
+        {bookend && (<>
+          <h2 style={h2}>What If You Converted Everything?</h2>
+          <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.6, margin: '0 0 10px' }}>
+            Emptying the pre-tax account entirely is almost never the right answer, which is exactly why
+            it is worth pricing: it brackets the decision from the far side, the way &ldquo;convert
+            nothing&rdquo; brackets it from the near side. Draining {fmt(bookend.annualConversion)} a year
+            from age {bookend.startAge} to {bookend.endAge} would do it. The arguments cut both ways, and
+            each one is measurable on its own.
+          </p>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th style={th}>Measured to age {pi.legacyAge || 95}</th>
+                <th style={thR}>Convert nothing</th>
+                {bookend.current && <th style={thR}>Your plan</th>}
+                <th style={thR}>Convert everything</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                { k: 'Charitable gifts made straight from the IRA (QCD)', f: p => fmt(p.qcd), hint: 'needs an IRA balance to exist' },
+                { k: 'Cheap 10%/12% bracket room left unused', f: p => fmt(p.unusedLowBrackets), hint: 'income you were entitled to take cheaply and did not' },
+                { k: 'Lifetime required distributions', f: p => fmt(p.rmd) },
+                { k: 'Share of Social Security that gets taxed', f: p => p.ssTaxedShare === null ? '—' : pct1(p.ssTaxedShare) },
+                { k: "Worst widow's year, after the window (today's $)", f: p => fmt(p.widowExposure) },
+                { k: "Lifetime tax, in today's dollars", f: p => fmt(p.pvTax) },
+              ].map(r => (
+                <tr key={r.k}>
+                  <td style={td}>
+                    {r.k}
+                    {r.hint && <div style={{ fontSize: 10, color: '#94a3b8' }}>{r.hint}</div>}
+                  </td>
+                  <td style={tdR}>{r.f(bookend.none)}</td>
+                  {bookend.current && <td style={tdR}>{r.f(bookend.current)}</td>}
+                  <td style={tdR}>{r.f(bookend.all)}</td>
+                </tr>
+              ))}
+              <tr style={{ background: '#f8fafc' }}>
+                <td style={{ ...td, fontWeight: 700 }}>After-tax legacy</td>
+                <td style={{ ...tdR, fontWeight: 700 }}>{fmt(bookend.none.afterTaxLegacy)}</td>
+                {bookend.current && <td style={{ ...tdR, fontWeight: 700 }}>{fmt(bookend.current.afterTaxLegacy)}</td>}
+                <td style={{ ...tdR, fontWeight: 700, color: bookend.verdict >= 0 ? '#059669' : '#dc2626' }}>
+                  {fmt(bookend.all.afterTaxLegacy)}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 12 }}>
+            <div style={{ borderLeft: '4px solid #dc2626', background: '#fef2f2', borderRadius: 6, padding: '10px 14px', breakInside: 'avoid' }}>
+              <p style={{ fontSize: 12, fontWeight: 700, margin: 0, color: '#991b1b' }}>What it throws away</p>
+              <ul style={{ fontSize: 12, color: '#334155', margin: '6px 0 0', paddingLeft: 18, lineHeight: 1.6 }}>
+                <li><strong>{fmt(bookend.against.qcdLost)}</strong> of qualified charitable distributions.
+                  A QCD is the only way to move money to charity without it ever appearing in income, and
+                  it needs an IRA to come out of. Empty the account and that ends for life.</li>
+                <li><strong>{fmt(bookend.against.lowBracketsLeftUnused)}</strong> of unused 10%/12% bracket
+                  room. The standard deduction and the two lowest bands are cheap ordinary income you are
+                  entitled to every year — with nothing pre-tax left, there is nothing to fill them with.</li>
+                {bookend.against.taxPaidEarlier !== null && bookend.against.taxPaidEarlier > 0 && (
+                  <li><strong>{fmt(bookend.against.taxPaidEarlier)}</strong> more lifetime tax in today's
+                    dollars, because the bill is paid decades earlier.</li>
+                )}
+              </ul>
+            </div>
+            <div style={{ borderLeft: '4px solid #059669', background: '#f0fdf4', borderRadius: 6, padding: '10px 14px', breakInside: 'avoid' }}>
+              <p style={{ fontSize: 12, fontWeight: 700, margin: 0, color: '#065f46' }}>What it buys</p>
+              <ul style={{ fontSize: 12, color: '#334155', margin: '6px 0 0', paddingLeft: 18, lineHeight: 1.6 }}>
+                <li><strong>{fmt(bookend.forIt.rmdsRemoved)}</strong> of required distributions gone —
+                  income forced out whether you want it or not.</li>
+                {bookend.forIt.ssTorpedoRemoved !== null && (
+                  <li>The Social Security torpedo shrinks by{' '}
+                    <strong>{(bookend.forIt.ssTorpedoRemoved * 100).toFixed(1)} points</strong> of benefits
+                    taxed{bookend.all.ssTaxedShare > 0.05 && <> — though it does not disappear, because your
+                    taxable account still feeds provisional income</>}.</li>
+                )}
+                <li>The widow&rsquo;s-year penalty falls by{' '}
+                  <strong>{fmt(bookend.forIt.widowPenaltyRemoved)}</strong> in the worst year, since there
+                  is no ordinary income left to be re-taxed at single-filer brackets.</li>
+              </ul>
+            </div>
+          </div>
+          <p style={note}>
+            On this plan, converting everything{' '}
+            <strong style={{ color: bookend.verdict >= 0 ? '#059669' : '#dc2626' }}>
+              {bookend.verdict >= 0 ? 'adds' : 'costs'} {fmt(Math.abs(bookend.verdict))}
+            </strong>{' '}
+            of after-tax legacy against converting nothing. One thing the columns can hide: every benefit
+            in the right-hand panel only starts once the account is actually <em>empty</em>. A level
+            schedule spread to age {bookend.endAge} is still generating ordinary income at {bookend.endAge},
+            so a plan that finishes draining sooner banks the Social Security and widow&rsquo;s-year
+            savings for more years — at a higher rate on the way. Read the two panels rather than the total:
+            which side wins is a fact about <em>your</em> household — how much you give, how large the
+            benefit split is, how long you both live — not a general result. The bookend is here to show
+            you the shape of the trade, and the roadmap above is where the actual answer lives, somewhere
+            between the two.
+          </p>
         </>)}
 
         {effect && (<>
