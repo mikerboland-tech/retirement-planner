@@ -6268,9 +6268,24 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Exception: pensions with survivorBenefit flag continue for the survivor
       if (survivorEnabled && !ownerAlive) {
         if (stream.type === 'pension' && stream.survivorBenefit) {
-          // Pension continues at survivor benefit rate (default 50%)
+          // Pension continues at the elected survivor rate. 50% is the common
+          // default, but a joint-and-survivor election of 100% is a real option
+          // in many systems — Alabama's RSA among them — and is expressed here
+          // as survivorBenefitRate: 1.
           const survivorRate = stream.survivorBenefitRate || 0.5;
-          if (ownerAge >= stream.startAge && ownerAge <= stream.endAge) {
+          // The term is measured against the SURVIVOR, because they are now the
+          // recipient. It used to be measured against the deceased's notional
+          // age, which cut the pension off early whenever the survivor was the
+          // younger of the two: a pension ending at 95 stopped when the DECEASED
+          // would have turned 95, leaving a spouse three years younger without
+          // it for their last three years. Commencement still follows the
+          // pension's own timeline, so an election that had not started at the
+          // date of death still begins when it was due to.
+          const survivorAge = primaryAlive ? myAge : spouseAge;
+          const commenced = ownerAge >= stream.startAge;
+          if (commenced && survivorAge <= stream.endAge) {
+            // COLA keeps accruing on the pension's own clock — the benefit has
+            // been indexing since it started, and the death does not reset that.
             const colaYears = streamColaYears(stream, ownerAge, yearsFromNow);
             const adjustedAmount = stream.amount * Math.pow(1 + (stream.cola || 0), colaYears) * survivorRate;
             totalPension += adjustedAmount;

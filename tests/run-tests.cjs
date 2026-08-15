@@ -7735,6 +7735,44 @@ section('P64 — joint income survives the first death; Social Security follows 
       'either way the household loses one benefit — never both, never neither');
   }
 
+  // ── A 100% joint-and-survivor pension pays the survivor in full ─────────
+  // Alabama's RSA (and many public systems) offer an election that continues the
+  // same amount for as long as either spouse lives, usually for a modest
+  // reduction to the base benefit. Expressed as survivorBenefitRate: 1.
+  {
+    const pens = (rate) => build([
+      { id: 1, name: 'RSA pension', type: 'pension', amount: 48000, startAge: 70, endAge: 95,
+        cola: 0, owner: 'me', survivorBenefit: true, survivorBenefitRate: rate },
+    ], { myLifeExpectancy: 75, spouseLifeExpectancy: 90 });
+    const full = pens(1), half = pens(0.5);
+    eq(at(full, 74).pension, 48000, 'the pension pays in full while the retiree lives');
+    eq(at(full, 80).pension, 48000, 'and a 100% election keeps paying the survivor in full');
+    eq(at(half, 80).pension, 24000, 'while a 50% election halves it, as elected');
+    const none = build([
+      { id: 1, name: 'Single life', type: 'pension', amount: 48000, startAge: 70, endAge: 95, cola: 0, owner: 'me' },
+    ], { myLifeExpectancy: 75, spouseLifeExpectancy: 90 });
+    eq(at(none, 80).pension, 0, 'and a single-life pension stops at death, as it should');
+  }
+
+  // ── The term follows the SURVIVOR, who is the one now being paid ─────────
+  // It used to be measured against the deceased's notional age, so a pension
+  // ending at 95 stopped when the DECEASED would have turned 95 — cutting off a
+  // younger spouse for their last years. The same class of bug as the income
+  // streams above, in the one place that was already trying to model survivors.
+  {
+    const proj = build([
+      { id: 1, name: 'RSA pension', type: 'pension', amount: 48000, startAge: 70, endAge: 95,
+        cola: 0, owner: 'me', survivorBenefit: true, survivorBenefitRate: 1 },
+    ], { myAge: 70, spouseAge: 67, myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 67,
+         legacyAge: 98, myLifeExpectancy: 78, spouseLifeExpectancy: 95 });
+    eq(at(proj, 95).pension, 48000, "still paying when the deceased would have been 95");
+    eq(at(proj, 97).pension, 48000,
+      'and past it — the spouse is only 94, and the term is theirs now');
+    const beyond = at(proj, 99);
+    eq(!beyond.year || (beyond.pension || 0) === 0, true,
+      'but it does end once the survivor passes the term');
+  }
+
   // ── A stray joint SS row cannot be mistaken for the deceased's benefit ───
   // The UI no longer offers it, but an old plan or a hand-edited import can
   // still carry one, and the survivor lookup used to match it on `!== survivor`.

@@ -13828,7 +13828,11 @@ function IncomeModal({ editingIncome, personalInfo, incomeStreams = [], onClose,
               </p>
             );
           })()}
-          {formData.type === 'pension' && personalInfo.survivorModelEnabled && (
+          {/* Shown whether or not survivor modeling is on. The election is a fact
+              about the pension, made years before anyone runs a survivor
+              projection, and hiding the field until the toggle was flipped meant
+              it could not be recorded when it was actually decided. */}
+          {formData.type === 'pension' && personalInfo.hasSpouse && (
             <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg space-y-3">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
@@ -13837,18 +13841,54 @@ function IncomeModal({ editingIncome, personalInfo, incomeStreams = [], onClose,
                   onChange={e => setFormData({...formData, survivorBenefit: e.target.checked})}
                   className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-amber-500"
                 />
-                <span className="text-sm text-slate-300">Continues for surviving spouse</span>
+                <span className="text-sm text-slate-300">Joint &amp; survivor election — continues for the surviving spouse</span>
               </label>
               {formData.survivorBenefit && (
                 <div>
-                  <label className={labelStyle}>Survivor Benefit Rate (%)</label>
+                  <label className={labelStyle}>Survivor Benefit Rate</label>
+                  {/* The four standard joint-and-survivor forms. 100% is a real
+                      election in many public systems — Alabama's RSA among them —
+                      and is often only a small reduction to the base benefit,
+                      which makes it the one people most often pick and the one a
+                      free-text box made easiest to get wrong. */}
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {[
+                      { pct: 100, label: '100%', hint: 'Full benefit continues unchanged for the survivor' },
+                      { pct: 75, label: '75%' },
+                      { pct: 66.67, label: '66⅔%' },
+                      { pct: 50, label: '50%', hint: 'The most common default' },
+                    ].map(o => {
+                      const active = Math.abs((formData.survivorBenefitRate ?? 0.5) * 100 - o.pct) < 0.5;
+                      return (
+                        <button
+                          key={o.pct}
+                          type="button"
+                          title={o.hint}
+                          onClick={() => setFormData({ ...formData, survivorBenefitRate: o.pct / 100 })}
+                          className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                            active
+                              ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
+                              : 'bg-slate-800 text-slate-400 border-slate-600 hover:text-slate-200 hover:border-slate-500'
+                          }`}
+                        >{o.label}</button>
+                      );
+                    })}
+                  </div>
                   <input
                     type="number" step="5" min={0} max={100}
-                    value={Math.round((formData.survivorBenefitRate || 0.5) * 100)}
+                    value={Math.round((formData.survivorBenefitRate ?? 0.5) * 100)}
                     onChange={e => setFormData({...formData, survivorBenefitRate: Number(e.target.value) / 100})}
                     className={inputStyle}
                   />
-                  <p className="text-xs text-slate-500 mt-1">Percentage of pension paid to survivor (typically 50-100%)</p>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    What the survivor keeps. A 100% election pays the same amount for as long as either of
+                    you is living — the pension is priced for it, usually as a modest reduction to the base
+                    benefit, so enter that reduced amount above rather than the single-life figure.
+                    {!personalInfo.survivorModelEnabled && (
+                      <> <strong className="text-amber-500/80">Recorded but not yet applied:</strong> turn on
+                      survivor modeling in Personal Info to see it in the projection.</>
+                    )}
+                  </p>
                 </div>
               )}
             </div>
