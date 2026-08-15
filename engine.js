@@ -5340,6 +5340,177 @@ const survivorTaxComparison = ({ row, pi = {}, smallerSSBenefit = null, streams 
 };
 
 
+// ── BREAK-EVEN TAX RATE (BETR) ───────────────────────────────────────────────
+// Vanguard's 2025 research paper "A 'BETR' approach to Roth conversions"
+// (Passman, Wong, Dickson) makes one correction that is genuinely important and
+// one claim that is not safe to lean on.
+//
+// THE CORRECTION. The folk rule — "convert if your future rate will be higher
+// than today's" — is wrong whenever the conversion tax is paid from OUTSIDE the
+// IRA. Paying from a taxable account shrinks a tax-DRAGGED asset to grow a
+// tax-FREE one, and that swap is worth something on its own, independent of any
+// rate arbitrage. So the future rate at which converting breaks even sits BELOW
+// today's rate, and a conversion can win even if the future rate falls.
+//
+//   Convert, tax paid from taxable:   C·g                     (Roth, tax-free)
+//   Don't convert:                    C·g·(1−T₂) + C·T₁·G     (IRA, plus the
+//                                                              taxable dollars
+//                                                              never spent)
+//   Setting them equal:               BETR = T₁ · (G / g)
+//
+// where g is tax-free growth over the horizon and G is what the same dollar
+// earns in a taxable account after annual dividend tax and the capital-gains
+// tax due on sale. G < g whenever returns are positive, so BETR < T₁ always,
+// and the gap widens with the horizon and with how tax-inefficient the taxable
+// account is.
+//
+// Pay the tax from the IRA instead and the arithmetic collapses: only (1−T₁) of
+// each dollar reaches the Roth, and the break-even is exactly T₁. Nothing is
+// gained but rate arbitrage. That single contrast is the most decision-relevant
+// thing in the paper, and it is why this function reports both.
+//
+// THE CLAIM NOT TO LEAN ON. BETR is presented as a precise threshold, but every
+// input is an estimate: one future tax rate standing in for decades of
+// withdrawals across many brackets, a horizon that in practice means "until the
+// second death, plus the heirs' ten years", and a tax-drag figure that swings
+// the answer by points depending on assumed turnover and dividend yield. A
+// precise-looking number assembled from vague inputs invites more confidence
+// than it has earned.
+//
+// Two things follow, and both are implemented here rather than argued about.
+// First, every input is taken from the PLAN — its own growth rates, dividend
+// yield, cost basis, state and filing status — instead of being asked for
+// again. Second, BETR is reported as a FLOOR, not a threshold: it prices only
+// the bracket, while the same conversion in this engine also moves IRMAA, the
+// taxability of Social Security, NIIT and deduction phaseouts. `betrAllIn`
+// substitutes the conversion's true measured cost per dollar for the bracket,
+// and it is always the higher, more honest bar.
+//
+// The definitive answer to "where should the conversion tax come from" is not
+// this formula at all — it is running the plan both ways, which the caller can
+// do and this function cannot.
+
+// What one dollar in a taxable account is worth after `years`, net of tax on
+// dividends along the way and capital-gains tax on the sale at the end.
+// Looped rather than closed-form because basis has to be tracked: reinvested
+// dividends have already been taxed and add basis, which a single (1+r)^n term
+// silently forgets — overstating the final gain and the drag with it.
+const taxableGrowthFactor = ({ years, growthRate, dividendYield = 0.02,
+                               dividendTaxRate = 0.15, capGainsTaxRate = 0.15,
+                               costBasisFraction = 1 } = {}) => {
+  const n = Math.max(0, Math.round(years || 0));
+  const r = growthRate || 0;
+  const d = Math.max(0, dividendYield);
+  let value = 1;
+  let basis = Math.max(0, Math.min(1, costBasisFraction));
+  for (let y = 0; y < n; y++) {
+    const dividends = value * d;
+    const afterTaxDividends = dividends * (1 - dividendTaxRate);
+    const appreciation = value * (r - d);
+    value = value + appreciation + afterTaxDividends;
+    // Reinvested dividends were taxed on the way in, so they are basis.
+    basis += afterTaxDividends;
+  }
+  const gain = Math.max(0, value - basis);
+  return { grossValue: value, basis, afterTaxValue: value - gain * capGainsTaxRate };
+};
+
+const breakEvenTaxRate = ({ conversionRate, years, growthRate = 0.07,
+                            dividendYield = 0.02, dividendTaxRate = 0.15,
+                            capGainsTaxRate = 0.15, costBasisFraction = 1,
+                            allInCostRate = null } = {}) => {
+  const t1 = conversionRate;
+  if (!(t1 > 0) || !(years >= 0)) return null;
+  const n = Math.max(0, Math.round(years));
+  const taxFree = Math.pow(1 + (growthRate || 0), n);
+  if (!(taxFree > 0)) return null;
+  const taxable = taxableGrowthFactor({ years: n, growthRate, dividendYield,
+                                        dividendTaxRate, capGainsTaxRate, costBasisFraction });
+  const dragRatio = taxable.afterTaxValue / taxFree;
+
+  return {
+    years: n,
+    // Paying from a taxable account: the break-even future rate sits BELOW the
+    // rate paid to convert, by exactly the tax drag avoided.
+    betrExternal: t1 * dragRatio,
+    // Paying from the IRA: only (1 − t1) of each dollar ever reaches the Roth,
+    // so the break-even is the conversion rate itself and nothing else is won.
+    betrInternal: t1,
+    // The same threshold measured against what the conversion ACTUALLY costs in
+    // this plan — bracket plus IRMAA, plus the Social Security it drags into
+    // tax, plus NIIT and any phaseouts. Always the higher bar, and the one a
+    // decision should clear.
+    betrAllIn: allInCostRate !== null && allInCostRate > 0 ? allInCostRate * dragRatio : null,
+    allInCostRate,
+    conversionRate: t1,
+    dragRatio,
+    taxFreeGrowth: taxFree,
+    taxableGrowth: taxable.afterTaxValue,
+    // How much of the case for converting comes from the funding choice alone
+    // rather than from any bet on future rates.
+    fundingAdvantage: t1 - t1 * dragRatio,
+  };
+};
+
+// Where should the conversion tax come from? BETR answers that with a formula
+// resting on assumed growth, assumed drag and an assumed horizon. This answers
+// it by running the plan — three times, changing only the funding source — and
+// comparing what each leaves behind. No assumption is added that the plan does
+// not already make, which is the whole point: the formula's inputs are guesses,
+// the plan's inputs are the user's own.
+//
+// The reason the two can disagree sharply: paying from a taxable account is
+// cheaper per converted dollar (no gross-up, since the withdrawal that funds
+// the tax is not itself ordinary income), but it also spends down the very
+// account that funds early retirement and that heirs receive with a stepped-up
+// basis. A formula that stops at growth rates cannot see either effect. This
+// does, because the engine models both.
+const conversionFundingComparison = (ctx, { heirTaxRate = 0.25 } = {}) => {
+  if (!ctx || !ctx.pi || !rothConversionIsPlanned(ctx.pi)) return null;
+  const run = (pi) => computeProjections(pi, ctx.accts, ctx.streams, ctx.assetList || [],
+    ctx.events || [], ctx.recurring || [], ctx.currentYear);
+  const opts = { legacyAge: ctx.pi.legacyAge || 95,
+                 retirementAge: ctx.pi.myRetirementAge,
+                 heirTaxRate: ctx.pi.heirTaxRate ?? heirTaxRate };
+
+  const none = run({ ...withoutRothConversions(ctx.pi), rothConversionPreTaxFloor: 0 });
+  const fromPortfolio = run({ ...ctx.pi, rothConversionTaxSource: 'withdrawal' });
+  const fromTaxable = run({ ...ctx.pi, rothConversionTaxSource: 'brokerage' });
+
+  const score = (proj) => {
+    const s = scoreRothStrategy(proj, opts);
+    if (!s) return null;
+    const short = planShortfall(proj, { retirementAge: ctx.pi.myRetirementAge });
+    return { ...s, fails: short ? short.fails : false,
+             shortfall: short ? short.totalShortfall : 0 };
+  };
+
+  const a = score(none), b = score(fromPortfolio), c = score(fromTaxable);
+  if (!a || !b || !c) return null;
+
+  const best = [
+    { key: 'none', label: 'No conversions', score: a },
+    { key: 'withdrawal', label: 'Convert, tax from the portfolio', score: b },
+    { key: 'brokerage', label: 'Convert, tax from taxable', score: c },
+  ].reduce((x, y) => (y.score.afterTaxLegacy > x.score.afterTaxLegacy ? y : x));
+
+  return {
+    none: a, fromPortfolio: b, fromTaxable: c,
+    current: ctx.pi.rothConversionTaxSource === 'brokerage' ? 'brokerage' : 'withdrawal',
+    best: best.key, bestLabel: best.label,
+    // What the funding choice alone is worth, holding the conversion schedule
+    // fixed. This is the number BETR is really reaching for.
+    fundingDelta: c.afterTaxLegacy - b.afterTaxLegacy,
+    // And what converting at all is worth, measured from the BETTER of the two
+    // funding routes. Deliberately allowed to go negative: on a plan with a
+    // large taxable account and a modest heir rate, converting genuinely
+    // destroys value, and a figure floored at zero would hide the one result
+    // the user most needs to see.
+    conversionDelta: Math.max(b.afterTaxLegacy, c.afterTaxLegacy) - a.afterTaxLegacy,
+    conversionHelps: Math.max(b.afterTaxLegacy, c.afterTaxLegacy) > a.afterTaxLegacy,
+  };
+};
+
 // ── RETIRING THE 'both' CONTRIBUTOR ──────────────────────────────────────────
 // A fixed-dollar account marked contributor:'both' lumps the employee deferral
 // and the employer match into one number that nothing can take apart, and three
@@ -7835,6 +8006,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     planShortfall, breakingPoint, STRESS_DIMENSIONS,
     scaleOwnContributions, addOwnContribution, accountsAtSavingsTarget,
     splitBothContributors, BOTH_SPLIT_EMPLOYEE_SHARE,
+    taxableGrowthFactor, breakEvenTaxRate, conversionFundingComparison,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,

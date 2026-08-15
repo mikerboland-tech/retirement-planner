@@ -7148,6 +7148,151 @@ section('P59 — the starter plan: internally consistent, and not balanced on a 
   }
 }
 
+section('P60 — break-even tax rate, and where the conversion tax actually comes from');
+{
+  // Vanguard's BETR paper corrects a real error in the folk rule ("convert if
+  // your future rate will be higher"), and the correction turns entirely on
+  // where the conversion tax is paid from. These assertions pin the mechanism,
+  // and pin the limits the paper does not state loudly enough.
+  const { breakEvenTaxRate, taxableGrowthFactor, conversionFundingComparison } = engine;
+
+  // ── Paying from the IRA wins nothing but rate arbitrage ──────────────────
+  // Only (1 − t) of each converted dollar reaches the Roth, so the break-even
+  // future rate is the conversion rate itself — no horizon, no drag, no edge.
+  {
+    [0.12, 0.22, 0.24, 0.32].forEach(t => {
+      [1, 10, 30].forEach(n => {
+        const b = breakEvenTaxRate({ conversionRate: t, years: n, growthRate: 0.07 });
+        eq(b.betrInternal, t, `paying from the IRA at ${t}: break-even is the conversion rate itself`);
+      });
+    });
+  }
+
+  // ── Paying from outside always breaks even at a LOWER future rate ────────
+  // The headline claim, and it holds for every positive return: a conversion
+  // can pay off even when the future rate falls.
+  {
+    [0.12, 0.24, 0.32].forEach(t => {
+      [5, 15, 30].forEach(n => {
+        const b = breakEvenTaxRate({ conversionRate: t, years: n, growthRate: 0.07 });
+        lt(b.betrExternal, b.betrInternal,
+          `at ${t} over ${n} years, funding from taxable lowers the bar`);
+        gt(b.fundingAdvantage, 0, 'and the gap is the funding choice, not a rate forecast');
+      });
+    });
+  }
+
+  // ── The advantage widens with the horizon and with tax inefficiency ──────
+  {
+    const short = breakEvenTaxRate({ conversionRate: 0.24, years: 5, growthRate: 0.07 });
+    const long = breakEvenTaxRate({ conversionRate: 0.24, years: 30, growthRate: 0.07 });
+    lt(long.betrExternal, short.betrExternal, 'a longer horizon means more drag avoided');
+    const efficient = breakEvenTaxRate({ conversionRate: 0.24, years: 20, growthRate: 0.07, dividendYield: 0.01 });
+    const inefficient = breakEvenTaxRate({ conversionRate: 0.24, years: 20, growthRate: 0.07, dividendYield: 0.05 });
+    lt(inefficient.betrExternal, efficient.betrExternal,
+      'and a tax-inefficient taxable account means more still — the paper\'s sharpest case');
+  }
+
+  // ── With no drag at all, the edge vanishes exactly ───────────────────────
+  // The control that proves the effect IS the drag and not an artifact: zero
+  // dividend tax, zero capital-gains tax, and the two break-evens coincide.
+  {
+    const b = breakEvenTaxRate({ conversionRate: 0.24, years: 30, growthRate: 0.07,
+      dividendTaxRate: 0, capGainsTaxRate: 0 });
+    approx(b.betrExternal, b.betrInternal, 'no tax drag, no funding advantage', 1e-9);
+    approx(b.dragRatio, 1, 'and the ratio of the two growth paths is exactly 1', 1e-9);
+    const flat = breakEvenTaxRate({ conversionRate: 0.24, years: 30, growthRate: 0,
+      dividendTaxRate: 0, capGainsTaxRate: 0 });
+    approx(flat.betrExternal, 0.24, 'nor when nothing grows and nothing is taxed', 1e-9);
+    // But a 0% TOTAL return still pays taxable dividends, and the tax on them is
+    // real: the funding advantage survives even with no growth to shelter, which
+    // is the opposite of the intuition that the case rests on compounding.
+    const flatButTaxed = breakEvenTaxRate({ conversionRate: 0.24, years: 30, growthRate: 0 });
+    lt(flatButTaxed.betrExternal, 0.24, 'dividend tax alone still lowers the bar with zero growth');
+  }
+
+  // ── Reinvested dividends add basis; forgetting that overstates the drag ──
+  {
+    const g = taxableGrowthFactor({ years: 20, growthRate: 0.07, dividendYield: 0.02,
+      dividendTaxRate: 0.15, capGainsTaxRate: 0.15, costBasisFraction: 1 });
+    gt(g.basis, 1, 'dividends taxed on the way in become basis');
+    lt(g.basis, g.grossValue, 'but never more than the account is worth');
+    lt(g.afterTaxValue, g.grossValue, 'and the embedded gain is still taxed on sale');
+    // A naive model taxing the whole (value − 1) as gain would sit below this.
+    const naive = g.grossValue - (g.grossValue - 1) * 0.15;
+    gt(g.afterTaxValue, naive, 'so the after-tax value beats the basis-forgetting version');
+  }
+
+  // ── The all-in bar is higher than the bracket bar ────────────────────────
+  // The paper's BETR prices only the bracket. This engine knows the conversion
+  // also moves IRMAA, the taxability of Social Security, NIIT and phaseouts —
+  // so the honest threshold is the one built from the measured cost.
+  {
+    const b = breakEvenTaxRate({ conversionRate: 0.24, years: 20, growthRate: 0.07,
+      allInCostRate: 0.35 });
+    gt(b.betrAllIn, b.betrExternal, 'the true cost per dollar sets a higher bar than the bracket');
+    gt(b.betrAllIn, b.betrInternal, 'higher, here, than even the conversion bracket itself');
+    eq(breakEvenTaxRate({ conversionRate: 0.24, years: 20 }).betrAllIn, null,
+      'and it is simply absent when the measured cost was not supplied');
+  }
+
+  // ── Degenerate inputs ────────────────────────────────────────────────────
+  {
+    eq(breakEvenTaxRate({}), null, 'no conversion rate, no answer');
+    eq(breakEvenTaxRate({ conversionRate: 0, years: 10 }), null, 'nor for a zero rate');
+    eq(breakEvenTaxRate({ conversionRate: 0.24 }), null, 'nor without a horizon');
+  }
+
+  // ── The plan, run three ways, is the answer the formula only gestures at ──
+  {
+    const sc = baseScenario({
+      myAge: 62, spouseAge: 60, myBirthYear: TODAY_YEAR - 62, spouseBirthYear: TODAY_YEAR - 60,
+      myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 92,
+      state: 'Missouri', inflationRate: 0.025, desiredRetirementIncome: 130000,
+      withdrawalPriority: ['pretax', 'brokerage', 'roth'], heirTaxRate: 0.25,
+      rothConversionBracket: '24%', rothConversionStartAge: 65, rothConversionEndAge: 75,
+      healthcareModel: 'none', medicalInflation: 0,
+    });
+    sc.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 2200000, contribution: 0, cagr: 0.06, startAge: 62, stopAge: 65, owner: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 250000, contribution: 0, cagr: 0.06, startAge: 62, stopAge: 65, owner: 'me' },
+      { id: 3, name: 'Brok', type: 'brokerage', balance: 900000, contribution: 0, cagr: 0.05, startAge: 62, stopAge: 65, owner: 'joint', costBasisPercent: 0.6 },
+    ];
+    sc.streams = [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 46000, startAge: 70, endAge: 95, cola: 0.025, owner: 'me', todaysDollars: true },
+      { id: 2, name: 'Sp SS', type: 'social_security', amount: 24000, startAge: 67, endAge: 95, cola: 0.025, owner: 'spouse', todaysDollars: true },
+    ];
+    const ctx = { pi: sc.pi, accts: sc.accts, streams: sc.streams, assetList: [],
+                  events: [], recurring: [], currentYear: TODAY_YEAR };
+    const c = conversionFundingComparison(ctx);
+    eq(!!c, true, 'a plan with conversions can be compared three ways');
+
+    // Funding from taxable converts MORE for the same schedule, because the
+    // draw that pays the tax is not itself ordinary income eating bracket room.
+    gt(c.fromTaxable.lifetimeConversions, c.fromPortfolio.lifetimeConversions,
+      'paying from taxable lets the same rule convert more');
+    eq(Number.isFinite(c.fundingDelta), true, 'and the funding choice carries a measurable value');
+
+    // The result that must be allowed to be negative. Floor it at zero and the
+    // tool would hide the case where converting destroys value.
+    eq(c.conversionHelps === (c.conversionDelta > 0), true,
+      'the verdict and the number always agree');
+    eq(['none', 'withdrawal', 'brokerage'].includes(c.best), true, 'and a winner is named');
+  }
+
+  // ── A plan with no conversion strategy has nothing to compare ────────────
+  {
+    const sc = baseScenario({ myAge: 62, myBirthYear: TODAY_YEAR - 62, myRetirementAge: 65,
+      legacyAge: 80, hasSpouse: false, filingStatus: 'single', state: 'Missouri' });
+    sc.accts = [{ id: 1, name: 'IRA', type: 'traditional_ira', balance: 500000, contribution: 0, cagr: 0.05, startAge: 62, stopAge: 65, owner: 'me' }];
+    sc.streams = [];
+    eq(conversionFundingComparison({ pi: sc.pi, accts: sc.accts, streams: sc.streams,
+      assetList: [], events: [], recurring: [], currentYear: TODAY_YEAR }), null,
+      'no strategy, nothing to compare — and no throw');
+    eq(conversionFundingComparison(null), null, 'nor for no context at all');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

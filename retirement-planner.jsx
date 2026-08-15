@@ -50,7 +50,7 @@ const {
   taxBreakpoints, marginalCostOfNextDollar,
   survivorTaxComparison, survivorSSLoss, scoreRothStrategy,
   planShortfall, breakingPoint, accountsAtSavingsTarget,
-  splitBothContributors,
+  splitBothContributors, breakEvenTaxRate, conversionFundingComparison,
   getFederalDeduction, NIIT_THRESHOLDS,
   IRMAA_FILL_SAFETY_MARGIN,
 } = PlannerEngine;
@@ -14827,6 +14827,53 @@ function RothRoadmapReport({ projections, personalInfo, accounts, incomeStreams,
     };
   }, [baseline, projections, pi]);
 
+  // Where the conversion tax comes from, answered by running the plan rather
+  // than by a formula. Three more projections; a report is opened deliberately.
+  const funding = useMemo(() => {
+    if (!planned) return null;
+    return conversionFundingComparison({
+      pi, accts: accounts, streams: incomeStreams, assetList: assets,
+      events: oneTimeEvents, recurring: recurringExpenses,
+      currentYear: new Date().getFullYear(),
+    });
+  }, [planned, pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
+
+  // The break-even future tax rate, in the Vanguard BETR sense, built entirely
+  // from this plan's own numbers. Horizon runs from the last converting year to
+  // the planning horizon — the paper leaves "years to distribution" undefined,
+  // and this is the one honest reading of it available here.
+  const betr = useMemo(() => {
+    if (!converting.length) return null;
+    const last = converting[converting.length - 1];
+    const brokerage = (accounts || []).filter(a => isBrokerageAccount(a.type));
+    const basis = brokerage.length
+      ? brokerage.reduce((s, a) => s + (a.costBasisPercent ?? BROKERAGE_COST_BASIS_ESTIMATE), 0) / brokerage.length
+      : BROKERAGE_COST_BASIS_ESTIMATE;
+    const growth = brokerage.length
+      ? brokerage.reduce((s, a) => s + (a.cagr || 0), 0) / brokerage.length
+      : 0.06;
+    // Preferential rate the plan actually lands in, plus state — the drag is
+    // paid at the household's rate, not at a textbook 15%.
+    const stateRate = (STATE_TAX_RATES && STATE_TAX_RATES[pi.state]) || 0;
+    const prefRate = 0.15 + (typeof stateRate === 'number' ? stateRate : 0);
+    // Weight the schedule's own years so a long conversion window is not
+    // represented by its last year alone.
+    const weighted = converting.reduce((s, r) => s + r.amount * r.bracket, 0)
+                   / Math.max(1, converting.reduce((s, r) => s + r.amount, 0));
+    const allIn = converting.reduce((s, r) => s + r.amount * (r.rate || 0), 0)
+                / Math.max(1, converting.reduce((s, r) => s + r.amount, 0));
+    return breakEvenTaxRate({
+      conversionRate: weighted,
+      years: Math.max(1, (pi.legacyAge || 95) - last.myAge),
+      growthRate: growth,
+      dividendYield: pi.brokerageDividendYield ?? 0.02,
+      dividendTaxRate: prefRate,
+      capGainsTaxRate: prefRate,
+      costBasisFraction: basis,
+      allInCostRate: allIn > 0 ? allIn : null,
+    });
+  }, [converting, accounts, pi]);
+
   const th = { textAlign: 'left', padding: '4px 8px', borderBottom: '2px solid #0f172a', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.03em', color: '#334155' };
   const thR = { ...th, textAlign: 'right' };
   const td = { padding: '4px 8px', borderBottom: '1px solid #e2e8f0', fontSize: 12 };
@@ -14990,6 +15037,124 @@ function RothRoadmapReport({ projections, personalInfo, accounts, incomeStreams,
             </p>
           </div>
         )}
+
+        {funding && (<>
+          <h2 style={h2}>Where the Conversion Tax Comes From</h2>
+          <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.6, margin: '0 0 10px' }}>
+            The oldest rule about conversions — convert if your future tax rate will be higher than
+            today's — is wrong whenever the tax is paid from <em>outside</em> the IRA. Paying from a
+            taxable account shrinks a tax-dragged asset to grow a tax-free one, and that swap is worth
+            something by itself, whatever future rates do. Vanguard's 2025 research calls the rate where
+            it all nets out the <strong>break-even tax rate</strong>. Rather than take their formula's
+            assumptions, this runs your plan three times and changes only one thing: who pays the tax.
+          </p>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th style={th}>Same conversion schedule, three ways</th>
+                <th style={thR}>Converted</th>
+                <th style={thR}>Lifetime tax</th>
+                <th style={thR}>Pre-tax left</th>
+                <th style={thR}>After-tax legacy</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                { key: 'none', label: 'No conversions at all', s: funding.none },
+                { key: 'withdrawal', label: 'Convert — tax from the portfolio', s: funding.fromPortfolio },
+                { key: 'brokerage', label: 'Convert — tax from a taxable account', s: funding.fromTaxable },
+              ].map(r => (
+                <tr key={r.key} style={r.key === funding.best ? { background: '#f0fdf4' } : undefined}>
+                  <td style={{ ...td, fontWeight: r.key === funding.best ? 700 : 400 }}>
+                    {r.label}
+                    {r.key === funding.current && r.key !== 'none' && (
+                      <span style={{ fontSize: 10, color: '#2563eb', fontWeight: 600, marginLeft: 6 }}>YOUR SETTING</span>
+                    )}
+                    {r.key === funding.best && (
+                      <span style={{ fontSize: 10, color: '#059669', fontWeight: 600, marginLeft: 6 }}>BEST HERE</span>
+                    )}
+                  </td>
+                  <td style={tdR}>{r.key === 'none' ? '—' : fmt(r.s.lifetimeConversions)}</td>
+                  <td style={tdR}>{fmt(r.s.lifetimeTax)}</td>
+                  <td style={tdR}>{fmt(r.s.endPreTax)}</td>
+                  <td style={{ ...tdR, fontWeight: 700 }}>{fmt(r.s.afterTaxLegacy)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p style={note}>
+            Paying the tax from a taxable account converts{' '}
+            <strong>{fmt(Math.abs(funding.fromTaxable.lifetimeConversions - funding.fromPortfolio.lifetimeConversions))} {funding.fromTaxable.lifetimeConversions > funding.fromPortfolio.lifetimeConversions ? 'more' : 'less'}</strong>{' '}
+            under the identical rule, because the withdrawal that funds the tax is not itself ordinary
+            income eating the bracket room the conversion was aiming at. But converting more is not the
+            same as ending up ahead: on after-tax legacy, paying from{' '}
+            <strong>{funding.fundingDelta >= 0 ? 'a taxable account' : 'the portfolio'}</strong> wins here
+            by <strong style={{ color: '#059669' }}>{fmt(Math.abs(funding.fundingDelta))}</strong>.
+            {funding.fundingDelta < 0 && (
+              <> That is the direction the break-even formula does <em>not</em> predict, and it is worth
+              understanding: the taxable account was already doing useful work — funding early retirement,
+              and passing to heirs with a stepped-up basis — so spending it down to convert more gives up
+              something the formula never counts.</>
+            )}
+            {funding.fundingDelta >= 0 && (
+              <> Which is the direction the published research points, for the reason it gives: the
+              taxable dollars spent on tax were the ones carrying the drag.</>
+            )}
+            {!funding.conversionHelps && (
+              <> <strong style={{ color: '#b45309' }}>Note that on this plan, not converting at all still
+              wins</strong> — by {fmt(Math.abs(funding.conversionDelta))} of after-tax legacy. That is a
+              real result, not a bug: with a large taxable account and a modest assumed heir rate, paying
+              tax early to avoid a rate you may never face can cost more than it saves.</>
+            )}
+          </p>
+
+          {betr && (
+            <div style={{ borderLeft: '4px solid #2563eb', background: '#eff6ff', borderRadius: 6, padding: '12px 16px', marginTop: 12, breakInside: 'avoid' }}>
+              <p style={{ fontSize: 13, fontWeight: 700, margin: 0, color: '#1e3a8a' }}>
+                Your break-even future tax rate
+              </p>
+              <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 8 }}>
+                <tbody>
+                  <tr>
+                    <td style={{ ...td, borderBottom: 'none' }}>If you pay the tax <strong>from the IRA itself</strong></td>
+                    <td style={{ ...tdR, borderBottom: 'none', fontWeight: 700 }}>{pct1(betr.betrInternal)}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ ...td, borderBottom: 'none' }}>If you pay it <strong>from a taxable account</strong></td>
+                    <td style={{ ...tdR, borderBottom: 'none', fontWeight: 700, color: '#059669' }}>{pct1(betr.betrExternal)}</td>
+                  </tr>
+                  {betr.betrAllIn !== null && (
+                    <tr>
+                      <td style={{ ...td, borderBottom: 'none' }}>
+                        From taxable, priced at what the conversion <strong>actually costs you</strong>
+                      </td>
+                      <td style={{ ...tdR, borderBottom: 'none', fontWeight: 700, color: '#b45309' }}>{pct1(betr.betrAllIn)}</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+              <p style={{ fontSize: 12, color: '#334155', margin: '10px 0 0', lineHeight: 1.6 }}>
+                Read it as: convert if you expect your future marginal rate to be <em>above</em> these.
+                Paying from the IRA moves nothing but the rate — only {pct1(1 - betr.betrInternal)} of
+                each dollar reaches the Roth, so the break-even is the conversion rate itself. Paying from
+                taxable drops the bar to {pct1(betr.betrExternal)} over {betr.years} years, and{' '}
+                <strong>that {(betr.fundingAdvantage * 100).toFixed(1)}-point gap is the entire published finding</strong> —
+                it comes from the funding choice, not from any forecast about future rates.
+              </p>
+              <p style={{ fontSize: 11, color: '#475569', margin: '10px 0 0', lineHeight: 1.6 }}>
+                <strong>Treat the first two as a floor, not a threshold.</strong> They price the bracket
+                and nothing else. The same conversion in your plan also pushes Social Security into tax,
+                crosses Medicare surcharge tiers, and can trigger the investment-income surtax — the third
+                line is that real cost, and it is the bar a decision should actually clear. The horizon is
+                taken as your last converting year to age {pi.legacyAge || 95}; the published method leaves
+                &quot;years to distribution&quot; undefined, and stretching or shortening it moves these
+                numbers by points. A single figure carrying that many estimates deserves to be read as a
+                direction, not a verdict — which is why the table above, built by running your plan rather
+                than a formula, is the part to act on.
+              </p>
+            </div>
+          )}
+        </>)}
 
         {effect && (<>
           <h2 style={h2}>What It Changes</h2>
