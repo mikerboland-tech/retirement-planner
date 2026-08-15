@@ -5415,6 +5415,67 @@ const taxableGrowthFactor = ({ years, growthRate, dividendYield = 0.02,
   return { grossValue: value, basis, afterTaxValue: value - gain * capGainsTaxRate };
 };
 
+// BETR stated on the axis the whole result actually turns on: the NET return the
+// taxable account earns after its own tax drag. This is Vanguard's own arithmetic
+// — their published figure is FV_traditional minus FV_of_the_tax_payment, over
+// FV_traditional — restated so the assumption doing the work is the visible input
+// rather than something buried behind a dividend yield.
+//
+// It is worth being blunt about how much work that one number does. In the
+// paper's own case study Jill's tax payment is assumed to merely double over 20
+// years: a 3.53% net return against a 6% gross, i.e. 41% of the return conceded
+// to drag. Move it to 5% — still a full point of drag, and unremarkable for
+// anyone using tax-managed funds or harvesting losses — and her BETR goes from
+// 23.3% to 31.0%, reversing the recommendation outright. The paper's own text
+// concedes the input is a plug ("you can use your preferred rate of return
+// assumption"), and it enters early enough that the output still looks derived.
+const betrFromNetReturn = ({ conversionRate, years, growthRate = 0.07, netReturn } = {}) => {
+  if (!(conversionRate > 0) || !(years >= 0) || netReturn === undefined || netReturn === null) return null;
+  const n = Math.max(0, Math.round(years));
+  const g = Math.pow(1 + (growthRate || 0), n);
+  if (!(g > 0)) return null;
+  return conversionRate * (Math.pow(1 + netReturn, n) / g);
+};
+
+// The band, not the point. Issue four of the critique is that a 0.7-percentage-
+// point gap between two estimates is presented as an answer; the honest reply is
+// to show the whole range the assumption can plausibly take and let the reader
+// see whether the verdict survives it. `flipsInsideBand` is the alarm: it means
+// the recommendation reverses somewhere inside assumptions no one could rule out.
+const betrSensitivity = ({ conversionRate, years, growthRate = 0.07,
+                           expectedFutureRate = null, dragPoints = [0.25, 0.5, 0.75, 1, 1.5, 2, 2.5],
+                           planNetReturn = null } = {}) => {
+  if (!(conversionRate > 0) || !(years >= 0)) return null;
+  const band = dragPoints
+    .map(pts => {
+      const netReturn = growthRate - pts / 100;
+      return { dragPoints: pts, netReturn,
+               dragShare: growthRate > 0 ? (pts / 100) / growthRate : 0,
+               betr: betrFromNetReturn({ conversionRate, years, growthRate, netReturn }) };
+    })
+    .filter(r => r.netReturn > -1 && r.betr !== null);
+  const values = band.map(r => r.betr);
+  const out = {
+    band, low: Math.min(...values), high: Math.max(...values),
+    // Where the plan's own modelled drag actually sits inside that band.
+    planNetReturn,
+    planBetr: planNetReturn === null ? null
+      : betrFromNetReturn({ conversionRate, years, growthRate, netReturn: planNetReturn }),
+    expectedFutureRate, flipsInsideBand: false, flipNetReturn: null,
+  };
+  if (expectedFutureRate !== null && expectedFutureRate > 0) {
+    out.flipsInsideBand = out.low < expectedFutureRate && out.high > expectedFutureRate;
+    // The exact net return at which the verdict reverses. Solvable in closed
+    // form: BETR = T1·(1+x)^n / (1+g)^n, set equal to the expected future rate.
+    const n = Math.max(0, Math.round(years));
+    if (n > 0 && conversionRate > 0) {
+      const ratio = (expectedFutureRate / conversionRate) * Math.pow(1 + growthRate, n);
+      if (ratio > 0) out.flipNetReturn = Math.pow(ratio, 1 / n) - 1;
+    }
+  }
+  return out;
+};
+
 const breakEvenTaxRate = ({ conversionRate, years, growthRate = 0.07,
                             dividendYield = 0.02, dividendTaxRate = 0.15,
                             capGainsTaxRate = 0.15, costBasisFraction = 1,
@@ -5450,6 +5511,25 @@ const breakEvenTaxRate = ({ conversionRate, years, growthRate = 0.07,
     // rather than from any bet on future rates.
     fundingAdvantage: t1 - t1 * dragRatio,
   };
+};
+
+// Lifetime tax, discounted to today. A nominal 30-year sum of tax paid is not a
+// comparable number — a dollar of tax in 2056 is not a dollar of tax now, and a
+// strategy that pays MORE tax later can easily be the cheaper one in present
+// value. Discounting at the plan's own inflation rate states the total in today's
+// purchasing power, which is the only basis on which "convert now and pay early"
+// versus "defer and pay later" can be honestly compared.
+const presentValueOfTaxes = (proj, { discountRate = 0.03, baseYear = null, retirementAge = 0 } = {}) => {
+  if (!Array.isArray(proj) || proj.length === 0) return null;
+  const y0 = baseYear !== null ? baseYear : proj[0].year;
+  let nominal = 0, present = 0;
+  proj.forEach(r => {
+    if (r.myAge < retirementAge) { /* still counted — tax paid while working is real */ }
+    const t = r.totalTax || 0;
+    nominal += t;
+    present += t / Math.pow(1 + discountRate, Math.max(0, (r.year || y0) - y0));
+  });
+  return { nominal: Math.round(nominal), present: Math.round(present), discountRate, baseYear: y0 };
 };
 
 // Where should the conversion tax come from? BETR answers that with a formula
@@ -8007,6 +8087,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     scaleOwnContributions, addOwnContribution, accountsAtSavingsTarget,
     splitBothContributors, BOTH_SPLIT_EMPLOYEE_SHARE,
     taxableGrowthFactor, breakEvenTaxRate, conversionFundingComparison,
+    betrFromNetReturn, betrSensitivity, presentValueOfTaxes,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,

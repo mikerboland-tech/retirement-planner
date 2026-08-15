@@ -7293,6 +7293,112 @@ section('P60 — break-even tax rate, and where the conversion tax actually come
   }
 }
 
+section('P61 — BETR is a band, not a point: reproducing the paper and the case against it');
+{
+  // Vanguard's paper is checkable, so it is checked here rather than paraphrased.
+  // Their case study: Jill, 35% bracket, 20 years, IRA at 6%, and a $35,000 tax
+  // payment assumed to merely DOUBLE to $70,000 over those 20 years. That single
+  // assumption produces the published 23.3% — and it is the assumption a public
+  // critique (Capita Finance, Aug 2026) identifies as doing nearly all the work.
+  const { betrFromNetReturn, betrSensitivity, presentValueOfTaxes } = engine;
+
+  // ── The published figure, from the paper's own arithmetic ────────────────
+  {
+    const published = 1 - (300000 - 70000) / 300000;
+    approx(published, 0.2333, "the paper's own numbers give its published 23.3%", 0.0005);
+    // Their FV_traditional is $100,000 x 1.06^20 = $320,714, rounded to $300,000
+    // in the write-up. Our un-rounded arithmetic is the same formula on exact
+    // figures, which is why it lands slightly lower — worth pinning so the gap is
+    // understood as their rounding rather than a different method.
+    const exact = betrFromNetReturn({ conversionRate: 0.35, years: 20, growthRate: 0.06, netReturn: 0.0353 });
+    approx(exact, 0.218, 'the same formula on un-rounded values gives 21.8%', 0.002);
+    approx(1 - (Math.pow(1.06, 20) * 100000 - 35000 * Math.pow(1.0353, 20)) / (Math.pow(1.06, 20) * 100000),
+      exact, 'and our closed form IS their FV expression, algebraically', 1e-6);
+  }
+
+  // ── The assumption doing the work, quantified ────────────────────────────
+  {
+    const impliedNet = Math.pow(70000 / 35000, 1 / 20) - 1;
+    approx(impliedNet, 0.0353, 'doubling in 20 years is a 3.53% net return', 0.0002);
+    approx((0.06 - impliedNet) / 0.06, 0.41,
+      'against a 6% gross that concedes 41% of the return to tax drag', 0.01);
+    // Our own drag model, on the same 6% gross, lands nowhere near that.
+    const g = engine.taxableGrowthFactor({ years: 20, growthRate: 0.06, dividendYield: 0.02,
+      dividendTaxRate: 0.238, capGainsTaxRate: 0.238, costBasisFraction: 1 });
+    const ourNet = Math.pow(g.afterTaxValue, 1 / 20) - 1;
+    gt(ourNet, 0.045, 'a 2% yield at the top preferential rate implies a far smaller drag');
+    lt((0.06 - ourNet) / 0.06, 0.25, 'under a quarter of the return, not 41% of it');
+  }
+
+  // ── And the flip: the recommendation reverses on a plausible input ───────
+  // The heart of the critique. Jill's published BETR of 23.3% sits 0.7 points
+  // under her expected 24% future rate. Improve the taxable account's net return
+  // by about a point and a half — routine with tax-managed funds or loss
+  // harvesting — and the verdict reverses outright.
+  {
+    const atFive = 1 - (300000 - 35000 * Math.pow(1.05, 20)) / 300000;
+    approx(atFive, 0.310, 'at a 5% net return Jill\'s BETR is 31.0%, not 23.3%', 0.002);
+    gt(atFive, 0.24, 'which is now ABOVE her expected future rate — do not convert');
+  }
+
+  // ── The band exposes that, where a point estimate hides it ───────────────
+  {
+    const s = betrSensitivity({ conversionRate: 0.35, years: 20, growthRate: 0.06,
+      expectedFutureRate: 0.24, planNetReturn: 0.05 });
+    eq(s.flipsInsideBand, true, 'the verdict reverses inside a band nobody could rule out');
+    gt(s.flipNetReturn, 0.035, 'the flip sits above the rate the paper assumed');
+    lt(s.flipNetReturn, 0.055, 'and below any realistic tax-managed return — i.e. right in the middle');
+    lt(s.low, 0.24, 'the band spans the decision');
+    gt(s.high, 0.24, 'on both sides of it');
+  }
+
+  // ── Less drag always means a higher bar; more drag, a lower one ──────────
+  {
+    const s = betrSensitivity({ conversionRate: 0.24, years: 20, growthRate: 0.06 });
+    for (let i = 1; i < s.band.length; i++) {
+      lt(s.band[i].betr, s.band[i - 1].betr,
+        `more assumed drag (${s.band[i].dragPoints} pts) always lowers BETR — which is why the case for converting rests on it`);
+    }
+    eq(s.flipsInsideBand, false, 'with no expected future rate supplied, nothing can be said to flip');
+    eq(s.flipNetReturn, null, 'and no flip point is invented');
+  }
+
+  // ── Zero drag reproduces the folk rule exactly ──────────────────────────
+  {
+    const b = betrFromNetReturn({ conversionRate: 0.24, years: 25, growthRate: 0.06, netReturn: 0.06 });
+    approx(b, 0.24, 'with no drag at all, break-even is just the conversion rate — the old rule', 1e-9);
+  }
+
+  // ── Degenerate inputs ────────────────────────────────────────────────────
+  {
+    eq(betrFromNetReturn({}), null, 'no inputs, no answer');
+    eq(betrFromNetReturn({ conversionRate: 0.24, years: 10 }), null, 'a missing net return is not treated as zero');
+    eq(betrSensitivity({}), null, 'and the band needs a conversion rate too');
+  }
+
+  // ── Lifetime tax, discounted, is a different ranking from the raw sum ────
+  // A nominal 30-year total of tax paid is not a comparable number. Paying more
+  // tax later can be cheaper in present value, which is exactly the comparison a
+  // conversion decision is making.
+  {
+    const early = [
+      { year: 2026, myAge: 65, totalTax: 100000 },
+      { year: 2046, myAge: 85, totalTax: 0 },
+    ];
+    const late = [
+      { year: 2026, myAge: 65, totalTax: 0 },
+      { year: 2046, myAge: 85, totalTax: 130000 },
+    ];
+    const a = presentValueOfTaxes(early, { discountRate: 0.03 });
+    const b = presentValueOfTaxes(late, { discountRate: 0.03 });
+    gt(b.nominal, a.nominal, 'the deferred plan pays MORE tax in nominal dollars');
+    lt(b.present, a.present, 'and yet less in present value — the ranking reverses');
+    eq(a.present, a.nominal, 'tax paid in the base year is already in present value');
+    eq(presentValueOfTaxes(null), null, 'no projection, no answer');
+    eq(presentValueOfTaxes([]), null, 'nor an empty one');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

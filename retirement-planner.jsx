@@ -51,6 +51,7 @@ const {
   survivorTaxComparison, survivorSSLoss, scoreRothStrategy,
   planShortfall, breakingPoint, accountsAtSavingsTarget,
   splitBothContributors, breakEvenTaxRate, conversionFundingComparison,
+  betrSensitivity, presentValueOfTaxes,
   getFederalDeduction, NIIT_THRESHOLDS,
   IRMAA_FILL_SAFETY_MARGIN,
 } = PlannerEngine;
@@ -14820,8 +14821,16 @@ function RothRoadmapReport({ projections, personalInfo, accounts, incomeStreams,
     if (!w || !o) return null;
     const rmdSum = (proj) => (proj || []).reduce((s, p) => s + (p.rmd || 0), 0);
     const firstRmd = (proj) => (proj || []).find(p => (p.rmd || 0) > 0);
+    // Lifetime tax discounted to today. A nominal 30-year sum is not a comparable
+    // number: a strategy that pays MORE tax in raw dollars can be the cheaper one
+    // once the timing is priced, and "pay now at a known rate versus later at an
+    // unknown one" is precisely a question about timing.
+    const pvOpts = { discountRate: pi.inflationRate ?? 0.03,
+                     baseYear: (projections || [])[0] && projections[0].year };
     return {
       w, o,
+      pvWith: presentValueOfTaxes(projections, pvOpts),
+      pvWithout: presentValueOfTaxes(baseline, pvOpts),
       lifetimeRmdWith: rmdSum(projections), lifetimeRmdWithout: rmdSum(baseline),
       firstRmdWith: firstRmd(projections), firstRmdWithout: firstRmd(baseline),
     };
@@ -14862,17 +14871,39 @@ function RothRoadmapReport({ projections, personalInfo, accounts, incomeStreams,
                    / Math.max(1, converting.reduce((s, r) => s + r.amount, 0));
     const allIn = converting.reduce((s, r) => s + r.amount * (r.rate || 0), 0)
                 / Math.max(1, converting.reduce((s, r) => s + r.amount, 0));
-    return breakEvenTaxRate({
-      conversionRate: weighted,
-      years: Math.max(1, (pi.legacyAge || 95) - last.myAge),
-      growthRate: growth,
+    const years = Math.max(1, (pi.legacyAge || 95) - last.myAge);
+    const core = breakEvenTaxRate({
+      conversionRate: weighted, years, growthRate: growth,
       dividendYield: pi.brokerageDividendYield ?? 0.02,
-      dividendTaxRate: prefRate,
-      capGainsTaxRate: prefRate,
+      dividendTaxRate: prefRate, capGainsTaxRate: prefRate,
       costBasisFraction: basis,
       allInCostRate: allIn > 0 ? allIn : null,
     });
-  }, [converting, accounts, pi]);
+    if (!core) return null;
+    // The net return this plan's own drag model implies, which is the number the
+    // whole result turns on and the one the published case study sets by hand.
+    const planNetReturn = Math.pow(core.taxableGrowth, 1 / years) - 1;
+    // The rate the converted money would otherwise have come out at — measured on
+    // the BASELINE, not on the converting plan. Reading it off the converting run
+    // is self-fulfilling: convert the IRA away and the later years have little
+    // ordinary income left, so the "future rate" collapses to 10% and every
+    // aggressive plan concludes it should not have converted. The honest question
+    // is what rate those dollars would have faced had they stayed put.
+    const laterRows = (baseline || projections || []).filter(p => p.myAge > last.myAge && (p.taxableIncome || 0) > 0);
+    const futureRate = laterRows.length
+      ? laterRows.reduce((s, p) => s + topMarginalBracket(
+          Math.max(0, (p.taxableIncome || 0) - (p.realizedCapitalGains || 0)
+                      - (p.brokerageDividends || 0) - (p.federalDeduction || 0)),
+          p.filingStatus || pi.filingStatus || 'married_joint', p.year - BASE_TAX_YEAR, infl), 0) / laterRows.length
+      : null;
+    return {
+      ...core, planNetReturn, futureRate, growth,
+      sensitivity: betrSensitivity({
+        conversionRate: weighted, years, growthRate: growth,
+        expectedFutureRate: futureRate, planNetReturn,
+      }),
+    };
+  }, [converting, accounts, pi, projections, baseline, infl]);
 
   const th = { textAlign: 'left', padding: '4px 8px', borderBottom: '2px solid #0f172a', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.03em', color: '#334155' };
   const thR = { ...th, textAlign: 'right' };
@@ -15141,6 +15172,78 @@ function RothRoadmapReport({ projections, personalInfo, accounts, incomeStreams,
                 <strong>that {(betr.fundingAdvantage * 100).toFixed(1)}-point gap is the entire published finding</strong> —
                 it comes from the funding choice, not from any forecast about future rates.
               </p>
+              {/* The band. A single BETR next to a single guessed future rate can sit
+                  0.7 points apart and be presented as an answer; showing the range
+                  the load-bearing assumption can take is the honest reply. */}
+              <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid #bfdbfe' }}>
+                <p style={{ fontSize: 12, fontWeight: 700, margin: 0, color: '#1e3a8a' }}>
+                  How much rests on one assumption
+                </p>
+                <p style={{ fontSize: 12, color: '#334155', margin: '4px 0 8px', lineHeight: 1.6 }}>
+                  Everything above turns on what your taxable account earns <em>after</em> its own tax
+                  drag. Your plan implies <strong>{pct1(betr.planNetReturn)}</strong> net against{' '}
+                  {pct1(betr.growth)} gross — {((betr.growth - betr.planNetReturn) * 100).toFixed(1)} points
+                  of drag, or {Math.round((betr.growth - betr.planNetReturn) / Math.max(0.0001, betr.growth) * 100)}%
+                  of the return. Vanguard's own case study assumes 41%, which is where most of its
+                  headline comes from. Here is the whole range:
+                </p>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr>
+                      <th style={th}>Tax drag on the taxable account</th>
+                      <th style={thR}>Net return</th>
+                      <th style={thR}>Break-even rate</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {betr.sensitivity.band.map(r => {
+                      const nearest = Math.abs(r.netReturn - betr.planNetReturn) < 0.0026;
+                      return (
+                        <tr key={r.dragPoints} style={nearest ? { background: '#dbeafe' } : undefined}>
+                          <td style={td}>
+                            {r.dragPoints.toFixed(2)} points ({Math.round(r.dragShare * 100)}% of the return)
+                            {nearest && <span style={{ fontSize: 10, color: '#1d4ed8', fontWeight: 700, marginLeft: 6 }}>YOUR PLAN</span>}
+                          </td>
+                          <td style={tdR}>{pct1(r.netReturn)}</td>
+                          <td style={{ ...tdR, fontWeight: 600 }}>{pct1(r.betr)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {betr.futureRate !== null && (
+                  <p style={{ fontSize: 12, color: betr.sensitivity.flipsInsideBand ? '#b45309' : '#334155', margin: '8px 0 0', lineHeight: 1.6 }}>
+                    Without these conversions, your plan projects an average marginal rate of{' '}
+                    <strong>{pct1(betr.futureRate)}</strong> on the years those dollars would have come
+                    out.{' '}
+                    {betr.sensitivity.flipsInsideBand ? (
+                      <>
+                        <strong>The verdict reverses inside this band.</strong> Above a{' '}
+                        {pct1(betr.sensitivity.flipNetReturn)} net return on your taxable account the
+                        break-even rises past {pct1(betr.futureRate)} and the answer becomes
+                        &ldquo;don&rsquo;t convert&rdquo;; below it, &ldquo;convert&rdquo;. Nobody can
+                        forecast that return to the tenth of a point over {betr.years} years, so treat
+                        this as a reason to look at the table further up — which runs your plan instead
+                        of resolving an assumption — rather than as an answer.
+                      </>
+                    ) : (
+                      <>Across the whole band the answer stays{' '}
+                      <strong>{betr.futureRate > betr.sensitivity.high ? 'convert' : 'do not convert'}</strong> —
+                      which is the case where a break-even rate is genuinely useful, because the
+                      conclusion does not depend on the assumption doing the work.</>
+                    )}
+                  </p>
+                )}
+                <p style={{ fontSize: 11, color: '#475569', margin: '8px 0 0', lineHeight: 1.6 }}>
+                  <strong>There is also a third option this framing leaves out.</strong> The worse your
+                  taxable account is at growing after tax, the better a conversion looks — which is an
+                  odd way to build a case, because the same willingness to sell those holdings to pay
+                  conversion tax is a willingness to sell them and reinvest more efficiently. Fixing the
+                  drag first raises the break-even rate and weakens the case for converting; that is the
+                  honest order to do it in.
+                </p>
+              </div>
+
               <p style={{ fontSize: 11, color: '#475569', margin: '10px 0 0', lineHeight: 1.6 }}>
                 <strong>Treat the first two as a floor, not a threshold.</strong> They price the bracket
                 and nothing else. The same conversion in your plan also pushes Social Security into tax,
@@ -15170,6 +15273,9 @@ function RothRoadmapReport({ projections, personalInfo, accounts, incomeStreams,
             <tbody>
               {[
                 { k: 'Lifetime income tax + surcharges', a: effect.w.lifetimeTax, b: effect.o.lifetimeTax, lowerBetter: true },
+                ...(effect.pvWith && effect.pvWithout
+                  ? [{ k: '  the same, in today\'s dollars', a: effect.pvWith.present, b: effect.pvWithout.present, lowerBetter: true }]
+                  : []),
                 { k: 'Lifetime Medicare IRMAA', a: effect.w.lifetimeIRMAA, b: effect.o.lifetimeIRMAA, lowerBetter: true },
                 { k: 'Lifetime required distributions', a: effect.lifetimeRmdWith, b: effect.lifetimeRmdWithout, lowerBetter: true },
                 { k: 'Pre-tax balance at the end', a: effect.w.endPreTax, b: effect.o.endPreTax, lowerBetter: true },
@@ -15196,6 +15302,12 @@ function RothRoadmapReport({ projections, personalInfo, accounts, incomeStreams,
             more after-tax legacy. Lifetime income tax usually goes <em>up</em> with conversions — that is
             the bill being paid on purpose, early and at a chosen rate, instead of later at whatever rate
             the survivor or the heirs face. The line that decides whether it was worth it is the last one.
+            {effect.pvWith && effect.pvWithout && (
+              <> The second row discounts every year's tax back to today at your inflation rate, which is
+              the only basis on which paying early and paying late are comparable at all: a conversion
+              deliberately moves tax <em>forward</em> in time, and a raw 30-year sum prices that move at
+              zero. Where the two rows disagree in direction, the discounted one is the honest ranking.</>
+            )}
             {effect.firstRmdWithout && effect.firstRmdWith
               ? ` The first required distribution falls from ${fmt(effect.firstRmdWithout.rmd)} to ${fmt(effect.firstRmdWith.rmd)} in ${effect.firstRmdWith.year}.`
               : effect.firstRmdWithout
