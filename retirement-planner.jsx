@@ -22,7 +22,7 @@ const {
   calculateAlabamaTax, FICA_SS_RATE, FICA_SS_WAGE_BASE_2025, FICA_MEDICARE_RATE,
   FICA_ADDITIONAL_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_THRESHOLD,
   calculateFICA, RMD_FACTORS, calculateRMD, getRmdStartAge,
-  getDefaultRothConversionWindow, QCD_ANNUAL_LIMIT, QCD_START_AGE, getPlanningHorizonYears, checkContributionLimits,
+  getDefaultRothConversionWindow, QCD_ANNUAL_LIMIT, QCD_START_AGE, qcdTaxSavings, getPlanningHorizonYears, checkContributionLimits,
   rmdUsesJointTable, SECTION_121_EXCLUSION_SINGLE, SECTION_121_EXCLUSION_JOINT,
   estimateRetirementSavings, estimateAnnualSocialSecurity, savingsMultipleForAge,
   realReturn, inflateToAge, deflateToToday, coastFire, streamColaYears, streamAmountAtAge,
@@ -1929,7 +1929,7 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
 // ============================================
 // TaxYearSnapshot — Lifted to module scope
 // ============================================
-function TaxYearSnapshot({ projections, personalInfo }) {
+function TaxYearSnapshot({ projections, personalInfo, qcdSavings }) {
   const [selectedAge, setSelectedAge] = useState(personalInfo.myAge);
   const p = projections.find(pr => pr.myAge === selectedAge);
   if (!p) return null;
@@ -2535,11 +2535,36 @@ function TaxYearSnapshot({ projections, personalInfo }) {
           )}
 </div>
         </div>
-        {(p.qcd || 0) > 0 && (
-          <p className="text-xs text-emerald-400/70 mt-2">
-            💡 QCD of {formatCurrency(p.qcd)} excluded from taxable income, saving approximately {formatCurrency(Math.round((p.qcd) * (bracketDetails.find(b => b.filled && !bracketDetails.find(b2 => b2.filled && b2.rateNum > b.rateNum))?.rateNum || 0.22)))} in federal taxes.
-          </p>
-        )}
+        {/* This used to read qcd x marginal bracket, federal only — which is the
+            smallest part of what the exclusion does and understated it by half
+            on a typical plan. The figure below is measured: the same year priced
+            with and without the exclusion, so it carries state tax, the Social
+            Security the money would have dragged into tax, any Medicare
+            surcharge, and the senior deduction the higher AGI would have phased
+            out. */}
+        {(p.qcd || 0) > 0 && (() => {
+          const y = qcdSavings && qcdSavings.years.find(x => x.year === p.year);
+          if (!y) return (
+            <p className="text-xs text-emerald-400/70 mt-2">
+              💡 QCD of {formatCurrency(p.qcd)} excluded from taxable income entirely — and still leaves
+              the standard deduction intact.
+            </p>
+          );
+          return (
+            <p className="text-xs text-emerald-400/70 mt-2 leading-relaxed">
+              💡 QCD of {formatCurrency(y.qcd)} excluded from income saves{' '}
+              <strong>{formatCurrency(y.saved)}</strong> this year —{' '}
+              {(y.ratePerDollar * 100).toFixed(0)}¢ per dollar given
+              {' '}({formatCurrency(y.federal)} federal
+              {y.state > 0 ? ` + ${formatCurrency(y.state)} state` : ''}
+              {y.irmaa > 0 ? ` + ${formatCurrency(y.irmaa)} Medicare surcharge` : ''})
+              {y.ssPulledIntoTax > 0 && <>, and keeps {formatCurrency(y.ssPulledIntoTax)} of Social
+                Security out of tax that an ordinary withdrawal would have dragged in</>}.
+              Giving the same amount by cheque from a taxable account would save none of it, because the
+              standard deduction means the gift never reaches Schedule A.
+            </p>
+          );
+        })()}
       </div>
     </div>
   );
@@ -4544,6 +4569,14 @@ function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, pro
 
 
 function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setPersonalInfo }) {
+  // What the charitable giving actually saves, measured by running the plan with
+  // and without the QCD exclusion. Two projections, computed once here and shared
+  // with the snapshot below rather than estimated separately in each place.
+  const qcdSavings = useMemo(() => qcdTaxSavings({
+    pi: personalInfo, accts: accounts, streams: incomeStreams, assetList: assets,
+    events: oneTimeEvents, recurring: recurringExpenses,
+    currentYear: new Date().getFullYear(),
+  }), [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
   const [ageRange, setAgeRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || 95 });
   
   // Retirement age: always use personalInfo as source of truth
@@ -4926,9 +4959,56 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
       {/* Tax Year Snapshot */}
       <TaxBreakpointsTable projections={projections} personalInfo={personalInfo} />
 
+      {qcdSavings && qcdSavings.totalQcd > 0 && (
+        <div className={cardStyle}>
+          <div className="flex items-center gap-2 mb-1">
+            <h4 className="text-lg font-semibold text-slate-100">What Your Charitable Giving Saves</h4>
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">QCD</span>
+          </div>
+          <p className="text-xs text-slate-400 mb-4 leading-relaxed">
+            Measured by running your plan twice — identical but for the qualified charitable distribution
+            exclusion. Ages {qcdSavings.firstQcdAge}–{qcdSavings.lastQcdAge}.
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-3">
+              <div className="text-slate-500 text-xs mb-0.5">Given straight from the IRA</div>
+              <div className="text-lg font-bold text-slate-100">{formatCurrency(qcdSavings.totalQcd)}</div>
+              <div className="text-xs text-slate-500">never enters your income</div>
+            </div>
+            <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-3">
+              <div className="text-slate-500 text-xs mb-0.5">Lifetime tax avoided</div>
+              <div className="text-lg font-bold text-emerald-400">{formatCurrency(qcdSavings.lifetimeTaxSaved)}</div>
+              <div className="text-xs text-slate-500">{formatCurrency(qcdSavings.lifetimeTaxSavedReal)} in today's dollars</div>
+            </div>
+            <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-3">
+              <div className="text-slate-500 text-xs mb-0.5">Saved per dollar given</div>
+              <div className="text-lg font-bold text-emerald-400">
+                {qcdSavings.blendedRate !== null ? `${(qcdSavings.blendedRate * 100).toFixed(0)}¢` : '—'}
+              </div>
+              <div className="text-xs text-slate-500">all-in, not just the bracket</div>
+            </div>
+            <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-3">
+              <div className="text-slate-500 text-xs mb-0.5">Portfolio at age {personalInfo.legacyAge || 95}</div>
+              <div className="text-lg font-bold text-emerald-400">+{formatCurrency(qcdSavings.endingPortfolioDelta)}</div>
+              <div className="text-xs text-slate-500">tax not paid, still compounding</div>
+            </div>
+          </div>
+          <p className="text-xs text-slate-500 mt-3 leading-relaxed">
+            The per-dollar figure is usually well above your tax bracket, and that is the point. The
+            exclusion keeps the money out of AGI entirely, so it also avoids the Social Security those
+            dollars would have dragged into tax, any Medicare surcharge two years later, and the senior
+            deduction a higher AGI would have phased out. Giving the same amount by cheque from a taxable
+            account saves none of it: with the standard deduction the gift never reaches Schedule A, so it
+            buys no deduction at all
+            {qcdSavings.lifetimeIrmaaSaved > 0 && <>. Medicare surcharges avoided: {formatCurrency(qcdSavings.lifetimeIrmaaSaved)}</>}.
+          </p>
+        </div>
+      )}
+
       <TaxYearSnapshot
         projections={projections}
         personalInfo={personalInfo}
+        qcdSavings={qcdSavings}
       />
       
       {/* Roth Conversion Optimizer — goal-based strategy sweep (worker) */}

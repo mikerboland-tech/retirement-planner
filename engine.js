@@ -5579,6 +5579,91 @@ const levelConversionToDrain = (ctx, { startAge, endAge, steps = 14 } = {}) => {
   return hi;
 };
 
+// ── WHAT THE QCD IS ACTUALLY WORTH ───────────────────────────────────────────
+// A qualified charitable distribution is the most tax-efficient gift a retiree
+// over 70½ can make, and the app priced it at a bracket: qcd × marginal rate.
+// That is the smallest part of what it does.
+//
+// The exclusion keeps the money out of AGI entirely, and AGI is the base for
+// almost everything expensive downstream. The same dollar, taken as an ordinary
+// distribution and given by cheque instead, would:
+//   · be taxed at the marginal bracket, federal AND state
+//   · drag more Social Security into tax through the §86 provisional-income test
+//   · raise MAGI toward a Medicare surcharge tier — which lands TWO YEARS later
+//   · count toward the §1411 net investment income tax threshold
+//   · and, for a household taking the standard deduction, buy no deduction at
+//     all in return, because the gift never appears on Schedule A
+//
+// That last point is the whole reason the QCD exists and is why a bracket-only
+// figure is not merely incomplete but structurally wrong: it implicitly assumes
+// the alternative is a deductible gift, when for most retirees the alternative
+// is a gift that produces no tax benefit whatsoever.
+//
+// Measured by running the plan twice, identical but for the exclusion, so the
+// answer carries every one of those effects plus the compounding difference the
+// extra tax makes to the portfolio over the rest of the plan.
+const qcdTaxSavings = (ctx) => {
+  if (!ctx || !ctx.pi) return null;
+  if (!((ctx.pi.charitableGivingPercent || 0) > 0)) return null;
+  const run = (opts) => computeProjections(ctx.pi, ctx.accts, ctx.streams, ctx.assetList || [],
+    ctx.events || [], ctx.recurring || [], ctx.currentYear, opts);
+  const withQcd = run({});
+  const totalQcd = withQcd.reduce((s, r) => s + (r.qcd || 0), 0);
+  if (!(totalQcd > 0)) return null;
+  const withoutQcd = run({ disableQCD: true });
+
+  const infl = ctx.pi.inflationRate ?? 0.03;
+  const y0 = withQcd[0] ? withQcd[0].year : BASE_TAX_YEAR;
+  const real = (n, year) => (n || 0) / Math.pow(1 + infl, Math.max(0, year - y0));
+
+  const years = [];
+  let lifetimeTax = 0, lifetimeIrmaa = 0, lifetimeReal = 0;
+  withQcd.forEach((r, i) => {
+    const o = withoutQcd[i];
+    if (!o || o.year !== r.year) return;
+    const federal = (o.federalTax || 0) - (r.federalTax || 0);
+    const state = (o.stateTax || 0) - (r.stateTax || 0);
+    const irmaa = (o.irmaaSurcharge || 0) - (r.irmaaSurcharge || 0);
+    const ssTaxed = (o.taxableSS || 0) - (r.taxableSS || 0);
+    const saved = federal + state + irmaa;
+    lifetimeTax += federal + state;
+    lifetimeIrmaa += irmaa;
+    lifetimeReal += real(saved, r.year);
+    if ((r.qcd || 0) > 0 || Math.abs(saved) > 0.5) {
+      years.push({
+        year: r.year, myAge: r.myAge, qcd: Math.round(r.qcd || 0),
+        federal: Math.round(federal), state: Math.round(state), irmaa: Math.round(irmaa),
+        // Extra benefit dragged into tax by the same dollars, had they been an
+        // ordinary distribution. Reported because it is the effect people are
+        // most surprised by and the one a bracket cannot show.
+        ssPulledIntoTax: Math.round(ssTaxed),
+        saved: Math.round(saved),
+        // Cents on the donated dollar. Routinely well above the bracket.
+        ratePerDollar: (r.qcd || 0) > 0 ? saved / r.qcd : null,
+      });
+    }
+  });
+
+  const qcdYears = years.filter(y => y.qcd > 0);
+  const lastWith = withQcd[withQcd.length - 1] || {};
+  const lastWithout = withoutQcd[withoutQcd.length - 1] || {};
+  return {
+    years, qcdYears,
+    totalQcd: Math.round(totalQcd),
+    lifetimeTaxSaved: Math.round(lifetimeTax + lifetimeIrmaa),
+    lifetimeIncomeTaxSaved: Math.round(lifetimeTax),
+    lifetimeIrmaaSaved: Math.round(lifetimeIrmaa),
+    lifetimeTaxSavedReal: Math.round(lifetimeReal),
+    // Cents saved per dollar given, across the whole plan.
+    blendedRate: totalQcd > 0 ? (lifetimeTax + lifetimeIrmaa) / totalQcd : null,
+    // What the difference is worth by the end, compounding included — the extra
+    // tax would have come out of the portfolio and stopped earning.
+    endingPortfolioDelta: Math.round((lastWith.totalPortfolio || 0) - (lastWithout.totalPortfolio || 0)),
+    firstQcdAge: qcdYears.length ? qcdYears[0].myAge : null,
+    lastQcdAge: qcdYears.length ? qcdYears[qcdYears.length - 1].myAge : null,
+  };
+};
+
 // ── THE "CONVERT EVERYTHING" BOOKEND ─────────────────────────────────────────
 // Converting the whole pre-tax balance is worth analysing precisely because it
 // is almost never right — it brackets the answer from the far side, the way
@@ -6858,7 +6943,10 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Use pre-calculated inflation factor for QCD limit
       const adjustedQCDLimit = QCD_ANNUAL_LIMIT * inflationFactor;
       const householdQCDLimit = effectiveFilingStatus === 'married_joint' ? adjustedQCDLimit * 2 : adjustedQCDLimit;
-      const canDoQCD = charitablePercent > 0 && myAge >= QCD_START_AGE;
+      // opts.disableQCD runs the identical plan with the exclusion switched off,
+      // so the QCD's worth can be measured as a difference rather than estimated
+      // from a bracket. It is only ever set by qcdTaxSavings below.
+      const canDoQCD = charitablePercent > 0 && myAge >= QCD_START_AGE && !opts.disableQCD;
 
       // ── WITHDRAWAL-COMPOSITION ESTIMATOR ────────────────────────────────────────
       // Used by the solver so the tax gross-up reflects the ACTUAL draw (Roth = tax-free,
@@ -7770,7 +7858,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // 4. If RMDs have started, QCDs count toward satisfying the RMD
     // Note: qcdAmount and charitablePercent are declared in outer scope above the isRetired block
     
-    if (charitablePercent > 0 && isRetired && myAge >= QCD_START_AGE) {
+    // NOTE: this is the SECOND copy of the QCD eligibility rule — `canDoQCD`
+    // above gates the withdrawal solver's estimate, this one gates the actual
+    // computation. They differ (this adds isRetired) and have to move together:
+    // switching the exclusion off in one but not the other leaves the solver
+    // grossing up for tax on income the tax step then excludes anyway, which is
+    // not "no QCD", it is an incoherent third state.
+    if (charitablePercent > 0 && isRetired && myAge >= QCD_START_AGE && !opts.disableQCD) {
       // Calculate desired charitable giving as % of retirement spending
       const charitableGiving = desiredIncome * (charitablePercent / 100);
       
@@ -8329,6 +8423,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     taxableGrowthFactor, breakEvenTaxRate, conversionFundingComparison,
     betrFromNetReturn, betrSensitivity, presentValueOfTaxes,
     convertEverythingAnalysis, levelConversionToDrain, convertEverythingPI,
+    qcdTaxSavings,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,

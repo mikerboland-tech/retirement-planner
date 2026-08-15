@@ -7810,6 +7810,101 @@ section('P64 — joint income survives the first death; Social Security follows 
   }
 }
 
+section('P65 — what the QCD is actually worth, measured rather than estimated from a bracket');
+{
+  // The app priced a qualified charitable distribution at qcd x marginal bracket,
+  // federal only. That is the smallest part of what the exclusion does, and on a
+  // typical plan it understated the benefit by roughly half.
+  const { qcdTaxSavings } = engine;
+
+  const ctxFor = (over) => {
+    const sc = baseScenario({
+      myAge: 70, spouseAge: 68, myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 68,
+      myRetirementAge: 70, spouseRetirementAge: 70, legacyAge: 92,
+      state: 'Missouri', inflationRate: 0.025, desiredRetirementIncome: 130000,
+      withdrawalPriority: ['pretax', 'brokerage', 'roth'], charitableGivingPercent: 10,
+      healthcareModel: 'none', medicalInflation: 0, ...over,
+    });
+    sc.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 1800000, contribution: 0, cagr: 0.05, startAge: 70, stopAge: 70, owner: 'me' },
+      { id: 2, name: 'Brok', type: 'brokerage', balance: 400000, contribution: 0, cagr: 0.05, startAge: 70, stopAge: 70, owner: 'joint', costBasisPercent: 0.6 },
+    ];
+    sc.streams = [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 46000, startAge: 70, endAge: 95, cola: 0.025, owner: 'me', todaysDollars: true, pia: 3800 },
+      { id: 2, name: 'Sp SS', type: 'social_security', amount: 28000, startAge: 70, endAge: 95, cola: 0.025, owner: 'spouse', todaysDollars: true, pia: 2300 },
+    ];
+    return { pi: sc.pi, accts: sc.accts, streams: sc.streams, assetList: [],
+             events: [], recurring: [], currentYear: TODAY_YEAR };
+  };
+
+  // ── The disable flag has to reach BOTH copies of the eligibility rule ────
+  // The engine holds the QCD rule twice: once gating the withdrawal solver's
+  // estimate, once gating the actual computation. Switching it off in one but
+  // not the other is not "no QCD" — it is an incoherent third state where the
+  // solver grosses up for tax on income the tax step then excludes anyway. The
+  // tell is net income: it must still land on the spending target either way.
+  {
+    const c = ctxFor({});
+    const on = computeProjections(c.pi, c.accts, c.streams, [], [], [], TODAY_YEAR, {});
+    const off = computeProjections(c.pi, c.accts, c.streams, [], [], [], TODAY_YEAR, { disableQCD: true });
+    gt(on[0].qcd, 0, 'the QCD runs by default');
+    eq(off[0].qcd, 0, 'and is genuinely off when disabled — in the row, not just the solver');
+    approx(off[0].netIncome, on[0].netIncome,
+      'and both runs still fund the same spending, which is what proves the two gates agree', 50);
+    gt(off[0].taxableIncome, on[0].taxableIncome, 'the excluded income really does come back');
+    gt(off[0].federalTax, on[0].federalTax, 'and it really does cost tax');
+  }
+
+  // ── The saving is well above the bracket, because AGI drives everything ──
+  {
+    const q = qcdTaxSavings(ctxFor({}));
+    eq(!!q, true, 'a charitable plan can be priced');
+    gt(q.totalQcd, 0, 'something is actually given through the IRA');
+    gt(q.lifetimeTaxSaved, 0, 'and it saves real tax');
+    gt(q.blendedRate, 0.25,
+      'well above the 22% bracket a bracket-only estimate would have quoted');
+    // State tax alone is most of the gap the old estimate ignored.
+    gt(q.qcdYears[0].state, 0, 'state tax is part of it and was simply missing before');
+    // And the money not paid in tax keeps earning.
+    gt(q.endingPortfolioDelta, q.lifetimeTaxSaved * 0.5,
+      'the tax not paid compounds, so the plan ends materially further ahead');
+    approx(q.lifetimeTaxSaved, q.lifetimeIncomeTaxSaved + q.lifetimeIrmaaSaved,
+      'the reported total is exactly its parts', 1);
+    lt(q.lifetimeTaxSavedReal, q.lifetimeTaxSaved,
+      "and today's-dollar total is below the nominal one, as a discounted sum must be");
+  }
+
+  // ── Social Security kept out of tax is reported, because it is invisible ──
+  // The effect people are most surprised by: the same dollars taken as an
+  // ordinary distribution raise provisional income and drag more benefit into
+  // tax. A bracket cannot show it.
+  {
+    const q = qcdTaxSavings(ctxFor({}));
+    const pulled = q.qcdYears.filter(y => y.ssPulledIntoTax > 0);
+    gt(pulled.length, 0,
+      'at least one year would have dragged more Social Security into tax without the QCD');
+    q.qcdYears.forEach(y => {
+      eq(Number.isFinite(y.ratePerDollar), true, `age ${y.myAge} reports cents per dollar given`);
+      approx(y.saved, y.federal + y.state + y.irmaa, `age ${y.myAge}: the year's parts sum to its total`, 1);
+    });
+  }
+
+  // ── No giving, nothing to price ──────────────────────────────────────────
+  {
+    eq(qcdTaxSavings(ctxFor({ charitableGivingPercent: 0 })), null,
+      'a plan that gives nothing has no QCD saving to report');
+    eq(qcdTaxSavings(null), null, 'and no context is not an error');
+    // And a QCD needs an IRA to come out of: a charitable household holding only
+    // Roth and taxable money has no exclusion available, however much it gives.
+    const noPreTax = ctxFor({});
+    noPreTax.accts = [
+      { id: 1, name: 'Roth', type: 'roth_ira', balance: 1400000, contribution: 0, cagr: 0.05, startAge: 70, stopAge: 70, owner: 'me' },
+      { id: 2, name: 'Brok', type: 'brokerage', balance: 800000, contribution: 0, cagr: 0.05, startAge: 70, stopAge: 70, owner: 'joint', costBasisPercent: 0.6 },
+    ];
+    eq(qcdTaxSavings(noPreTax), null, 'no pre-tax account means no QCD to price');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
