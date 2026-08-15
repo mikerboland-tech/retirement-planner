@@ -5532,6 +5532,45 @@ const presentValueOfTaxes = (proj, { discountRate = 0.03, baseYear = null, retir
   return { nominal: Math.round(nominal), present: Math.round(present), discountRate, baseYear: y0 };
 };
 
+// The personalInfo that converts a level `amount` every year of a window, with
+// every other conversion mode cleared. Shared so the optimizer's "convert
+// everything" candidate and the report's bookend are provably the same strategy
+// rather than two hand-rolled ones that drift.
+const convertEverythingPI = (pi, { startAge, endAge, amount }) => ({
+  ...withoutRothConversions(pi),
+  rothConversionPreTaxFloor: 0,
+  rothConversionAmount: amount,
+  rothConversionInflationAdjust: false,
+  rothConversionStartAge: startAge,
+  rothConversionEndAge: endAge,
+  rothConversionTaxSource: pi.rothConversionTaxSource || 'withdrawal',
+});
+
+// The level annual conversion that just empties the pre-tax balance by the end
+// of a window. Bisected rather than derived: balances grow, the conversion's own
+// tax draw takes more out, and RMDs may already be running — no closed form
+// survives all three. Returns null when there is nothing pre-tax to drain.
+const levelConversionToDrain = (ctx, { startAge, endAge, steps = 14 } = {}) => {
+  if (!ctx || !ctx.pi || !Array.isArray(ctx.accts)) return null;
+  const preTaxNow = ctx.accts.filter(a => isPreTaxAccount(a.type))
+    .reduce((sum, a) => sum + (a.balance || 0), 0);
+  if (!(preTaxNow > 0)) return null;
+  const drainedBy = (amount) => {
+    const p = convertEverythingPI(ctx.pi, { startAge, endAge, amount });
+    const proj = computeProjections(p, ctx.accts, ctx.streams, ctx.assetList || [],
+      ctx.events || [], ctx.recurring || [], ctx.currentYear);
+    const last = proj.find(r => r.myAge >= endAge) || proj[proj.length - 1];
+    return (last.preTaxBalance || 0) <= 1;
+  };
+  let lo = 0, hi = Math.max(preTaxNow, 1) * 3;
+  if (!drainedBy(hi)) hi *= 4;
+  for (let i = 0; i < steps; i++) {
+    const mid = (lo + hi) / 2;
+    if (drainedBy(mid)) hi = mid; else lo = mid;
+  }
+  return hi;
+};
+
 // ── THE "CONVERT EVERYTHING" BOOKEND ─────────────────────────────────────────
 // Converting the whole pre-tax balance is worth analysing precisely because it
 // is almost never right — it brackets the answer from the far side, the way
@@ -5577,28 +5616,9 @@ const convertEverythingAnalysis = (ctx, { steps = 14 } = {}) => {
   const years = Math.max(1, endAge - startAge + 1);
 
   const base = { ...withoutRothConversions(pi), rothConversionPreTaxFloor: 0 };
-  const withAmount = (amount) => ({
-    ...base, rothConversionAmount: amount, rothConversionInflationAdjust: false,
-    rothConversionStartAge: startAge, rothConversionEndAge: endAge,
-    rothConversionTaxSource: pi.rothConversionTaxSource || 'withdrawal',
-  });
-
-  // The level annual conversion that just empties the pre-tax balance by the end
-  // of the window. Bisected rather than derived: balances grow, the conversion's
-  // own tax draw takes more out, and RMDs may already be running — no closed form
-  // survives all three.
-  const emptiedBy = (amount) => {
-    const proj = run(withAmount(amount));
-    const last = proj.find(r => r.myAge >= endAge) || proj[proj.length - 1];
-    return { proj, drained: (last.preTaxBalance || 0) <= 1 };
-  };
-  let lo = 0, hi = Math.max(preTaxNow, 1) * 3;
-  if (!emptiedBy(hi).drained) hi *= 4;
-  for (let i = 0; i < steps; i++) {
-    const mid = (lo + hi) / 2;
-    if (emptiedBy(mid).drained) hi = mid; else lo = mid;
-  }
-  const allProj = run(withAmount(hi));
+  const hi = levelConversionToDrain(ctx, { startAge, endAge, steps });
+  if (hi === null) return null;
+  const allProj = run(convertEverythingPI(pi, { startAge, endAge, amount: hi }));
   const noneProj = run(base);
   const currentProj = rothConversionIsPlanned(pi) ? run(pi) : null;
 
@@ -8249,7 +8269,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     splitBothContributors, BOTH_SPLIT_EMPLOYEE_SHARE,
     taxableGrowthFactor, breakEvenTaxRate, conversionFundingComparison,
     betrFromNetReturn, betrSensitivity, presentValueOfTaxes,
-    convertEverythingAnalysis,
+    convertEverythingAnalysis, levelConversionToDrain, convertEverythingPI,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,

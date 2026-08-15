@@ -3447,9 +3447,16 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
       ...withRothConversionTarget(prev, {
         bracket: row.bracket || '',
         irmaaTier: Number.isInteger(row.irmaaTier) ? row.irmaaTier : undefined,
+        // A "convert everything" row is a fixed-amount strategy. Without the
+        // amount, Apply on it would clear every mode and switch conversions off
+        // — turning the recommended row into no strategy at all.
+        amount: row.drainAmount > 0 ? row.drainAmount : undefined,
         startAge: row.startAge || 0,
         endAge: row.endAge || 0,
       }),
+      // The drain schedule is a nominal dollar figure sized to empty the account,
+      // not a today's-dollars target to be indexed each year.
+      ...(row.drainAmount > 0 ? { rothConversionInflationAdjust: false } : {}),
     }));
     setAppliedLabel(row.label);
   };
@@ -12812,54 +12819,48 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
       
       {/* Marginal Tax Impact Dashboard Card */}
       {visibilitySettings.taxSummary && (() => {
-        // Compute marginal rates for current year and a few key ages
+        // Priced by the engine's own marginalCostOfNextDollar, the same function
+        // behind the Tax Planning tab's "Next Dollar" card. This card used to
+        // rebuild all of it by hand and got two things wrong that showed up as
+        // blank columns:
+        //
+        //   MAGI was hand-assembled from gross Social Security and the whole
+        //   portfolio withdrawal — but IRMAA is measured on AGI, which contains
+        //   only the TAXABLE part of the benefit and none of a Roth draw or a
+        //   return of brokerage basis. The row already carries a correct `magi`.
+        //
+        //   And the probe collided with the engine's own IRMAA_FILL_SAFETY_MARGIN.
+        //   A year converting up to an IRMAA ceiling stops $1,000 short of it by
+        //   design, so a +$1,000 probe landed EXACTLY on the edge — where the
+        //   tier has not flipped yet — and reported no IRMAA cost at all in
+        //   precisely the years built to sit against that edge.
         const computeMarginalForAge = (targetAge) => {
           const p = projections.find(pr => pr.myAge === targetAge);
           if (!p) return null;
-          // Tax tables index from BASE_TAX_YEAR, not from the user's current age.
-          // An age offset only equals the tax offset while the app runs in the
-          // base year; deriving it from the row's calendar year keeps this card
-          // agreeing with the engine in every later year. (See engine BASE_TAX_YEAR.)
-          const taxIndexYears = p.year - BASE_TAX_YEAR;
-          const extra = 1000;
-          const rothConv = p.rothConversion || 0;
-          const currentNonSS = p.earnedIncome + p.pension + p.otherIncome + p.portfolioWithdrawal + rothConv - (p.qcd || 0);
-          const currentTaxableSS = calculateSocialSecurityTaxableAmount(p.socialSecurity, currentNonSS, personalInfo.filingStatus);
-          const newTaxableSS = calculateSocialSecurityTaxableAmount(p.socialSecurity, currentNonSS + extra, personalInfo.filingStatus);
-          const currentGross = currentNonSS + currentTaxableSS;
-          const newGross = currentNonSS + extra + newTaxableSS;
-          
-          // Total tax deltas (include torpedo effect)
-          const retIncome = p.pension; // Only pension is exempt from state tax (not 401k/IRA withdrawals)
-          const currentFed = calculateFederalTax(currentGross, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate);
-          const currentSt = calculateStateTax(currentGross, personalInfo.state, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate, currentTaxableSS, retIncome, { federalTaxPaid: currentFed, primaryAge: targetAge, spouseAge: personalInfo.spouseAge + (targetAge - personalInfo.myAge) });
-          const newFed = calculateFederalTax(newGross, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate);
-          const newSt = calculateStateTax(newGross, personalInfo.state, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate, newTaxableSS, retIncome, { federalTaxPaid: newFed, primaryAge: targetAge, spouseAge: personalInfo.spouseAge + (targetAge - personalInfo.myAge) });
-          const fedDelta = newFed - currentFed;
-          const stDelta = newSt - currentSt;
-          
-          // Direct deltas (without torpedo - keep SS taxable unchanged)
-          const directGross = currentGross + extra;
-          const directFed = calculateFederalTax(directGross, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate);
-          const directSt = calculateStateTax(directGross, personalInfo.state, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate, currentTaxableSS, retIncome, { federalTaxPaid: directFed, primaryAge: targetAge, spouseAge: personalInfo.spouseAge + (targetAge - personalInfo.myAge) });
-          const directFedDelta = directFed - currentFed;
-          const directStDelta = directSt - currentSt;
-          
-          // Torpedo = total delta minus direct delta (the tax COST of SS becoming more taxable)
-          const torpedoCost = (fedDelta - directFedDelta) + (stDelta - directStDelta);
-          
-          const currentMAGI = p.earnedIncome + p.socialSecurity + p.pension + p.otherIncome + p.portfolioWithdrawal + rothConv;
-          const irm1 = targetAge >= 65 ? calculateIRMAA(currentMAGI, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate) : { totalAnnual: 0, tier: 0 };
-          const irm2 = targetAge >= 65 ? calculateIRMAA(currentMAGI + extra, personalInfo.filingStatus, taxIndexYears, personalInfo.inflationRate) : { totalAnnual: 0, tier: 0 };
-          const irmDelta = irm2.totalAnnual - irm1.totalAnnual;
-          const totalCost = fedDelta + stDelta + irmDelta;
+          const m = marginalCostOfNextDollar({ row: p, pi: personalInfo, probe: 1000 });
+          if (!m) return null;
+          const irmaaEdge = (m.nextThresholds || []).find(t => /IRMAA/.test(t.label));
+          const ss = p.socialSecurity || 0;
           return {
-            age: targetAge, rate: Math.round(totalCost / extra * 1000) / 10,
-            fed: Math.round(directFedDelta / extra * 1000) / 10, 
-            state: Math.round(directStDelta / extra * 1000) / 10,
-            ssTorpedo: Math.round(torpedoCost / extra * 1000) / 10,
-            irmaa: Math.round(irmDelta / extra * 1000) / 10,
-            irmaaAnnual: irm1.totalAnnual, irmaaTier: irm1.tier,
+            age: targetAge,
+            rate: Math.round(m.rate * 1000) / 10,
+            fed: Math.round(m.ratePoints.bracket * 1000) / 10,
+            state: Math.round(m.ratePoints.state * 1000) / 10,
+            ssTorpedo: Math.round(m.ratePoints.ssTorpedo * 1000) / 10,
+            irmaa: Math.round(m.ratePoints.irmaa * 1000) / 10,
+            irmaaAnnual: p.irmaaSurcharge || 0,
+            // Everything the blank cells needed in order to say something true.
+            hasSS: ss > 0,
+            ssShareBefore: m.detail.ssTaxableShareBefore,
+            ssMaxedOut: m.detail.ssTaxableShareBefore !== null && m.detail.ssTaxableShareBefore >= 0.8499,
+            medicareAge: targetAge >= 65,
+            irmaaEdgeDistance: irmaaEdge ? irmaaEdge.distance : null,
+            crossedIrmaaEdge: !!m.detail.crossedIrmaaEdge,
+            // What crossing actually costs, in dollars. Expressing a cliff as a
+            // percentage of the probe is arbitrary — the same crossing reads
+            // 400% against $1,000 and 40% against $10,000 — so the dollar figure
+            // is the one that means anything.
+            irmaaCrossCost: m.components.irmaa,
           };
         };
         
@@ -12909,13 +12910,28 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
             <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mb-3">
               <div className="border rounded-lg px-4 py-3 bg-amber-500/10 border-amber-500/30">
                 <div className="text-slate-400 text-xs mb-0.5">True Marginal Rate (Now)</div>
-                <div className={`text-2xl font-bold ${(currentMarg?.rate || 0) > 35 ? 'text-red-400' : (currentMarg?.rate || 0) > 25 ? 'text-amber-400' : 'text-emerald-400'}`}>{currentMarg?.rate || 0}%</div>
-                <div className="text-xs text-slate-500">Age {personalInfo.myAge} — each extra $1K costs ${Math.round((currentMarg?.rate || 0) * 10)}</div>
+                <div className={`text-2xl font-bold ${(currentMarg?.rate || 0) > 35 ? 'text-red-400' : (currentMarg?.rate || 0) > 25 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                  {currentMarg?.crossedIrmaaEdge
+                    ? formatCurrency(currentMarg.irmaaCrossCost + (currentMarg.rate - currentMarg.irmaa) * 10)
+                    : `${currentMarg?.rate || 0}%`}
+                </div>
+                <div className="text-xs text-slate-500">
+                  {currentMarg?.crossedIrmaaEdge
+                    ? `Age ${personalInfo.myAge} — you sit on an IRMAA edge; the next $1K tips a tier`
+                    : `Age ${personalInfo.myAge} — each extra $1K costs $${Math.round((currentMarg?.rate || 0) * 10)}`}
+                </div>
               </div>
               <div className="border rounded-lg px-4 py-3 bg-purple-500/10 border-purple-500/30">
                 <div className="text-slate-400 text-xs mb-0.5">SS Tax Torpedo</div>
-                <div className="text-2xl font-bold text-purple-400">{currentMarg?.ssTorpedo || 0}%</div>
-                <div className="text-xs text-slate-500">{(currentMarg?.ssTorpedo || 0) > 0 ? 'Extra withdrawals make SS taxable' : 'SS not yet in taxable range'}</div>
+                <div className="text-2xl font-bold text-purple-400">
+                  {currentMarg?.ssMaxedOut ? '85%' : `${currentMarg?.ssTorpedo || 0}%`}
+                </div>
+                <div className="text-xs text-slate-500">
+                  {currentMarg?.ssMaxedOut ? 'Already at the statutory maximum — no more to drag in'
+                    : (currentMarg?.ssTorpedo || 0) > 0 ? 'Extra withdrawals make SS taxable'
+                    : !currentMarg?.hasSS ? 'Not collecting Social Security yet'
+                    : `${Math.round((currentMarg?.ssShareBefore || 0) * 100)}% taxable — the next $1K adds none`}
+                </div>
               </div>
               <div className="border rounded-lg px-4 py-3 bg-pink-500/10 border-pink-500/30">
                 <div className="text-slate-400 text-xs mb-0.5">IRMAA Surcharge</div>
@@ -12942,9 +12958,38 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
                       <td className="py-1 px-2 text-slate-100 font-medium">{m.age}</td>
                       <td className="py-1 px-2 text-right text-red-400">{m.fed}%</td>
                       <td className="py-1 px-2 text-right text-orange-400">{m.state}%</td>
-                      <td className="py-1 px-2 text-right text-purple-400">{m.ssTorpedo > 0 ? `${m.ssTorpedo}%` : '—'}</td>
-                      <td className="py-1 px-2 text-right text-pink-400">{m.irmaa > 0 ? `${m.irmaa}%` : '—'}</td>
-                      <td className={`py-1 px-2 text-right font-bold ${m.rate > 35 ? 'text-red-400' : m.rate > 25 ? 'text-amber-400' : 'text-emerald-400'}`}>{m.rate}%</td>
+                      {/* A zero here has three different meanings and a dash
+                          told them apart from nothing. "Already 85%" is the
+                          common one and the one that reads as a bug: the torpedo
+                          costs nothing more precisely because it has already
+                          done its worst. */}
+                      <td className="py-1 px-2 text-right text-purple-400">
+                        {m.ssTorpedo > 0 ? `${m.ssTorpedo}%`
+                          : !m.hasSS ? <span className="text-slate-600" title="Not collecting Social Security yet">—</span>
+                          : m.ssMaxedOut ? <span className="text-slate-500 text-[10px]" title="85% of your benefit is already taxable — the statutory maximum. The next dollar cannot drag any more of it in.">85% maxed</span>
+                          : <span className="text-slate-500" title={`${Math.round((m.ssShareBefore || 0) * 100)}% of your benefit is taxable; the next $1,000 does not add to it`}>0%</span>}
+                      </td>
+                      <td className="py-1 px-2 text-right text-pink-400">
+                        {m.irmaa > 0 ? `${m.irmaa}%`
+                          : !m.medicareAge ? <span className="text-slate-600" title="IRMAA applies from age 65">—</span>
+                          : m.irmaaEdgeDistance !== null && m.irmaaEdgeDistance <= 25000
+                            ? <span className="text-amber-500/80 text-[10px]" title="No surcharge on the next $1,000, but the next tier is close — crossing it costs the full tier, not a rate">
+                                {formatCurrency(m.irmaaEdgeDistance)} to edge
+                              </span>
+                            : <span className="text-slate-500" title="Comfortably inside an IRMAA tier — the next $1,000 crosses nothing">0%</span>}
+                      </td>
+                      {/* A crossing year is not a "rate" year. The surcharge is a
+                          fixed step, so the percentage is an artefact of the
+                          $1,000 probe — the dollar cost is the real quantity and
+                          the badge stops the number being read as a tax rate. */}
+                      <td className={`py-1 px-2 text-right font-bold ${m.rate > 35 ? 'text-red-400' : m.rate > 25 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                        {m.crossedIrmaaEdge ? (
+                          <span title={`This year sits against an IRMAA edge. The next $1,000 tips you into the higher tier, which costs ${formatCurrency(m.irmaaCrossCost)} for the year — a one-time step, not a rate every dollar pays.`}>
+                            <span className="text-[10px] bg-pink-500/20 text-pink-300 px-1 py-0.5 rounded mr-1">cliff</span>
+                            {formatCurrency(m.irmaaCrossCost)}
+                          </span>
+                        ) : `${m.rate}%`}
+                      </td>
                       <td className="py-1 px-2 text-right text-slate-400">{m.irmaaAnnual > 0 ? formatCurrency(m.irmaaAnnual) : '—'}</td>
                     </tr>
                   ))}
@@ -12952,7 +12997,17 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
               </table>
             </div>
             <p className="text-xs text-slate-500 mt-2">
-              True Rate = combined impact of federal tax, state tax, SS becoming taxable, and IRMAA surcharges on each extra $1,000 of pre-tax withdrawal. See Tax Planning tab for full year-by-year detail.
+              True Rate = combined impact of federal tax, state tax, SS becoming taxable, and IRMAA
+              surcharges on each extra $1,000 of pre-tax withdrawal. <strong>&ldquo;85% maxed&rdquo;</strong> means
+              the torpedo has already done its worst — 85% of the benefit is taxable, the statutory
+              ceiling, so the next dollar cannot drag in any more. IRMAA is a <em>cliff</em>, not a rate:
+              a year can show 0% and still sit a few thousand dollars from an edge that costs a full tier
+              to cross, which is why the distance is shown instead of a dash. See Tax Planning tab for
+              full year-by-year detail. Rows marked <strong>cliff</strong> sit right against an IRMAA edge —
+              usually because the plan is deliberately converting up to it. There the next $1,000 tips you
+              into the next tier and the cost shown is the <em>dollar</em> step for that year, not a rate:
+              the same crossing would read 400% against a $1,000 test and 40% against a $10,000 one, so the
+              percentage would tell you nothing.
             </p>
           </div>
         );

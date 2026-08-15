@@ -833,6 +833,24 @@ function runRothOptimizer(jobId, payload) {
     pi: withRothConversionTarget(personalInfo, { irmaaTier: t.index, startAge: w.startAge, endAge: w.endAge }),
   })));
 
+  // The far bookend: empty the pre-tax account entirely over each window. Almost
+  // never the winner, and that is the point — without it the sweep only ever
+  // offers partial fills, so a reader cannot see where the ceiling is or what
+  // the QCD, low-bracket and Social Security trade-offs look like at the limit.
+  // Uses the engine's own bisection so this candidate and the Roadmap report's
+  // bookend are provably the same strategy.
+  const drainCtx = { pi: personalInfo, accts: accounts, streams: incomeStreams,
+                     assetList: assets, events: oneTimeEvents, recurring: recurringExpenses };
+  windows.forEach(w => {
+    const amount = E.levelConversionToDrain(drainCtx, { startAge: w.startAge, endAge: w.endAge });
+    if (!(amount > 0)) return;
+    strategies.push({
+      label: `Convert everything ($${Math.round(amount).toLocaleString()}/yr), ages ${w.startAge}–${w.endAge}`,
+      bracket: '', window: w, drainAmount: amount,
+      pi: E.convertEverythingPI(personalInfo, { startAge: w.startAge, endAge: w.endAge, amount }),
+    });
+  });
+
   const scored = [];
   strategies.forEach((s, i) => {
     const proj = computeProjections(s.pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
@@ -840,6 +858,9 @@ function runRothOptimizer(jobId, payload) {
     scored.push({
       label: s.label, bracket: s.bracket,
       irmaaTier: Number.isInteger(s.irmaaTier) ? s.irmaaTier : null,
+      // Carried so Apply reproduces a drain candidate: it is a fixed-amount
+      // strategy, and without the amount Apply would clear the row it came from.
+      drainAmount: s.drainAmount || null,
       startAge: s.window ? s.window.startAge : null,
       endAge: s.window ? s.window.endAge : null,
       isCurrent: !!s.isCurrent,

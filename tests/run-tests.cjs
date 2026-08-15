@@ -7530,6 +7530,113 @@ section('P62 — the "convert everything" bookend: what it buys and what it thro
   }
 }
 
+section('P63 — a zero in the marginal-cost table has three meanings, and they are not the same');
+{
+  // The dashboard card showed a dash for the Social Security torpedo and for
+  // IRMAA whenever the next $1,000 cost nothing extra. Both blanks were
+  // misleading, and one of them was a real bug.
+  const { marginalCostOfNextDollar, IRMAA_FILL_SAFETY_MARGIN, calculateIRMAA,
+          IRMAA_THRESHOLDS_2025 } = engine;
+
+  // ── The probe collided with the engine's own safety margin ───────────────
+  // A year converting up to an IRMAA ceiling stops IRMAA_FILL_SAFETY_MARGIN short
+  // of it BY DESIGN. Probe by exactly that margin and you land ON the edge, where
+  // the tier has not flipped — so the card reported no IRMAA cost in precisely
+  // the years built to sit against that edge.
+  {
+    const edge = IRMAA_THRESHOLDS_2025.married_joint[0].maxIncome;
+    eq(calculateIRMAA(edge, 'married_joint', 0, 0).tier, 0,
+      'sitting exactly on an IRMAA edge is still the lower tier');
+    eq(calculateIRMAA(edge + 1, 'married_joint', 0, 0).tier, 1,
+      'and one dollar past it is the higher one — the crossing is a step, not a slope');
+    eq(IRMAA_FILL_SAFETY_MARGIN, 1000,
+      'the fill margin and the probe were the same size, which is what made the collision exact');
+  }
+
+  const build = (over, streams) => {
+    const sc = baseScenario({
+      myAge: 72, spouseAge: 70, myBirthYear: TODAY_YEAR - 72, spouseBirthYear: TODAY_YEAR - 70,
+      myRetirementAge: 72, spouseRetirementAge: 72, legacyAge: 80,
+      state: 'Missouri', inflationRate: 0, desiredRetirementIncome: 150000,
+      healthcareModel: 'none', medicalInflation: 0,
+      withdrawalPriority: ['pretax', 'brokerage', 'roth'], ...over,
+    });
+    sc.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 3000000, contribution: 0, cagr: 0, startAge: 72, stopAge: 72, owner: 'me' },
+    ];
+    sc.streams = streams !== undefined ? streams : [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 67, endAge: 95, cola: 0, owner: 'me' },
+      { id: 2, name: 'Sp SS', type: 'social_security', amount: 30000, startAge: 67, endAge: 95, cola: 0, owner: 'spouse' },
+    ];
+    return { pi: sc.pi, row: computeProjections(sc.pi, sc.accts, sc.streams, [], [], [], TODAY_YEAR)[0] };
+  };
+
+  // ── "Already 85%" is not the same as "no torpedo" ────────────────────────
+  // The common case, and the one that reads as a bug: a high-income retiree has
+  // 85% of the benefit taxable — the statutory ceiling — so the next dollar
+  // genuinely drags in nothing more. The card must say WHY it is zero.
+  {
+    const { row, pi } = build({});
+    const m = marginalCostOfNextDollar({ row, pi, probe: 1000 });
+    approx(m.detail.ssTaxableShareBefore, 0.85, 'this retiree is already at the 85% ceiling', 0.001);
+    approx(m.components.ssTorpedo, 0, 'so the next $1,000 adds no torpedo cost at all', 1);
+    eq(m.detail.ssTaxableShareBefore >= 0.8499, true,
+      'which the card can detect and label rather than blanking');
+  }
+
+  // ── A retiree not yet collecting is a different zero ─────────────────────
+  {
+    const { row, pi } = build({}, []);
+    const m = marginalCostOfNextDollar({ row, pi, probe: 1000 });
+    eq(row.socialSecurity, 0, 'no benefit is being received');
+    eq(m.detail.ssTaxableShareBefore, null, 'so there is no taxable share to report');
+    approx(m.components.ssTorpedo, 0, 'and no torpedo either — for an entirely different reason', 1);
+  }
+
+  // ── And a middle case: collecting, below the ceiling, torpedo live ───────
+  {
+    const { row, pi } = build({ desiredRetirementIncome: 60000 }, [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 40000, startAge: 67, endAge: 95, cola: 0, owner: 'me' },
+    ]);
+    const m = marginalCostOfNextDollar({ row, pi, probe: 1000 });
+    if (m.detail.ssTaxableShareBefore !== null && m.detail.ssTaxableShareBefore < 0.8499) {
+      gt(m.components.ssTorpedo, 0,
+        'below the ceiling the next $1,000 really does drag more benefit into tax');
+    }
+    eq(m.detail.ssTaxableShareBefore !== null, true, 'and the share is always reported');
+  }
+
+  // ── crossedIrmaaEdge distinguishes a cliff year from a quiet one ─────────
+  // The flag the card needs: a percentage is meaningless for a step cost. The
+  // same crossing reads 400% against a $1,000 probe and 40% against $10,000, so
+  // the dollar figure is the only quantity that means anything.
+  {
+    const { row, pi } = build({});
+    const m1 = marginalCostOfNextDollar({ row, pi, probe: 1000 });
+    const m10 = marginalCostOfNextDollar({ row, pi, probe: 10000 });
+    eq(typeof m1.detail.crossedIrmaaEdge, 'boolean', 'the card is told whether an edge was crossed');
+    if (m1.detail.crossedIrmaaEdge && m10.detail.crossedIrmaaEdge) {
+      approx(m1.components.irmaa, m10.components.irmaa,
+        'the DOLLAR cost of crossing is the same whatever the probe', 1);
+      gt(m1.ratePoints.irmaa, m10.ratePoints.irmaa,
+        'while the RATE is pure artefact of the probe size — which is why it is not shown');
+    }
+  }
+
+  // ── The card must price MAGI the way IRMAA does ─────────────────────────
+  // The old hand-rolled version assembled MAGI from GROSS Social Security and the
+  // whole portfolio withdrawal. IRMAA is measured on AGI, which carries only the
+  // taxable part of the benefit and none of a Roth draw or a return of basis.
+  {
+    const { row } = build({});
+    lt(row.taxableSS, row.socialSecurity,
+      'the taxable benefit is always less than the benefit received');
+    lt(row.magi, row.earnedIncome + row.socialSecurity + row.pension + row.otherIncome + row.portfolioWithdrawal,
+      'so a MAGI built from gross SS and the whole withdrawal overstates it');
+    gt(row.magi, 0, 'while the row carries a correct figure the card can just use');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
