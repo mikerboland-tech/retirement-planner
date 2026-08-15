@@ -8021,6 +8021,116 @@ section('P66 — the conversion rate, provable: every part named, and the parts 
   }
 }
 
+section('P67 — the IRMAA ranking is right, and the reason has to be on screen');
+{
+  // Reported as a bug: sorting by "avoid IRMAA surcharges" ranks a $750,000-MAGI
+  // target above a tier-1 plan over the same ages. It is not a bug, and the
+  // arithmetic behind it is worth pinning because it is the least obvious thing
+  // the optimizer does.
+  //
+  // IRMAA is set from MAGI TWO YEARS EARLIER and starts at 65, so a conversion
+  // at age 62 or earlier is invisible to it. A target aggressive enough to empty
+  // the account before 63 converts most of the balance free of any surcharge; a
+  // cautious target converts slowly into the chargeable years and pays for a
+  // decade. Lower lifetime IRMAA for the aggressive plan is the correct answer.
+  const { irmaaTierOptions, withRothConversionTarget, withoutRothConversions,
+          scoreRothStrategy, IRMAA_TIER_LOOKBACK_YEARS } = engine;
+
+  const sc = baseScenario({
+    myAge: 60, spouseAge: 58, myBirthYear: TODAY_YEAR - 60, spouseBirthYear: TODAY_YEAR - 58,
+    myRetirementAge: 60, spouseRetirementAge: 60, legacyAge: 92,
+    state: 'Missouri', inflationRate: 0.025, desiredRetirementIncome: 140000,
+    withdrawalPriority: ['pretax', 'brokerage', 'roth'], heirTaxRate: 0.25,
+    rothConversionStartAge: 60, rothConversionEndAge: 74,
+    healthcareModel: 'none', medicalInflation: 0,
+  });
+  sc.accts = [
+    { id: 1, name: 'IRA', type: 'traditional_ira', balance: 2500000, contribution: 0, cagr: 0.06, startAge: 60, stopAge: 60, owner: 'me' },
+    { id: 2, name: 'Roth', type: 'roth_ira', balance: 250000, contribution: 0, cagr: 0.06, startAge: 60, stopAge: 60, owner: 'me' },
+    { id: 3, name: 'Brok', type: 'brokerage', balance: 800000, contribution: 0, cagr: 0.05, startAge: 60, stopAge: 60, owner: 'joint', costBasisPercent: 0.5 },
+  ];
+  sc.streams = [
+    { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 67, endAge: 95, cola: 0.025, owner: 'me', todaysDollars: true, pia: 4000 },
+    { id: 2, name: 'Sp SS', type: 'social_security', amount: 26000, startAge: 67, endAge: 95, cola: 0.025, owner: 'spouse', todaysDollars: true, pia: 2200 },
+  ];
+  const runTier = (tier) => {
+    const p = withRothConversionTarget(sc.pi, { irmaaTier: tier, startAge: 60, endAge: 74 });
+    const proj = computeProjections(p, sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+    const s = scoreRothStrategy(proj, { legacyAge: 92, retirementAge: 60, heirTaxRate: 0.25 });
+    const conv = proj.filter(r => (r.rothConversion || 0) > 0);
+    const freeThrough = 65 - IRMAA_TIER_LOOKBACK_YEARS - 1;
+    return { ...s, proj,
+      irmaaYears: proj.filter(r => (r.irmaaSurcharge || 0) > 0).length,
+      lastConversionAge: conv.length ? conv[conv.length - 1].myAge : null,
+      free: conv.filter(r => r.myAge <= freeThrough).reduce((a, r) => a + r.rothConversion, 0),
+      exposed: conv.filter(r => r.myAge > freeThrough).reduce((a, r) => a + r.rothConversion, 0) };
+  };
+
+  // ── The window itself ────────────────────────────────────────────────────
+  {
+    eq(IRMAA_TIER_LOOKBACK_YEARS, 2, 'IRMAA is set from MAGI two years earlier');
+    eq(65 - IRMAA_TIER_LOOKBACK_YEARS - 1, 62,
+      'so a conversion at 62 or earlier lands before Medicare and is never charged');
+  }
+
+  // ── The reported result, reproduced ──────────────────────────────────────
+  {
+    const tiers = irmaaTierOptions('married_joint', 2).filter(t => !t.isTop);
+    const highest = tiers[tiers.length - 1];
+    gt(highest.ceiling, 700000, 'the top swept target really is a $750,000-ish MAGI ceiling');
+    const aggressive = runTier(highest.index);
+    const cautious = runTier(1);
+    lt(aggressive.lifetimeIRMAA, cautious.lifetimeIRMAA,
+      'the aggressive target genuinely posts LESS lifetime IRMAA — the reported result');
+    lt(aggressive.irmaaYears, cautious.irmaaYears, 'because it is charged in far fewer years');
+  }
+
+  // ── And the reason: it finishes before IRMAA can see it ──────────────────
+  {
+    const tiers = irmaaTierOptions('married_joint', 2).filter(t => !t.isTop);
+    const aggressive = runTier(tiers[tiers.length - 1].index);
+    const cautious = runTier(1);
+    lt(aggressive.lastConversionAge, 65,
+      'the aggressive plan is finished before Medicare even starts');
+    gt(cautious.lastConversionAge, aggressive.lastConversionAge,
+      'while the cautious one converts for years longer');
+    gt(aggressive.free, aggressive.exposed,
+      'most of the aggressive conversion happens where IRMAA cannot reach it');
+    gt(cautious.exposed, cautious.free,
+      'and most of the cautious one happens where it can — which is the whole story');
+    gt(aggressive.free, cautious.free,
+      'the aggressive plan simply uses the pre-Medicare window harder');
+  }
+
+  // ── The goal has a blind spot, and it is a real cost ─────────────────────
+  // Ranking on lifetime IRMAA alone rewards a strategy that gives up far more in
+  // legacy than it saves in surcharge. The UI has to show that trade, because
+  // the sort will not.
+  {
+    const tiers = irmaaTierOptions('married_joint', 2).filter(t => !t.isTop);
+    const aggressive = runTier(tiers[tiers.length - 1].index);
+    const bestLegacy = tiers.map(t => runTier(t.index))
+      .reduce((a, b) => (b.afterTaxLegacy > a.afterTaxLegacy ? b : a));
+    const legacyCost = bestLegacy.afterTaxLegacy - aggressive.afterTaxLegacy;
+    const irmaaSaved = bestLegacy.lifetimeIRMAA - aggressive.lifetimeIRMAA;
+    gt(legacyCost, 0, 'the IRMAA winner is not the legacy winner');
+    gt(legacyCost, Math.max(1, irmaaSaved) * 3,
+      'and gives up several times more legacy than the surcharge it avoids — the trade the UI now names');
+  }
+
+  // ── A cautious target really can pay nothing at all ──────────────────────
+  // The other end: the lowest ceiling keeps MAGI under the first tier for the
+  // whole plan, so it is never charged. That is the row a reader expects to win,
+  // and on this plan it does — which is why the $750k row winning was surprising
+  // rather than obviously wrong.
+  {
+    const lowest = runTier(0);
+    eq(lowest.lifetimeIRMAA, 0, 'the lowest ceiling is never charged a surcharge');
+    eq(lowest.irmaaYears, 0, 'in any year');
+    gt(lowest.lifetimeConversions, 0, 'while still converting something');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

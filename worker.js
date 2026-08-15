@@ -851,10 +851,35 @@ function runRothOptimizer(jobId, payload) {
     });
   });
 
+  // A conversion at age A sets the IRMAA bracket at age A+2, and IRMAA starts at
+  // 65 — so conversions at 62 or earlier are INVISIBLE to it. That single fact
+  // explains most of what the "avoid IRMAA" ranking does, and nothing on screen
+  // said it: an aggressive target that empties the IRA before 63 can post a
+  // LOWER lifetime surcharge than a cautious one that converts slowly into the
+  // chargeable years. Reported per strategy so the ranking can be understood
+  // rather than argued with.
+  const IRMAA_FREE_THROUGH_AGE = 65 - (E.IRMAA_TIER_LOOKBACK_YEARS || 2) - 1;
+
   const scored = [];
   strategies.forEach((s, i) => {
     const proj = computeProjections(s.pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
     const score = E.scoreRothStrategy(proj, { legacyAge, retirementAge, heirTaxRate });
+    const retired = proj.filter(p => p.myAge >= retirementAge);
+    const convRows = retired.filter(p => (p.rothConversion || 0) > 0);
+    const irmaaRows = retired.filter(p => (p.irmaaSurcharge || 0) > 0);
+    const freeConv = convRows.filter(p => p.myAge <= IRMAA_FREE_THROUGH_AGE)
+      .reduce((sum, p) => sum + p.rothConversion, 0);
+    const detail = {
+      conversionYears: convRows.length,
+      firstConversionAge: convRows.length ? convRows[0].myAge : null,
+      lastConversionAge: convRows.length ? convRows[convRows.length - 1].myAge : null,
+      irmaaYears: irmaaRows.length,
+      firstIrmaaAge: irmaaRows.length ? irmaaRows[0].myAge : null,
+      lastIrmaaAge: irmaaRows.length ? irmaaRows[irmaaRows.length - 1].myAge : null,
+      conversionsIrmaaFree: Math.round(freeConv),
+      conversionsIrmaaExposed: Math.round(score.lifetimeConversions - freeConv),
+      irmaaFreeThroughAge: IRMAA_FREE_THROUGH_AGE,
+    };
     scored.push({
       label: s.label, bracket: s.bracket,
       irmaaTier: Number.isInteger(s.irmaaTier) ? s.irmaaTier : null,
@@ -865,6 +890,7 @@ function runRothOptimizer(jobId, payload) {
       endAge: s.window ? s.window.endAge : null,
       isCurrent: !!s.isCurrent,
       ...score,
+      ...detail,
     });
     postMessage({ jobId, type: 'progress', percent: Math.round(((i + 1) / strategies.length) * 100) });
   });

@@ -3672,6 +3672,41 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
       {optError && <p className="text-sm text-red-400 mb-2">{optError}</p>}
       {appliedLabel && <p className="text-sm text-emerald-400 mb-2">✓ Applied: {appliedLabel} — every tab now reflects this strategy.</p>}
 
+      {/* Why the IRMAA ranking looks wrong when it is not, and what it costs. */}
+      {goal === 'irmaa' && best && best.conversionYears > 0 && (() => {
+        const bestLegacy = ranked.reduce((a, b) => (b.afterTaxLegacy > a.afterTaxLegacy ? b : a), ranked[0]);
+        const legacyCost = bestLegacy.afterTaxLegacy - best.afterTaxLegacy;
+        const irmaaSaved = (bestLegacy.lifetimeIRMAA || 0) - (best.lifetimeIRMAA || 0);
+        return (
+          <div className="mb-3 p-3 bg-sky-500/5 border border-sky-500/30 rounded-lg">
+            <p className="text-xs text-slate-300 leading-relaxed">
+              <strong className="text-sky-300">How this ranking works.</strong>{' '}
+              IRMAA is set from your MAGI <em>two years earlier</em>, and it only starts at 65 — so anything
+              converted by age {best.irmaaFreeThroughAge ?? 62} is invisible to it. That is why a target
+              which converts hard and finishes early can post a <em>lower</em> lifetime surcharge than a
+              cautious one that converts slowly into the chargeable years: the aggressive plan spends the
+              free window, the cautious plan spends the charged years.
+              {best.conversionsIrmaaFree > 0 && (
+                <> The winning row moves <strong>{formatCurrency(best.conversionsIrmaaFree)}</strong> inside
+                that free window and leaves {formatCurrency(best.conversionsIrmaaExposed)} exposed
+                {best.lastConversionAge !== null && <>, finishing at age {best.lastConversionAge}</>}.</>
+              )}
+              {' '}Compare the &ldquo;years charged&rdquo; note under each row&rsquo;s IRMAA figure — that,
+              and how much each converts before {best.irmaaFreeThroughAge ?? 62}, is the whole ranking.
+            </p>
+            {legacyCost > 0 && (
+              <p className="text-xs text-amber-400/90 leading-relaxed mt-2">
+                <strong>But this goal only ranks IRMAA.</strong> This strategy gives up{' '}
+                {formatCurrency(legacyCost)} of after-tax legacy against the best row on that measure, to
+                avoid {formatCurrency(irmaaSaved)} of surcharge
+                {irmaaSaved > 0 && legacyCost > irmaaSaved * 3 && <> — a poor trade on its face</>}.
+                Sort by <em>Maximize after-tax legacy</em> to see the other side before applying anything.
+              </p>
+            )}
+          </div>
+        );
+      })()}
+
       {optResult && (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -3707,7 +3742,24 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
                     {formatCurrency(r.lifetimeTax)}
                     {baseline && <span className={`ml-1 text-xs ${r.lifetimeTax <= baseline.lifetimeTax ? 'text-emerald-400' : 'text-red-400'}`}>({deltaFmt(r.lifetimeTax - baseline.lifetimeTax)})</span>}
                   </td>
-                  <td className="py-2 pr-3 text-slate-300">{formatCurrency(r.lifetimeIRMAA)}</td>
+                  <td className="py-2 pr-3 text-slate-300">
+                    {formatCurrency(r.lifetimeIRMAA)}
+                    {/* The two numbers that explain the whole IRMAA ranking. A
+                        conversion at age A sets the surcharge at A+2, and IRMAA
+                        starts at 65 — so anything converted by 62 is invisible
+                        to it. An aggressive target that finishes early can post
+                        a LOWER lifetime surcharge than a cautious one that
+                        converts slowly into the chargeable years, which reads as
+                        a bug until these are on screen. */}
+                    {r.conversionYears > 0 && (
+                      <span className="block text-[10px] text-slate-500 leading-tight mt-0.5">
+                        {r.irmaaYears > 0 ? `${r.irmaaYears} year${r.irmaaYears === 1 ? '' : 's'} charged` : 'never charged'}
+                        {r.conversionsIrmaaFree > 0 && (
+                          <> · {formatCurrency(r.conversionsIrmaaFree)} converted by {r.irmaaFreeThroughAge}, before IRMAA can see it</>
+                        )}
+                      </span>
+                    )}
+                  </td>
                   {showACA && <td className="py-2 pr-3 text-slate-300">{formatCurrency(r.lifetimeACASubsidy)}</td>}
                   <td className="py-2 pr-3">
                     <button onClick={() => applyStrategy(r)}
