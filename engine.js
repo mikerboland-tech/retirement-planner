@@ -2725,11 +2725,28 @@ const conversionCostComponents = (withProj, withoutProj, age, convertedAmount) =
   const ordBase = ordinaryOf(o);
   const ssExtra = (w.taxableSS || 0) - (o.taxableSS || 0);
   const deductionLost = (o.federalDeduction || 0) - (w.federalDeduction || 0);
-  const ordinaryCost = T(ordBase + convertedAmount) - T(ordBase);
-  const ssTorpedoCost = T(ordBase + convertedAmount + ssExtra) - T(ordBase + convertedAmount);
-  const deductionCost = T(ordBase + convertedAmount + ssExtra + deductionLost)
-                      - T(ordBase + convertedAmount + ssExtra);
-  const preferentialCost = federalDelta - ordinaryCost - ssTorpedoCost - deductionCost;
+
+  // ── THE GROSS-UP, WHICH USED TO HIDE IN THE RESIDUAL ──────────────────────
+  // Unless the conversion tax is paid from a taxable account, the plan withdraws
+  // MORE pre-tax money to pay it — and that withdrawal is ordinary income too,
+  // which is itself taxed. On a large conversion this is the second-biggest
+  // component: converting $197,274 raised ordinary income by $286,076, and the
+  // missing $88,802 was the draw that funded the tax bill.
+  //
+  // The bracket walk below only ever climbed `convertedAmount`, so the tax on
+  // that draw fell into the residual — which is labelled "capital gains and
+  // NIIT". It was the single largest thing standing between the quoted rate and
+  // a reader able to reproduce it, and it was filed under the wrong name.
+  const taxDrawOrdinary = Math.max(0,
+    (ordinaryOf(w) - ordBase) - convertedAmount - ssExtra - deductionLost);
+
+  let acc = ordBase;
+  const step = (add) => { const before = T(acc); acc += add; return T(acc) - before; };
+  const ordinaryCost = step(convertedAmount);
+  const taxDrawCost = step(taxDrawOrdinary);
+  const ssTorpedoCost = step(ssExtra);
+  const deductionCost = step(deductionLost);
+  const preferentialCost = federalDelta - ordinaryCost - taxDrawCost - ssTorpedoCost - deductionCost;
 
   const pct = (n) => n / convertedAmount;
   return {
@@ -2738,6 +2755,11 @@ const conversionCostComponents = (withProj, withoutProj, age, convertedAmount) =
     // Federal broken into its causes; these four sum to federalDelta.
     federalBreakdown: {
       ordinary: ordinaryCost,
+      // Tax on the pre-tax withdrawal taken to PAY the conversion tax. Zero when
+      // rothConversionTaxSource is 'brokerage', which is exactly why that setting
+      // is the biggest single lever on this rate.
+      taxDraw: taxDrawCost,
+      taxDrawOrdinary,
       ssTorpedo: ssTorpedoCost,
       deductionPhaseout: deductionCost,
       preferential: preferentialCost,
@@ -2766,11 +2788,126 @@ const conversionCostComponents = (withProj, withoutProj, age, convertedAmount) =
     // headline percentage adds up to it.
     federalRatePoints: {
       ordinary: pct(ordinaryCost),
+      taxDraw: pct(taxDrawCost),
       ssTorpedo: pct(ssTorpedoCost),
       deductionPhaseout: pct(deductionCost),
       preferential: pct(preferentialCost),
       state: pct(stateDelta),
     },
+  };
+};
+
+// ── SHOW THE MATH ────────────────────────────────────────────────────────────
+// conversionCostComponents answers "what does a converted dollar cost"; this
+// answers "prove it". Every figure the rate is built from, in the order it is
+// used, with the two projections side by side and the arithmetic written out —
+// so a reader can add it up on paper and get the same number, or find the line
+// where their expectation and the engine part company.
+//
+// The reconciliation checks are the point. A decomposition that does not sum to
+// the total it decomposes is worse than no decomposition, and these assert it in
+// the output rather than in a comment: if `ok` is ever false the UI shows a
+// failure instead of a confident wrong number.
+const conversionCostAudit = (withProj, withoutProj, age, convertedAmount) => {
+  const c = conversionCostComponents(withProj, withoutProj, age, convertedAmount);
+  if (!c) return null;
+  const w = withProj.find(p => p.myAge === age);
+  const o = withoutProj.find(p => p.myAge === age);
+  const wLag = withProj.find(p => p.myAge === age + 2) || null;
+  const oLag = withoutProj.find(p => p.myAge === age + 2) || null;
+
+  const snap = (r) => !r ? null : {
+    year: r.year, myAge: r.myAge,
+    // Ordinary taxable income is the base the bracket walk runs on: AGI less
+    // preferential income less the deduction. Spelled out because it is the one
+    // figure a reader cannot look up on any screen.
+    agi: Math.round(r.taxableIncome || 0),
+    preferential: Math.round((r.realizedCapitalGains || 0) + (r.brokerageDividends || 0)),
+    deduction: Math.round(r.federalDeduction || 0),
+    ordinaryTaxable: Math.round(Math.max(0, (r.taxableIncome || 0)
+      - (r.realizedCapitalGains || 0) - (r.federalDeduction || 0))),
+    socialSecurity: Math.round(r.socialSecurity || 0),
+    taxableSS: Math.round(r.taxableSS || 0),
+    magi: Math.round(r.magi || 0),
+    federalTax: Math.round(r.federalTax || 0),
+    stateTax: Math.round(r.stateTax || 0),
+    irmaa: Math.round(r.irmaaSurcharge || 0),
+    acaSubsidy: Math.round(r.acaSubsidy || 0),
+    totalTax: Math.round(r.totalTax || 0),
+  };
+
+  const fb = c.federalBreakdown;
+  const money = (n) => Math.round(n);
+  const steps = [
+    { key: 'ordinary', kind: 'component', label: 'Federal tax on the converted dollars',
+      detail: `The conversion climbs the brackets from $${snap(o).ordinaryTaxable.toLocaleString()} of ordinary taxable income. Filling TO a bracket taxes the early dollars lower, so this is usually below the headline rate.`,
+      amount: money(fb.ordinary) },
+    { key: 'taxDraw', kind: 'component', label: 'Tax on the withdrawal that pays the tax',
+      detail: fb.taxDrawOrdinary > 0
+        ? `Paying the conversion tax from pre-tax money means withdrawing $${money(fb.taxDrawOrdinary).toLocaleString()} MORE, and that withdrawal is ordinary income too. Setting the conversion tax source to a taxable account removes this line entirely — it is the largest single lever on this rate.`
+        : 'Nothing: the conversion tax is not being funded by an additional pre-tax withdrawal.',
+      amount: money(fb.taxDraw) },
+    { key: 'ssTorpedo', kind: 'component', label: 'Social Security dragged into tax',
+      detail: fb.ssMadeTaxable > 0
+        ? `The conversion raises provisional income, making $${money(fb.ssMadeTaxable).toLocaleString()} more of your benefit taxable — taxed on top of the conversion itself.`
+        : (fb.ssTaxableShareBefore !== null && fb.ssTaxableShareBefore >= 0.8499
+            ? 'Nothing: 85% of your benefit is already taxable, the statutory ceiling, so the conversion cannot drag in more.'
+            : 'Nothing: the conversion does not push provisional income past a §86 threshold this year.'),
+      amount: money(fb.ssTorpedo) },
+    { key: 'deductionPhaseout', kind: 'component', label: 'Senior deduction phased out',
+      detail: fb.deductionLost > 0
+        ? `Higher MAGI phases out $${money(fb.deductionLost).toLocaleString()} of the OBBBA senior deduction (6¢ per dollar, per person), which is income that becomes taxable.`
+        : 'Nothing: your deduction is unchanged at this income.',
+      amount: money(fb.deductionPhaseout) },
+    { key: 'preferential', kind: 'component', label: 'Capital gains pushed up, and NIIT',
+      detail: 'Ordinary income stacks BENEATH preferential income, so a conversion can push gains from 0% to 15% (or 15% to 20%) and can cross the §1411 net investment income threshold. Any residual arithmetic lands here so the parts sum exactly.',
+      amount: money(fb.preferential) },
+    { key: 'federalSubtotal', kind: 'subtotal', label: 'Federal tax difference',
+      detail: 'The five lines above, and the difference between the two projections\' federal tax.',
+      amount: money(c.federalDelta) },
+    { key: 'state', kind: 'component', label: 'State tax difference',
+      detail: 'Your state\'s own schedule applied to the same extra income.',
+      amount: money(c.stateDelta) },
+    { key: 'irmaa', kind: 'component', label: `Medicare IRMAA surcharge${wLag ? `, landing at age ${age + 2}` : ''}`,
+      detail: wLag
+        ? `IRMAA is set from MAGI two years earlier, so THIS year's conversion shows up on the ${wLag.year} premium. The surcharge sitting in ${w.year} belongs to a conversion two years back and is deliberately excluded.`
+        : 'The plan does not reach the year this surcharge would land in, so it never costs anything.',
+      amount: money(c.irmaaDelta) },
+    { key: 'aca', kind: 'component', label: 'ACA premium subsidy lost',
+      detail: c.acaSubsidyLost !== 0
+        ? 'Marketplace credits fall as MAGI rises. This is real money out of pocket and appears in no tax total.'
+        : 'Nothing: no marketplace coverage in this year, or the subsidy is unchanged.',
+      amount: money(c.acaSubsidyLost) },
+    { key: 'total', kind: 'total', label: 'Total cost of converting',
+      detail: `Everything above, for $${money(convertedAmount).toLocaleString()} converted.`,
+      amount: money(c.totalCost) },
+  ];
+
+  // Anything that must hold for the number to be trustworthy, checked here so a
+  // drift shows up as a failed check instead of a plausible-looking rate.
+  const near = (a, b, tol = 1.5) => Math.abs(a - b) <= tol;
+  const partsSum = fb.ordinary + fb.taxDraw + fb.ssTorpedo + fb.deductionPhaseout + fb.preferential;
+  const totalSum = c.federalDelta + c.stateDelta + c.irmaaDelta + c.acaSubsidyLost;
+  const checks = [
+    { label: 'The five federal parts sum to the federal difference',
+      expected: money(c.federalDelta), actual: money(partsSum), ok: near(partsSum, c.federalDelta) },
+    { label: 'Federal + state + IRMAA + ACA sums to the total cost',
+      expected: money(c.totalCost), actual: money(totalSum), ok: near(totalSum, c.totalCost) },
+    { label: 'Total cost divided by the amount converted is the quoted rate',
+      expected: c.rate, actual: c.totalCost / convertedAmount,
+      ok: near((c.totalCost / convertedAmount) * 1e6, c.rate * 1e6, 2) },
+  ];
+
+  return {
+    year: w.year, myAge: age, converted: money(convertedAmount),
+    withConversion: snap(w), withoutConversion: snap(o),
+    lag: wLag && oLag ? { withConversion: snap(wLag), withoutConversion: snap(oLag) } : null,
+    steps, checks,
+    rate: c.rate,
+    taxOnlyRate: c.taxOnlyRate,
+    bracket: topMarginalBracket(snap(o).ordinaryTaxable,
+      w.filingStatus || 'married_joint', (w.year || BASE_TAX_YEAR) - BASE_TAX_YEAR, 0.03),
+    components: c,
   };
 };
 
@@ -8501,7 +8638,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     getACAApplicablePercentage, calculateACAPremiumCredit,
     getSpendingPhaseMultiplier, scoreRothStrategy, rowAtOrLast,
     reindexSSForInflation, compareClaimingScenarios,
-    conversionCostComponents, topMarginalBracket,
+    conversionCostComponents, conversionCostAudit, topMarginalBracket,
     calculateHealthcareExpenses, calculateRecurringExpenses,
     healthcareCostsModeled, HEALTHCARE_MODELS_UNPRICED,
 

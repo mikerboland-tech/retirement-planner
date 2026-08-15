@@ -7905,6 +7905,122 @@ section('P65 — what the QCD is actually worth, measured rather than estimated 
   }
 }
 
+section('P66 — the conversion rate, provable: every part named, and the parts sum');
+{
+  // "I cannot get to 37%" is a fair complaint about a figure built by
+  // differencing two whole projections. These assertions pin the decomposition
+  // that makes it checkable — and cover the mislabelled bucket that was the
+  // single biggest obstacle to reproducing it by hand.
+  const { conversionCostAudit, conversionCostComponents, withoutRothConversions } = engine;
+
+  const build = (over) => {
+    const sc = baseScenario({
+      myAge: 63, spouseAge: 61, myBirthYear: TODAY_YEAR - 63, spouseBirthYear: TODAY_YEAR - 61,
+      myRetirementAge: 63, spouseRetirementAge: 63, legacyAge: 92,
+      state: 'Missouri', inflationRate: 0.025, desiredRetirementIncome: 140000,
+      withdrawalPriority: ['pretax', 'brokerage', 'roth'], heirTaxRate: 0.25,
+      rothConversionBracket: '24%', rothConversionStartAge: 63, rothConversionEndAge: 75,
+      healthcareModel: 'none', medicalInflation: 0, ...over,
+    });
+    sc.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 2400000, contribution: 0, cagr: 0.06, startAge: 63, stopAge: 63, owner: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 200000, contribution: 0, cagr: 0.06, startAge: 63, stopAge: 63, owner: 'me' },
+      { id: 3, name: 'Brok', type: 'brokerage', balance: 600000, contribution: 0, cagr: 0.05, startAge: 63, stopAge: 63, owner: 'joint', costBasisPercent: 0.5 },
+    ];
+    sc.streams = [
+      { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 67, endAge: 95, cola: 0.025, owner: 'me', todaysDollars: true, pia: 4000 },
+      { id: 2, name: 'Sp SS', type: 'social_security', amount: 26000, startAge: 67, endAge: 95, cola: 0.025, owner: 'spouse', todaysDollars: true, pia: 2200 },
+    ];
+    const withP = computeProjections(sc.pi, sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+    const withoutP = computeProjections({ ...withoutRothConversions(sc.pi), rothConversionPreTaxFloor: 0 },
+      sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+    const age = withP.filter(r => (r.rothConversion || 0) > 0).map(r => r.myAge)[3];
+    return { pi: sc.pi, withP, withoutP, age,
+             amount: withP.find(r => r.myAge === age).rothConversion };
+  };
+
+  // ── THE MISLABELLED BUCKET ───────────────────────────────────────────────
+  // Paying the conversion tax from pre-tax money means withdrawing MORE, and
+  // that withdrawal is ordinary income too. The bracket walk only ever climbed
+  // the conversion amount, so the tax on that draw fell into the residual — a
+  // bucket labelled "capital gains and NIIT". On the test plan it was $21,647
+  // filed under the wrong name, which is most of what stood between the quoted
+  // rate and a reader able to reproduce it.
+  {
+    const { withP, withoutP, age, amount } = build({});
+    const c = conversionCostComponents(withP, withoutP, age, amount);
+    const fb = c.federalBreakdown;
+    gt(fb.taxDrawOrdinary, 0, 'the plan really does withdraw extra to pay the conversion tax');
+    gt(fb.taxDraw, 0, 'and that withdrawal is itself taxed');
+    // The residual is now small; before the split it carried the whole gross-up.
+    lt(Math.abs(fb.preferential), fb.taxDraw,
+      'the residual is now smaller than the line that was hiding inside it');
+    // The ordinary income increase is the conversion PLUS the tax draw, and the
+    // decomposition has to account for both.
+    const ordOf = (r) => Math.max(0, (r.taxableIncome || 0) - (r.realizedCapitalGains || 0) - (r.federalDeduction || 0));
+    const w = withP.find(r => r.myAge === age), o = withoutP.find(r => r.myAge === age);
+    const ssExtra = (w.taxableSS || 0) - (o.taxableSS || 0);
+    const dedLost = (o.federalDeduction || 0) - (w.federalDeduction || 0);
+    approx(ordOf(w) - ordOf(o), amount + fb.taxDrawOrdinary + ssExtra + dedLost,
+      'and every dollar of the ordinary-income increase is attributed to something', 1);
+  }
+
+  // ── Paying from a taxable account removes that line entirely ─────────────
+  // The cleanest proof that the line is what it says it is.
+  {
+    const a = build({});
+    const sc2 = build({ rothConversionTaxSource: 'brokerage' });
+    const c2 = conversionCostComponents(sc2.withP, sc2.withoutP, sc2.age, sc2.amount);
+    lt(c2.federalBreakdown.taxDrawOrdinary, a.amount * 0.02,
+      'funding the tax from taxable leaves almost no extra ordinary income');
+    lt(c2.rate, conversionCostComponents(a.withP, a.withoutP, a.age, a.amount).rate,
+      'which is why that setting is the largest single lever on this rate');
+  }
+
+  // ── The audit reconciles, and says so ────────────────────────────────────
+  {
+    const { withP, withoutP, age, amount } = build({});
+    const a = conversionCostAudit(withP, withoutP, age, amount);
+    eq(!!a, true, 'an audit is produced for a converting year');
+    eq(a.checks.length, 3, 'with every reconciliation it claims');
+    a.checks.forEach(c => eq(c.ok, true, `check passes: ${c.label}`));
+
+    // The build-up steps must themselves add to the total shown.
+    const parts = a.steps.filter(s => s.kind === 'component').reduce((s, x) => s + x.amount, 0);
+    const total = a.steps.find(s => s.kind === 'total').amount;
+    approx(parts, total, 'the component lines shown on screen add to the total shown on screen', 2);
+
+    // And the subtotal is the federal parts only, not everything above it.
+    const fedParts = a.steps.filter(s => ['ordinary', 'taxDraw', 'ssTorpedo', 'deductionPhaseout', 'preferential'].includes(s.key))
+      .reduce((s, x) => s + x.amount, 0);
+    approx(fedParts, a.steps.find(s => s.key === 'federalSubtotal').amount,
+      'and the federal subtotal is exactly the federal lines', 2);
+  }
+
+  // ── The side-by-side carries the figures the arithmetic runs on ──────────
+  {
+    const { withP, withoutP, age, amount } = build({});
+    const a = conversionCostAudit(withP, withoutP, age, amount);
+    ['agi', 'deduction', 'ordinaryTaxable', 'magi', 'federalTax', 'stateTax'].forEach(k => {
+      eq(Number.isFinite(a.withConversion[k]), true, `the with-conversion snapshot reports ${k}`);
+      eq(Number.isFinite(a.withoutConversion[k]), true, `and the without-conversion one reports ${k}`);
+    });
+    gt(a.withConversion.agi, a.withoutConversion.agi, 'converting raises AGI, as it must');
+    // The IRMAA row is dated two years out, which is the whole reason it is
+    // shown separately rather than read off this year's surcharge.
+    if (a.lag) {
+      eq(a.lag.withConversion.year, a.year + 2, 'the IRMAA row is dated two years after the conversion');
+    }
+  }
+
+  // ── Degenerate inputs ────────────────────────────────────────────────────
+  {
+    const { withP, withoutP, age } = build({});
+    eq(conversionCostAudit(withP, withoutP, age, 0), null, 'a zero conversion has no rate to prove');
+    eq(conversionCostAudit(withP, withoutP, 200, 50000), null, 'nor does an age the plan never reaches');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

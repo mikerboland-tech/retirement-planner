@@ -42,7 +42,7 @@ const {
   GOV_PENSION_SYSTEMS, estimateGovernmentPension, estimateFersSupplement,
   HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
   computeProjections, compareClaimingScenarios,
-  conversionCostComponents, topMarginalBracket,
+  conversionCostComponents, conversionCostAudit, topMarginalBracket,
   computeTaxReturn, buildTaxSituation, compareTraditionalVsRoth,
   projectPayrollYearEnd, marginalRateOn, saltCapFor, projectedWithdrawalRate,
   detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling,
@@ -2752,6 +2752,10 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
       preTaxFloor: pi.rothConversionPreTaxFloor || 0,
     };
   };
+  // Which year's rate the reader has asked to see proved. One at a time: the
+  // audit is long, and the question is always about a specific year.
+  const [auditAge, setAuditAge] = useState(null);
+
   const [conversionSettings, setConversionSettings] = useState(() => planToSettings(personalInfo));
   const [savedFlash, setSavedFlash] = useState(false);
 
@@ -3302,7 +3306,15 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
           <tbody>
             {conversionAnalysis.map((row, idx) => (
               <tr key={row.age} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''}`}>
-                <td className="py-2 px-2 text-slate-300 font-medium">{row.age}</td>
+                <td className="py-2 px-2 text-slate-300 font-medium">
+                  {row.conversionAmount > 0 ? (
+                    <button
+                      onClick={() => setAuditAge(auditAge === row.age ? null : row.age)}
+                      className={`underline decoration-dotted underline-offset-2 hover:text-amber-400 transition-colors ${auditAge === row.age ? 'text-amber-400' : ''}`}
+                      title="Show every figure this year's rate is built from"
+                    >{row.age}</button>
+                  ) : row.age}
+                </td>
                 <td className="py-2 px-2 text-right text-slate-400">{formatCurrency(row.baseIncome)}</td>
                 <td className="py-2 px-2 text-right text-emerald-400 font-semibold">
                   {row.conversionAmount > 0 ? formatCurrency(row.conversionAmount) : '—'}
@@ -3326,6 +3338,13 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                       '',
                       line('Ordinary tax on it', d.ordinary, f.ordinary),
                     ];
+                    // Usually the second-largest line and the one nobody expects:
+                    // paying the tax from pre-tax money means withdrawing more,
+                    // and that withdrawal is ordinary income too.
+                    if (Math.abs(d.taxDraw) > 1) {
+                      out.push(line('Tax on the tax-paying draw', d.taxDraw, f.taxDraw));
+                      out.push(`      (+${formatCurrency(d.taxDrawOrdinary)} withdrawn to pay the bill)`);
+                    }
                     // Each of these is a real reason the figure sits above the
                     // bracket, and each is invisible unless it is named.
                     // Always stated, even at zero. "Why is my SS being taxed
@@ -3390,6 +3409,126 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
           </tfoot>
         </table>
       </div>
+
+      {/* ── SHOW THE MATH ──────────────────────────────────────────────────
+          The rate is a difference between two full projections, which makes it
+          correct and completely unverifiable by eye. This lays out every figure
+          it is built from, in the order it is used, with the two scenarios side
+          by side — so the number can be reproduced on paper rather than taken on
+          trust. The reconciliation checks are shown, pass or fail. */}
+      {auditAge !== null && (() => {
+        const amt = (conversionAnalysis.find(r => r.age === auditAge) || {}).conversionAmount || 0;
+        const a = conversionCostAudit(conversionProj, baselineProj, auditAge, amt);
+        if (!a) return null;
+        const pct = (n) => ((n / a.converted) * 100).toFixed(1) + '%';
+        const rowsOf = [
+          ['Adjusted gross income', 'agi'],
+          ['  of which preferential (gains + qualified dividends)', 'preferential'],
+          ['Standard deduction', 'deduction'],
+          ['Ordinary taxable income (the bracket walk runs on this)', 'ordinaryTaxable'],
+          ['Social Security received', 'socialSecurity'],
+          ['  taxable portion', 'taxableSS'],
+          ['MAGI (what IRMAA is measured on)', 'magi'],
+          ['Federal tax', 'federalTax'],
+          ['State tax', 'stateTax'],
+          ['ACA premium subsidy', 'acaSubsidy'],
+        ];
+        return (
+          <div className="mt-4 p-4 bg-slate-900/70 border border-amber-500/30 rounded-xl">
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div>
+                <h5 className="text-base font-semibold text-amber-400">Showing the math — age {a.myAge} ({a.year})</h5>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Converted {formatCurrency(a.converted)} · quoted cost{' '}
+                  <strong className="text-amber-400">{(a.rate * 100).toFixed(1)}%</strong> · statutory bracket {(a.bracket * 100).toFixed(0)}%
+                </p>
+              </div>
+              <button onClick={() => setAuditAge(null)} className="text-xs text-slate-400 hover:text-slate-200">Close ✕</button>
+            </div>
+
+            <div className="overflow-x-auto mb-4">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-slate-700">
+                    <th className="text-left py-1.5 px-2 text-slate-400 font-medium">The same year, both ways</th>
+                    <th className="text-right py-1.5 px-2 text-slate-400 font-medium">No conversion</th>
+                    <th className="text-right py-1.5 px-2 text-slate-400 font-medium">With conversion</th>
+                    <th className="text-right py-1.5 px-2 text-slate-400 font-medium">Difference</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rowsOf.map(([label, key]) => {
+                    const o = a.withoutConversion[key], w = a.withConversion[key];
+                    if (o === 0 && w === 0) return null;
+                    return (
+                      <tr key={key} className="border-b border-slate-800">
+                        <td className={`py-1 px-2 ${label.startsWith('  ') ? 'text-slate-500 pl-6' : 'text-slate-300'}`}>{label.trim()}</td>
+                        <td className="py-1 px-2 text-right text-slate-400">{formatCurrency(o)}</td>
+                        <td className="py-1 px-2 text-right text-slate-300">{formatCurrency(w)}</td>
+                        <td className={`py-1 px-2 text-right font-medium ${w - o > 0 ? 'text-amber-400' : w - o < 0 ? 'text-emerald-400' : 'text-slate-600'}`}>
+                          {w - o === 0 ? '—' : (w - o > 0 ? '+' : '−') + formatCurrency(Math.abs(w - o))}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {a.lag && (
+                    <tr className="border-b border-slate-800">
+                      <td className="py-1 px-2 text-slate-300">
+                        Medicare IRMAA surcharge in {a.lag.withConversion.year}
+                        <span className="text-slate-500"> (two years on — this year&rsquo;s MAGI sets it)</span>
+                      </td>
+                      <td className="py-1 px-2 text-right text-slate-400">{formatCurrency(a.lag.withoutConversion.irmaa)}</td>
+                      <td className="py-1 px-2 text-right text-slate-300">{formatCurrency(a.lag.withConversion.irmaa)}</td>
+                      <td className="py-1 px-2 text-right font-medium text-amber-400">
+                        {a.lag.withConversion.irmaa - a.lag.withoutConversion.irmaa === 0 ? '—'
+                          : '+' + formatCurrency(a.lag.withConversion.irmaa - a.lag.withoutConversion.irmaa)}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-slate-700">
+                    <th className="text-left py-1.5 px-2 text-slate-400 font-medium">How the cost is built</th>
+                    <th className="text-right py-1.5 px-2 text-slate-400 font-medium">Amount</th>
+                    <th className="text-right py-1.5 px-2 text-slate-400 font-medium">Of the amount converted</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {a.steps.map(st => (
+                    <tr key={st.key} className={`border-b border-slate-800 ${st.kind === 'total' ? 'bg-amber-500/5' : st.kind === 'subtotal' ? 'bg-slate-800/40' : ''}`}>
+                      <td className="py-1.5 px-2">
+                        <div className={st.kind === 'total' ? 'text-amber-400 font-semibold' : st.kind === 'subtotal' ? 'text-slate-200 font-medium' : 'text-slate-300'}>{st.label}</div>
+                        <div className="text-[11px] text-slate-500 leading-relaxed mt-0.5">{st.detail}</div>
+                      </td>
+                      <td className={`py-1.5 px-2 text-right whitespace-nowrap ${st.kind === 'total' ? 'text-amber-400 font-bold' : st.amount === 0 ? 'text-slate-600' : 'text-slate-200'}`}>{formatCurrency(st.amount)}</td>
+                      <td className={`py-1.5 px-2 text-right whitespace-nowrap ${st.kind === 'total' ? 'text-amber-400 font-bold' : 'text-slate-500'}`}>{pct(st.amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="mt-3 pt-3 border-t border-slate-800">
+              {a.checks.map((chk, i) => (
+                <div key={i} className="flex items-center gap-2 text-[11px] py-0.5">
+                  <span className={chk.ok ? 'text-emerald-400' : 'text-red-400'}>{chk.ok ? '✓' : '✗'}</span>
+                  <span className="text-slate-400">{chk.label}</span>
+                </div>
+              ))}
+              <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
+                Every figure above comes from the two projections themselves — the same plan run twice,
+                identical but for this conversion. Nothing here is an estimate layered on top. If a line
+                disagrees with your own arithmetic, that line is where to look.
+              </p>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Save the simulated settings back to the user's plan */}
       <div className="mt-4 flex items-center gap-3 flex-wrap">
