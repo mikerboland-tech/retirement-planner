@@ -7682,6 +7682,20 @@ section('P64 — joint income survives the first death; Social Security follows 
     eq(at(joint, 72).otherIncome, 24000, 'and it begins at the primary\'s 72, not the spouse\'s');
   }
 
+  // ── Its term ends on whoever is still receiving it ───────────────────────
+  // Commencement follows the primary; the END follows the survivor, matching the
+  // survivor-pension rule below. Ending on the primary's age would stop household
+  // income at the age the FIRST-to-die would have reached — the very failure this
+  // ownership option exists to remove.
+  {
+    const proj = build([{ id: 1, name: 'Rental', type: 'other', amount: 30000, startAge: 70, endAge: 95, cola: 0, owner: 'joint' }],
+      { myAge: 70, spouseAge: 67, myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 67,
+        legacyAge: 98, myLifeExpectancy: 78, spouseLifeExpectancy: 95 });
+    eq(at(proj, 95).otherIncome, 30000, 'still paying at the deceased\'s notional 95');
+    eq(at(proj, 97).otherIncome, 30000,
+      'and past it — the surviving spouse is only 94, and the term is theirs now');
+  }
+
   // ── And it does end at the SECOND death ──────────────────────────────────
   {
     const joint = build([{ id: 1, name: 'Rental', type: 'other', amount: 36000, startAge: 70, endAge: 95, cola: 0, owner: 'joint' }],

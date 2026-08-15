@@ -26,6 +26,7 @@ const {
   rmdUsesJointTable, SECTION_121_EXCLUSION_SINGLE, SECTION_121_EXCLUSION_JOINT,
   estimateRetirementSavings, estimateAnnualSocialSecurity, savingsMultipleForAge,
   realReturn, inflateToAge, deflateToToday, coastFire, streamColaYears, streamAmountAtAge,
+  streamOwnerAge,
   inferPiaFromBenefit,
   TYPICAL_DEFERRAL_RATE, TYPICAL_MATCH_RATE,
   SS_FULL_RETIREMENT_AGE, SS_FRA_PRE_1943, getFullRetirementAge,
@@ -5371,9 +5372,8 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
                 {formatCurrency(
                   incomeStreams
                     .filter(s => {
-                      const ownerAge = s.owner === 'me' 
-                        ? simSettings.startAge 
-                        : personalInfo.spouseAge + (simSettings.startAge - personalInfo.myAge);
+                      const ownerAge = streamOwnerAge(s, simSettings.startAge,
+                        personalInfo.spouseAge + (simSettings.startAge - personalInfo.myAge));
                       return ownerAge >= s.startAge && ownerAge <= s.endAge;
                     })
                     .reduce((sum, s) => sum + s.amount, 0)
@@ -5381,9 +5381,8 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
               </div>
               <div className="text-xs text-slate-400">
                 {incomeStreams.filter(s => {
-                  const ownerAge = s.owner === 'me' 
-                    ? simSettings.startAge 
-                    : personalInfo.spouseAge + (simSettings.startAge - personalInfo.myAge);
+                  const ownerAge = streamOwnerAge(s, simSettings.startAge,
+                    personalInfo.spouseAge + (simSettings.startAge - personalInfo.myAge));
                   return ownerAge >= s.startAge && ownerAge <= s.endAge;
                 }).length} streams at age {simSettings.startAge}
               </div>
@@ -6448,7 +6447,7 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
     let otherIncome = 0;
     
     incomeStreams.forEach(stream => {
-      const ownerAge = stream.owner === 'me' ? age : age - (personalInfo.myAge - personalInfo.spouseAge);
+      const ownerAge = streamOwnerAge(stream, age, age - (personalInfo.myAge - personalInfo.spouseAge));
       {
         // Use the engine's own COLA rule rather than a local copy. The copy that
         // was here omitted the (cola || 0) guard, so any stream saved without a
@@ -10321,7 +10320,13 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
       oneTimeEvents, recurringExpenses);
     const salaries = { me: 0, spouse: 0 };
     (incomeStreams || []).forEach(st => {
-      if (st.type === 'earned_income') salaries[st.owner === 'spouse' ? 'spouse' : 'me'] += (st.amount || 0);
+      // Joint earned income is split, exactly as computeProjections splits it —
+      // the 402(g) and 415(c) checks below are per-person, so attributing it all
+      // to one would flag a breach the engine does not model.
+      if (st.type === 'earned_income') {
+        if (st.owner === 'joint') { salaries.me += (st.amount || 0) / 2; salaries.spouse += (st.amount || 0) / 2; }
+        else salaries[st.owner === 'spouse' ? 'spouse' : 'me'] += (st.amount || 0);
+      }
     });
     return { proj, accts, targetDollars, breaches: checkContributionLimits(accts, pi, salaries) };
   }, [accounts, assets, incomeStreams, oneTimeEvents, pi, recurringExpenses,
@@ -10582,7 +10587,10 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
   // Runs on the LIVE edited list so it appears as you type, not only after saving.
   const salariesForLimits = { me: 0, spouse: 0 };
   (incomeStreams || []).forEach(st => {
-    if (st.type === 'earned_income') salariesForLimits[st.owner === 'spouse' ? 'spouse' : 'me'] += (st.amount || 0);
+    if (st.type === 'earned_income') {
+      if (st.owner === 'joint') { salariesForLimits.me += (st.amount || 0) / 2; salariesForLimits.spouse += (st.amount || 0) / 2; }
+      else salariesForLimits[st.owner === 'spouse' ? 'spouse' : 'me'] += (st.amount || 0);
+    }
   });
   const limitBreaches = checkContributionLimits(localAccounts, personalInfo, salariesForLimits);
 

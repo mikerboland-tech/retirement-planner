@@ -2265,6 +2265,14 @@ const streamColaYears = (stream, ownerAge, yearsFromNow) => {
   return Math.max(0, ownerAge - colaFrom);
 };
 
+// Whose age drives a stream's start/end window. A 'joint' stream follows the
+// PRIMARY, matching the rule in computeProjections' stream loop — exported so
+// the UI cannot hold a second opinion about it. Three display sites used to read
+// "anything not 'me' is the spouse", which put a joint stream's window on the
+// wrong person's clock the moment joint ownership existed.
+const streamOwnerAge = (stream, myAge, spouseAge) =>
+  (!stream || stream.owner === 'me' || stream.owner === 'joint') ? myAge : spouseAge;
+
 // What a stream actually pays when its owner is ownerAge, yearsFromNow from today.
 // Returns 0 outside the stream's age window so callers don't repeat that test.
 const streamAmountAtAge = (stream, ownerAge, yearsFromNow) => {
@@ -6263,6 +6271,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       const ownerAge = (stream.owner === 'me' || isJoint) ? myAge : spouseAge;
       const ownerAlive = isJoint ? (primaryAlive || spouseAlive)
                        : stream.owner === 'me' ? primaryAlive : spouseAlive;
+      // A joint stream COMMENCES on the primary's clock but ENDS on whoever is
+      // still receiving it — the same rule the survivor pension below uses, and
+      // for the same reason. Ending it on the primary's age would stop household
+      // income at the age the FIRST-to-die would have reached, which is exactly
+      // the failure this ownership option exists to remove: a rental ending at 95
+      // stopped when a survivor three years younger was only 92.
+      const recipientAge = isJoint && !primaryAlive ? spouseAge : ownerAge;
       
       // Skip income from deceased owner (survivor modeling)
       // Exception: pensions with survivorBenefit flag continue for the survivor
@@ -6296,7 +6311,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         return; // Skip all other income from deceased
       }
       
-      if (ownerAge >= stream.startAge && ownerAge <= stream.endAge) {
+      if (ownerAge >= stream.startAge && recipientAge <= stream.endAge) {
         const colaYears = streamColaYears(stream, ownerAge, yearsFromNow);
         const adjustedAmount = stream.amount * Math.pow(1 + (stream.cola || 0), colaYears);
 
@@ -8406,7 +8421,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     LIMIT_402G, LIMIT_415C, LIMIT_IRA, LIMIT_HSA_SELF, LIMIT_HSA_FAMILY,
     LIMIT_CATCHUP_50, LIMIT_CATCHUP_60_63,
     DEFERRAL_TYPES, IRA_TYPES, workplaceCatchUp, checkContributionLimits,
-    streamColaYears, streamAmountAtAge,
+    streamColaYears, streamAmountAtAge, streamOwnerAge,
     SAVINGS_MULTIPLE_BY_AGE, savingsMultipleForAge, TYPICAL_DEFERRAL_RATE,
     TYPICAL_MATCH_RATE, SS_REPLACEMENT_RATE, SS_MAX_ANNUAL_AT_FRA,
     estimateRetirementSavings, estimateAnnualSocialSecurity,
