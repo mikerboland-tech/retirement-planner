@@ -7637,6 +7637,127 @@ section('P63 — a zero in the marginal-cost table has three meanings, and they 
   }
 }
 
+section('P64 — joint income survives the first death; Social Security follows the SSA rule');
+{
+  // Every income stream belonged to exactly one spouse, so it vanished at that
+  // person's death while the projection carried on spending as if it were still
+  // arriving. The only workaround was to mis-assign household income to whichever
+  // spouse was modelled to live longer.
+  const build = (streams, over) => {
+    const sc = baseScenario({
+      myAge: 70, spouseAge: 68, myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 68,
+      myRetirementAge: 70, spouseRetirementAge: 70, legacyAge: 90,
+      state: 'Missouri', inflationRate: 0, desiredRetirementIncome: 120000,
+      healthcareModel: 'none', medicalInflation: 0,
+      survivorModelEnabled: true, myLifeExpectancy: 75, spouseLifeExpectancy: 90,
+      ...over,
+    });
+    sc.accts = [{ id: 1, name: 'IRA', type: 'traditional_ira', balance: 1500000, contribution: 0, cagr: 0.04, startAge: 70, stopAge: 70, owner: 'me' }];
+    sc.streams = streams;
+    return computeProjections(sc.pi, sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+  };
+  const at = (proj, age) => proj.find(r => r.myAge === age) || {};
+
+  // ── The bug: income owned by the first to die simply stops ───────────────
+  {
+    const mine = build([{ id: 1, name: 'Rental', type: 'other', amount: 36000, startAge: 70, endAge: 95, cola: 0, owner: 'me' }]);
+    eq(at(mine, 74).otherIncome, 36000, 'the rent arrives while its owner is alive');
+    eq(at(mine, 80).otherIncome, 0, 'and stops entirely once they die — the reported problem');
+  }
+
+  // ── Joint income keeps paying for the survivor ───────────────────────────
+  {
+    const joint = build([{ id: 1, name: 'Rental', type: 'other', amount: 36000, startAge: 70, endAge: 95, cola: 0, owner: 'joint' }]);
+    eq(at(joint, 74).otherIncome, 36000, 'joint income arrives while both are living');
+    eq(at(joint, 80).otherIncome, 36000, 'and keeps arriving after the first death');
+    eq(at(joint, 85).otherIncome, 36000, 'right through the survivor\'s remaining years');
+  }
+
+  // ── Its age window follows the primary, not the spouse ───────────────────
+  // Ambiguous otherwise, and the rest of the plan is entered against the
+  // primary's ages — "starts at 72" has to mean the primary's 72.
+  {
+    const joint = build([{ id: 1, name: 'Later', type: 'other', amount: 24000, startAge: 72, endAge: 95, cola: 0, owner: 'joint' }]);
+    eq(at(joint, 71).otherIncome, 0, 'nothing before the primary reaches the start age');
+    eq(at(joint, 72).otherIncome, 24000, 'and it begins at the primary\'s 72, not the spouse\'s');
+  }
+
+  // ── And it does end at the SECOND death ──────────────────────────────────
+  {
+    const joint = build([{ id: 1, name: 'Rental', type: 'other', amount: 36000, startAge: 70, endAge: 95, cola: 0, owner: 'joint' }],
+      { myLifeExpectancy: 75, spouseLifeExpectancy: 80 });
+    const rows = joint.filter(r => r.myAge >= 70);
+    const last = rows[rows.length - 1];
+    eq((last.otherIncome || 0) === 0 || !last.primaryAlive && !last.spouseAlive, true,
+      'household income is not immortal — it stops when nobody is left');
+  }
+
+  // ── A joint earned-income stream splits across the two wage bases ────────
+  // FICA and the Social Security earnings test are both per-person. Assigning a
+  // joint stream wholly to one person would run it through a single wage base,
+  // and above that base the 6.2% stops — so stacking it understates FICA for a
+  // household where two people are genuinely earning. Splitting costs MORE, and
+  // that is the correct answer, not a worse one.
+  {
+    const split = build([{ id: 1, name: 'Business', type: 'earned_income', amount: 200000, startAge: 70, endAge: 95, cola: 0, owner: 'joint' }],
+      { myLifeExpectancy: 88, spouseLifeExpectancy: 90 });
+    const solo = build([{ id: 1, name: 'Business', type: 'earned_income', amount: 200000, startAge: 70, endAge: 95, cola: 0, owner: 'me' }],
+      { myLifeExpectancy: 88, spouseLifeExpectancy: 90 });
+    eq(at(split, 72).earnedIncome, at(solo, 72).earnedIncome,
+      'the household earns the same either way');
+    gt(at(split, 72).ficaTax, at(solo, 72).ficaTax,
+      'but two wage bases expose more of it to the 6.2% than one does');
+    // $200,000 on one base tops out at the cap; split, both halves are under it.
+    approx(at(split, 72).ficaTax - at(solo, 72).ficaTax,
+      (200000 - engine.FICA_SS_WAGE_BASE_2025) * engine.FICA_SS_RATE,
+      'by exactly the amount that had been escaping above the cap', 1);
+  }
+
+  // ── Social Security already follows the SSA survivor rule ────────────────
+  // The survivor receives the HIGHER of their own benefit or the deceased's, and
+  // never both. Worth pinning: it is the single most consequential survivor rule
+  // in the plan, and it was already right.
+  {
+    const ss = (mine, theirs) => build([
+      { id: 1, name: 'My SS', type: 'social_security', amount: mine, startAge: 67, endAge: 95, cola: 0, owner: 'me' },
+      { id: 2, name: 'Sp SS', type: 'social_security', amount: theirs, startAge: 67, endAge: 95, cola: 0, owner: 'spouse' },
+    ]);
+    // Primary dies at 75 with the LARGER benefit — the survivor steps up to it.
+    const bigger = ss(60000, 30000);
+    eq(at(bigger, 74).socialSecurity, 90000, 'both benefits arrive while both are living');
+    eq(at(bigger, 80).socialSecurity, 60000,
+      'the survivor keeps the larger of the two, not their own smaller one');
+
+    // Primary dies at 75 with the SMALLER benefit — the survivor keeps their own.
+    const smaller = ss(30000, 60000);
+    eq(at(smaller, 80).socialSecurity, 60000, 'and keeps their own when it was already the larger');
+    lt(at(smaller, 80).socialSecurity, at(smaller, 74).socialSecurity,
+      'either way the household loses one benefit — never both, never neither');
+  }
+
+  // ── A stray joint SS row cannot be mistaken for the deceased's benefit ───
+  // The UI no longer offers it, but an old plan or a hand-edited import can
+  // still carry one, and the survivor lookup used to match it on `!== survivor`.
+  {
+    const odd = build([
+      { id: 1, name: 'My SS', type: 'social_security', amount: 40000, startAge: 67, endAge: 95, cola: 0, owner: 'me' },
+      { id: 2, name: 'Sp SS', type: 'social_security', amount: 25000, startAge: 67, endAge: 95, cola: 0, owner: 'spouse' },
+      { id: 3, name: 'Odd', type: 'social_security', amount: 99000, startAge: 67, endAge: 95, cola: 0, owner: 'joint' },
+    ]);
+    const without = build([
+      { id: 1, name: 'My SS', type: 'social_security', amount: 40000, startAge: 67, endAge: 95, cola: 0, owner: 'me' },
+      { id: 2, name: 'Sp SS', type: 'social_security', amount: 25000, startAge: 67, endAge: 95, cola: 0, owner: 'spouse' },
+    ]);
+    // The joint row pays out as ordinary joint income and nothing more. Before
+    // the guard it also matched the "deceased's stream" lookup, so the survivor
+    // uplift was computed from $99,000 instead of the primary's real $40,000.
+    eq(at(odd, 80).socialSecurity - at(without, 80).socialSecurity, 99000,
+      'a stray joint row adds exactly its own amount — the uplift still comes from the primary');
+    eq(at(without, 80).socialSecurity, 40000,
+      'and the survivor uplift itself is unchanged by its presence');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

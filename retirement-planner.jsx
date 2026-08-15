@@ -1660,7 +1660,7 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
                 items: [
                   { icon: '📝', label: 'Name', desc: 'A descriptive label (e.g., "My Social Security", "John\'s Pension", "Part-time Consulting"). For your reference only.' },
                   { icon: '🏷️', label: 'Type', desc: 'The category of income. This affects how the planner treats it for tax calculations: Earned Income is subject to payroll taxes and signals you\'re still working. Social Security uses special IRS taxation rules (only 50–85% may be taxable). Pension and Other Income are taxed as ordinary income.' },
-                  { icon: '👤', label: 'Owner', desc: '"Me" or "Spouse". Determines whose age triggers the start/stop of this income stream. Critical for Social Security where each spouse has their own benefit and claiming age.' },
+                  { icon: '👤', label: 'Owner', desc: '"Me", "Spouse", or "Joint". Determines whose age triggers the start/stop of this stream, and — when survivor modeling is on — whether it stops at that person\'s death. Choose Joint for household income that keeps paying after the first death: rental income, a joint-and-survivor annuity, a business interest. Its ages follow yours. Social Security is always individual, so Joint is not offered there; the survivor automatically keeps the higher of the two benefits.' },
                   { icon: '💰', label: 'Amount', desc: 'Annual income in today\'s dollars. For Social Security, enter your estimated annual benefit at the claiming age you plan to use (check ssa.gov for your estimate). For salary, enter your current annual gross pay.' },
                   { icon: '📈', label: 'COLA', desc: 'Cost-of-Living Adjustment — the annual percentage increase for this income. Social Security typically gets 2–3% COLA. Pensions may have 0–2%. Salary might grow 2–4%. This compounds each year from the start age.' },
                   { icon: '📅', label: 'Ages', desc: `The start and end ages for this income. Social Security: typically 62 to your planning age (or your chosen claiming age). Salary: current age to retirement age. Pension: pension start age to your planning age. Set end age to ${personalInfo.legacyAge || 95} for lifetime income.` }
@@ -1731,6 +1731,11 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
                     >
                       <option value="me">Me</option>
                       <option value="spouse">Spouse</option>
+                      {/* Social Security is always an individual entitlement, and
+                          the survivor rule works by finding the OTHER spouse's
+                          stream — a joint one would have no other side. Every
+                          other kind of income can belong to the household. */}
+                      {stream.type !== 'social_security' && <option value="joint">Joint</option>}
                     </GridSelect>
                   </td>
                   <td className="py-2 px-1">
@@ -13670,7 +13675,14 @@ function IncomeModal({ editingIncome, personalInfo, incomeStreams = [], onClose,
         <div className="space-y-4">
           <div><label className={labelStyle}>Income Name</label><input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className={inputStyle} /></div>
           <div><label className={labelStyle}>Income Type</label><select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className={inputStyle}>{INCOME_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
-          <div><label className={labelStyle}>Owner</label><select value={formData.owner} onChange={e => setFormData({...formData, owner: e.target.value})} className={inputStyle}><option value="me">Me</option><option value="spouse">Spouse</option></select></div>
+          <div><label className={labelStyle}>Owner</label><select value={formData.owner} onChange={e => setFormData({...formData, owner: e.target.value})} className={inputStyle}><option value="me">Me</option><option value="spouse">Spouse</option>{formData.type !== 'social_security' && <option value="joint">Joint (continues for the survivor)</option>}</select>
+            {formData.owner === 'joint' && (
+              <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                Household income: it keeps paying after the first death and stops only at the second.
+                Start and end ages follow your age. Use this for rental income, a joint-and-survivor
+                annuity, a business interest — anything that does not stop because one owner died.
+              </p>
+            )}</div>
 
           {formData.type === 'pension' && estAvailable && (
             <div className="border border-purple-700/40 bg-purple-900/10 rounded-lg overflow-hidden">
@@ -16959,7 +16971,7 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
                     <div><label className="text-[10px] text-slate-500 block mb-0.5">Annual $</label>{dollarInput(oi.amount, v=>setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,amount:v}:o)})), '12,000')}</div>
                     <div><label className="text-[10px] text-slate-500 block mb-0.5">Ages</label><div className="flex items-center gap-1"><input type="number" value={oi.startAge} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,startAge:v}:o)}))}} className={`${inputStyle} text-xs py-1.5 w-14`} /><span className="text-slate-600">–</span><input type="number" value={oi.endAge} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,endAge:v}:o)}))}} className={`${inputStyle} text-xs py-1.5 w-14`} /></div></div>
                     <div><label className="text-[10px] text-slate-500 block mb-0.5">Annual growth (%)</label><input type="number" step="0.5" value={oi.cola} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,cola:v}:o)}))}} className={`${inputStyle} text-xs py-1.5`} placeholder="2" /></div>
-                    {w.hasSpouse&&<div><label className="text-[10px] text-slate-500 block mb-0.5">Owner</label><select value={oi.owner} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,owner:v}:o)}))}} className={`${inputStyle} text-xs py-1.5`}><option value="me">Me</option><option value="spouse">Spouse</option></select></div>}
+                    {w.hasSpouse&&<div><label className="text-[10px] text-slate-500 block mb-0.5">Owner</label><select value={oi.owner} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,owner:v}:o)}))}} className={`${inputStyle} text-xs py-1.5`}><option value="me">Me</option><option value="spouse">Spouse</option><option value="joint">Joint</option></select></div>}
                   </div>
                 </div>
               ))}

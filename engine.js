@@ -6246,8 +6246,23 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     let myEarnedIncome = 0, spouseEarnedIncome = 0; // Per-person for FICA wage base
     
     streams.forEach(stream => {
-      const ownerAge = stream.owner === 'me' ? myAge : spouseAge;
-      const ownerAlive = stream.owner === 'me' ? primaryAlive : spouseAlive;
+      // A 'joint' stream belongs to the household rather than to one person, so
+      // it survives the first death and ends only at the second. Rental income,
+      // an annuity with a joint-and-survivor election, a business interest,
+      // royalties — anything that does not stop because one owner died.
+      //
+      // Without this option every stream was owned by exactly one spouse and
+      // vanished at their death, while the projection carried on spending as if
+      // it were still arriving. That silently overstated the survivor's
+      // shortfall, and the only workaround was to mis-assign the income to
+      // whichever spouse was modelled to live longer.
+      //
+      // Age window follows the PRIMARY, because that is whose ages the rest of
+      // the plan is entered against — "starts at 65" means the primary's 65.
+      const isJoint = stream.owner === 'joint';
+      const ownerAge = (stream.owner === 'me' || isJoint) ? myAge : spouseAge;
+      const ownerAlive = isJoint ? (primaryAlive || spouseAlive)
+                       : stream.owner === 'me' ? primaryAlive : spouseAlive;
       
       // Skip income from deceased owner (survivor modeling)
       // Exception: pensions with survivorBenefit flag continue for the survivor
@@ -6273,7 +6288,16 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         if (stream.type === 'earned_income') {
           earnedIncome += adjustedAmount;
           nonSSIncome += adjustedAmount;
-          if (stream.owner === 'me') myEarnedIncome += adjustedAmount;
+          // Per-person, because the FICA wage base and the Social Security
+          // earnings test are both per-person. A joint earned-income stream is
+          // split between whoever is still alive — assigning it wholly to one
+          // would push a single wage base over its cap and understate FICA.
+          if (isJoint) {
+            const living = (primaryAlive ? 1 : 0) + (spouseAlive ? 1 : 0);
+            if (living === 2) { myEarnedIncome += adjustedAmount / 2; spouseEarnedIncome += adjustedAmount / 2; }
+            else if (primaryAlive) myEarnedIncome += adjustedAmount;
+            else spouseEarnedIncome += adjustedAmount;
+          } else if (stream.owner === 'me') myEarnedIncome += adjustedAmount;
           else spouseEarnedIncome += adjustedAmount;
         } else if (stream.type === 'social_security') {
           // If survivor modeling is active and the other spouse has died,
@@ -6301,8 +6325,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     if (survivorEnabled && yearOfFirstDeath && (primaryAlive !== spouseAlive) && deceasedSSBenefit > 0) {
       const survivorOwner = primaryAlive ? 'me' : 'spouse';
       const survivorAge = primaryAlive ? myAge : spouseAge;
+      // Both lookups require an explicitly individual owner. Without the second
+      // test a stray 'joint' Social Security row — which the UI no longer offers
+      // but an old plan or a hand-edited import could still carry — would match
+      // `!== survivorOwner` and be treated as the deceased's benefit.
       const survivorStream = streams.find(s => s.type === 'social_security' && s.owner === survivorOwner);
-      const deceasedStream = streams.find(s => s.type === 'social_security' && s.owner !== survivorOwner);
+      const deceasedStream = streams.find(s => s.type === 'social_security'
+        && s.owner !== survivorOwner && (s.owner === 'me' || s.owner === 'spouse'));
       
       // Years of COLA that have accumulated on the deceased's benefit.
       // If they claimed before death, COLA from claim age onwards.
