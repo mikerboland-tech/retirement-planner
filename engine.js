@@ -6333,10 +6333,27 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   // (multiplier compounds). Rates use withdrawal ÷ end-of-year portfolio,
   // consistently for both anchor and comparison.
   const spendingRule = opts.spendingRule || null;
+  // ── CONVERSION GUARDRAIL ────────────────────────────────────────────────────
+  // The spending guardrail below throttles what you SPEND when the portfolio
+  // falls behind. This does the same for what you CONVERT, and for a sharper
+  // reason: a conversion is a discretionary, irreversible tax payment funded by
+  // selling assets. Making it in a down market sells shares cheap and removes
+  // the very ones that would have carried the recovery — the textbook
+  // sequence-of-returns wound, self-inflicted.
+  //
+  // The trigger is the prior year's INVESTMENT RETURN, not the portfolio balance.
+  // That distinction was not obvious and the first attempt got it wrong: a plan
+  // drawing spending and paying conversion tax sees its balance fall on a
+  // perfectly smooth return path, so a balance test fires on the plan's own
+  // intentional drawdown and throttles conversions in years when nothing went
+  // wrong at all. The return is the only signal that isolates "the market went
+  // against me" from "I am spending my money as planned".
+  let conversionThrottled = false; // whether this year's conversion was cut
   let guardrailMultiplier = 1;
   let guardrailAnchorRate = (spendingRule && spendingRule.initialWithdrawalRate > 0)
     ? spendingRule.initialWithdrawalRate : null;
   let guardrailPrevYear = null; // last pushed year row (for prior-year rate)
+  let prevYearRow = null;       // last pushed row, tracked unconditionally
   const years = [];
   let accountBalances = accts.reduce((acc, account) => ({ ...acc, [account.id]: account.balance }), {});
   
@@ -7589,6 +7606,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     //   • The user is not yet in the conversion window (age < start or age > end)
     //   • There are no pre-tax funds available to convert
     //   • There is no Roth account to receive the funds
+    conversionThrottled = false;
     let rothConversionThisYear = 0;
     // WHY this year's conversion is the size it is. The engine has always known
     // — the answer falls out of which clamp fired — but only the amount was ever
@@ -7875,6 +7893,26 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // here). Lets the user keep pre-tax funds for QCDs (need an IRA balance at
       // 70+) and for filling the low (0–12%) brackets each year, instead of
       // converting everything away. 0 = no floor (unchanged behavior).
+      // Guardrail: throttle when the portfolio is materially below where it stood
+      // when this programme started. Applied AFTER the ceiling solve — the target
+      // is still "fill to the 24% bracket", this only decides how much of that
+      // target is prudent this year — and BEFORE the balance clamp, so a
+      // throttled year still reports its reason rather than looking like an
+      // empty account.
+      const guard = pi.rothConversionGuardrailEnabled ? {
+        returnFloor: pi.rothConversionGuardrailReturnFloor ?? 0,
+        floor: Math.min(1, Math.max(0, pi.rothConversionGuardrailFloor ?? 0)),
+      } : null;
+      // The PRIOR year's return, because that is the information a person
+      // actually has when deciding in January — and because this year's own
+      // return has not happened yet inside the loop either.
+      if (guard && targetConversion > 0 && prevYearRow
+          && prevYearRow.marketReturn !== undefined
+          && prevYearRow.marketReturn < guard.returnFloor) {
+        targetConversion *= guard.floor;
+        conversionThrottled = true;
+      }
+
       const floorToday = pi.rothConversionPreTaxFloor || 0;
       if (floorToday > 0 && targetConversion > 0) {
         const floorAdj = floorToday * inflationFactor;
@@ -8489,7 +8527,12 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // What bound the conversion — see conversionLimit above. Reported so a
       // roadmap can say "filled the 24% bracket" versus "the IRA ran dry"
       // instead of showing two identical-looking dollar figures.
-      rothConversionLimit: rothConversionThisYear > 0 ? conversionLimit
+      // Whether the guardrail cut this year's conversion. Reported so a year that
+      // converted less than its target reads as a deliberate pause rather than
+      // an unexplained dip.
+      rothConversionThrottled: conversionThrottled,
+      rothConversionLimit: conversionThrottled ? 'guardrail'
+        : rothConversionThisYear > 0 ? conversionLimit
         : (conversionLimit === 'ceiling' || conversionLimit === 'target' ? 'balance' : conversionLimit),
       conversionTaxWithdrawal: Math.round(conversionTaxWithdrawal), // Extra portfolio draw that paid the conversion's tax bill
       charitableGiving: Math.round(isRetired ? desiredIncome * (charitablePercent / 100) : 0),
@@ -8587,7 +8630,14 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       rothBalance: Math.round(finalRothBalance),
       brokerageBalance: Math.round(finalBrokerageBalance),
       totalPortfolio: Math.round(finalPreTaxBalance + finalRothBalance + finalBrokerageBalance),
-      weightedCAGR, // Balance-weighted average growth rate across all accounts
+      weightedCAGR,
+      // The return actually applied to the portfolio this year: the scenario
+      // override when one is driving the run (Monte Carlo, a historical
+      // sequence, the stress test), otherwise the plan's own blended growth
+      // rate. Exposed because a conversion guardrail — and anything else that
+      // wants to react to a bad year — needs to know what the market did, not
+      // what the balance did.
+      marketReturn: yrOverride ? yrOverride.marketReturn : weightedCAGR, // Balance-weighted average growth rate across all accounts
       assetValue: Math.round(totalAssetValue),
       assetDebt: Math.round(totalAssetDebt),
       netAssetValue: Math.round(netAssetValue),
@@ -8615,6 +8665,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // Guardrails bookkeeping: remember this row for next year's rate check, and
     // anchor the target withdrawal rate at the FIRST retirement year's actual rate
     // (unless the caller supplied initialWithdrawalRate explicitly).
+    prevYearRow = years[years.length - 1];
     if (spendingRule) {
       guardrailPrevYear = years[years.length - 1];
       if (guardrailAnchorRate === null && isRetired && guardrailPrevYear.totalPortfolio > 0) {

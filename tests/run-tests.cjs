@@ -8245,6 +8245,143 @@ section('P68 — the balanced goal: legacy first, but only what survives a bad d
   }
 }
 
+section('P69 — the conversion guardrail: stop paying a discretionary tax bill in a downturn');
+{
+  // The balanced goal picks the best FIXED rule. This is the year-by-year half:
+  // a conversion is a discretionary, irreversible tax payment funded by selling
+  // assets, and making it in a falling market sells shares cheap and removes the
+  // ones that would have carried the recovery. The guardrail waits instead.
+  const { sequenceRiskOverrides, withRothConversionTarget, scoreRothStrategy } = engine;
+
+  const sc = baseScenario({
+    myAge: 60, spouseAge: 58, myBirthYear: TODAY_YEAR - 60, spouseBirthYear: TODAY_YEAR - 58,
+    myRetirementAge: 60, spouseRetirementAge: 60, legacyAge: 92,
+    state: 'Missouri', inflationRate: 0.025, desiredRetirementIncome: 140000,
+    withdrawalPriority: ['pretax', 'brokerage', 'roth'], heirTaxRate: 0.25,
+    healthcareModel: 'none', medicalInflation: 0,
+  });
+  sc.accts = [
+    { id: 1, name: 'IRA', type: 'traditional_ira', balance: 2500000, contribution: 0, cagr: 0.06, startAge: 60, stopAge: 60, owner: 'me' },
+    { id: 2, name: 'Roth', type: 'roth_ira', balance: 250000, contribution: 0, cagr: 0.06, startAge: 60, stopAge: 60, owner: 'me' },
+    { id: 3, name: 'Brok', type: 'brokerage', balance: 800000, contribution: 0, cagr: 0.05, startAge: 60, stopAge: 60, owner: 'joint', costBasisPercent: 0.5 },
+  ];
+  sc.streams = [
+    { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 67, endAge: 95, cola: 0.025, owner: 'me', todaysDollars: true, pia: 4000 },
+    { id: 2, name: 'Sp SS', type: 'social_security', amount: 26000, startAge: 67, endAge: 95, cola: 0.025, owner: 'spouse', todaysDollars: true, pia: 2200 },
+  ];
+  const opts = { legacyAge: 92, retirementAge: 60, heirTaxRate: 0.25 };
+  const target = (extra) => ({
+    ...withRothConversionTarget(sc.pi, { bracket: '32%', startAge: 60, endAge: 74 }), ...extra });
+  const run = (pi, stressed) => {
+    const first = computeProjections(pi, sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+    const proj = stressed
+      ? computeProjections(pi, sc.accts, sc.streams, [], [], [], TODAY_YEAR,
+          { yearOverrides: sequenceRiskOverrides(sc.pi, { horizonYears: first.length }) })
+      : first;
+    return { proj, ...scoreRothStrategy(proj, opts), ...engine.planShortfall(proj, { retirementAge: 60 }) };
+  };
+  const GUARD = { rothConversionGuardrailEnabled: true, rothConversionGuardrailReturnFloor: 0,
+                  rothConversionGuardrailFloor: 0 };
+
+  // ── Off by default, and inert on a smooth path ───────────────────────────
+  // The guardrail must not change a plan that was never in trouble, or every
+  // existing projection shifts under people who did not ask for it.
+  {
+    const off = run(target({}), false);
+    const on = run(target(GUARD), false);
+    eq(off.proj.every(r => !r.rothConversionThrottled), true,
+      'nothing is throttled when the guardrail is off');
+    const throttledSmooth = on.proj.filter(r => r.rothConversionThrottled).length;
+    eq(throttledSmooth, 0, 'and nothing is throttled on a smooth path even when it is on');
+    eq(on.lifetimeConversions, off.lifetimeConversions,
+      'so the smooth-path plan converts exactly the same amount either way');
+    eq(on.afterTaxLegacy, off.afterTaxLegacy,
+      'and lands on exactly the same legacy — the guardrail is inert until a year goes wrong');
+  }
+
+  // ── It fires under a bad sequence, and says so ───────────────────────────
+  {
+    const on = run(target(GUARD), true);
+    const throttled = on.proj.filter(r => r.rothConversionThrottled);
+    gt(throttled.length, 0, 'a bad opening decade does trip the guardrail');
+    throttled.forEach(r => {
+      eq(r.rothConversion, 0, `age ${r.myAge}: a fully-paused year converts nothing`);
+      eq(r.rothConversionLimit, 'guardrail',
+        `age ${r.myAge}: and reports the guardrail as the reason, not an empty account`);
+    });
+    // The first year can never be throttled — it sets the anchor.
+    const firstConv = on.proj.find(r => r.myAge >= 60 && (r.rothConversion || 0) > 0);
+    eq(firstConv.rothConversionThrottled, false, 'the anchor year itself is never paused');
+  }
+
+  // ── It materially reduces the damage, which is the honest claim ─────────
+  // Not "it rescues everything": fill-to-32% is aggressive enough that a
+  // one-year-lagged pause cannot fully save it, and pretending otherwise would
+  // oversell the feature. What it does is cut the shortfall substantially, and
+  // it converts less to do it.
+  {
+    const off = run(target({}), true);
+    const on = run(target(GUARD), true);
+    eq(off.fails, true, 'without the guardrail this strategy runs short under the stress');
+    gt(off.totalShortfall, 0, 'by a measurable amount');
+    lt(on.totalShortfall, off.totalShortfall * 0.75,
+      'and pausing cuts that shortfall by at least a quarter');
+    lt(on.lifetimeConversions, off.lifetimeConversions,
+      'because it converts less — the tax it does not pay is the tax it does not have to sell for');
+  }
+
+  // ── A partial floor can beat a full pause, which is not obvious ──────────
+  // Stopping entirely leaves a larger pre-tax balance, which later forces larger
+  // required distributions. Half speed keeps chipping at it. Worth pinning
+  // because it means the floor is a real dial, not just a softer version of off.
+  {
+    const half = run(target({ ...GUARD, rothConversionGuardrailFloor: 0.5 }), true);
+    const full = run(target(GUARD), true);
+    const halfThrottled = half.proj.filter(r => r.rothConversionThrottled);
+    gt(halfThrottled.length, 0, 'a half-speed guardrail still trips');
+    gt(halfThrottled.filter(r => (r.rothConversion || 0) > 0).length, 0,
+      'but a throttled year still converts something');
+    gt(half.lifetimeConversions, full.lifetimeConversions,
+      'so it converts more overall than a full pause');
+    lt(half.totalShortfall, full.totalShortfall,
+      'and on this plan it ends up SHORTER of cash than stopping did — a full pause leaves a bigger IRA to be forced out later');
+  }
+
+  // ── A more demanding floor pauses in more years ──────────────────────────
+  {
+    const strict = run(target({ ...GUARD, rothConversionGuardrailReturnFloor: 0.04 }), true);
+    const lax = run(target({ ...GUARD, rothConversionGuardrailReturnFloor: -0.20 }), true);
+    gt(strict.proj.filter(r => r.rothConversionThrottled).length,
+       lax.proj.filter(r => r.rothConversionThrottled).length,
+      'requiring a 4% year pauses more often than tolerating a 20% loss');
+  }
+
+  // ── The signal is the RETURN, not the balance ────────────────────────────
+  // The distinction the first design got wrong: a plan spending and paying
+  // conversion tax sees its balance fall on a perfectly smooth path, so a
+  // balance test would throttle in years when nothing went wrong. The row now
+  // carries the return that was actually applied, and the guardrail reads that.
+  {
+    const smooth = run(target(GUARD), false);
+    smooth.proj.filter(r => r.myAge >= 60).forEach(r => {
+      eq(Number.isFinite(r.marketReturn), true, `age ${r.myAge} reports the return applied`);
+      gt(r.marketReturn, 0, `age ${r.myAge}: a steady projection never has a down year`);
+    });
+    // The balance, meanwhile, genuinely does fall — which is exactly why it is
+    // the wrong trigger.
+    const first = smooth.proj.find(r => r.myAge === 60);
+    const later = smooth.proj.find(r => r.myAge === 72);
+    lt(later.totalPortfolio, first.totalPortfolio,
+      'the portfolio declines on the smooth path, as an aggressive plan should');
+    eq(smooth.proj.every(r => !r.rothConversionThrottled), true,
+      'and the guardrail correctly ignores it');
+
+    const stressed = run(target(GUARD), true);
+    gt(stressed.proj.filter(r => r.marketReturn < 0).length, 0,
+      'while the stressed run does have down years');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

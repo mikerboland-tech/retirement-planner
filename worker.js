@@ -842,6 +842,22 @@ function runRothOptimizer(jobId, payload) {
     pi: withRothConversionTarget(personalInfo, { irmaaTier: t.index, startAge: w.startAge, endAge: w.endAge }),
   })));
 
+  // Guardrailed variants of the bracket targets. Only for the plan's own default
+  // window and only for the brackets — a full cross-product would double a sweep
+  // that already runs two projections per candidate. The point is to let the
+  // balanced goal SHOW that pausing in a downturn can turn a strategy that fails
+  // the stress into one that survives it, which is otherwise a setting nobody
+  // would think to try.
+  if (!personalInfo.rothConversionGuardrailEnabled) {
+    brackets.forEach(b => strategies.push({
+      label: `Fill to ${b} bracket, ages ${defWin.startAge}–${defWin.endAge}, pausing after a down year`,
+      bracket: b, window: { startAge: defWin.startAge, endAge: defWin.endAge }, guardrail: true,
+      pi: { ...withRothConversionTarget(personalInfo, { bracket: b, startAge: defWin.startAge, endAge: defWin.endAge }),
+            rothConversionGuardrailEnabled: true, rothConversionGuardrailReturnFloor: 0,
+            rothConversionGuardrailFloor: 0 },
+    }));
+  }
+
   // The far bookend: empty the pre-tax account entirely over each window. Almost
   // never the winner, and that is the point — without it the sweep only ever
   // offers partial fills, so a reader cannot see where the ceiling is or what
@@ -906,6 +922,7 @@ function runRothOptimizer(jobId, payload) {
       // Carried so Apply reproduces a drain candidate: it is a fixed-amount
       // strategy, and without the amount Apply would clear the row it came from.
       drainAmount: s.drainAmount || null,
+      guardrail: !!s.guardrail,
       startAge: s.window ? s.window.startAge : null,
       endAge: s.window ? s.window.endAge : null,
       isCurrent: !!s.isCurrent,

@@ -409,6 +409,15 @@ const DEFAULT_PERSONAL_INFO = {
                                  // existing only where it happens to be read.
   rothConversionTaxSource: 'withdrawal', // 'withdrawal' = tax paid via normal withdrawal priority, 'brokerage' = tax paid from brokerage account
   rothConversionPreTaxFloor: 0,  // Preserve this much pre-tax balance (today's $); stop converting once pre-tax hits it (0 = no floor)
+  // Conversion guardrail: pause or throttle conversions while the portfolio is
+  // materially below where it stood when the programme began, measured in
+  // today's dollars. A conversion is a discretionary, irreversible tax payment
+  // funded by selling assets — making it in a down market sells shares cheap and
+  // removes the ones that would have carried the recovery. Off by default: it
+  // changes an existing plan's behaviour, so it is opt-in.
+  rothConversionGuardrailEnabled: false,
+  rothConversionGuardrailReturnFloor: 0, // pause when LAST year's portfolio return was below this
+  rothConversionGuardrailFloor: 0,    // fraction of the normal conversion still done (0 = pause fully)
   // §72(t) SEPP: substantially equal periodic payments let you tap a pre-tax
   // account before 59½ without the 10% penalty, in exchange for locking the
   // payment schedule until 59½ or 5 years, whichever is longer. Off by default —
@@ -3631,6 +3640,11 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
         startAge: row.startAge || 0,
         endAge: row.endAge || 0,
       }),
+      // A guardrailed row is not just a target — the pause rule is half of what
+      // makes it win. Applying the target alone would silently drop it.
+      ...(row.guardrail
+        ? { rothConversionGuardrailEnabled: true, rothConversionGuardrailReturnFloor: 0, rothConversionGuardrailFloor: 0 }
+        : { rothConversionGuardrailEnabled: false }),
       // The drain schedule is a nominal dollar figure sized to empty the account,
       // not a today's-dollars target to be indexed each year.
       ...(row.drainAmount > 0 ? { rothConversionInflationAdjust: false } : {}),
@@ -9838,6 +9852,58 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
               </p>
             </div>
           </div>
+
+          {/* Guardrail — the only setting here that changes conversions YEAR BY
+              YEAR rather than setting a fixed rule for all of them. */}
+          <div className="mt-3 p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={!!localInfo.rothConversionGuardrailEnabled}
+                onChange={e => handleChange('rothConversionGuardrailEnabled', e.target.checked)}
+                className="w-4 h-4 mt-0.5 rounded border-slate-600 bg-slate-800 text-amber-500"
+              />
+              <span className="text-sm text-slate-300">
+                Pause conversions when the portfolio is down
+                <span className="block text-[11px] text-slate-500 leading-relaxed mt-0.5">
+                  A conversion is a discretionary, irreversible tax bill funded by selling assets. Paying it
+                  in a falling market sells shares cheap and removes the ones that would have carried the
+                  recovery. This waits instead.
+                </span>
+              </span>
+            </label>
+            {localInfo.rothConversionGuardrailEnabled && (
+              <div className="grid grid-cols-2 gap-3 mt-3 pl-6">
+                <div>
+                  <label className={compactLabelStyle}>Pause after a year returning less than</label>
+                  <PercentCell
+                    value={localInfo.rothConversionGuardrailReturnFloor ?? 0}
+                    onValueChange={v => handleChange('rothConversionGuardrailReturnFloor', Math.min(0.15, Math.max(-0.5, v)))}
+                    className={compactInputStyle}
+                  />
+                  <p className="text-[10px] text-slate-500 mt-0.5">
+                    The prior year&rsquo;s investment return, not the balance. A plan that is spending and
+                    paying conversion tax sees its balance fall in a perfectly good year — only the return
+                    separates &ldquo;the market went against me&rdquo; from &ldquo;I am spending my money
+                    as planned&rdquo;.
+                  </p>
+                </div>
+                <div>
+                  <label className={compactLabelStyle}>Convert this much while paused</label>
+                  <PercentCell
+                    value={localInfo.rothConversionGuardrailFloor ?? 0}
+                    onValueChange={v => handleChange('rothConversionGuardrailFloor', Math.min(1, Math.max(0, v)))}
+                    className={compactInputStyle}
+                  />
+                  <p className="text-[10px] text-slate-500 mt-0.5">
+                    0% stops entirely; 50% keeps converting at half speed. Conversions resume in full once
+                    the portfolio recovers past the band.
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="mt-3 p-3 bg-purple-900/20 border border-purple-700/30 rounded-lg">
             <p className="text-xs text-purple-300 font-medium mb-1">&#128161; Roth Conversion Strategy</p>
             <p className="text-xs text-slate-400">
@@ -9852,6 +9918,9 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
                 : ' Tax on conversions is covered by the normal withdrawal solver (using your withdrawal priority order), which may pull additional pre-tax funds.'}
               {(localInfo.rothConversionPreTaxFloor || 0) > 0
                 ? ` Conversions stop once your pre-tax balance reaches ${formatCurrency(localInfo.rothConversionPreTaxFloor)} (today's dollars), leaving funds for QCDs and low-bracket withdrawals.`
+                : ''}
+              {localInfo.rothConversionGuardrailEnabled
+                ? ` The guardrail pauses conversions in any year following a portfolio return below ${Math.round((localInfo.rothConversionGuardrailReturnFloor ?? 0) * 100)}%${(localInfo.rothConversionGuardrailFloor ?? 0) > 0 ? `, converting at ${Math.round((localInfo.rothConversionGuardrailFloor) * 100)}% of target instead of stopping` : ''}. It never fires on a steady-return projection — you will see it in Monte Carlo, the stress test, and the optimizer's balanced goal, which are where a bad year exists.`
                 : ''}
             </p>
           </div>
