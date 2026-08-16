@@ -8382,6 +8382,95 @@ section('P69 — the conversion guardrail: stop paying a discretionary tax bill 
   }
 }
 
+section('P70 — the mid-60s IRMAA hinge: priced in the years the decision is still open');
+{
+  // The dashboard card showed now, 70, 75, 80, 85, 90. For a 53-year-old that is
+  // 53 and then nothing until 70 — skipping the entire window this card exists
+  // to inform. Medicare reads the MAGI you reported TWO YEARS earlier, so 62 is
+  // the last year invisible to it and 63 is the first year a withdrawal or
+  // conversion can cost a surcharge at all.
+  const { marginalCostOfNextDollar, nextIRMAAThreshold, IRMAA_TIER_LOOKBACK_YEARS, BASE_TAX_YEAR } = engine;
+
+  const build = (age) => {
+    const sc = baseScenario({
+      myAge: age, spouseAge: age - 2, myBirthYear: TODAY_YEAR - age, spouseBirthYear: TODAY_YEAR - age + 2,
+      myRetirementAge: age, spouseRetirementAge: age, legacyAge: age + 4,
+      state: 'Missouri', inflationRate: 0, desiredRetirementIncome: 200000,
+      healthcareModel: 'none', medicalInflation: 0,
+      withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+    });
+    sc.accts = [{ id: 1, name: 'IRA', type: 'traditional_ira', balance: 4000000, contribution: 0, cagr: 0, startAge: age, stopAge: age, owner: 'me' }];
+    sc.streams = [];
+    return { pi: sc.pi, row: computeProjections(sc.pi, sc.accts, sc.streams, [], [], [], TODAY_YEAR)[0] };
+  };
+
+  // IRMAA is a step, not a slope. A $1,000 probe reports zero in any year that
+  // does not happen to sit within $1,000 of a tier edge — which is most years,
+  // and says nothing about whether a surcharge is reachable. So aim the probe AT
+  // the edge two years out and ask what crossing it costs. That is the question
+  // the card is really answering.
+  const crossingProbe = ({ row, pi }) => {
+    const idx = (row.year || BASE_TAX_YEAR) - BASE_TAX_YEAR;
+    const edge = nextIRMAAThreshold(row.magi, row.effectiveFilingStatus || pi.filingStatus,
+      idx + IRMAA_TIER_LOOKBACK_YEARS, pi.inflationRate ?? 0);
+    return Math.round(edge.distance) + 2000;
+  };
+  const crossingCost = (b, extra = {}) =>
+    marginalCostOfNextDollar({ row: b.row, pi: b.pi, probe: crossingProbe(b), ...extra }).components.irmaa;
+
+  // ── The gate has to be judged in the year the surcharge LANDS ────────────
+  // The cost was already priced two years out at that year's thresholds — but
+  // the eligibility test asked "is anyone 65 now", so 63 and 64 reported zero.
+  // Those are exactly the two years whose income first reaches Medicare.
+  {
+    const at63 = build(63), at64 = build(64), at62 = build(62);
+    eq(at63.row.age65Count, 0, 'nobody is on Medicare at 63 — which is what the old gate tested');
+    gt(crossingCost(at63), 0,
+      'yet income at 63 does cost a surcharge, because it sets the one paid at 65');
+    gt(crossingCost(at64), 0, 'and 64 likewise, landing at 66');
+    eq(crossingCost(at62), 0,
+      'while 62 genuinely costs nothing — it lands at 64, before Medicare');
+    // And the cliff really is a cliff: a thousand dollars in mid-band is free.
+    eq(marginalCostOfNextDollar({ row: at63.row, pi: at63.pi, probe: 1000 }).components.irmaa, 0,
+      'a $1,000 probe well inside a tier costs nothing — the step is elsewhere');
+  }
+
+  // ── The free window is exactly the lookback, not a guess ────────────────
+  {
+    eq(IRMAA_TIER_LOOKBACK_YEARS, 2, 'the lookback is two years');
+    eq(65 - IRMAA_TIER_LOOKBACK_YEARS, 63, 'so 63 is the first chargeable year');
+    eq(65 - IRMAA_TIER_LOOKBACK_YEARS - 1, 62, 'and 62 the last free one');
+    // Walk the boundary a year at a time; the switch must land exactly there.
+    [58, 60, 62].forEach(a => {
+      eq(crossingCost(build(a)), 0,
+        `age ${a}: income lands at ${a + 2}, before Medicare — no surcharge possible`);
+    });
+    [63, 65, 70].forEach(a => {
+      gt(crossingCost(build(a)), 0,
+        `age ${a}: income lands at ${a + 2}, on Medicare — a surcharge is reachable`);
+    });
+  }
+
+  // ── The count ramps too, one person at a time ───────────────────────────
+  // The surcharge is per covered person. With a two-year age gap, the older
+  // spouse's income reaches Medicare two years before the younger one's, so the
+  // same crossing costs one premium at 63 and two at 65.
+  {
+    const one = crossingCost(build(63));
+    const two = crossingCost(build(65));
+    approx(two, one * 2, 'crossing costs two premiums once both spouses will be covered', 0.01);
+  }
+
+  // ── An explicit override still wins, for callers that know better ────────
+  {
+    const b = build(63);
+    eq(crossingCost(b, { numMedicareEligible: 0 }), 0,
+      'a caller stating nobody will be covered is believed');
+    gt(crossingCost(b, { numMedicareEligible: 2 }), crossingCost(b, { numMedicareEligible: 1 }),
+      'and two covered people cost more than one');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

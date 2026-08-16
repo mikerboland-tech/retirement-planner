@@ -45,7 +45,7 @@ const {
   conversionCostComponents, conversionCostAudit, topMarginalBracket,
   computeTaxReturn, buildTaxSituation, compareTraditionalVsRoth,
   projectPayrollYearEnd, marginalRateOn, saltCapFor, projectedWithdrawalRate,
-  detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling,
+  detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling, IRMAA_TIER_LOOKBACK_YEARS,
   rothConversionIsPlanned, withoutRothConversions, withRothConversionTarget,
   rothConversionModeLabel, rothConversionModeOf,
   taxBreakpoints, marginalCostOfNextDollar,
@@ -13277,6 +13277,10 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
             medicareAge: targetAge >= 65,
             irmaaEdgeDistance: irmaaEdge ? irmaaEdge.distance : null,
             crossedIrmaaEdge: !!m.detail.crossedIrmaaEdge,
+            // What this year's income does to the surcharge two years out. The
+            // whole reason the mid-60s matter, and it was nowhere on screen.
+            setsIrmaaAtAge: targetAge + (IRMAA_TIER_LOOKBACK_YEARS || 2),
+            irmaaReachable: targetAge + (IRMAA_TIER_LOOKBACK_YEARS || 2) >= 65,
             // What crossing actually costs, in dollars. Expressing a cliff as a
             // percentage of the probe is arbitrary — the same crossing reads
             // 400% against $1,000 and 40% against $10,000 — so the dollar figure
@@ -13286,7 +13290,30 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
         };
         
         const currentMarg = computeMarginalForAge(personalInfo.myAge);
-        const ages = [personalInfo.myAge, 70, 75, 80, 85, 90].filter((a, i, arr) => a >= personalInfo.myAge && arr.indexOf(a) === i);
+        // Decision-relevant ages, not an every-five-years grid. The old list —
+        // now, 70, 75, 80, 85, 90 — skipped the only years where the answer is
+        // still open. For a 53-year-old it showed 53 and then nothing until 70,
+        // missing the entire window this card exists to inform.
+        //
+        // The hinge is the two-year lookback: the MAGI you report at 63 sets the
+        // Medicare surcharge you pay at 65. That makes 63 the first year a
+        // withdrawal or conversion can cost you IRMAA at all, and 62 the last
+        // year one is free. Those two ages decide more than every later row
+        // combined, and neither was ever shown.
+        const rmdAge = getRmdStartAge(personalInfo.myBirthYear || (new Date().getFullYear() - personalInfo.myAge));
+        const lookback = IRMAA_TIER_LOOKBACK_YEARS || 2;
+        const ages = [...new Set([
+          personalInfo.myAge,                    // where you are now
+          personalInfo.myRetirementAge,          // income changes shape
+          65 - lookback - 1,                     // last year invisible to IRMAA (62)
+          65 - lookback,                         // first year that sets a surcharge (63)
+          65,                                    // Medicare starts; the first bill lands
+          rmdAge,                                // income you no longer choose
+          rmdAge + 5,
+          85,
+        ])]
+          .filter(a => Number.isFinite(a) && a >= personalInfo.myAge)
+          .sort((a, b) => a - b);
         const marginals = ages.map(computeMarginalForAge).filter(Boolean);
         
         return (
@@ -13365,6 +13392,7 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
                 <thead>
                   <tr className="border-b border-slate-700">
                     <th className="text-left py-1 px-2 text-slate-400">Age</th>
+                    <th className="text-left py-1 px-2 text-slate-400">Sets IRMAA at</th>
                     <th className="text-right py-1 px-2 text-red-400">Federal</th>
                     <th className="text-right py-1 px-2 text-orange-400">State</th>
                     <th className="text-right py-1 px-2 text-purple-400">SS Torpedo</th>
@@ -13377,6 +13405,15 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
                   {marginals.map((m, i) => (
                     <tr key={i} className={`border-b border-slate-700/50 ${i === 0 ? 'bg-amber-900/10' : ''}`}>
                       <td className="py-1 px-2 text-slate-100 font-medium">{m.age}</td>
+                      <td className="py-1 px-2">
+                        {m.irmaaReachable ? (
+                          <span className="text-pink-400/90">age {m.setsIrmaaAtAge}</span>
+                        ) : (
+                          <span className="text-emerald-400/80" title={`Income this year sets the surcharge at ${m.setsIrmaaAtAge}, which is before Medicare — it cannot cost you anything`}>
+                            free
+                          </span>
+                        )}
+                      </td>
                       <td className="py-1 px-2 text-right text-red-400">{m.fed}%</td>
                       <td className="py-1 px-2 text-right text-orange-400">{m.state}%</td>
                       {/* A zero here has three different meanings and a dash
@@ -13418,6 +13455,13 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
               </table>
             </div>
             <p className="text-xs text-slate-500 mt-2">
+              Ages shown are the ones where the decision is still open, not a five-year grid.{' '}
+              <strong>&ldquo;Sets IRMAA at&rdquo;</strong> is the hinge: Medicare reads the MAGI you
+              reported <em>two years earlier</em>, so income at {65 - (IRMAA_TIER_LOOKBACK_YEARS || 2) - 1} and
+              before is marked <span className="text-emerald-400/80">free</span> — it lands before Medicare
+              and cannot cost a surcharge, however large. Age {65 - (IRMAA_TIER_LOOKBACK_YEARS || 2)} is the
+              first year a withdrawal or conversion can, which makes it the single most consequential year
+              on this table and the one a five-year grid always skipped.
               True Rate = combined impact of federal tax, state tax, SS becoming taxable, and IRMAA
               surcharges on each extra $1,000 of pre-tax withdrawal. <strong>&ldquo;85% maxed&rdquo;</strong> means
               the torpedo has already done its worst — 85% of the benefit is taxable, the statutory

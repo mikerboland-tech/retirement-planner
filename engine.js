@@ -5355,7 +5355,18 @@ const marginalCostOfNextDollar = ({ row, pi = {}, probe = 1000, numMedicareEligi
   const preTaxDeduction = row.preTaxDeduction || 0;
   const preferential = (row.realizedCapitalGains || 0) + (row.brokerageDividends || 0);
   const age65Count = row.age65Count || 0;
-  const eligible = numMedicareEligible !== null ? numMedicareEligible : age65Count;
+  // Eligibility has to be judged in the year the surcharge LANDS, not this one.
+  // The cost was already priced two years out at that year's thresholds, but the
+  // gate asked "is anyone 65 now" — so at 63 and 64, the two years whose income
+  // first reaches Medicare, it returned zero. Those are precisely the years a
+  // conversion or withdrawal decision is still open, and the card reported them
+  // as free.
+  const lookback = IRMAA_TIER_LOOKBACK_YEARS;
+  const eligibleWhenCharged = [row.myAge, row.spouseAge]
+    .filter(a => Number.isFinite(a) && a > 0)
+    .filter(a => a + lookback >= 65).length;
+  const eligible = numMedicareEligible !== null ? numMedicareEligible
+    : Math.max(age65Count, eligibleWhenCharged);
   // Derived from AGI rather than read from row.nonSSIncome. That field is the
   // pre-withdrawal figure — on a retired year it reads 0 while AGI is $193,347,
   // because the withdrawals that make up the year's income are added later in
