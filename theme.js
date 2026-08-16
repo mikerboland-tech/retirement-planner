@@ -94,8 +94,8 @@
   // BEHIND the data, so the ramp is deliberately lower in chroma than the series
   // above.
   const BRACKET_RAMP = {
-    dark:  ['#7c8ba1', '#93a3bb', '#adbdd4', '#c9d6e8'],
-    light: ['#94a3b8', '#7385a0', '#556885', '#394c6b'],
+    dark:  ['#5b6b82', '#8496b0', '#aebfd6', '#e2eaf5'],
+    light: ['#a9b4c2', '#7c8ba1', '#4f5f78', '#22304a'],
   };
 
   // Reserved. Never used for "series 5", and never carrying meaning alone — a

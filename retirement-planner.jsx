@@ -5907,10 +5907,22 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
               <Bar dataKey="conversionTaxWithdrawal" stackId="income" fill={SERIES.conversionTaxDraw} name="Conversion Tax Draw" />
               
               {/* Tax bracket threshold lines */}
-              <Line type="monotone" dataKey="bracket12" stroke={THEME.bracket[0]} strokeWidth={2} dot={false} name="Top of 12% Bracket" strokeDasharray="5 5" />
-              <Line type="monotone" dataKey="bracket22" stroke={THEME.bracket[1]} strokeWidth={2} dot={false} name="Top of 22% Bracket" strokeDasharray="5 5" />
-              <Line type="monotone" dataKey="bracket24" stroke={THEME.bracket[2]} strokeWidth={2} dot={false} name="Top of 24% Bracket" strokeDasharray="5 5" />
-              <Line type="monotone" dataKey="bracket32" stroke={THEME.bracket[3]} strokeWidth={2} dot={false} name="Top of 32% Bracket" strokeDasharray="5 5" />
+              {(() => {
+                const iLast = (taxPlanningData || []).length - 1;
+                return [
+                  { key: 'bracket12', pct: '12%', slot: 0, dash: '2 4' },
+                  { key: 'bracket22', pct: '22%', slot: 1, dash: '7 4' },
+                  { key: 'bracket24', pct: '24%', slot: 2, dash: '14 4' },
+                  { key: 'bracket32', pct: '32%', slot: 3, dash: '22 4' },
+                ].map(b => (
+                  <Line
+                    key={b.key} type="monotone" dataKey={b.key}
+                    stroke={THEME.bracket[b.slot]} strokeWidth={2} dot={false}
+                    name={`Top of ${b.pct} Bracket`} strokeDasharray={b.dash}
+                    label={lastPointLabel(b.pct, THEME.bracket[b.slot], iLast)}
+                  />
+                ));
+              })()}
               
               {/* Retirement reference line */}
               <ReferenceLine x={retirementAge} stroke={THEME.bracket[3]} strokeDasharray="3 3" label={{ value: 'Retirement', position: 'top', fill: THEME.bracket[3], fontSize: 12 }} />
@@ -13669,10 +13681,10 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
               {/* A 1px surface-coloured stroke between stacked bands: the gap is
                   what lets a reader see the boundary without relying on the two
                   fills being far enough apart on their own. */}
-              <Area type="monotone" dataKey="preTaxBalance" stackId="1" fill={SERIES.preTax} stroke={THEME.surface} strokeWidth={1} fillOpacity={0.72} name="Pre-Tax" />
-              <Area type="monotone" dataKey="rothBalance" stackId="1" fill={SERIES.roth} stroke={THEME.surface} strokeWidth={1} fillOpacity={0.72} name="Roth" />
-              <Area type="monotone" dataKey="brokerageBalance" stackId="1" fill={SERIES.brokerage} stroke={THEME.surface} strokeWidth={1} fillOpacity={0.72} name="Brokerage" />
-              <Area type="monotone" dataKey="netAssetValue" stackId="1" fill={SERIES.nonLiquid} stroke={THEME.surface} strokeWidth={1} fillOpacity={0.72} name="Non-Liquid Assets" />
+              <Area type="monotone" dataKey="preTaxBalance" stackId="1" fill={SERIES.preTax} stroke={SERIES.preTax} strokeWidth={1.5} fillOpacity={0.72} name="Pre-Tax" />
+              <Area type="monotone" dataKey="rothBalance" stackId="1" fill={SERIES.roth} stroke={SERIES.roth} strokeWidth={1.5} fillOpacity={0.72} name="Roth" />
+              <Area type="monotone" dataKey="brokerageBalance" stackId="1" fill={SERIES.brokerage} stroke={SERIES.brokerage} strokeWidth={1.5} fillOpacity={0.72} name="Brokerage" />
+              <Area type="monotone" dataKey="netAssetValue" stackId="1" fill={SERIES.nonLiquid} stroke={SERIES.nonLiquid} strokeWidth={1.5} fillOpacity={0.72} name="Non-Liquid Assets" />
               <Line type="monotone" dataKey="totalNetWorth" stroke={THEME.inkPrimary} strokeWidth={2} dot={false} name="Total Net Worth" />
               <ReferenceLine x={retirementAge} stroke="#ef4444" strokeDasharray="5 5" />
             </ComposedChart>

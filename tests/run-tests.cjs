@@ -9089,7 +9089,22 @@ section('P74 — the palette: colour-vision separation, re-derived rather than t
     for (let i2 = 0; i2 < L.length - 1; i2++) {
       ok(mode === 'dark' ? L[i2] < L[i2 + 1] : L[i2] > L[i2 + 1],
         `${mode}: the bracket ramp steps monotonically — it is a scale, not a set of categories`);
+      // Monotonic is not the same as DISTINGUISHABLE. The first version of this
+      // ramp satisfied the line above and still shipped four dashed lines a
+      // reader could not tell apart at 1px on a dark ground.
+      gt(Math.abs(L[i2 + 1] - L[i2]), 0.07,
+        `${mode}: bracket step ${i2 + 1}→${i2 + 2} is far enough apart to actually see`);
     }
+    gt(Math.abs(L[L.length - 1] - L[0]), 0.3,
+      `${mode}: the bracket ramp spans enough range end to end`);
+
+    // Every series colour has to differ from the surface, or a legend swatch
+    // painted with it is an invisible legend. This is exactly how the net-worth
+    // chart lost its swatches: the Area stroke was set to the surface colour to
+    // get a gap between bands, and Recharts draws the swatch from the stroke.
+    Object.entries(t.series).forEach(([k, v]) => {
+      gt(contrast(v, t.surface), 2.0, `${mode}: '${k}' is not the surface colour — a swatch drawn with it stays visible`);
+    });
   });
 
   // Every entity is defined in both modes, and the dark step is genuinely its
