@@ -2928,6 +2928,100 @@ const topMarginalBracket = (taxableIncome, filingStatus, yearsFromNow = 0, infla
   return rate;
 };
 
+// ── SEQUENCE-RISK-ADJUSTED SCORING ───────────────────────────────────────────
+// Ranking Roth strategies on after-tax legacy alone quietly rewards paying an
+// enormous tax bill in the first years of retirement, because on a smooth return
+// path that bill always pays for itself. Real return paths are not smooth, and
+// the first decade is the one that decides the plan: a large conversion tax
+// funded by portfolio withdrawals during a falling market sells assets cheap and
+// permanently removes the shares that would have carried the recovery. The
+// point-estimate legacy figure cannot see any of that.
+//
+// So the balanced score does not penalise early tax with a fudge factor. It runs
+// the same strategy through a bad early sequence and asks what actually happens.
+// A strategy that survives both paths is genuinely better than one that only
+// wins on the smooth one, and the difference between its two legacy figures IS
+// its sequence risk, measured rather than assumed.
+//
+// The sequence is the dot-com opening: three consecutive down years starting the
+// year of retirement, then recovery. It is the canonical early-retirement
+// disaster, it is a real path the market took, and it lands exactly where a
+// conversion programme would be at its most exposed.
+const SEQUENCE_RISK_RETURNS = [-0.091, -0.119, -0.221, 0.287, 0.109];
+
+// The window over which early tax is most dangerous. Ten years is the span the
+// sequence-of-returns literature treats as decisive, and it is long enough to
+// cover a typical bridge-year conversion programme.
+const SEQUENCE_RISK_YEARS = 10;
+
+// yearOverrides that replay a bad sequence starting at retirement, then hold the
+// plan's own assumptions. Indexed by yearsFromNow, matching computeProjections.
+const sequenceRiskOverrides = (pi, { horizonYears, returns = SEQUENCE_RISK_RETURNS } = {}) => {
+  const startOffset = Math.max(0, (pi.myRetirementAge || 0) - (pi.myAge || 0));
+  const n = Math.max(1, horizonYears || (getPlanningHorizonYears(pi) + 1));
+  const out = new Array(n).fill(null);
+  returns.forEach((r, i) => {
+    const slot = startOffset + i;
+    if (slot < n) out[slot] = { marketReturn: r, inflation: pi.inflationRate ?? 0.03 };
+  });
+  return out;
+};
+
+// Tax paid inside the sequence-risk window, and — the figure that actually
+// matters — how much of the retirement-date portfolio it consumed. A $200,000
+// tax bill is a rounding error against $5M and an emergency against $800k.
+const earlyTaxBurden = (proj, { retirementAge, years = SEQUENCE_RISK_YEARS } = {}) => {
+  if (!Array.isArray(proj) || proj.length === 0) return null;
+  const window = proj.filter(r => r.myAge >= retirementAge && r.myAge < retirementAge + years);
+  if (window.length === 0) return null;
+  const atRetirement = proj.find(r => r.myAge >= retirementAge);
+  const base = atRetirement ? (atRetirement.totalPortfolio || 0) : 0;
+  const tax = window.reduce((s, r) => s + (r.totalTax || 0), 0);
+  return {
+    years: window.length, tax: Math.round(tax),
+    portfolioAtRetirement: Math.round(base),
+    shareOfPortfolio: base > 0 ? tax / base : null,
+    // Conversions are the discretionary part — the tax a strategy CHOSE to pay
+    // early, as opposed to the tax it would have owed regardless.
+    converted: Math.round(window.reduce((s, r) => s + (r.rothConversion || 0), 0)),
+  };
+};
+
+// The blend. Legacy on the smooth path is weighted highest, as asked; legacy on
+// the bad path carries the rest and is what stops the ranking from rewarding a
+// strategy that only works if nothing goes wrong. A plan that cannot fund itself
+// under the stress is not merely scored lower — it is disqualified, because no
+// amount of legacy compensates for not being able to pay the bills.
+const balancedRothScore = ({ base, stressed, baseProj, stressedProj, pi,
+                             retirementAge, smoothWeight = 0.6 } = {}) => {
+  if (!base || !stressed) return null;
+  const w = Math.min(1, Math.max(0, smoothWeight));
+  const shortfall = planShortfall(stressedProj, { retirementAge });
+  const early = earlyTaxBurden(stressedProj, { retirementAge });
+  const blended = w * base.afterTaxLegacy + (1 - w) * stressed.afterTaxLegacy;
+  // The cost of the bad path, as a share of what the smooth path promised. This
+  // is the strategy's sequence risk, and it is the column worth reading.
+  const drawdown = base.afterTaxLegacy > 0
+    ? (base.afterTaxLegacy - stressed.afterTaxLegacy) / base.afterTaxLegacy : null;
+  return {
+    balancedScore: shortfall && shortfall.fails
+      // Ordered below every funded strategy, and among failures the one that
+      // falls shortest sorts highest — so the list stays meaningful even when
+      // nothing survives.
+      ? -1e12 + Math.max(-1e11, -shortfall.totalShortfall)
+      : blended,
+    blendedLegacy: Math.round(blended),
+    stressedLegacy: Math.round(stressed.afterTaxLegacy),
+    stressedFails: !!(shortfall && shortfall.fails),
+    stressedShortfall: shortfall ? Math.round(shortfall.totalShortfall) : 0,
+    sequenceDrawdown: drawdown,
+    earlyTax: early ? early.tax : null,
+    earlyTaxShare: early ? early.shareOfPortfolio : null,
+    earlyConverted: early ? early.converted : null,
+    smoothWeight: w,
+  };
+};
+
 // ── ROTH OPTIMIZER SCORING ───────────────────────────────────────────────────
 // Reduce a projection to the metrics the Roth Conversion Optimizer ranks by.
 // Lives in the engine (not the worker) so the test suite can exercise it.
@@ -8639,6 +8733,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     getSpendingPhaseMultiplier, scoreRothStrategy, rowAtOrLast,
     reindexSSForInflation, compareClaimingScenarios,
     conversionCostComponents, conversionCostAudit, topMarginalBracket,
+    SEQUENCE_RISK_RETURNS, SEQUENCE_RISK_YEARS, sequenceRiskOverrides,
+    earlyTaxBurden, balancedRothScore,
     calculateHealthcareExpenses, calculateRecurringExpenses,
     healthcareCostsModeled, HEALTHCARE_MODELS_UNPRICED,
 

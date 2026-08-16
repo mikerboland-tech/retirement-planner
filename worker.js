@@ -770,7 +770,16 @@ function runRothOptimizer(jobId, payload) {
   // Candidate windows: the smart-default window (retirement → RMDs-1), an
   // ACA-aware variant starting at 65 (skips the pre-65 subsidy years), and an
   // IRMAA-aware variant ending at 70 (before most Medicare/IRMAA exposure).
-  const starts = [...new Set([defWin.startAge, Math.max(65, defWin.startAge)])];
+  // Later starts matter for the balanced goal: deferring the programme past the
+  // most fragile years is the plan's only way to say "convert, but not while a
+  // bad sequence would be compounding the damage". Without these in the sweep
+  // the optimizer has no vocabulary for the trade-off it is being asked to make.
+  const starts = [...new Set([
+    defWin.startAge,
+    Math.max(65, defWin.startAge),
+    defWin.startAge + 3,
+    defWin.startAge + 5,
+  ])].filter(a => a <= defWin.endAge);
   const ends = [...new Set([defWin.endAge, Math.min(70, defWin.endAge)])];
   const windows = [];
   starts.forEach(s => ends.forEach(e => { if (e >= s) windows.push({ startAge: s, endAge: e }); }));
@@ -864,6 +873,17 @@ function runRothOptimizer(jobId, payload) {
   strategies.forEach((s, i) => {
     const proj = computeProjections(s.pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
     const score = E.scoreRothStrategy(proj, { legacyAge, retirementAge, heirTaxRate });
+    // The same strategy through a bad early sequence. Doubles the work and is
+    // worth it: a legacy figure from a smooth return path cannot tell you
+    // whether the strategy survives the decade that decides the plan.
+    const stressProj = computeProjections(s.pi, accounts, incomeStreams, assets,
+      oneTimeEvents, recurringExpenses, undefined,
+      { yearOverrides: E.sequenceRiskOverrides(personalInfo, { horizonYears: proj.length }) });
+    const stressScore = E.scoreRothStrategy(stressProj, { legacyAge, retirementAge, heirTaxRate });
+    const balanced = E.balancedRothScore({
+      base: score, stressed: stressScore, baseProj: proj, stressedProj: stressProj,
+      pi: personalInfo, retirementAge,
+    }) || {};
     const retired = proj.filter(p => p.myAge >= retirementAge);
     const convRows = retired.filter(p => (p.rothConversion || 0) > 0);
     const irmaaRows = retired.filter(p => (p.irmaaSurcharge || 0) > 0);
@@ -891,6 +911,7 @@ function runRothOptimizer(jobId, payload) {
       isCurrent: !!s.isCurrent,
       ...score,
       ...detail,
+      ...balanced,
     });
     postMessage({ jobId, type: 'progress', percent: Math.round(((i + 1) / strategies.length) * 100) });
   });

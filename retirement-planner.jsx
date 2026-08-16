@@ -3589,6 +3589,13 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
     legacy: { label: 'Maximize after-tax legacy', sort: (a, b) => b.afterTaxLegacy - a.afterTaxLegacy },
     taxes: { label: 'Minimize lifetime taxes', sort: (a, b) => a.lifetimeTax - b.lifetimeTax },
     irmaa: { label: 'Avoid IRMAA surcharges', sort: (a, b) => (a.lifetimeIRMAA - b.lifetimeIRMAA) || (b.afterTaxLegacy - a.afterTaxLegacy) },
+    // Legacy first, but only what survives a bad decade. Every candidate is run
+    // twice — the plan's own assumptions, and the dot-com opening starting the
+    // year of retirement — and scored on a 60/40 blend of the two legacy
+    // figures, with any strategy that cannot fund itself under the stress pushed
+    // below every one that can.
+    balanced: { label: 'Balanced — legacy that survives a bad decade',
+      sort: (a, b) => (b.balancedScore ?? -Infinity) - (a.balancedScore ?? -Infinity) },
   };
 
   const runOptimizer = () => {
@@ -3643,8 +3650,9 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
         <div>
           <h4 className="text-lg font-semibold text-slate-100 mb-1">Roth Conversion Optimizer</h4>
           <p className="text-xs text-slate-400 max-w-xl">
-            Sweeps bracket-fill targets and conversion windows (a full projection each — taxes, IRMAA, ACA,
-            RMDs all included), then ranks them against your goal. Apply the winner to make it your plan.
+            Sweeps bracket-fill targets, IRMAA-tier targets and conversion windows (a full projection each —
+            taxes, IRMAA, ACA, RMDs all included), then ranks them against your goal. The balanced goal runs
+            every candidate a second time through a bad opening decade. Apply the winner to make it your plan.
           </p>
         </div>
         <div className="flex items-end gap-2">
@@ -3671,6 +3679,36 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
 
       {optError && <p className="text-sm text-red-400 mb-2">{optError}</p>}
       {appliedLabel && <p className="text-sm text-emerald-400 mb-2">✓ Applied: {appliedLabel} — every tab now reflects this strategy.</p>}
+
+      {goal === 'balanced' && best && (
+        <div className="mb-3 p-3 bg-emerald-500/5 border border-emerald-500/30 rounded-lg">
+          <p className="text-xs text-slate-300 leading-relaxed">
+            <strong className="text-emerald-300">What this goal optimises.</strong> Every strategy is run
+            twice — once on your plan's own assumptions, once through a bad opening decade (three
+            consecutive down years starting the year you retire, the dot-com path). The score is 60% the
+            smooth-path legacy and 40% the bad-path legacy, and any strategy that cannot fund your spending
+            under the stress is pushed below every one that can, however good it looks on paper.
+          </p>
+          <p className="text-xs text-slate-400 leading-relaxed mt-2">
+            That is the honest way to price early conversion tax. A big bill in the first years is nearly
+            free on a smooth return path and expensive on a falling one, because the withdrawal that funds
+            it sells assets cheap and permanently removes the shares that would have carried the recovery.
+            {best.stressedFails === false && (
+              <> The winner still funds every year of the bad case
+              {best.earlyTaxShare !== null && <>, paying {(best.earlyTaxShare * 100).toFixed(0)}% of the
+              retirement-date portfolio in tax across the first decade</>}.</>
+            )}
+          </p>
+          <p className="text-xs text-slate-500 leading-relaxed mt-2">
+            Expect the <em>&ldquo;−% vs the smooth path&rdquo;</em> column to be large on every row,
+            including no-conversions: legacy is what is <em>left over</em> after decades of withdrawals, so
+            it magnifies an early loss far more than the portfolio itself does. That figure is for comparing
+            rows against each other, not for reading in isolation. The two signals that decide this ranking
+            are whether a strategy still funds your spending under the stress — several usually do not — and
+            how large its bad-case legacy is next to the others.
+          </p>
+        </div>
+      )}
 
       {/* Why the IRMAA ranking looks wrong when it is not, and what it costs. */}
       {goal === 'irmaa' && best && best.conversionYears > 0 && (() => {
@@ -3717,6 +3755,8 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
                 <th className="py-2 pr-3">After-Tax Legacy (vs none)</th>
                 <th className="py-2 pr-3">Lifetime Tax (vs none)</th>
                 <th className="py-2 pr-3">Lifetime IRMAA</th>
+                {goal === 'balanced' && <th className="py-2 pr-3">If the first decade is bad</th>}
+                {goal === 'balanced' && <th className="py-2 pr-3">Tax in the fragile years</th>}
                 {showACA && <th className="py-2 pr-3">ACA Subsidy Kept</th>}
                 <th className="py-2 pr-3"></th>
               </tr>
@@ -3760,6 +3800,34 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
                       </span>
                     )}
                   </td>
+                  {goal === 'balanced' && (
+                    <td className="py-2 pr-3">
+                      {r.stressedFails ? (
+                        <span className="text-red-400 font-semibold">
+                          Runs short {formatCurrency(r.stressedShortfall)}
+                        </span>
+                      ) : (
+                        <>
+                          <span className="text-slate-200">{formatCurrency(r.stressedLegacy)}</span>
+                          {r.sequenceDrawdown !== null && r.sequenceDrawdown !== undefined && (
+                            <span className={`block text-[10px] ${r.sequenceDrawdown > 0.25 ? 'text-amber-400' : 'text-slate-500'}`}>
+                              −{(r.sequenceDrawdown * 100).toFixed(0)}% vs the smooth path
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </td>
+                  )}
+                  {goal === 'balanced' && (
+                    <td className="py-2 pr-3">
+                      <span className="text-slate-300">{formatCurrency(r.earlyTax)}</span>
+                      {r.earlyTaxShare !== null && r.earlyTaxShare !== undefined && (
+                        <span className={`block text-[10px] ${r.earlyTaxShare > 0.2 ? 'text-amber-400' : 'text-slate-500'}`}>
+                          {(r.earlyTaxShare * 100).toFixed(0)}% of the portfolio at retirement
+                        </span>
+                      )}
+                    </td>
+                  )}
                   {showACA && <td className="py-2 pr-3 text-slate-300">{formatCurrency(r.lifetimeACASubsidy)}</td>}
                   <td className="py-2 pr-3">
                     <button onClick={() => applyStrategy(r)}

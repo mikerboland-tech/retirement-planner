@@ -8131,6 +8131,120 @@ section('P67 — the IRMAA ranking is right, and the reason has to be on screen'
   }
 }
 
+section('P68 — the balanced goal: legacy first, but only what survives a bad decade');
+{
+  // Ranking Roth strategies on after-tax legacy alone quietly rewards paying an
+  // enormous tax bill in the first years of retirement, because on a smooth
+  // return path that bill always pays for itself. The balanced goal answers that
+  // by running each strategy through a bad opening decade instead of applying a
+  // fudge factor to the early tax.
+  const { SEQUENCE_RISK_RETURNS, SEQUENCE_RISK_YEARS, sequenceRiskOverrides,
+          earlyTaxBurden, balancedRothScore, scoreRothStrategy,
+          withRothConversionTarget, withoutRothConversions } = engine;
+
+  const sc = baseScenario({
+    myAge: 60, spouseAge: 58, myBirthYear: TODAY_YEAR - 60, spouseBirthYear: TODAY_YEAR - 58,
+    myRetirementAge: 60, spouseRetirementAge: 60, legacyAge: 92,
+    state: 'Missouri', inflationRate: 0.025, desiredRetirementIncome: 140000,
+    withdrawalPriority: ['pretax', 'brokerage', 'roth'], heirTaxRate: 0.25,
+    rothConversionStartAge: 60, rothConversionEndAge: 74,
+    healthcareModel: 'none', medicalInflation: 0,
+  });
+  sc.accts = [
+    { id: 1, name: 'IRA', type: 'traditional_ira', balance: 2500000, contribution: 0, cagr: 0.06, startAge: 60, stopAge: 60, owner: 'me' },
+    { id: 2, name: 'Roth', type: 'roth_ira', balance: 250000, contribution: 0, cagr: 0.06, startAge: 60, stopAge: 60, owner: 'me' },
+    { id: 3, name: 'Brok', type: 'brokerage', balance: 800000, contribution: 0, cagr: 0.05, startAge: 60, stopAge: 60, owner: 'joint', costBasisPercent: 0.5 },
+  ];
+  sc.streams = [
+    { id: 1, name: 'My SS', type: 'social_security', amount: 48000, startAge: 67, endAge: 95, cola: 0.025, owner: 'me', todaysDollars: true, pia: 4000 },
+    { id: 2, name: 'Sp SS', type: 'social_security', amount: 26000, startAge: 67, endAge: 95, cola: 0.025, owner: 'spouse', todaysDollars: true, pia: 2200 },
+  ];
+  const opts = { legacyAge: 92, retirementAge: 60, heirTaxRate: 0.25 };
+  const evaluate = (p) => {
+    const base = computeProjections(p, sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+    const stress = computeProjections(p, sc.accts, sc.streams, [], [], [], TODAY_YEAR,
+      { yearOverrides: sequenceRiskOverrides(sc.pi, { horizonYears: base.length }) });
+    return { base, stress,
+      ...balancedRothScore({ base: scoreRothStrategy(base, opts), stressed: scoreRothStrategy(stress, opts),
+        baseProj: base, stressedProj: stress, pi: sc.pi, retirementAge: 60 }),
+      smoothLegacy: scoreRothStrategy(base, opts).afterTaxLegacy };
+  };
+
+  // ── The stress lands where it is supposed to ─────────────────────────────
+  {
+    const ov = sequenceRiskOverrides(sc.pi, { horizonYears: 40 });
+    eq(ov.filter(Boolean).length, SEQUENCE_RISK_RETURNS.length,
+      'exactly the sequence years are overridden, nothing else');
+    // Retirement is this year in this fixture, so the bad run starts at slot 0.
+    eq(ov[0].marketReturn, SEQUENCE_RISK_RETURNS[0], 'starting the year of retirement');
+    eq(ov[SEQUENCE_RISK_RETURNS.length], null, 'and the plan resumes its own assumptions afterwards');
+    lt(SEQUENCE_RISK_RETURNS[0], 0, 'the sequence really does open with losses');
+    lt(SEQUENCE_RISK_RETURNS[1], 0, 'three of them');
+    lt(SEQUENCE_RISK_RETURNS[2], 0, 'consecutively — which is what makes it the hard case');
+
+    // A later retirement pushes the whole sequence later.
+    const later = sequenceRiskOverrides({ ...sc.pi, myAge: 55, myRetirementAge: 65 }, { horizonYears: 40 });
+    eq(later[0], null, 'nothing happens before retirement');
+    eq(later[10].marketReturn, SEQUENCE_RISK_RETURNS[0], 'the shock starts at the retirement year, not year zero');
+  }
+
+  // ── The stress costs something, on every strategy ────────────────────────
+  {
+    const none = evaluate({ ...withoutRothConversions(sc.pi), rothConversionPreTaxFloor: 0 });
+    lt(none.stressedLegacy, none.smoothLegacy,
+      'a bad opening decade costs legacy even with no conversions at all');
+    gt(none.sequenceDrawdown, 0, 'which is why the drawdown column is large on every row');
+  }
+
+  // ── Aggressive strategies that look best on paper fail the stress ────────
+  // The whole point: "fill to 32%" and a $750k-MAGI target both post respectable
+  // smooth-path legacy and neither can fund the plan through a bad decade.
+  {
+    const aggressive = evaluate(withRothConversionTarget(sc.pi, { bracket: '32%', startAge: 60, endAge: 74 }));
+    const moderate = evaluate(withRothConversionTarget(sc.pi, { bracket: '24%', startAge: 60, endAge: 74 }));
+    eq(aggressive.stressedFails, true, 'the aggressive strategy runs short under the stress');
+    gt(aggressive.stressedShortfall, 0, 'by a measurable amount');
+    eq(moderate.stressedFails, false, 'while the moderate one still funds every year');
+    gt(moderate.balancedScore, aggressive.balancedScore,
+      'so the balanced score ranks the moderate one above it');
+    // And the disqualification is decisive, not a small deduction.
+    lt(aggressive.balancedScore, 0, 'a strategy that cannot fund the plan scores below everything funded');
+    gt(moderate.balancedScore, 0, 'and a funded one scores on its merits');
+  }
+
+  // ── Among funded strategies, legacy still leads ──────────────────────────
+  {
+    const a = evaluate(withRothConversionTarget(sc.pi, { bracket: '24%', startAge: 60, endAge: 74 }));
+    const b = evaluate(withRothConversionTarget(sc.pi, { bracket: '22%', startAge: 60, endAge: 74 }));
+    eq(a.stressedFails || b.stressedFails, false, 'both fund the plan under stress');
+    approx(a.balancedScore, 0.6 * a.smoothLegacy + 0.4 * a.stressedLegacy,
+      'the score is exactly the stated 60/40 blend', 1);
+    eq(a.smoothWeight, 0.6, 'and the weight is reported so it is not a hidden constant');
+  }
+
+  // ── Early tax is measured against the portfolio that has to absorb it ────
+  // A $200,000 bill is a rounding error against $5M and an emergency against
+  // $800k, so the share matters more than the amount.
+  {
+    const m = evaluate(withRothConversionTarget(sc.pi, { bracket: '24%', startAge: 60, endAge: 74 }));
+    const none = evaluate({ ...withoutRothConversions(sc.pi), rothConversionPreTaxFloor: 0 });
+    gt(m.earlyTax, none.earlyTax, 'converting raises the tax paid in the fragile years');
+    gt(m.earlyTaxShare, none.earlyTaxShare, 'and the share of the portfolio it consumes');
+    lt(m.earlyTaxShare, 1, 'while staying a fraction of it');
+    const burden = earlyTaxBurden(m.base, { retirementAge: 60 });
+    eq(burden.years, SEQUENCE_RISK_YEARS, 'the window is the documented ten years');
+    approx(burden.shareOfPortfolio, burden.tax / burden.portfolioAtRetirement,
+      'and the share is the tax over the retirement-date portfolio, nothing cleverer', 1e-9);
+  }
+
+  // ── Degenerate inputs ────────────────────────────────────────────────────
+  {
+    eq(balancedRothScore({}), null, 'no scores, no blend');
+    eq(earlyTaxBurden(null, { retirementAge: 60 }), null, 'no projection, no burden');
+    eq(earlyTaxBurden([], { retirementAge: 60 }), null, 'nor an empty one');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
