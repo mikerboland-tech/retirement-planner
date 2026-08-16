@@ -5086,6 +5086,69 @@ const taxFieldsFromReturn = (ret) => {
 // the whole answer. The full range is returned alongside it, because a plan
 // spanning 10% to 32% is a materially different decision from one pinned at 22%
 // even when the medians agree.
+// ── WHAT A DEFERRED DOLLAR ACTUALLY COSTS WHEN IT COMES OUT ──────────────────
+// projectedWithdrawalRate below answers a narrower question than its callers
+// think: it returns the FEDERAL ORDINARY BRACKET and nothing else. No state, no
+// Social Security torpedo, no IRMAA, no NIIT.
+//
+// That is fine for labelling a year "the 22% bracket". It is wrong the moment
+// the figure is compared against a marginal cost measured all-in, because the
+// two are not the same instrument — and the traditional-vs-Roth panel did
+// exactly that, putting an all-in 25.9% today against a bracket-only 22.0%
+// later and reporting the 3.9-point difference as a reason to defer. On a plan
+// in Alabama the entire gap WAS the state tax the later figure had dropped.
+// Same instrument on both sides, the honest answer was a dead tie.
+//
+// This measures the later side with the same tool as the earlier side. It also
+// separates the two things a single median hides:
+//
+//   the smooth rate   what the next dollar costs in an ordinary year
+//   the cliff years   years where that dollar also trips an IRMAA edge, which
+//                     is not a rate at all — it is a step, and folding a 553%
+//                     year into an average produces a number describing no year
+//                     that actually happens
+const projectedWithdrawalCost = (projections, pi = {}, opts = {}) => {
+  const retireAge = opts.retirementAge ?? pi.myRetirementAge ?? 65;
+  const probe = opts.probe || 1000;
+  const rows = (projections || []).filter(p => p && p.myAge >= retireAge);
+  const measured = rows
+    .map(r => ({ age: r.myAge, m: marginalCostOfNextDollar({ row: r, pi, probe }) }))
+    .filter(x => x.m);
+  if (!measured.length) return null;
+
+  const cliffs = measured.filter(x => x.m.detail.crossedIrmaaEdge);
+  const smooth = measured.filter(x => !x.m.detail.crossedIrmaaEdge);
+  // If every year is a cliff year there is nothing smooth to report; fall back
+  // rather than returning null, since the caller still needs a number.
+  const pool = smooth.length ? smooth : measured;
+  const med = (get) => {
+    const v = pool.map(get).sort((a, b) => a - b);
+    return v[Math.floor(v.length / 2)];
+  };
+  const rates = pool.map(x => x.m.rate).sort((a, b) => a - b);
+
+  return {
+    rate: med(x => x.m.rate),
+    low: rates[0],
+    high: rates[rates.length - 1],
+    sample: pool.length,
+    // Named so the panel can show WHY the figure is not simply the bracket.
+    components: {
+      federal: med(x => x.m.federalRate),
+      state: med(x => x.m.stateRate),
+      ssTorpedo: med(x => x.m.ratePoints.ssTorpedo),
+      deductionPhaseout: med(x => x.m.ratePoints.deductionPhaseout),
+      preferential: med(x => x.m.ratePoints.preferential),
+    },
+    // Reported, never averaged in.
+    cliffYears: cliffs.length,
+    cliffAges: cliffs.map(x => x.age),
+    // The plain bracket, kept so a reader comparing this against a bracket
+    // label elsewhere can see both and know which is which.
+    bracketOnly: projectedWithdrawalRate(projections, pi).rate,
+  };
+};
+
 const projectedWithdrawalRate = (projections, pi = {}) => {
   const retireAge = pi.myRetirementAge || 65;
   const rows = (projections || []).filter(p => p && p.myAge >= retireAge);
@@ -6625,7 +6688,18 @@ const deferralDecision = (ctx, opts2 = {}) => {
   const baseline = converting
     ? run(withoutRothConversions(pi))
     : current;
-  const later = projectedWithdrawalRate(baseline, pi);
+  // Measured with the SAME instrument as the near side. rateNow is an all-in
+  // marginal cost — federal, state, the Social Security torpedo, IRMAA — so the
+  // later side has to be too. It used to be projectedWithdrawalRate, which is
+  // the federal ordinary bracket and nothing else, and the comparison silently
+  // dropped every non-federal cost from one side of it. On a plan in Alabama
+  // that put an all-in 25.9% today against a bracket-only 22.0% later and
+  // reported the 3.9-point difference as a reason to defer — when the entire
+  // gap was the state tax the later figure had thrown away.
+  const laterCost = projectedWithdrawalCost(baseline, pi, { retirementAge: retireAge });
+  const later = laterCost
+    ? { rate: laterCost.rate, low: laterCost.low, high: laterCost.high, sample: laterCost.sample }
+    : projectedWithdrawalRate(baseline, pi);
 
   // ── The year-by-year comparison ────────────────────────────────────────
   // rateNow uses a NEGATIVE probe: the question is what removing a dollar of
@@ -6701,6 +6775,10 @@ const deferralDecision = (ctx, opts2 = {}) => {
     retireAge,
     workingYears: years.length,
     rateLater: later,
+    // The decomposition of the later rate, so a reader who expected the bracket
+    // number can see the difference rather than concluding one of the two
+    // screens is broken.
+    rateLaterDetail: laterCost,
     // Whether the "later" rate came from a no-conversion baseline rather than
     // from the plan as configured. Shown, because a reader comparing this
     // figure against the conversion tables will otherwise think one is wrong.
@@ -9652,6 +9730,7 @@ const describePlanPatch = (state, patch) => {
     computeTaxReturn, marginalRateOn,
     PAY_PERIODS_PER_YEAR, payPeriodsElapsed, projectPayrollYearEnd,
     buildTaxSituation, compareTraditionalVsRoth, projectedWithdrawalRate,
+    projectedWithdrawalCost,
     detailedCurrentYearDecision, taxFieldsFromReturn,
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
     SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,

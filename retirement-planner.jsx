@@ -5389,15 +5389,66 @@ function DeferralDecisionPanel({ personalInfo, accounts, incomeStreams, assets, 
                 </LineChart>
               </ResponsiveContainer>
               <p className="text-[11px] text-slate-500 mt-1">
-                Amber above blue means traditional; below means Roth. The later rate is the median marginal
-                bracket across your retirement years ({pct(result.rateLater.low)}–{pct(result.rateLater.high)} across
-                the whole range), so treat a gap of a point or two as a tie.
+                Amber above blue means traditional; below means Roth. Both lines are the same measurement —
+                the ALL-IN cost of a dollar, not just its tax bracket — so they can be compared directly.
+                The later figure is the median across your retirement years
+                ({pct(result.rateLater.low)}–{pct(result.rateLater.high)} across the whole range), so treat a
+                gap of a point or two as a tie.
                 {result.rateLaterFromBaseline && (
                   <> It is measured on your plan <em>without</em> conversions on purpose: with them, your pre-tax
                   balance is gone by the mid-60s and the later rate collapses — not because those dollars were
                   cheap, but because the conversion already paid the tax. Comparing a deferral against that
                   number would flatter traditional with a bill you have already booked elsewhere.</>
                 )}
+              </p>
+            </div>
+          )}
+
+          {/* ── Why the later rate is not the bracket ───────────────────
+              A reader who has just looked at the bracket-fill tables will
+              recognise "22%" and not this number. Naming the difference is the
+              whole job: the panel used to show the bracket here, against an
+              all-in rate on the other side, and reported the gap between two
+              different instruments as a reason to defer. */}
+          {result.rateLaterDetail && (
+            <div className="bg-slate-900/60 border border-slate-700/50 rounded-lg p-4">
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-3">
+                What the {pct(result.rateLater.rate)} later is made of
+              </div>
+              <div className="flex flex-wrap gap-x-8 gap-y-2 text-sm">
+                {[['Federal bracket', result.rateLaterDetail.components.federal],
+                  ['State', result.rateLaterDetail.components.state],
+                  ['Social Security dragged into tax', result.rateLaterDetail.components.ssTorpedo],
+                  ['Deduction phase-out', result.rateLaterDetail.components.deductionPhaseout]]
+                  .filter(([, v]) => Math.abs(v) > 0.0005)
+                  .map(([label, v]) => (
+                    <div key={label}>
+                      <div className="text-xs text-slate-500">{label}</div>
+                      <div className="text-slate-200 font-semibold">{pct(v)}</div>
+                    </div>
+                  ))}
+              </div>
+              <p className="text-xs text-slate-400 mt-3">
+                Your tax-bracket tables show <strong>{pct(result.rateLaterDetail.bracketOnly)}</strong> for these
+                years. That is the federal ordinary bracket alone; this is what the dollar actually costs once
+                state tax and the other effects are counted. Both are correct — they answer different questions,
+                and only the all-in one can be compared against what a deferral saves you today.
+              </p>
+              {result.rateLaterDetail.cliffYears > 0 && (
+                <p className="text-xs text-amber-400/90 mt-2">
+                  Separately, in {result.rateLaterDetail.cliffYears} of those years
+                  (age {result.rateLaterDetail.cliffAges.slice(0, 6).join(', ')}
+                  {result.rateLaterDetail.cliffAges.length > 6 ? '…' : ''}) the next dollar also trips an IRMAA
+                  edge. That is a step, not a rate, so it is reported here rather than averaged into the figure
+                  above — folding a 500%+ year into a median produces a number describing no year that actually
+                  happens.
+                </p>
+              )}
+              <p className="text-xs text-slate-500 mt-2">
+                This is also not the same as the "cost per $ converted" in the conversion simulator. That is the
+                AVERAGE cost of moving a large block through several brackets at once; this is the MARGINAL cost
+                of one more dollar. The conversion figure is higher for the same reason a bracket-fill is: it
+                includes everything below the top slice.
               </p>
             </div>
           )}
@@ -5422,7 +5473,9 @@ function DeferralDecisionPanel({ personalInfo, accounts, incomeStreams, assets, 
                     <td className="py-1.5 px-2 text-right text-amber-400">{pct(y.rateNow)}</td>
                     <td className="py-1.5 px-2 text-right text-sky-400">{pct(y.rateLater)}</td>
                     <td className={`py-1.5 px-2 text-right ${y.gap > 0 ? 'text-emerald-400' : y.gap < 0 ? 'text-red-400' : 'text-slate-400'}`}>
-                      {y.gap > 0 ? '+' : ''}{(y.gap * 100).toFixed(1)}
+                      {/* A gap of −0.0001 renders as "-0.0", which reads as a
+                          direction the figure does not actually have. */}
+                      {Math.abs(y.gap) < 0.0005 ? '0.0' : `${y.gap > 0 ? '+' : ''}${(y.gap * 100).toFixed(1)}`}
                     </td>
                     <td className="py-1.5 px-2">
                       <span className={

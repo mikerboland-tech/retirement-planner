@@ -8989,6 +8989,50 @@ section('P73 — traditional or Roth, in the years you are still working');
     d.years.forEach(y => eq(y.rateLater, d.rateLater.rate, 'every row compares against the same later rate'));
   }
 
+  // ── Both sides of the comparison use the SAME instrument ───────────────
+  // The near side is an all-in marginal cost — federal, state, the Social
+  // Security torpedo, IRMAA. The far side used to be projectedWithdrawalRate,
+  // which is the federal ordinary bracket and nothing else, so every non-federal
+  // cost was silently dropped from one side of the comparison. On a real plan in
+  // Alabama that put an all-in 25.9% today against a bracket-only 22.0% later
+  // and called the 3.9-point difference a reason to defer — when the whole gap
+  // was the state tax the later figure had thrown away. Same instrument, the
+  // honest answer was a dead tie.
+  {
+    const ctx = working({ state: 'Alabama' });
+    const d = deferralDecision(ctx);
+    ok(d.rateLaterDetail, 'the later rate reports its decomposition');
+    const c = d.rateLaterDetail.components;
+    gt(c.state, 0, 'a state with an income tax contributes to the cost of a later withdrawal');
+    gt(d.rateLater.rate, d.rateLaterDetail.bracketOnly,
+      'so the all-in later rate exceeds the federal bracket alone');
+    approx(d.rateLater.rate, c.federal + c.state + c.ssTorpedo + c.deductionPhaseout + c.preferential,
+      'and the named components account for it', 0.02);
+    eq(d.rateLater.rate, d.rateLaterDetail.rate, 'the panel and the detail report the same number');
+
+    // A no-income-tax state is the control: there the two measures should agree,
+    // which is what makes the Alabama gap attributable rather than incidental.
+    const fl = deferralDecision(working({ state: 'Florida' }));
+    approx(fl.rateLater.rate, fl.rateLaterDetail.bracketOnly,
+      'with no state income tax the all-in rate collapses back to the bracket', 0.02);
+    eq(fl.rateLaterDetail.components.state, 0, 'and the state component is zero');
+  }
+
+  // ── An IRMAA crossing is a step, not a rate ────────────────────────────
+  // A year where the next dollar trips an IRMAA edge can measure 500%+. Folding
+  // that into a median produces a number describing no year that happens, so
+  // those years are counted and named rather than averaged in.
+  {
+    const ctx = working({ myRetirementAge: 60, desiredRetirementIncome: 220000 });
+    const proj = computeProjections(ctx.pi, ctx.accts, ctx.streams, [], [], [], TODAY_YEAR);
+    const cost = engine.projectedWithdrawalCost(proj, ctx.pi, { retirementAge: 60 });
+    ok(cost, 'the cost is measurable');
+    eq(cost.cliffYears, cost.cliffAges.length, 'the cliff count and the ages agree');
+    lt(cost.rate, 1.0, 'the headline rate is a rate, not a cliff');
+    ok(cost.rate >= cost.low && cost.rate <= cost.high, 'and it sits inside its own reported range');
+    eq(engine.projectedWithdrawalCost([], ctx.pi), null, 'an empty projection has no measurable cost');
+  }
+
   // ── Converting while still working ──────────────────────────────────────
   {
     const ctx = working();
