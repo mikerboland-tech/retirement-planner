@@ -8694,6 +8694,385 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   return years;
 }
 
+// ── AI-PROPOSED PLAN EDITS ───────────────────────────────────────────────────
+// An assistant that can change the plan has to be a PROPOSER, not an editor.
+// The model emits a patch; this module decides whether the patch is even
+// expressible against the plan's real shape, and the caller re-runs
+// computeProjections on the PROPOSED state so the reader sees the consequence
+// before accepting it. The model never touches storage, never runs the engine,
+// and cannot invent a field.
+//
+// That split is the whole design. The engine stays the single source of truth
+// — the README's governing rule — and a hallucinated number can be wrong but
+// never silent: it shows up in the diff as a before → after pair, priced by the
+// same projection that prices every other change.
+//
+// Scalar fields are type-checked against the CURRENT value in the plan rather
+// than a hardcoded field list, so a field added to personalInfo next month is
+// editable without touching this table — and a key that is NOT already in the
+// plan is rejected, which is what stops an invented `inflationRatePercent` from
+// becoming a real (and permanently ignored) field.
+
+// Whole-plan keys the model may never reach, whatever it asks for. Anything
+// that governs how the file is read rather than what the plan says.
+const PLAN_PATCH_FORBIDDEN = new Set(['schemaVersion', 'version', 'exportDate', 'scenarios', 'id']);
+
+// Every rate in this plan is a DECIMAL FRACTION — 0.03 means 3% — with exactly
+// one exception. charitableGivingPercent is whole percent, because the engine
+// divides it by 100. That inconsistency is real, and it is the single likeliest
+// thing for a language model to get wrong by a factor of 100, so it is stated
+// here rather than left to be inferred from a field name.
+const PLAN_FIELD_NOTES = {
+  'personalInfo.charitableGivingPercent': 'WHOLE PERCENT (5 means 5%), unlike every other rate in this plan',
+  'personalInfo.inflationRate': 'decimal fraction: 0.03 = 3%',
+  'personalInfo.heirTaxRate': 'decimal fraction',
+  'personalInfo.medicalInflation': 'decimal fraction',
+  'personalInfo.withdrawalPriority': "order to draw down: any permutation of ['pretax','brokerage','roth']",
+  'personalInfo.rothConversionIrmaaTier': 'integer tier index, or null for "not this mode"',
+  'personalInfo.rothConversionBracket': "'', '22%', '24%' or '32%'",
+};
+
+const WITHDRAWAL_BUCKETS = ['pretax', 'brokerage', 'roth'];
+
+// Collections need an explicit field list: a NEW row has no current value to
+// infer a type from.
+const PLAN_COLLECTIONS = {
+  accounts: {
+    label: 'account',
+    required: ['name', 'type', 'balance'],
+    fields: {
+      name: { type: 'string' },
+      type: { type: 'enum', values: ['401k', 'roth_401k', '403b', 'roth_403b', 'roth_ira', 'traditional_ira', 'brokerage', '457b', 'roth_457b', 'hsa'] },
+      balance: { type: 'number', min: 0, unit: 'dollars' },
+      contributionMode: { type: 'enum', values: ['fixed', 'percent'] },
+      contribution: { type: 'number', min: 0, unit: 'dollars/yr', note: "fixed mode only" },
+      contributionGrowth: { type: 'number', unit: 'rate', note: 'fixed mode only; ignored in percent mode' },
+      employeePercent: { type: 'number', unit: 'rate', note: "percent mode only: 0.08 = 8% of the owner's salary" },
+      employerMatchPercent: { type: 'number', unit: 'rate', note: 'percent mode only' },
+      cagr: { type: 'number', unit: 'rate' },
+      startAge: { type: 'number', unit: 'age' },
+      stopAge: { type: 'number', unit: 'age', note: 'exclusive — contributions stop the year this age is reached' },
+      owner: { type: 'enum', values: ['me', 'spouse', 'joint'] },
+      contributor: { type: 'enum', values: ['me', 'spouse'] },
+      costBasisPercent: { type: 'number', unit: 'rate', note: 'brokerage only' },
+    },
+  },
+  incomeStreams: {
+    label: 'income stream',
+    required: ['name', 'type', 'amount'],
+    fields: {
+      name: { type: 'string' },
+      type: { type: 'enum', values: ['earned_income', 'social_security', 'pension', 'business', 'rental', 'annuity', 'other'] },
+      amount: { type: 'number', min: 0, unit: 'dollars/yr' },
+      startAge: { type: 'number', unit: 'age' },
+      endAge: { type: 'number', unit: 'age', note: 'INCLUSIVE — the stream still pays in this year' },
+      cola: { type: 'number', unit: 'rate' },
+      owner: { type: 'enum', values: ['me', 'spouse', 'joint'], note: "'joint' survives the death of either spouse" },
+      pia: { type: 'number', min: 0, unit: 'dollars/mo', note: 'social_security only: primary insurance amount, MONTHLY' },
+      todaysDollars: { type: 'boolean', note: "true when `amount` is quoted in today's dollars (how SSA states it)" },
+      taxable: { type: 'boolean' },
+      survivorBenefitPercent: { type: 'number', unit: 'rate', note: 'pension only' },
+      survivorBenefitAmount: { type: 'number', min: 0, unit: 'dollars/yr', note: 'pension only: flat survivor election' },
+    },
+  },
+  assets: {
+    label: 'asset',
+    required: ['name', 'type', 'value'],
+    fields: {
+      name: { type: 'string' },
+      type: { type: 'enum', values: ['real_estate', 'business', 'vehicle', 'collectibles', 'other'] },
+      value: { type: 'number', min: 0, unit: 'dollars' },
+      appreciationRate: { type: 'number', unit: 'rate' },
+      mortgage: { type: 'number', min: 0, unit: 'dollars' },
+      mortgagePayoffAge: { type: 'number', unit: 'age', nullable: true },
+      costBasis: { type: 'number', min: 0, unit: 'dollars' },
+      saleAge: { type: 'number', unit: 'age', nullable: true },
+    },
+  },
+  oneTimeEvents: {
+    label: 'one-time event',
+    required: ['name', 'type', 'amount', 'age'],
+    fields: {
+      name: { type: 'string' },
+      type: { type: 'enum', values: ['expense', 'taxable_income', 'nontaxable_income'] },
+      amount: { type: 'number', min: 0, unit: 'dollars' },
+      age: { type: 'number', unit: 'age', note: "the OWNER's age in the year it happens" },
+      owner: { type: 'enum', values: ['me', 'spouse'] },
+      inflationAdjusted: { type: 'boolean' },
+    },
+  },
+  recurringExpenses: {
+    label: 'recurring expense',
+    required: ['name', 'amount'],
+    fields: {
+      name: { type: 'string' },
+      category: { type: 'enum', values: ['housing', 'healthcare', 'transportation', 'travel', 'education', 'insurance', 'caregiving', 'debt_payment', 'long_term_care', 'other'] },
+      amount: { type: 'number', min: 0, unit: 'dollars/yr' },
+      startAge: { type: 'number', unit: 'age' },
+      endAge: { type: 'number', unit: 'age' },
+      inflationRate: { type: 'number', unit: 'rate' },
+      owner: { type: 'enum', values: ['me', 'spouse'] },
+    },
+  },
+};
+
+// The machine-readable contract handed to the model. Built from the live plan
+// so the field list and the CURRENT values are one document — the model is
+// told what it may change and what the value is now, which is most of what
+// keeps it from proposing a no-op or a wrong-magnitude edit.
+const planPatchSchema = (state = {}) => {
+  const pi = state.personalInfo || {};
+  const scalars = {};
+  Object.keys(pi).sort().forEach(k => {
+    if (PLAN_PATCH_FORBIDDEN.has(k)) return;
+    const v = pi[k];
+    scalars[k] = {
+      type: Array.isArray(v) ? 'array' : (v === null ? 'number|string|null' : typeof v),
+      current: v,
+      ...(PLAN_FIELD_NOTES[`personalInfo.${k}`] ? { note: PLAN_FIELD_NOTES[`personalInfo.${k}`] } : {}),
+    };
+  });
+  const collections = {};
+  Object.entries(PLAN_COLLECTIONS).forEach(([key, spec]) => {
+    collections[key] = {
+      label: spec.label,
+      requiredOnAdd: spec.required,
+      fields: spec.fields,
+      currentRows: (state[key] || []).map(r => ({ id: r.id, name: r.name, type: r.type })),
+    };
+  });
+  return { personalInfo: scalars, collections };
+};
+
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+// Check one value against one field spec. Returns an error string or null.
+const checkFieldValue = (value, spec, path) => {
+  if (spec.nullable && value === null) return null;
+  switch (spec.type) {
+    case 'string':
+      if (typeof value !== 'string') return `${path} must be a string`;
+      if (!value.trim()) return `${path} must not be empty`;
+      if (value.length > 120) return `${path} is too long (max 120 characters)`;
+      return null;
+    case 'boolean':
+      return typeof value === 'boolean' ? null : `${path} must be true or false`;
+    case 'enum':
+      return spec.values.includes(value) ? null
+        : `${path} must be one of: ${spec.values.join(', ')}`;
+    case 'number':
+      if (typeof value !== 'number' || !Number.isFinite(value)) return `${path} must be a finite number`;
+      if (spec.min !== undefined && value < spec.min) return `${path} must be at least ${spec.min}`;
+      if (spec.max !== undefined && value > spec.max) return `${path} must be at most ${spec.max}`;
+      return null;
+    default:
+      return `${path} has no validation rule`;
+  }
+};
+
+// A value that is probably off by 100x. Not an error — the diff shows the
+// before and after, and a human decides — but worth saying out loud, because
+// "inflationRate: 0.03 → 7" and "inflationRate: 0.03 → 0.07" look equally
+// plausible in a sentence and completely different in a projection.
+const magnitudeWarning = (path, before, after) => {
+  if (typeof before !== 'number' || typeof after !== 'number') return null;
+  if (before > 0 && before < 1 && Math.abs(after) >= 1) {
+    return `${path} is currently ${before} (a decimal fraction); ${after} would be ${after * 100}× larger — did you mean ${after / 100}?`;
+  }
+  return null;
+};
+
+// Validate a whole patch against a plan state. Never mutates; never throws.
+// Returns every op with its own verdict so a partly-bad patch can still show
+// the reader what the good half would do.
+const validatePlanPatch = (state, patch) => {
+  const ops = Array.isArray(patch) ? patch : (patch && Array.isArray(patch.ops) ? patch.ops : null);
+  if (!ops) return { ok: false, ops: [], errors: ['The patch must be a list of operations.'] };
+  if (ops.length === 0) return { ok: false, ops: [], errors: ['The patch contains no operations.'] };
+  if (ops.length > 40) return { ok: false, ops: [], errors: [`The patch has ${ops.length} operations; 40 is the limit.`] };
+
+  const results = ops.map((raw, index) => {
+    const out = { index, op: raw && raw.op, target: raw && raw.target, raw, valid: false, error: null, warnings: [] };
+    if (!isPlainObject(raw)) { out.error = 'Operation must be an object.'; return out; }
+    const { op, target } = raw;
+
+    if (op === 'set') {
+      if (target !== 'personalInfo') {
+        out.error = `'set' only applies to personalInfo; use add/update/remove for ${target}.`;
+        return out;
+      }
+      const field = raw.field;
+      if (typeof field !== 'string' || !field) { out.error = 'set requires a field name.'; return out; }
+      if (PLAN_PATCH_FORBIDDEN.has(field)) { out.error = `${field} cannot be changed.`; return out; }
+      const pi = state.personalInfo || {};
+      if (!Object.prototype.hasOwnProperty.call(pi, field)) {
+        out.error = `personalInfo has no field '${field}'.`;
+        return out;
+      }
+      const before = pi[field];
+      const after = raw.value;
+      // withdrawalPriority is the one array; it must stay a permutation.
+      if (field === 'withdrawalPriority') {
+        if (!Array.isArray(after) || after.length !== WITHDRAWAL_BUCKETS.length
+            || WITHDRAWAL_BUCKETS.some(b => !after.includes(b))) {
+          out.error = `withdrawalPriority must be a permutation of ${JSON.stringify(WITHDRAWAL_BUCKETS)}.`;
+          return out;
+        }
+      } else if (before === null) {
+        if (after !== null && typeof after !== 'number' && typeof after !== 'string') {
+          out.error = `personalInfo.${field} must be a number, a string, or null.`;
+          return out;
+        }
+      } else if (typeof after !== typeof before) {
+        out.error = `personalInfo.${field} is a ${typeof before}; got ${after === null ? 'null' : typeof after}.`;
+        return out;
+      } else if (typeof after === 'number' && !Number.isFinite(after)) {
+        out.error = `personalInfo.${field} must be a finite number.`;
+        return out;
+      }
+      const warn = magnitudeWarning(`personalInfo.${field}`, before, after);
+      if (warn) out.warnings.push(warn);
+      out.field = field;
+      out.before = before;
+      out.after = after;
+      out.valid = true;
+      return out;
+    }
+
+    const spec = PLAN_COLLECTIONS[target];
+    if (!spec) {
+      out.error = `Unknown target '${target}'. Valid targets: personalInfo, ${Object.keys(PLAN_COLLECTIONS).join(', ')}.`;
+      return out;
+    }
+    const rows = Array.isArray(state[target]) ? state[target] : [];
+
+    if (op === 'remove') {
+      const row = rows.find(r => r && r.id === raw.id);
+      if (!row) { out.error = `No ${spec.label} with id ${JSON.stringify(raw.id)}.`; return out; }
+      out.row = row;
+      out.valid = true;
+      return out;
+    }
+
+    if (op !== 'add' && op !== 'update') {
+      out.error = `Unknown operation '${op}'. Valid: set, add, update, remove.`;
+      return out;
+    }
+
+    const values = raw.values;
+    if (!isPlainObject(values)) { out.error = `${op} requires a 'values' object.`; return out; }
+
+    let row = null;
+    if (op === 'update') {
+      row = rows.find(r => r && r.id === raw.id);
+      if (!row) { out.error = `No ${spec.label} with id ${JSON.stringify(raw.id)}.`; return out; }
+    }
+
+    const cleaned = {};
+    for (const [field, value] of Object.entries(values)) {
+      if (field === 'id') { out.error = 'id is assigned by the app and cannot be set.'; return out; }
+      const fspec = spec.fields[field];
+      if (!fspec) {
+        out.error = `${spec.label} has no field '${field}'. Valid: ${Object.keys(spec.fields).join(', ')}.`;
+        return out;
+      }
+      const err = checkFieldValue(value, fspec, `${target}.${field}`);
+      if (err) { out.error = err; return out; }
+      if (op === 'update') {
+        const warn = magnitudeWarning(`${spec.label} ${row.name || raw.id}: ${field}`, row[field], value);
+        if (warn) out.warnings.push(warn);
+      }
+      cleaned[field] = value;
+    }
+
+    if (op === 'add') {
+      const missing = spec.required.filter(f => cleaned[f] === undefined);
+      if (missing.length) {
+        out.error = `A new ${spec.label} needs ${missing.join(', ')}.`;
+        return out;
+      }
+    } else if (Object.keys(cleaned).length === 0) {
+      out.error = `update changes nothing.`;
+      return out;
+    }
+
+    out.values = cleaned;
+    out.row = row;
+    out.valid = true;
+    return out;
+  });
+
+  return {
+    ok: results.every(r => r.valid),
+    ops: results,
+    errors: results.filter(r => !r.valid).map(r => `Operation ${r.index + 1}: ${r.error}`),
+  };
+};
+
+// Apply the VALID operations of a patch to a plan state, returning a new state.
+// Invalid ones are skipped rather than throwing: the caller has already shown
+// the reader which ones failed and why, and half a reviewed change is better
+// than an exception in a render.
+const applyPlanPatch = (state, patch, { nextId } = {}) => {
+  const verdict = validatePlanPatch(state, patch);
+  const next = { ...state, personalInfo: { ...(state.personalInfo || {}) } };
+  Object.keys(PLAN_COLLECTIONS).forEach(k => {
+    next[k] = Array.isArray(state[k]) ? state[k].slice() : [];
+  });
+
+  // Ids must be unique across the whole patch, not just against the plan —
+  // two adds in one patch that both read `max + 1` would collide, and the
+  // second row would then be un-editable because every lookup finds the first.
+  let seed = 0;
+  Object.keys(PLAN_COLLECTIONS).forEach(k => {
+    next[k].forEach(r => { if (r && Number.isFinite(r.id) && r.id > seed) seed = r.id; });
+  });
+  const mintId = nextId || (() => { seed += 1; return seed; });
+
+  const applied = [];
+  verdict.ops.forEach(o => {
+    if (!o.valid) return;
+    if (o.op === 'set') {
+      next.personalInfo[o.field] = o.after;
+    } else if (o.op === 'add') {
+      next[o.target] = next[o.target].concat([{ id: mintId(), ...o.values }]);
+    } else if (o.op === 'update') {
+      next[o.target] = next[o.target].map(r => (r && r.id === o.raw.id) ? { ...r, ...o.values } : r);
+    } else if (o.op === 'remove') {
+      next[o.target] = next[o.target].filter(r => !(r && r.id === o.raw.id));
+    }
+    applied.push(o);
+  });
+
+  return { state: next, applied, skipped: verdict.ops.filter(o => !o.valid), ok: verdict.ok };
+};
+
+// One human sentence per operation, for the review panel. The reader approves
+// this text, not the JSON — so it has to say what actually changes, including
+// the old value, rather than restating the model's own description of it.
+const describePlanPatch = (state, patch) => {
+  const verdict = validatePlanPatch(state, patch);
+  return verdict.ops.map(o => {
+    const reason = isPlainObject(o.raw) && typeof o.raw.reason === 'string' ? o.raw.reason : null;
+    if (!o.valid) return { ...o, summary: `Rejected: ${o.error}`, reason };
+    if (o.op === 'set') {
+      return { ...o, reason, summary: `${o.field}: ${JSON.stringify(o.before)} → ${JSON.stringify(o.after)}` };
+    }
+    const spec = PLAN_COLLECTIONS[o.target];
+    if (o.op === 'add') {
+      return { ...o, reason, summary: `Add ${spec.label} “${o.values.name}” (${Object.entries(o.values)
+        .filter(([k]) => k !== 'name').map(([k, v]) => `${k} ${JSON.stringify(v)}`).join(', ')})` };
+    }
+    if (o.op === 'remove') {
+      return { ...o, reason, summary: `Remove ${spec.label} “${o.row.name || o.raw.id}”` };
+    }
+    const changes = Object.entries(o.values)
+      .map(([k, v]) => `${k}: ${JSON.stringify(o.row[k])} → ${JSON.stringify(v)}`)
+      .join(', ');
+    return { ...o, reason, summary: `${spec.label} “${o.row.name || o.raw.id}” — ${changes}` };
+  });
+};
+
   return {
     // ── Generic constants ─────────────────────────────────────────────────
     MAX_AGE, MAX_MODELED_AGE, BROKERAGE_COST_BASIS_ESTIMATE, MAX_ITERATIONS_FOR_TAX_CALC,
@@ -8710,6 +9089,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
     SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,
     marginalCostOfNextDollar, survivorTaxComparison, survivorSSLoss,
+    PLAN_COLLECTIONS, PLAN_PATCH_FORBIDDEN, planPatchSchema,
+    validatePlanPatch, applyPlanPatch, describePlanPatch,
     planShortfall, breakingPoint, STRESS_DIMENSIONS,
     scaleOwnContributions, addOwnContribution, accountsAtSavingsTarget,
     splitBothContributors, BOTH_SPLIT_EMPLOYEE_SHARE,

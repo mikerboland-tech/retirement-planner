@@ -55,6 +55,7 @@ const {
   betrSensitivity, presentValueOfTaxes, convertEverythingAnalysis,
   getFederalDeduction, NIIT_THRESHOLDS,
   IRMAA_FILL_SAFETY_MARGIN,
+  planPatchSchema, validatePlanPatch, applyPlanPatch, describePlanPatch,
 } = PlannerEngine;
 
 // ============================================
@@ -908,6 +909,431 @@ const buttonSecondary = "bg-slate-700 hover:bg-slate-600 text-slate-100 font-med
 // ============================================
 // FAQTab — Lifted to module scope (no longer recreated on every parent render)
 // ============================================
+// ── AI ASSISTANT (bring-your-own-key) ────────────────────────────────────────
+// The key lives in its own localStorage entry, NOT in the plan. handleExport
+// writes the plan to the browser's download folder and the README tells people
+// to serve this repo locally — a key inside that file would be one `git add .`
+// from a public repository. Separate key, never exported, never in a scenario.
+const AI_KEY_STORAGE = 'retirement_planner_ai_key';
+const AI_MODEL = 'claude-opus-5';
+const AI_API_URL = 'https://api.anthropic.com/v1/messages';
+
+const loadAiKey = () => {
+  try { return localStorage.getItem(AI_KEY_STORAGE) || ''; } catch { return ''; }
+};
+const saveAiKey = (key) => {
+  try {
+    if (key) localStorage.setItem(AI_KEY_STORAGE, key);
+    else localStorage.removeItem(AI_KEY_STORAGE);
+  } catch { /* private browsing — the key just won't persist */ }
+};
+
+// The one tool the model gets. It does not apply anything: it proposes, and the
+// engine's validatePlanPatch decides whether the proposal is even expressible.
+const AI_PATCH_TOOL = {
+  name: 'propose_plan_changes',
+  description:
+    'Propose changes to the retirement plan. This does NOT apply anything — the changes are '
+    + 'shown to the user as a before/after diff alongside the projected effect, and they choose '
+    + 'whether to accept. Call this whenever the user asks for a change to their plan. Do not '
+    + 'call it to answer a question that changes nothing.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      summary: { type: 'string', description: 'One sentence describing the change as a whole.' },
+      ops: {
+        type: 'array',
+        description: 'The individual edits, in the order they should be read.',
+        items: {
+          type: 'object',
+          properties: {
+            op: { type: 'string', enum: ['set', 'add', 'update', 'remove'] },
+            target: { type: 'string', description: "'personalInfo' for set; otherwise the collection name." },
+            field: { type: 'string', description: 'set only: the personalInfo field.' },
+            value: { description: 'set only: the new value.' },
+            id: { type: 'number', description: 'update/remove only: the id of the existing row.' },
+            values: { type: 'object', description: 'add/update only: the fields to write.' },
+            reason: { type: 'string', description: 'Why this specific edit, in one short sentence.' },
+          },
+          required: ['op', 'target'],
+        },
+      },
+    },
+    required: ['summary', 'ops'],
+  },
+};
+
+// What the model is told about the plan. Deliberately the whole plan plus a
+// projection summary: an assistant reasoning about a retirement plan from a
+// partial view gives confidently wrong answers, and this is the data the user
+// has already agreed to send.
+const buildAiContext = (plan, projections) => {
+  const last = projections && projections.length ? projections[projections.length - 1] : null;
+  const firstBroke = (projections || []).find(r => (r.totalPortfolio || 0) <= 0);
+  return {
+    schema: planPatchSchema(plan),
+    projection: {
+      years: projections ? projections.length : 0,
+      endingPortfolio: last ? Math.round(last.totalPortfolio || 0) : null,
+      endingNetWorth: last ? Math.round(last.totalNetWorth || 0) : null,
+      lifetimeTax: Math.round((projections || []).reduce((s, r) => s + (r.totalTax || 0), 0)),
+      moneyRunsOutAtAge: firstBroke ? firstBroke.myAge : null,
+    },
+  };
+};
+
+const AI_SYSTEM_PROMPT = `You are a retirement-planning assistant embedded in a planning tool the user already owns. You have two jobs: answer questions about their plan, and propose changes to it.
+
+You do not have the ability to change anything yourself. When the user asks for a change, call propose_plan_changes. The tool returns nothing — the app shows your proposal to the user as a before/after diff with the projected effect, and they accept or reject it. Say what you are proposing and why, briefly, alongside the call.
+
+The <plan> block below is the user's complete plan, with every field you may change, its current value, and its units. Read it before proposing anything:
+
+- Every rate is a DECIMAL FRACTION. 0.03 means 3%. The single exception is charitableGivingPercent, which is whole percent. Getting this wrong by a factor of 100 is the most damaging mistake available to you.
+- You may only write fields listed in the schema. There is no way to add a new one, and a field you invent will be rejected.
+- Ids are assigned by the app. Never choose one; use 'add' and the app assigns it.
+- An account's stopAge is exclusive; an income stream's endAge is inclusive.
+
+On judgment: this is the user's money and their decision. Make the routine calls yourself rather than asking — if they say "bump my savings rate to 12%", change it, don't ask which account. Ask only when two readings of the request would produce materially different plans. If you think the request is a mistake, say so in a sentence and propose it anyway; they can decline.
+
+Do not give tax or investment advice as though you were their advisor, and do not claim certainty the projection does not have. The numbers in the plan came from the user; the projected consequences come from the app's engine, not from you — never state a projected outcome you have not been given.`;
+
+function AiAssistantTab({ plan, projections, onApply }) {
+  const [apiKey, setApiKey] = useState(loadAiKey);
+  const [keyDraft, setKeyDraft] = useState('');
+  const [messages, setMessages] = useState([]);      // API-shaped conversation
+  const [input, setInput] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [proposal, setProposal] = useState(null);    // { toolUseId, summary, ops, diff, preview }
+  const [usage, setUsage] = useState(null);
+  const [showPayload, setShowPayload] = useState(false);
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages, busy, proposal]);
+
+  const context = useMemo(() => buildAiContext(plan, projections), [plan, projections]);
+
+  // Price the proposal with the engine, not with the model. This is the whole
+  // point of the review step: the reader sees what the change does to THEIR
+  // plan, computed the same way every other number in the app is computed.
+  const priceProposal = (ops) => {
+    const diff = describePlanPatch(plan, ops);
+    const { state: next, ok } = applyPlanPatch(plan, ops);
+    let preview = null;
+    try {
+      const after = computeProjections(next.personalInfo, next.accounts, next.incomeStreams,
+        next.assets, next.oneTimeEvents, next.recurringExpenses, new Date().getFullYear());
+      const lastA = after[after.length - 1];
+      const lastB = projections && projections.length ? projections[projections.length - 1] : null;
+      const brokeA = after.find(r => (r.totalPortfolio || 0) <= 0);
+      const brokeB = (projections || []).find(r => (r.totalPortfolio || 0) <= 0);
+      preview = {
+        endingBefore: lastB ? lastB.totalPortfolio || 0 : 0,
+        endingAfter: lastA ? lastA.totalPortfolio || 0 : 0,
+        taxBefore: (projections || []).reduce((s, r) => s + (r.totalTax || 0), 0),
+        taxAfter: after.reduce((s, r) => s + (r.totalTax || 0), 0),
+        breaksBefore: brokeB ? brokeB.myAge : null,
+        breaksAfter: brokeA ? brokeA.myAge : null,
+      };
+    } catch (e) {
+      preview = { failed: e.message };
+    }
+    return { diff, next, ok, preview };
+  };
+
+  // One request. Returns the assistant message so the caller can decide what to
+  // do with a tool call. Errors are surfaced verbatim — a 401 from a mistyped
+  // key and a 429 from a spent quota need different fixes, and paraphrasing
+  // them into "something went wrong" hides which one it is.
+  const callClaude = async (history) => {
+    const res = await fetch(AI_API_URL, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        // Required for browser-origin calls. Named "dangerous" because it means
+        // the key is in the page — which is exactly the bring-your-own-key
+        // bargain this feature makes, and why the key is never sent anywhere
+        // but api.anthropic.com.
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: AI_MODEL,
+        max_tokens: 16000,
+        output_config: { effort: 'medium' },
+        system: `${AI_SYSTEM_PROMPT}\n\n<plan>\n${JSON.stringify(context, null, 1)}\n</plan>`,
+        tools: [AI_PATCH_TOOL],
+        messages: history,
+      }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = body && body.error ? `${body.error.type}: ${body.error.message}` : `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    return body;
+  };
+
+  const send = async (text) => {
+    if (!text.trim() || busy) return;
+    setError(null);
+
+    // An unresolved tool_use has to be answered before the next user turn — the
+    // API rejects the request otherwise. Typing instead of deciding is a
+    // decline, and the model is told so rather than left to guess.
+    const history = messages.slice();
+    if (proposal) {
+      history.push({
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: proposal.toolUseId,
+                    content: 'The user did not apply these changes; they replied instead.' }],
+      });
+      setProposal(null);
+    }
+    history.push({ role: 'user', content: text });
+    setMessages(history);
+    setInput('');
+    setBusy(true);
+    try {
+      const reply = await callClaude(history);
+      setUsage(reply.usage || null);
+      const next = history.concat([{ role: 'assistant', content: reply.content }]);
+      setMessages(next);
+      const toolUse = (reply.content || []).find(b => b.type === 'tool_use');
+      if (toolUse && Array.isArray(toolUse.input && toolUse.input.ops)) {
+        const priced = priceProposal(toolUse.input.ops);
+        setProposal({ toolUseId: toolUse.id, summary: toolUse.input.summary, ops: toolUse.input.ops, ...priced });
+      }
+      if (reply.stop_reason === 'refusal') {
+        setError('Claude declined to answer that. Try rephrasing.');
+      }
+    } catch (e) {
+      setError(e.message);
+      setMessages(messages);   // roll back the optimistic user turn
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resolveProposal = (accepted) => {
+    if (!proposal) return;
+    if (accepted) onApply(proposal.next);
+    setMessages(prev => prev.concat([{
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: proposal.toolUseId,
+                  content: accepted ? 'The user applied these changes.' : 'The user declined these changes.' }],
+    }]));
+    setProposal(null);
+  };
+
+  // ── Key setup ────────────────────────────────────────────────────────────
+  if (!apiKey) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-100">AI Assistant</h2>
+          <p className="text-slate-400 mt-1">Ask about your plan, or describe a change and review it before it lands.</p>
+        </div>
+        <div className={cardStyle}>
+          <h3 className="text-lg font-semibold text-slate-100 mb-3">Connect your Anthropic API key</h3>
+          <p className="text-sm text-slate-400 mb-4">
+            This app is a static site with no server, so there is nowhere for it to keep an API key on your
+            behalf — you bring your own. It is stored in this browser only, under its own key, and is
+            <strong className="text-slate-200"> never included in a plan export or a scenario</strong>. Requests go
+            straight from this page to <code className="text-amber-400">api.anthropic.com</code> and nowhere else.
+          </p>
+          <div className="bg-amber-900/20 border border-amber-500/30 rounded-lg p-4 mb-4 text-sm text-amber-200/90">
+            <strong>What leaves your browser.</strong> Turning this on is the first time this tool sends anything
+            anywhere. Each message sends your plan — ages, balances, contribution rates, income, and the
+            projection summary — to Anthropic's API so the assistant can reason about it. It does not send your
+            name, your account numbers, or anything from the Current Year tab. Nothing is sent until you type a
+            message, and you can disconnect at any time.
+          </div>
+          <label className={labelStyle}>API key</label>
+          <input
+            type="password" value={keyDraft} onChange={e => setKeyDraft(e.target.value)}
+            placeholder="sk-ant-..." className={inputStyle} autoComplete="off" spellCheck={false}
+          />
+          <div className="flex items-center gap-3 mt-4">
+            <button
+              className={buttonPrimary}
+              disabled={!keyDraft.trim()}
+              onClick={() => { saveAiKey(keyDraft.trim()); setApiKey(keyDraft.trim()); setKeyDraft(''); }}
+            >
+              Connect
+            </button>
+            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer"
+               className="text-sm text-amber-400 hover:text-amber-300">Get a key →</a>
+          </div>
+          <p className="text-xs text-slate-500 mt-4">
+            Usage is billed to your own Anthropic account. A typical question costs a fraction of a cent;
+            the plan is re-sent with every message, so a long conversation costs more than a short one.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Conversation ─────────────────────────────────────────────────────────
+  const shown = messages.filter(m =>
+    typeof m.content === 'string' || (Array.isArray(m.content) && m.content.some(b => b.type === 'text')));
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-100">AI Assistant</h2>
+          <p className="text-slate-400 mt-1">Every proposed change is shown as a diff, priced by the engine, and applied only when you say so.</p>
+        </div>
+        <button
+          className="text-xs text-slate-400 hover:text-slate-200 border border-slate-600 rounded-lg px-3 py-1.5"
+          onClick={() => { saveAiKey(''); setApiKey(''); setMessages([]); setProposal(null); setUsage(null); }}
+        >
+          Disconnect key
+        </button>
+      </div>
+
+      <div className={cardStyle}>
+        <div ref={scrollRef} className="max-h-[420px] overflow-y-auto space-y-4 pr-1">
+          {shown.length === 0 && (
+            <div className="text-sm text-slate-500 space-y-2">
+              <p>Try:</p>
+              <ul className="list-disc list-inside space-y-1">
+                <li>“Why does my plan run out of money at 88?”</li>
+                <li>“Raise my 401(k) deferral to 12% and show me what it does.”</li>
+                <li>“Add a $40,000 one-time expense at 62 for a new roof.”</li>
+                <li>“What happens if I retire two years earlier?”</li>
+              </ul>
+            </div>
+          )}
+          {shown.map((m, i) => {
+            const text = typeof m.content === 'string'
+              ? m.content
+              : m.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+            const mine = m.role === 'user';
+            return (
+              <div key={i} className={mine ? 'text-right' : ''}>
+                <div className={`inline-block text-left max-w-[85%] rounded-xl px-4 py-2.5 text-sm whitespace-pre-wrap ${
+                  mine ? 'bg-amber-600/20 border border-amber-500/30 text-amber-100'
+                       : 'bg-slate-900/60 border border-slate-700/50 text-slate-200'}`}>
+                  {text}
+                </div>
+              </div>
+            );
+          })}
+          {busy && <div className="text-sm text-slate-500">Thinking…</div>}
+        </div>
+
+        {error && (
+          <div className="mt-4 bg-red-900/20 border border-red-500/30 rounded-lg p-3 text-sm text-red-300">
+            {error}
+          </div>
+        )}
+
+        <div className="mt-4 flex gap-2">
+          <input
+            type="text" value={input} onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(input); } }}
+            placeholder="Ask about your plan, or describe a change…"
+            className={inputStyle} disabled={busy}
+          />
+          <button className={buttonPrimary} disabled={busy || !input.trim()} onClick={() => send(input)}>Send</button>
+        </div>
+
+        <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
+          <button className="hover:text-slate-300 underline decoration-dotted"
+                  onClick={() => setShowPayload(v => !v)}>
+            {showPayload ? 'Hide' : 'Show'} exactly what gets sent
+          </button>
+          {usage && (
+            <span>
+              last turn: {usage.input_tokens?.toLocaleString()} in / {usage.output_tokens?.toLocaleString()} out
+            </span>
+          )}
+        </div>
+        {showPayload && (
+          <pre className="mt-3 max-h-64 overflow-auto text-[11px] text-slate-400 bg-slate-950/60 border border-slate-700/50 rounded-lg p-3">
+{JSON.stringify(context, null, 1)}
+          </pre>
+        )}
+      </div>
+
+      {proposal && (
+        <div className="bg-gradient-to-br from-emerald-900/20 to-slate-900/80 border border-emerald-500/30 rounded-xl p-6 shadow-xl">
+          <h3 className="text-lg font-semibold text-slate-100">Proposed change</h3>
+          <p className="text-sm text-slate-300 mt-1">{proposal.summary}</p>
+
+          <div className="mt-4 space-y-2">
+            {proposal.diff.map((d, i) => (
+              <div key={i} className={`rounded-lg border px-3 py-2 text-sm ${
+                d.valid ? 'bg-slate-900/60 border-slate-700/50' : 'bg-red-900/20 border-red-500/30'}`}>
+                <div className={d.valid ? 'text-slate-200' : 'text-red-300'}>{d.summary}</div>
+                {d.reason && <div className="text-xs text-slate-500 mt-0.5">{d.reason}</div>}
+                {d.warnings && d.warnings.map((w, j) => (
+                  <div key={j} className="text-xs text-amber-400 mt-1">⚠ {w}</div>
+                ))}
+              </div>
+            ))}
+          </div>
+
+          {/* The consequence, from the engine. The model's account of what its
+              own change does is not evidence; this is. */}
+          {proposal.preview && !proposal.preview.failed && (
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="bg-slate-900/60 border border-slate-700/50 rounded-lg p-3">
+                <div className="text-xs text-slate-500">Ending portfolio</div>
+                <div className="text-sm text-slate-300">{formatCurrency(proposal.preview.endingBefore)} → <span className={
+                  proposal.preview.endingAfter >= proposal.preview.endingBefore ? 'text-emerald-400' : 'text-red-400'
+                }>{formatCurrency(proposal.preview.endingAfter)}</span></div>
+              </div>
+              <div className="bg-slate-900/60 border border-slate-700/50 rounded-lg p-3">
+                <div className="text-xs text-slate-500">Lifetime tax</div>
+                <div className="text-sm text-slate-300">{formatCurrency(proposal.preview.taxBefore)} → <span className={
+                  proposal.preview.taxAfter <= proposal.preview.taxBefore ? 'text-emerald-400' : 'text-red-400'
+                }>{formatCurrency(proposal.preview.taxAfter)}</span></div>
+              </div>
+              <div className="bg-slate-900/60 border border-slate-700/50 rounded-lg p-3">
+                <div className="text-xs text-slate-500">Money runs out</div>
+                <div className="text-sm text-slate-300">
+                  {proposal.preview.breaksBefore ? `age ${proposal.preview.breaksBefore}` : 'never'}
+                  {' → '}
+                  <span className={proposal.preview.breaksAfter ? 'text-red-400' : 'text-emerald-400'}>
+                    {proposal.preview.breaksAfter ? `age ${proposal.preview.breaksAfter}` : 'never'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+          {proposal.preview && proposal.preview.failed && (
+            <div className="mt-4 text-sm text-red-300">
+              The proposed plan could not be projected ({proposal.preview.failed}) — don't apply it.
+            </div>
+          )}
+
+          <div className="flex items-center gap-3 mt-5">
+            <button
+              className={buttonPrimary}
+              disabled={!proposal.diff.some(d => d.valid) || (proposal.preview && proposal.preview.failed)}
+              onClick={() => resolveProposal(true)}
+            >
+              Apply {proposal.diff.filter(d => d.valid).length} change{proposal.diff.filter(d => d.valid).length === 1 ? '' : 's'}
+            </button>
+            <button className={buttonSecondary} onClick={() => resolveProposal(false)}>Discard</button>
+            {!proposal.ok && (
+              <span className="text-xs text-amber-400">
+                Some operations were rejected and will be skipped.
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FAQTab() {
   const [openSection, setOpenSection] = useState(null);
   
@@ -1323,6 +1749,18 @@ function FAQTab() {
         {
           q: "How do I clear my data for sharing?",
           a: "Use Import/Export → 'Clear My Data' to reset everything to sample defaults. This removes your personal data from the browser. Export a backup first if you want to restore your data later."
+        },
+        {
+          q: "Does the AI Assistant send my plan anywhere?",
+          a: "Yes — and it is the only part of this tool that sends anything anywhere. With the assistant disconnected (the default), nothing leaves your browser. Connect an Anthropic API key and each message you send transmits your plan — ages, balances, contribution rates, income streams, expenses, and a summary of the projection — to Anthropic's API so the assistant can reason about it. It does not send your name, account numbers, or anything from the Current Year tab. The 'Show exactly what gets sent' link on that tab displays the payload verbatim before you send anything. Nothing is transmitted until you type a message, and 'Disconnect key' ends it."
+        },
+        {
+          q: "Where does the AI Assistant keep my API key?",
+          a: "In this browser's localStorage, under its own separate entry — deliberately NOT in the plan. It is never written into a plan export, never copied into a scenario, and never sent anywhere except api.anthropic.com as the authentication header on your own requests. Because this app is a static site with no server, there is nowhere for it to hold a key on your behalf; bringing your own is the only architecture that does not put a shared key in a public repository. Usage bills to your own Anthropic account."
+        },
+        {
+          q: "Can the AI Assistant change my plan on its own?",
+          a: "No. The assistant can only propose changes; it cannot write to your plan, cannot run the projection engine, and cannot touch storage. What it emits is a patch, which the engine validates against the plan's real field list — a field that does not exist is rejected rather than silently created, and ids are assigned by the app, not chosen by the model. Valid changes are shown to you as a before/after diff, with the effect on ending portfolio, lifetime tax and whether the plan runs out of money computed by the same engine that produces every other number here. Nothing is applied until you press Apply."
         }
       ]
     },
@@ -18060,6 +18498,26 @@ function RetirementPlanner() {
   const declineTourOffer = () => { markTourSeen(); setTourPromptOpen(false); };
   
   // Navigation structure with groups
+  // The assistant reads and writes the plan through one object rather than nine
+  // setters. Keeping the shape identical to what the engine's patch layer
+  // expects means the same object is what gets validated, what gets projected
+  // for the preview, and what gets written back — there is no second place
+  // where a slice could be dropped on the way through.
+  const livePlan = useMemo(() => ({
+    personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
+  }), [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
+
+  const applyAiPlan = (next) => {
+    setPersonalInfo(next.personalInfo);
+    setAccounts(next.accounts);
+    setIncomeStreams(next.incomeStreams);
+    setAssets(next.assets);
+    setOneTimeEvents(next.oneTimeEvents);
+    setRecurringExpenses(next.recurringExpenses);
+    setSaveStatus('Applied');
+    setTimeout(() => setSaveStatus(''), 2000);
+  };
+
   const navGroups = [
     {
       label: 'OVERVIEW',
@@ -18097,6 +18555,7 @@ function RetirementPlanner() {
       icon: '🔧',
       items: [
         { id: 'scenarios', label: 'Scenarios', icon: '🔀' },
+        { id: 'assistant', label: 'AI Assistant', icon: '💬' },
         { id: 'faq', label: 'Assumptions', icon: '❓' }
       ]
     }
@@ -18310,6 +18769,7 @@ function RetirementPlanner() {
             {activeTab === 'montecarlo' && <MonteCarloTab accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'stresstest' && <StressTestTab accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'sensitivity' && <SensitivityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'assistant' && <AiAssistantTab onApply={applyAiPlan} plan={livePlan} projections={projections} />}
             {activeTab === 'faq' && <FAQTab />}
           </div>
         </main>

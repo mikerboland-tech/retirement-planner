@@ -44,6 +44,10 @@ function lt(actual, threshold, label) {
   if (actual < threshold) { pass++; }
   else { fail++; failures.push(`  ✗ ${label}\n      expected < ${threshold}\n      actual   ${actual}`); }
 }
+function ok(actual, label) {
+  if (actual) { pass++; }
+  else { fail++; failures.push(`  ✗ ${label}\n      expected truthy\n      actual   ${JSON.stringify(actual)}`); }
+}
 function approx(actual, expected, label, relTol = 0.01) {
   const ok = Math.abs(actual - expected) / Math.max(1, Math.abs(expected)) <= relTol;
   if (ok) { pass++; }
@@ -8468,6 +8472,214 @@ section('P70 — the mid-60s IRMAA hinge: priced in the years the decision is st
       'a caller stating nobody will be covered is believed');
     gt(crossingCost(b, { numMedicareEligible: 2 }), crossingCost(b, { numMedicareEligible: 1 }),
       'and two covered people cost more than one');
+  }
+}
+
+section('P71 — the AI patch layer: the model proposes, the engine decides');
+{
+  // A chat assistant that can change the plan is only safe if it cannot change
+  // the plan. It emits a patch; this layer decides whether the patch is even
+  // expressible, and the caller re-projects the PROPOSED state so the reader
+  // sees the consequence before accepting. Everything below is that boundary.
+  const { validatePlanPatch, applyPlanPatch, describePlanPatch, planPatchSchema } = engine;
+
+  const plan = () => ({
+    personalInfo: {
+      myAge: 53, spouseAge: 51, inflationRate: 0.03, desiredRetirementIncome: 110000,
+      charitableGivingPercent: 0, rothConversionIrmaaTier: null,
+      withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+      spendingPhasesEnabled: false, state: 'Missouri',
+    },
+    accounts: [{ id: 1, name: 'IRA', type: 'traditional_ira', balance: 500000, cagr: 0.06, owner: 'me' }],
+    incomeStreams: [{ id: 2, name: 'My Salary', type: 'earned_income', amount: 150000, owner: 'me' }],
+    assets: [], oneTimeEvents: [], recurringExpenses: [],
+    scenarios: [{ id: 9, name: 'do not touch' }],
+    schemaVersion: 4,
+  });
+
+  // ── A field that isn't in the plan cannot be written ─────────────────────
+  // The failure this prevents is silent: a model that writes
+  // `inflationRatePercent: 3` produces a plan that looks edited, saves, exports,
+  // and is ignored by every consumer. Rejecting unknown keys is what makes an
+  // accepted patch mean something.
+  {
+    const v = validatePlanPatch(plan(), [{ op: 'set', target: 'personalInfo', field: 'inflationRatePercent', value: 3 }]);
+    eq(v.ok, false, 'a field the plan does not have is rejected');
+    ok(/no field/.test(v.errors[0]), 'and the error names the problem');
+
+    const good = validatePlanPatch(plan(), [{ op: 'set', target: 'personalInfo', field: 'inflationRate', value: 0.025 }]);
+    eq(good.ok, true, 'while a real field is accepted');
+  }
+
+  // ── Structural keys are off limits entirely ──────────────────────────────
+  {
+    ['schemaVersion', 'version', 'exportDate', 'scenarios', 'id'].forEach(f => {
+      const v = validatePlanPatch(plan(), [{ op: 'set', target: 'personalInfo', field: f, value: 99 }]);
+      eq(v.ok, false, `${f} cannot be set, whatever the model asks`);
+    });
+    const v = validatePlanPatch(plan(), [{ op: 'update', target: 'scenarios', id: 9, values: { name: 'x' } }]);
+    eq(v.ok, false, 'and scenarios is not an editable collection at all');
+  }
+
+  // ── Types come from the plan, not from a table that can drift ────────────
+  {
+    const p = plan();
+    eq(validatePlanPatch(p, [{ op: 'set', target: 'personalInfo', field: 'myAge', value: '53' }]).ok, false,
+      'a string where the plan holds a number is rejected');
+    eq(validatePlanPatch(p, [{ op: 'set', target: 'personalInfo', field: 'spendingPhasesEnabled', value: 'yes' }]).ok, false,
+      'and a string where it holds a boolean');
+    eq(validatePlanPatch(p, [{ op: 'set', target: 'personalInfo', field: 'spendingPhasesEnabled', value: true }]).ok, true,
+      'while the right type goes through');
+    eq(validatePlanPatch(p, [{ op: 'set', target: 'personalInfo', field: 'desiredRetirementIncome', value: Infinity }]).ok, false,
+      'Infinity is not a number a projection can use');
+    // A null field carries no type to infer, so it accepts the shapes it can hold.
+    eq(validatePlanPatch(p, [{ op: 'set', target: 'personalInfo', field: 'rothConversionIrmaaTier', value: 1 }]).ok, true,
+      'a currently-null field accepts a number');
+    eq(validatePlanPatch(p, [{ op: 'set', target: 'personalInfo', field: 'rothConversionIrmaaTier', value: null }]).ok, true,
+      'and accepts null back');
+    eq(validatePlanPatch(p, [{ op: 'set', target: 'personalInfo', field: 'rothConversionIrmaaTier', value: {} }]).ok, false,
+      'but not an object');
+  }
+
+  // ── withdrawalPriority must stay a permutation ───────────────────────────
+  // Dropping a bucket doesn't error anywhere downstream; it silently makes that
+  // account type unreachable for withdrawals.
+  {
+    const p = plan();
+    eq(validatePlanPatch(p, [{ op: 'set', target: 'personalInfo', field: 'withdrawalPriority', value: ['roth', 'pretax'] }]).ok, false,
+      'a two-element withdrawal order is rejected');
+    eq(validatePlanPatch(p, [{ op: 'set', target: 'personalInfo', field: 'withdrawalPriority', value: ['roth', 'pretax', 'cash'] }]).ok, false,
+      'and so is an invented bucket');
+    eq(validatePlanPatch(p, [{ op: 'set', target: 'personalInfo', field: 'withdrawalPriority', value: ['brokerage', 'pretax', 'roth'] }]).ok, true,
+      'while a genuine reordering is accepted');
+  }
+
+  // ── The 100× trap is warned about, not silently accepted ────────────────
+  // charitableGivingPercent is whole percent and every other rate is a decimal
+  // fraction. "0.03 → 7" and "0.03 → 0.07" read the same in a sentence and are
+  // a hundred times apart in a projection.
+  {
+    const v = validatePlanPatch(plan(), [{ op: 'set', target: 'personalInfo', field: 'inflationRate', value: 7 }]);
+    eq(v.ok, true, 'an off-by-100 rate is still a legal number');
+    gt(v.ops[0].warnings.length, 0, 'but it is flagged rather than passed through quietly');
+    ok(/0\.07/.test(v.ops[0].warnings[0]), 'and the warning names the value that was probably meant');
+    const fine = validatePlanPatch(plan(), [{ op: 'set', target: 'personalInfo', field: 'inflationRate', value: 0.025 }]);
+    eq(fine.ops[0].warnings.length, 0, 'a plausible rate is not flagged');
+  }
+
+  // ── Collections: enums, required fields, and no self-assigned ids ────────
+  {
+    const p = plan();
+    eq(validatePlanPatch(p, [{ op: 'add', target: 'accounts', values: { name: 'Roth', type: 'roth_401k', balance: 1000 } }]).ok, true,
+      'a new account with the required fields is accepted');
+    eq(validatePlanPatch(p, [{ op: 'add', target: 'accounts', values: { name: 'Roth', type: 'crypto', balance: 1000 } }]).ok, false,
+      'an account type the engine does not model is rejected');
+    eq(validatePlanPatch(p, [{ op: 'add', target: 'accounts', values: { name: 'Roth', type: 'roth_401k' } }]).ok, false,
+      'and a new account without a balance is incomplete');
+    eq(validatePlanPatch(p, [{ op: 'add', target: 'accounts', values: { id: 99, name: 'R', type: 'roth_401k', balance: 1 } }]).ok, false,
+      'the model may not choose its own id');
+    eq(validatePlanPatch(p, [{ op: 'add', target: 'accounts', values: { name: 'R', type: 'roth_401k', balance: 1, yield: 0.05 } }]).ok, false,
+      'nor invent a field on a row');
+    eq(validatePlanPatch(p, [{ op: 'update', target: 'accounts', id: 42, values: { balance: 1 } }]).ok, false,
+      'updating a row that is not there fails rather than creating one');
+    eq(validatePlanPatch(p, [{ op: 'remove', target: 'accounts', id: 42 }]).ok, false,
+      'and so does removing one');
+    eq(validatePlanPatch(p, [{ op: 'add', target: 'accounts', values: { name: 'R', type: 'roth_401k', balance: -5 } }]).ok, false,
+      'a negative balance is not a plan the engine can price');
+  }
+
+  // ── Applying: the original state is never mutated ────────────────────────
+  {
+    const before = plan();
+    const snapshot = JSON.stringify(before);
+    const { state: after } = applyPlanPatch(before, [
+      { op: 'set', target: 'personalInfo', field: 'desiredRetirementIncome', value: 125000 },
+      { op: 'update', target: 'accounts', id: 1, values: { balance: 600000 } },
+      { op: 'add', target: 'incomeStreams', values: { name: 'Pension', type: 'pension', amount: 24000, owner: 'spouse' } },
+      { op: 'remove', target: 'incomeStreams', id: 2 },
+    ]);
+    eq(JSON.stringify(before), snapshot, 'the plan handed in is untouched');
+    eq(after.personalInfo.desiredRetirementIncome, 125000, 'the scalar is set');
+    eq(after.personalInfo.myAge, 53, 'and the fields nobody touched survive');
+    eq(after.accounts[0].balance, 600000, 'the row is updated');
+    eq(after.accounts[0].type, 'traditional_ira', 'keeping the fields the patch did not mention');
+    eq(after.incomeStreams.length, 1, 'one stream added and one removed nets to one');
+    eq(after.incomeStreams[0].name, 'Pension', 'and it is the new one');
+    eq(after.scenarios.length, 1, 'scenarios are carried through untouched');
+  }
+
+  // ── Two adds in one patch get different ids ──────────────────────────────
+  // Both would read the same max and mint the same id; the second row would then
+  // be permanently un-editable, because every lookup by id finds the first.
+  {
+    const { state } = applyPlanPatch(plan(), [
+      { op: 'add', target: 'accounts', values: { name: 'A', type: 'roth_ira', balance: 1 } },
+      { op: 'add', target: 'accounts', values: { name: 'B', type: 'roth_ira', balance: 2 } },
+      { op: 'add', target: 'assets', values: { name: 'Home', type: 'real_estate', value: 400000 } },
+    ]);
+    const ids = [...state.accounts, ...state.assets].map(r => r.id);
+    eq(new Set(ids).size, ids.length, 'every id in the patch is distinct');
+    ok(ids.every(i => Number.isFinite(i)), 'and every id is a real number');
+    ok(ids.every(i => !plan().accounts.some(a => a.id === i) || i === 1), 'without colliding with the plan');
+  }
+
+  // ── A partly-bad patch applies its good half and reports the rest ────────
+  {
+    const r = applyPlanPatch(plan(), [
+      { op: 'set', target: 'personalInfo', field: 'desiredRetirementIncome', value: 120000 },
+      { op: 'set', target: 'personalInfo', field: 'nonsense', value: 1 },
+    ]);
+    eq(r.ok, false, 'the patch as a whole did not validate');
+    eq(r.applied.length, 1, 'but the operation that was legal was applied');
+    eq(r.skipped.length, 1, 'and the one that was not is reported, not swallowed');
+    eq(r.state.personalInfo.desiredRetirementIncome, 120000, 'with the good change in place');
+  }
+
+  // ── The description says what changes, in the reader's terms ────────────
+  // The reader approves this text, not the JSON — so it has to carry the OLD
+  // value, not just the model's own account of what it did.
+  {
+    const d = describePlanPatch(plan(), [
+      { op: 'set', target: 'personalInfo', field: 'inflationRate', value: 0.025, reason: 'closer to long-run CPI' },
+      { op: 'update', target: 'accounts', id: 1, values: { balance: 600000 } },
+      { op: 'remove', target: 'incomeStreams', id: 2 },
+      { op: 'set', target: 'personalInfo', field: 'bogus', value: 1 },
+    ]);
+    ok(/0\.03/.test(d[0].summary) && /0\.025/.test(d[0].summary), 'a scalar change shows before and after');
+    eq(d[0].reason, 'closer to long-run CPI', "and carries the model's stated reason");
+    ok(/500000/.test(d[1].summary) && /600000/.test(d[1].summary), 'a row update shows the old value too');
+    ok(/IRA/.test(d[1].summary), 'named by the row the reader recognises');
+    ok(/My Salary/.test(d[2].summary), 'a removal names what is going');
+    ok(/Rejected/.test(d[3].summary), 'and a rejected operation says so rather than reading as applied');
+  }
+
+  // ── The schema handed to the model is built from the live plan ──────────
+  {
+    const s = planPatchSchema(plan());
+    eq(s.personalInfo.inflationRate.current, 0.03, 'it carries the current value of each field');
+    eq(s.personalInfo.schemaVersion, undefined, 'and omits the fields that cannot be changed');
+    ok(/WHOLE PERCENT/.test(s.personalInfo.charitableGivingPercent.note),
+      'the one field with different units says so, because that is the 100× trap');
+    eq(s.collections.accounts.currentRows[0].id, 1, 'and it lists the rows by id so update can target them');
+    ok(s.collections.accounts.fields.type.values.includes('hsa'), 'with the real enum values');
+  }
+
+  // ── A patched plan still projects ───────────────────────────────────────
+  // The point of the whole layer: whatever the model proposes, the answer comes
+  // from computeProjections on the proposed state, not from the model.
+  {
+    const sc = baseScenario({ myAge: 40, spouseAge: 38, inflationRate: 0.03 });
+    const live = { personalInfo: sc.pi, accounts: sc.accts, incomeStreams: sc.streams,
+                   assets: [], oneTimeEvents: [], recurringExpenses: [] };
+    const base = computeProjections(live.personalInfo, live.accounts, live.incomeStreams, [], [], [], TODAY_YEAR);
+    const { state: proposed } = applyPlanPatch(live, [
+      { op: 'set', target: 'personalInfo', field: 'desiredRetirementIncome', value: (sc.pi.desiredRetirementIncome || 100000) + 30000 },
+    ]);
+    const after = computeProjections(proposed.personalInfo, proposed.accounts, proposed.incomeStreams, [], [], [], TODAY_YEAR);
+    eq(after.length > 0, true, 'the proposed plan projects');
+    const endBase = base[base.length - 1].totalPortfolio;
+    const endAfter = after[after.length - 1].totalPortfolio;
+    lt(endAfter, endBase, 'and spending $30k more a year leaves less at the end — priced by the engine, not the model');
   }
 }
 
