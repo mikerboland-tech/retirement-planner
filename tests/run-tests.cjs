@@ -9005,6 +9005,118 @@ section('P73 — traditional or Roth, in the years you are still working');
   }
 }
 
+section('P74 — the palette: colour-vision separation, re-derived rather than trusted');
+{
+  // The palette is checked here, in the suite, rather than by eye or by a
+  // one-off script nobody runs again. What this pins is not taste — it is the
+  // measurable claim that two series a reader has to tell apart are actually
+  // distinguishable, on the pair list the chart really renders and against the
+  // surface it really sits on.
+  //
+  // What it replaces, measured on the palette shipped through v1.73.0: "RMD
+  // (mandatory)" and "Portfolio Withdrawal (voluntary)" — adjacent segments of
+  // the same stacked bar, and the whole point of that chart — at a
+  // normal-vision ΔE of 4.2. Not a colour-blindness edge case. Nobody could
+  // tell them apart.
+  const theme = require('../theme.js');
+
+  // Machado, Oliveira & Fernandes (2009), severity 1.0, on linear RGB.
+  const MACHADO = {
+    protan: [[0.152286, 1.052583, -0.204868], [0.114503, 0.786281, 0.099216], [-0.003882, -0.048116, 1.051998]],
+    deutan: [[0.367322, 0.860646, -0.227968], [0.280085, 0.672501, 0.047413], [-0.011820, 0.042940, 0.968881]],
+  };
+  const lin = (h) => {
+    const v = h.trim().replace(/^#/, '');
+    return [0, 2, 4].map(i2 => {
+      const c = parseInt(v.slice(i2, i2 + 2), 16) / 255;
+      return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    });
+  };
+  const oklab = ([r, g, b]) => {
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+    const s2 = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s2,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s2,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s2];
+  };
+  const sim = (h, kind) => {
+    const [r, g, b] = lin(h), M = MACHADO[kind], cl = (c) => Math.max(0, Math.min(1, c));
+    return [cl(M[0][0]*r + M[0][1]*g + M[0][2]*b), cl(M[1][0]*r + M[1][1]*g + M[1][2]*b), cl(M[2][0]*r + M[2][1]*g + M[2][2]*b)];
+  };
+  const dE = (h1, h2, kind) => {
+    const a = oklab(kind ? sim(h1, kind) : lin(h1)), b = oklab(kind ? sim(h2, kind) : lin(h2));
+    return 100 * Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  };
+  const relLum = (h) => { const [r, g, b] = lin(h); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+  const contrast = (a, b) => {
+    const [hi, lo] = [relLum(a), relLum(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+
+  const CVD_FLOOR = 8.0;      // OKLab ΔE ×100, min(protan, deutan)
+  const NORMAL_FLOOR = 15.0;  // full-colour-vision floor
+
+  theme.MODES.forEach(mode => {
+    const t = theme.resolve(mode);
+
+    Object.entries(theme.STACKS).forEach(([chart, entities]) => {
+      // ADJACENT pairs: in a stack or a bar group those are the ones that touch,
+      // and they are the pair list the palette was stepped against.
+      for (let i2 = 0; i2 < entities.length - 1; i2++) {
+        const a = t.series[entities[i2]], b = t.series[entities[i2 + 1]];
+        const label = `${mode}/${chart}: ${entities[i2]}↔${entities[i2 + 1]}`;
+        gt(Math.min(dE(a, b, 'protan'), dE(a, b, 'deutan')), CVD_FLOOR - 0.001,
+          `${label} separates under colour-vision deficiency`);
+        gt(dE(a, b), NORMAL_FLOOR, `${label} separates in full colour vision`);
+      }
+      // And every series has to be visible against the surface it sits on.
+      entities.forEach(e => {
+        gt(contrast(t.series[e], t.surface), mode === 'dark' ? 3.0 : 2.0,
+          `${mode}/${chart}: ${e} is visible against the chart surface`);
+      });
+    });
+
+    // The regression that motivated all of this.
+    const rmd = t.series.rmd, vol = t.series.withdrawalVoluntary;
+    gt(dE(rmd, vol), NORMAL_FLOOR,
+      `${mode}: mandatory RMD and voluntary withdrawal are distinguishable — the pair that was ΔE 4.2`);
+
+    // Bracket thresholds are a MAGNITUDE, so the ramp must be monotonic in
+    // lightness. A rainbow here reads as four unrelated categories, which is
+    // what four saturated hues used to say.
+    const L = t.bracket.map(h => oklab(lin(h))[0]);
+    for (let i2 = 0; i2 < L.length - 1; i2++) {
+      ok(mode === 'dark' ? L[i2] < L[i2 + 1] : L[i2] > L[i2 + 1],
+        `${mode}: the bracket ramp steps monotonically — it is a scale, not a set of categories`);
+    }
+  });
+
+  // Every entity is defined in both modes, and the dark step is genuinely its
+  // own value rather than the light one reused.
+  {
+    let restepped = 0;
+    Object.keys(theme.SERIES).forEach(k => {
+      ok(/^#[0-9a-f]{6}$/i.test(theme.SERIES[k].dark), `${k} has a dark step`);
+      ok(/^#[0-9a-f]{6}$/i.test(theme.SERIES[k].light), `${k} has a light step`);
+      if (theme.SERIES[k].dark !== theme.SERIES[k].light) restepped++;
+    });
+    gt(restepped, Object.keys(theme.SERIES).length * 0.7,
+      'most hues are re-stepped per surface rather than flipped — a colour that reads on white glows on near-black');
+  }
+
+  // Status colours are reserved. Reusing one as "series 5" is how a chart ends
+  // up saying "critical" about a category that is merely the fifth one.
+  {
+    const t = theme.resolve('dark');
+    Object.entries(t.status).forEach(([sk, sv]) => {
+      Object.entries(t.series).forEach(([ek, ev]) => {
+        ok(sv !== ev, `status '${sk}' is not reused as the '${ek}' series colour`);
+      });
+    });
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

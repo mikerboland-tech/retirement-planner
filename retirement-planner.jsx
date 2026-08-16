@@ -60,6 +60,14 @@ const {
   planPatchSchema, validatePlanPatch, applyPlanPatch, describePlanPatch,
 } = PlannerEngine;
 
+// ── PALETTE ────────────────────────────────────────────────────────────────
+// One place a thing gets its colour. `theme.js` carries the entity→hue map and
+// both surface steppings; tests/run-tests.cjs re-derives the colour-vision
+// separation of every adjacent pair, so a palette edit that makes two stacked
+// series indistinguishable fails the suite rather than shipping.
+const THEME = PlannerTheme.resolve('dark');
+const SERIES = THEME.series;
+
 // ============================================
 // Sankey Diagram Component for Cash Flow Visualization
 // ============================================
@@ -587,6 +595,20 @@ const newK1Row = () => ({
            b14a_seEarnings: 0, b19_distributions: 0,
            b20z_qbi: 0, b20z_w2Wages: 0, b20z_ubia: 0, isSSTB: false },
 });
+
+// A savings rate is a magnitude with a judgement attached to it, so the bar
+// carries the judgement and the number stays in text ink. They used to disagree:
+// the figure was hardcoded amber (or emerald) while the bar ran a separate
+// threshold ramp, so a 24.2% gross rate showed an amber number above a blue bar
+// and a 31.2% net rate showed an emerald number above an amber one. Neither
+// tile's colour said anything about the other.
+// Recharts paints legend labels in the series colour. A label is text, and text
+// wears text ink — a saturated hue at 11px on a dark ground is both a contrast
+// problem and a second, redundant encoding of what the swatch beside it already
+// says. This keeps the swatch coloured and the words readable.
+const legendInk = (value) => <span style={{ color: THEME.inkSecondary }}>{value}</span>;
+
+const savingsRateStatus = (rate) => rate >= 25 ? 'good' : rate >= 15 ? 'warning' : 'serious';
 
 const formatCurrency = (value) => {
   if (value === undefined || value === null || isNaN(value)) return '$0';
@@ -3612,7 +3634,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                     allowDataOverflow
                   />
                   <Tooltip content={<RateCurveTooltip probeAmount={RATE_PROBE} />} />
-                  <Legend />
+                  <Legend formatter={legendInk} />
                   {/* The strategy's own window, so the plan can be read against
                       the terrain it is operating on. */}
                   <ReferenceArea
@@ -3723,7 +3745,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                 formatter={(v, name) => [formatCurrency(v), name]}
                 labelFormatter={l => `Age ${l}`}
               />
-              <Legend />
+              <Legend formatter={legendInk} />
               <Bar dataKey="baseIncome" stackId="income" fill="#3b82f6" name="Base Income" />
               <Bar dataKey="conversionAmount" stackId="income" fill="#10b981" name="Roth Conversion" />
               <Line type="monotone" dataKey="baseTotalTax" stroke="#ef4444" strokeWidth={2} dot={false} name="Tax Without Conv." strokeDasharray="5 5" />
@@ -5872,26 +5894,26 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
                 formatter={(v, name) => [formatCurrency(v), name]}
                 labelFormatter={l => `Age ${l}`}
               />
-              <Legend />
+              <Legend formatter={legendInk} />
               
               {/* Stacked income bars */}
-              <Bar dataKey="earnedIncome" stackId="income" fill="#22c55e" name="Earned Income" />
-              <Bar dataKey="socialSecurity" stackId="income" fill="#3b82f6" name="Social Security (85%)" />
-              <Bar dataKey="pension" stackId="income" fill="#8b5cf6" name="Pension" />
-              <Bar dataKey="otherIncome" stackId="income" fill="#06b6d4" name="Other Income" />
-              <Bar dataKey="voluntaryWithdrawal" stackId="income" fill="#f59e0b" name="Portfolio Withdrawal (voluntary)" />
-              <Bar dataKey="rmd" stackId="income" fill="#fb923c" name="RMD (mandatory)" />
-              <Bar dataKey="plannedConversion" stackId="income" fill="#a855f7" name="Planned Roth Conv." />
-              <Bar dataKey="conversionTaxWithdrawal" stackId="income" fill="#d97706" name="Conversion Tax Draw" />
+              <Bar dataKey="earnedIncome" stackId="income" fill={SERIES.earnedIncome} name="Earned Income" />
+              <Bar dataKey="socialSecurity" stackId="income" fill={SERIES.socialSecurity} name="Social Security (85%)" />
+              <Bar dataKey="pension" stackId="income" fill={SERIES.pension} name="Pension" />
+              <Bar dataKey="otherIncome" stackId="income" fill={SERIES.otherIncome} name="Other Income" />
+              <Bar dataKey="voluntaryWithdrawal" stackId="income" fill={SERIES.withdrawalVoluntary} name="Portfolio Withdrawal (voluntary)" />
+              <Bar dataKey="rmd" stackId="income" fill={SERIES.rmd} name="RMD (mandatory)" />
+              <Bar dataKey="plannedConversion" stackId="income" fill={SERIES.rothConversion} name="Planned Roth Conv." />
+              <Bar dataKey="conversionTaxWithdrawal" stackId="income" fill={SERIES.conversionTaxDraw} name="Conversion Tax Draw" />
               
               {/* Tax bracket threshold lines */}
-              <Line type="monotone" dataKey="bracket12" stroke="#10b981" strokeWidth={2} dot={false} name="Top of 12% Bracket" strokeDasharray="5 5" />
-              <Line type="monotone" dataKey="bracket22" stroke="#eab308" strokeWidth={2} dot={false} name="Top of 22% Bracket" strokeDasharray="5 5" />
-              <Line type="monotone" dataKey="bracket24" stroke="#f97316" strokeWidth={2} dot={false} name="Top of 24% Bracket" strokeDasharray="5 5" />
-              <Line type="monotone" dataKey="bracket32" stroke="#ef4444" strokeWidth={2} dot={false} name="Top of 32% Bracket" strokeDasharray="5 5" />
+              <Line type="monotone" dataKey="bracket12" stroke={THEME.bracket[0]} strokeWidth={2} dot={false} name="Top of 12% Bracket" strokeDasharray="5 5" />
+              <Line type="monotone" dataKey="bracket22" stroke={THEME.bracket[1]} strokeWidth={2} dot={false} name="Top of 22% Bracket" strokeDasharray="5 5" />
+              <Line type="monotone" dataKey="bracket24" stroke={THEME.bracket[2]} strokeWidth={2} dot={false} name="Top of 24% Bracket" strokeDasharray="5 5" />
+              <Line type="monotone" dataKey="bracket32" stroke={THEME.bracket[3]} strokeWidth={2} dot={false} name="Top of 32% Bracket" strokeDasharray="5 5" />
               
               {/* Retirement reference line */}
-              <ReferenceLine x={retirementAge} stroke="#ef4444" strokeDasharray="3 3" label={{ value: 'Retirement', position: 'top', fill: '#ef4444', fontSize: 12 }} />
+              <ReferenceLine x={retirementAge} stroke={THEME.bracket[3]} strokeDasharray="3 3" label={{ value: 'Retirement', position: 'top', fill: THEME.bracket[3], fontSize: 12 }} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -6846,7 +6868,7 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
                     formatter={(v) => formatCurrency(v)}
                     labelFormatter={l => `Age ${l}`}
                   />
-                  <Legend />
+                  <Legend formatter={legendInk} />
                   <Area type="monotone" dataKey="p90" stackId="1" fill="#10b981" stroke="#10b981" fillOpacity={0.2} name="90th Percentile" />
                   <Area type="monotone" dataKey="p75" stackId="2" fill="#22c55e" stroke="#22c55e" fillOpacity={0.2} name="75th Percentile" />
                   <Area type="monotone" dataKey="p50" stackId="3" fill="#eab308" stroke="#eab308" fillOpacity={0.3} name="Median (50th)" />
@@ -7114,7 +7136,7 @@ function ScenarioComparisonTab({ activeScenarioId, assets, computeProjections, c
               <XAxis dataKey="age" stroke="#94a3b8" />
               <YAxis stroke="#94a3b8" tickFormatter={(v) => `$${(v/1000000).toFixed(1)}M`} />
               <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569' }} formatter={(value) => [formatCurrency(value), '']} />
-              <Legend />
+              <Legend formatter={legendInk} />
               <Line type="monotone" dataKey="Current Plan" stroke="#f59e0b" strokeWidth={2} dot={false} />
               {selectedScenarios.map((id, idx) => {
                 const scenario = scenarios.find(s => s.id === id);
@@ -7477,7 +7499,7 @@ function StressTestTab({ accounts, assets, currentYear, incomeStreams, oneTimeEv
                       formatter={(value, name) => [formatCurrency(value), name]}
                       labelFormatter={label => `Age ${label}`}
                     />
-                    <Legend />
+                    <Legend formatter={legendInk} />
                     <ReferenceLine y={0} stroke="#475569" strokeDasharray="3 3" />
                     {stressResults.map(result => (
                       <Line 
@@ -8201,7 +8223,7 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
                 formatter={(v, name) => [formatCurrency(v), name.replace('Portfolio', '')]}
                 labelFormatter={l => `Age ${l}`}
               />
-              <Legend />
+              <Legend formatter={legendInk} />
               {selectedStrategies.map(key => {
                 const info = strategyInfo.find(s => s.key === key);
                 return (
@@ -8235,7 +8257,7 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
                 formatter={(v, name) => [formatCurrency(v), name.replace('Withdrawal', '')]}
                 labelFormatter={l => `Age ${l}`}
               />
-              <Legend />
+              <Legend formatter={legendInk} />
               {selectedStrategies.map(key => {
                 const info = strategyInfo.find(s => s.key === key);
                 return (
@@ -9329,7 +9351,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                     contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569' }} 
                     formatter={(value, name) => [formatCurrency(value), name]} 
                   />
-                  <Legend />
+                  <Legend formatter={legendInk} />
                   <ReferenceLine x={personalInfo.myRetirementAge} stroke="#f59e0b" strokeDasharray="5 5" label={{ value: 'Retire', fill: '#f59e0b', fontSize: 11 }} />
                   {chartScenarios.map((s, i) => (
                     <Line key={s.label} type="monotone" dataKey={s.label} stroke={chartColors[i % chartColors.length]} 
@@ -12203,11 +12225,11 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
                 <div>
                   <div className="text-slate-500 text-xs mb-0.5">Savings Rate (Gross)</div>
                   <div className="flex items-center gap-2">
-                    <span className="text-xl font-bold text-amber-400">{savingsRate.toFixed(1)}%</span>
+                    <span className="text-xl font-bold text-slate-100">{savingsRate.toFixed(1)}%</span>
                     <div className="w-24 h-2.5 bg-slate-700 rounded-full overflow-hidden">
                       <div 
-                        className={`h-full rounded-full ${savingsRate >= 50 ? 'bg-emerald-400' : savingsRate >= 25 ? 'bg-amber-400' : 'bg-sky-400'}`}
-                        style={{ width: `${Math.min(savingsRate, 100)}%` }}
+                        className="h-full rounded-full"
+                        style={{ width: `${Math.min(savingsRate, 100)}%`, background: THEME.status[savingsRateStatus(savingsRate)] }}
                       ></div>
                     </div>
                   </div>
@@ -12221,11 +12243,11 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
                 <div>
                   <div className="text-slate-500 text-xs mb-0.5">Savings Rate (Net)</div>
                   <div className="flex items-center gap-2">
-                    <span className="text-xl font-bold text-emerald-400">{afterTaxSavingsRate.toFixed(1)}%</span>
+                    <span className="text-xl font-bold text-slate-100">{afterTaxSavingsRate.toFixed(1)}%</span>
                     <div className="w-24 h-2.5 bg-slate-700 rounded-full overflow-hidden">
                       <div 
-                        className={`h-full rounded-full ${afterTaxSavingsRate >= 50 ? 'bg-emerald-400' : afterTaxSavingsRate >= 25 ? 'bg-amber-400' : 'bg-sky-400'}`}
-                        style={{ width: `${Math.min(afterTaxSavingsRate, 100)}%` }}
+                        className="h-full rounded-full"
+                        style={{ width: `${Math.min(afterTaxSavingsRate, 100)}%`, background: THEME.status[savingsRateStatus(afterTaxSavingsRate)] }}
                       ></div>
                     </div>
                   </div>
@@ -12273,7 +12295,7 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
                     { color: '#10b981', label: 'Pre-Tax (Green)', desc: 'Combined balance of all pre-tax accounts (401k, Traditional IRA, 403b, 457b). These balances shrink in retirement as RMDs and spending withdrawals are taken. Every dollar withdrawn is taxed as ordinary income.' },
                     { color: '#a855f7', label: 'Roth (Purple)', desc: 'Combined balance of all Roth accounts. These grow tax-free and withdrawals are tax-free. The planner typically draws from Roth last (per your withdrawal priority), so this balance may grow well into retirement.' },
                     { color: '#38bdf8', label: 'Brokerage (Sky Blue)', desc: 'Combined taxable investment and HSA balances. Notice this column may jump UP in RMD years — that\'s excess RMD money being reinvested here after taxes.' },
-                    { color: '#f59e0b', label: 'Total (Gold)', desc: `Sum of all three account types — your total liquid investment portfolio. This is the number that needs to stay above zero through age ${personalInfo.legacyAge || 95}.` }
+                    { color: THEME.inkPrimary, label: 'Total', desc: `Sum of all three account types — your total liquid investment portfolio. This is the number that needs to stay above zero through age ${personalInfo.legacyAge || 95}.` }
                   ]
                 },
                 {
@@ -12496,7 +12518,7 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
                     { color: '#10b981', label: 'Pre-Tax (Green)', desc: 'Combined contributions to all pre-tax accounts (401k, Traditional IRA, 403b, 457b). These reduce your taxable income in the year contributed.' },
                     { color: '#a855f7', label: 'Roth (Purple)', desc: 'Combined contributions to all Roth accounts. These are made with after-tax dollars but grow and withdraw tax-free.' },
                     { color: '#38bdf8', label: 'Brokerage (Sky Blue)', desc: 'Combined contributions to taxable brokerage and HSA accounts.' },
-                    { color: '#f59e0b', label: 'Total (Gold)', desc: 'Sum of all contributions for the year across all account types.' }
+                    { color: THEME.inkPrimary, label: 'Total', desc: 'Sum of all contributions for the year across all account types.' }
                   ]
                 },
                 {
@@ -13567,10 +13589,10 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
                 {
                   heading: 'The Colored Layers',
                   items: [
-                    { color: '#f59e0b', label: 'Pre-Tax (Gold)', desc: '401(k), Traditional IRA, 403(b), 457(b). Contributions reduced your taxable income, but every dollar withdrawn in retirement will be taxed as ordinary income. This is typically your largest bucket during accumulation.' },
-                    { color: '#10b981', label: 'Roth (Green)', desc: 'Roth IRA, Roth 401(k), etc. You paid tax on contributions upfront, so withdrawals in retirement are completely tax-free. This layer growing large is very favorable for retirement flexibility.' },
-                    { color: '#6366f1', label: 'Brokerage (Indigo)', desc: 'Taxable investment accounts and HSAs. Withdrawals may generate capital gains taxes, but there are no age restrictions or required minimum distributions (except HSAs are tax-free for medical expenses).' },
-                    { color: '#ec4899', label: 'Non-Liquid Assets (Pink)', desc: 'Real estate, vehicles, business equity — things with value but not easily converted to spending cash. Shown net of any remaining mortgages or debt.' }
+                    { color: SERIES.preTax, label: 'Pre-Tax', desc: '401(k), Traditional IRA, 403(b), 457(b). Contributions reduced your taxable income, but every dollar withdrawn in retirement will be taxed as ordinary income. This is typically your largest bucket during accumulation.' },
+                    { color: SERIES.roth, label: 'Roth', desc: 'Roth IRA, Roth 401(k), etc. You paid tax on contributions upfront, so withdrawals in retirement are completely tax-free. This layer growing large is very favorable for retirement flexibility.' },
+                    { color: SERIES.brokerage, label: 'Brokerage', desc: 'Taxable investment accounts and HSAs. Withdrawals may generate capital gains taxes, but there are no age restrictions or required minimum distributions (except HSAs are tax-free for medical expenses).' },
+                    { color: SERIES.nonLiquid, label: 'Non-Liquid Assets', desc: 'Real estate, vehicles, business equity — things with value but not easily converted to spending cash. Shown net of any remaining mortgages or debt.' }
                   ]
                 },
                 {
@@ -13643,12 +13665,15 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
               <XAxis dataKey="myAge" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
               <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8' }} tickFormatter={v => `$${(v/1e6).toFixed(1)}M`} />
               <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }} formatter={v => formatCurrency(v)} labelFormatter={l => `Age ${l}`} />
-              <Legend />
-              <Area type="monotone" dataKey="preTaxBalance" stackId="1" fill="#f59e0b" stroke="#f59e0b" fillOpacity={0.6} name="Pre-Tax" />
-              <Area type="monotone" dataKey="rothBalance" stackId="1" fill="#10b981" stroke="#10b981" fillOpacity={0.6} name="Roth" />
-              <Area type="monotone" dataKey="brokerageBalance" stackId="1" fill="#6366f1" stroke="#6366f1" fillOpacity={0.6} name="Brokerage" />
-              <Area type="monotone" dataKey="netAssetValue" stackId="1" fill="#ec4899" stroke="#ec4899" fillOpacity={0.4} name="Non-Liquid Assets" />
-              <Line type="monotone" dataKey="totalNetWorth" stroke="#22d3ee" strokeWidth={2} dot={false} name="Total Net Worth" />
+              <Legend formatter={legendInk} />
+              {/* A 1px surface-coloured stroke between stacked bands: the gap is
+                  what lets a reader see the boundary without relying on the two
+                  fills being far enough apart on their own. */}
+              <Area type="monotone" dataKey="preTaxBalance" stackId="1" fill={SERIES.preTax} stroke={THEME.surface} strokeWidth={1} fillOpacity={0.72} name="Pre-Tax" />
+              <Area type="monotone" dataKey="rothBalance" stackId="1" fill={SERIES.roth} stroke={THEME.surface} strokeWidth={1} fillOpacity={0.72} name="Roth" />
+              <Area type="monotone" dataKey="brokerageBalance" stackId="1" fill={SERIES.brokerage} stroke={THEME.surface} strokeWidth={1} fillOpacity={0.72} name="Brokerage" />
+              <Area type="monotone" dataKey="netAssetValue" stackId="1" fill={SERIES.nonLiquid} stroke={THEME.surface} strokeWidth={1} fillOpacity={0.72} name="Non-Liquid Assets" />
+              <Line type="monotone" dataKey="totalNetWorth" stroke={THEME.inkPrimary} strokeWidth={2} dot={false} name="Total Net Worth" />
               <ReferenceLine x={retirementAge} stroke="#ef4444" strokeDasharray="5 5" />
             </ComposedChart>
           </ResponsiveContainer>
@@ -13675,12 +13700,12 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
                   heading: 'The Income Bars (Stacked)',
                   body: 'Each colored bar segment is a different source of income. They stack on top of each other so the total bar height equals your total gross income for that year.',
                   items: [
-                    { color: '#22c55e', label: 'Earned Income (Green)', desc: 'Salary, wages, or business income while you\'re still working. This typically drops to zero at your retirement age.' },
-                    { color: '#3b82f6', label: 'Social Security (Blue)', desc: 'Your monthly Social Security benefit, shown annually. Starts at your claiming age (usually 62–70). Delaying increases the amount.' },
-                    { color: '#8b5cf6', label: 'Pension (Purple)', desc: 'Any defined-benefit pension income. Starts at the age you specified in your income streams.' },
-                    { color: '#06b6d4', label: 'Other Income (Teal)', desc: 'Rental income, annuities, part-time work, or any other income streams you\'ve entered.' },
-                    { color: '#f59e0b', label: 'Portfolio Withdrawal (Gold)', desc: 'Money pulled from your retirement accounts (401k, IRA, Roth, brokerage) to cover the gap between your guaranteed income and your spending needs. This is the piece the planner calculates for you.' },
-                    { color: '#ec4899', label: 'Roth Conversion (Pink, translucent)', desc: 'Only shown when your plan includes Roth conversions. This is an account TRANSFER (pre-tax → Roth), not spendable income — that\'s why it\'s drawn translucent with a dashed outline, unlike the solid income segments. It\'s taxed as ordinary income in the year it happens, which is what drives the tax spike in conversion years. Use the checkbox above the chart to hide it if a large conversion dominates the scale.' }
+                    { color: SERIES.earnedIncome, label: 'Earned Income', desc: 'Salary, wages, or business income while you\'re still working. This typically drops to zero at your retirement age.' },
+                    { color: SERIES.socialSecurity, label: 'Social Security', desc: 'Your monthly Social Security benefit, shown annually. Starts at your claiming age (usually 62–70). Delaying increases the amount.' },
+                    { color: SERIES.pension, label: 'Pension', desc: 'Any defined-benefit pension income. Starts at the age you specified in your income streams.' },
+                    { color: SERIES.otherIncome, label: 'Other Income', desc: 'Rental income, annuities, part-time work, or any other income streams you\'ve entered.' },
+                    { color: SERIES.withdrawalVoluntary, label: 'Portfolio Withdrawal', desc: 'Money pulled from your retirement accounts (401k, IRA, Roth, brokerage) to cover the gap between your guaranteed income and your spending needs. This is the piece the planner calculates for you.' },
+                    { color: SERIES.rothConversion, label: 'Roth Conversion (translucent)', desc: 'Only shown when your plan includes Roth conversions. This is an account TRANSFER (pre-tax → Roth), not spendable income — that\'s why it\'s drawn translucent with a dashed outline, unlike the solid income segments. It\'s taxed as ordinary income in the year it happens, which is what drives the tax spike in conversion years. Use the checkbox above the chart to hide it if a large conversion dominates the scale.' }
                   ]
                 },
                 {
@@ -13770,7 +13795,7 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
               <XAxis dataKey="myAge" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
               <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8' }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
               <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }} formatter={v => formatCurrency(v)} labelFormatter={l => `Age ${l}`} />
-              <Legend />
+              <Legend formatter={legendInk} />
               <Bar dataKey="earnedIncome" stackId="income" fill="#22c55e" name="Earned Income" />
               <Bar dataKey="socialSecurity" stackId="income" fill="#3b82f6" name="Social Security" />
               <Bar dataKey="pension" stackId="income" fill="#8b5cf6" name="Pension" />

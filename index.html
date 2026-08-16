@@ -54,7 +54,7 @@
            the value off its own Worker URL search params)
        So one edit per release, in both index.html AND mobile.html.
        ============================================================ -->
-  <script>window.APP_VERSION = '1.73.0';</script>
+  <script>window.APP_VERSION = '1.74.0';</script>
   <!-- engine.js is loaded dynamically from the body IIFE (after the library
        check) using `appendChild` so its ?v= comes from APP_VERSION without any
        hardcoded version in a <script> tag. -->
@@ -217,6 +217,13 @@
           await loadScript('engine.js?v=' + window.APP_VERSION);
           if (typeof window.PlannerEngine === 'undefined') {
             throw new Error('engine.js loaded but window.PlannerEngine is undefined.');
+          }
+          // The palette. Separate from the engine because it is presentation,
+          // and separate from the app because tests/run-tests.cjs re-derives its
+          // colour-vision separation in node and needs to require() it.
+          await loadScript('theme.js?v=' + window.APP_VERSION);
+          if (typeof window.PlannerTheme === 'undefined') {
+            throw new Error('theme.js loaded but window.PlannerTheme is undefined.');
           }
           document.getElementById('load-status').textContent = 'Fetching app code...';
           // Fetch source and precompiled bundle together. The bundle (written by

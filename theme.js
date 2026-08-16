@@ -1,0 +1,134 @@
+// ── PALETTE ──────────────────────────────────────────────────────────────────
+// One place where a thing gets its colour, so the same entity looks the same on
+// every chart, table and tile. Before this file the app carried 60 hardcoded hex
+// values across 15 Tailwind colour families, and the same hue meant different
+// things in different places: pre-tax money was gold in one chart and
+// amber-orange in another, and three DIFFERENT oranges sat next to each other in
+// the tax chart meaning "voluntary withdrawal", "RMD" and "conversion tax".
+//
+// The governing rule is that COLOUR FOLLOWS THE ENTITY, NOT THE SLOT. A series
+// keeps its hue when other series are filtered away, and a reader can learn what
+// blue means because blue always means the same thing.
+//
+// Every categorical set below was checked with a contrast/colour-vision
+// validator against its own surface rather than by eye, on the pair list the
+// chart actually renders — for a stack or a bar group that is the ADJACENT
+// pairs, since those are the ones that touch. The measured worst cases are
+// recorded next to each set; tests/run-tests.cjs re-derives them so a future
+// edit that breaks one fails the suite instead of shipping.
+//
+// The failure this replaces, measured on the old palette: "RMD (mandatory)" and
+// "Portfolio Withdrawal (voluntary)" — two adjacent segments of the same stacked
+// bar, and the single most important distinction on that chart — sat at a
+// normal-vision ΔE of 4.2. Not a colour-blindness problem. Nobody could tell
+// them apart.
+
+(function (root, factory) {
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = factory();
+  } else {
+    root.PlannerTheme = factory();
+  }
+})(typeof window !== 'undefined' ? window : globalThis, function () {
+
+  // The eight categorical hues, stepped once for each surface. The dark column
+  // is the same eight hues re-stepped for a dark ground, NOT an automatic
+  // lightening: a colour that reads correctly on white glows on near-black.
+  const SLOTS = {
+    blue:    { dark: '#3987e5', light: '#2a78d6' },
+    orange:  { dark: '#d95926', light: '#eb6834' },
+    aqua:    { dark: '#199e70', light: '#1baf7a' },
+    yellow:  { dark: '#c98500', light: '#eda100' },
+    magenta: { dark: '#d55181', light: '#e87ba4' },
+    green:   { dark: '#008300', light: '#008300' },
+    violet:  { dark: '#9085e9', light: '#4a3aa7' },
+    red:     { dark: '#e66767', light: '#e34948' },
+  };
+
+  // Entities, mapped to slots. The mapping is deliberate rather than arbitrary:
+  // where two entities appear stacked against each other, they are given slots
+  // whose adjacent separation was measured, and the stack order below is the
+  // order the charts render in.
+  //
+  //   Balance sheet   preTax / roth / brokerage / nonLiquid
+  //     worst adjacent pair: yellow↔aqua, CVD ΔE 8.4 dark / 9.1 light,
+  //     normal-vision 19.8 dark / 22.9 light.
+  //
+  //   Income and flows  earned → socialSecurity → pension → otherIncome →
+  //     withdrawalVoluntary → rmd → rothConversion → conversionTaxDraw
+  //     worst adjacent pair: yellow↔aqua, CVD ΔE 8.4 dark / 9.1 light,
+  //     normal-vision 19.3 dark / 19.6 light.
+  const SERIES = {
+    // ── Balance sheet ──────────────────────────────────────────────────────
+    preTax:    SLOTS.blue,
+    roth:      SLOTS.aqua,
+    brokerage: SLOTS.yellow,
+    nonLiquid: SLOTS.violet,
+
+    // ── Income and flows, in the order they stack ──────────────────────────
+    earnedIncome:        SLOTS.blue,
+    socialSecurity:      SLOTS.orange,
+    pension:             SLOTS.aqua,
+    otherIncome:         SLOTS.yellow,
+    withdrawalVoluntary: SLOTS.magenta,
+    rmd:                 SLOTS.green,
+    rothConversion:      SLOTS.violet,
+    conversionTaxDraw:   SLOTS.red,
+  };
+
+  // Tax-bracket thresholds are a MAGNITUDE, not an identity — 12% then 22% then
+  // 24% then 32% is a ramp, and a ramp gets one hue light-to-dark. They used
+  // four saturated hues from the categorical space (green, yellow, orange, red),
+  // which both read as a traffic light nobody intended and stole four hues that
+  // the bars underneath were also using. As reference lines they should also sit
+  // BEHIND the data, so the ramp is deliberately lower in chroma than the series
+  // above.
+  const BRACKET_RAMP = {
+    dark:  ['#7c8ba1', '#93a3bb', '#adbdd4', '#c9d6e8'],
+    light: ['#94a3b8', '#7385a0', '#556885', '#394c6b'],
+  };
+
+  // Reserved. Never used for "series 5", and never carrying meaning alone — a
+  // status colour always ships next to a word or an icon.
+  const STATUS = {
+    good:     { dark: '#22c07a', light: '#0f8f52' },
+    warning:  { dark: '#e0a832', light: '#a86a06' },
+    serious:  { dark: '#e8834a', light: '#c04f11' },
+    critical: { dark: '#f0736f', light: '#c62b28' },
+  };
+
+  // Chart furniture. Grid and axis are deliberately recessive; the tooltip sits
+  // one step above the chart surface so it reads as floating.
+  const CHROME = {
+    surface:      { dark: '#0f172a', light: '#fcfcfb' },
+    surfaceRaised:{ dark: '#1e293b', light: '#ffffff' },
+    grid:         { dark: '#2b3a52', light: '#e6e6e2' },
+    axis:         { dark: '#7c8ba1', light: '#6b6b66' },
+    inkPrimary:   { dark: '#f1f5f9', light: '#14140f' },
+    inkSecondary: { dark: '#b6c2d2', light: '#52514e' },
+    inkMuted:     { dark: '#7c8ba1', light: '#78776f' },
+    reference:    { dark: '#e0a832', light: '#a86a06' },  // "you retire here" markers
+  };
+
+  // Resolve every token for one mode. Charts take plain strings rather than CSS
+  // variables because Recharts computes legend swatches and tooltip colours in
+  // JS, where a var() reference is an opaque string.
+  const resolve = (mode = 'dark') => {
+    const pick = (o) => o[mode] !== undefined ? o[mode] : o.dark;
+    const out = { mode, series: {}, status: {}, bracket: pick(BRACKET_RAMP) };
+    Object.entries(SERIES).forEach(([k, v]) => { out.series[k] = pick(v); });
+    Object.entries(STATUS).forEach(([k, v]) => { out.status[k] = pick(v); });
+    Object.entries(CHROME).forEach(([k, v]) => { out[k] = pick(v); });
+    return out;
+  };
+
+  // The order each chart stacks in. Exported so the chart and the validator
+  // cannot drift apart: a test asserts the separation of exactly these pairs.
+  const STACKS = {
+    balanceSheet: ['preTax', 'roth', 'brokerage', 'nonLiquid'],
+    incomeFlows: ['earnedIncome', 'socialSecurity', 'pension', 'otherIncome',
+                  'withdrawalVoluntary', 'rmd', 'rothConversion', 'conversionTaxDraw'],
+  };
+
+  return { SLOTS, SERIES, BRACKET_RAMP, STATUS, CHROME, STACKS, resolve, MODES: ['dark', 'light'] };
+});
