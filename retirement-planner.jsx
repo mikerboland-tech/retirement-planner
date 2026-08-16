@@ -50,6 +50,7 @@ const {
   rothConversionModeLabel, rothConversionModeOf,
   taxBreakpoints, marginalCostOfNextDollar,
   conversionStagesOf, irmaaAwareConversionStages, conversionFundingCost,
+  deferralDecision, convertWhileWorking,
   survivorTaxComparison, survivorSSLoss, scoreRothStrategy,
   planShortfall, breakingPoint, accountsAtSavingsTarget,
   splitBothContributors, breakEvenTaxRate, conversionFundingComparison,
@@ -5280,6 +5281,225 @@ function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, pro
 }
 
 
+// ── TRADITIONAL OR ROTH, WHILE YOU ARE STILL WORKING ─────────────────────────
+// Every other conversion tool here answers a question that only opens at
+// retirement. This one is for the years before that, when the decision gets
+// made silently by whatever the payroll form was set to and repeats every
+// payday. Two halves: the year-by-year rate comparison, which is the rule of
+// thumb made explicit, and the whole-plan run, which checks the rule of thumb
+// against everything it ignores.
+function DeferralDecisionPanel({ personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses }) {
+  const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine } = window.Recharts || {};
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState('equalTakeHome');
+
+  const result = useMemo(() => {
+    if (!open) return null;
+    try {
+      return deferralDecision({
+        pi: personalInfo, accts: accounts, streams: incomeStreams,
+        assetList: assets, events: oneTimeEvents, recurring: recurringExpenses,
+        currentYear: new Date().getFullYear(),
+      }, { mode });
+    } catch (e) { return { error: e.message }; }
+  }, [open, mode, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
+
+  const early = useMemo(() => {
+    if (!open || !rothConversionIsPlanned(personalInfo)) return null;
+    try {
+      return convertWhileWorking({
+        pi: personalInfo, accts: accounts, streams: incomeStreams,
+        assetList: assets, events: oneTimeEvents, recurring: recurringExpenses,
+        currentYear: new Date().getFullYear(),
+      });
+    } catch (e) { return null; }
+  }, [open, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
+
+  const retired = (personalInfo.myAge || 0) >= (personalInfo.myRetirementAge || 65);
+  if (retired) return null;
+
+  const pct = (v) => `${(v * 100).toFixed(1)}%`;
+  const variantLabel = { current: 'Your current split', allRoth: 'All Roth', allTraditional: 'All traditional' };
+
+  return (
+    <div className={cardStyle}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h4 className="text-lg font-semibold text-slate-100">Traditional or Roth, while you are still working</h4>
+          <p className="text-sm text-slate-400 mt-1">
+            You have {Math.max(0, (personalInfo.myRetirementAge || 65) - (personalInfo.myAge || 0))} working years
+            left to make this decision, and it repeats every payday. Defer when the rate you avoid now beats the
+            rate you will pay later — both halves shown below, year by year.
+          </p>
+        </div>
+        <button className={buttonSecondary} onClick={() => setOpen(v => !v)}>
+          {open ? 'Hide' : 'Run the analysis'}
+        </button>
+      </div>
+
+      {open && !result && <p className="text-sm text-slate-500 mt-4">Running the plan three ways…</p>}
+      {result && result.error && <p className="text-sm text-red-400 mt-4">{result.error}</p>}
+
+      {result && !result.error && result.years.length > 0 && (
+        <div className="mt-5 space-y-6">
+          {/* ── The chart: the rule of thumb, drawn ─────────────────────── */}
+          {ResponsiveContainer && (
+            <div>
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+                What a deferred dollar saves now, against what it will cost later
+              </div>
+              <ResponsiveContainer height={230} width="100%">
+                <LineChart data={result.years.map(y => ({
+                  age: y.age,
+                  now: Math.round(y.rateNow * 1000) / 10,
+                  later: Math.round(y.rateLater * 1000) / 10,
+                }))} margin={{ top: 8, right: 24, left: 0, bottom: 4 }}>
+                  <CartesianGrid stroke="#334155" strokeDasharray="3 3" />
+                  <XAxis dataKey="age" stroke="#94a3b8" tick={{ fontSize: 11 }}
+                         label={{ value: 'Your age', position: 'insideBottom', offset: -2, fill: '#64748b', fontSize: 11 }} />
+                  <YAxis stroke="#94a3b8" tick={{ fontSize: 11 }} unit="%" />
+                  <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
+                           formatter={(v, n) => [`${v}%`, n === 'now' ? 'Saved by deferring now' : 'Paid at withdrawal']} />
+                  <Legend formatter={(v) => v === 'now' ? 'Saved by deferring now' : 'Paid at withdrawal'}
+                          wrapperStyle={{ fontSize: 11 }} />
+                  <Line dataKey="now" dot={false} stroke="#f59e0b" strokeWidth={2} type="stepAfter" />
+                  <Line dataKey="later" dot={false} stroke="#38bdf8" strokeWidth={2} strokeDasharray="5 4" />
+                </LineChart>
+              </ResponsiveContainer>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Amber above blue means traditional; below means Roth. The later rate is the median marginal
+                bracket across your retirement years ({pct(result.rateLater.low)}–{pct(result.rateLater.high)} across
+                the whole range), so treat a gap of a point or two as a tie.
+                {result.rateLaterFromBaseline && (
+                  <> It is measured on your plan <em>without</em> conversions on purpose: with them, your pre-tax
+                  balance is gone by the mid-60s and the later rate collapses — not because those dollars were
+                  cheap, but because the conversion already paid the tax. Comparing a deferral against that
+                  number would flatter traditional with a bill you have already booked elsewhere.</>
+                )}
+              </p>
+            </div>
+          )}
+
+          {/* ── The table ───────────────────────────────────────────────── */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-700 text-slate-400">
+                  <th className="text-left py-1.5 px-2">Age</th>
+                  <th className="text-right py-1.5 px-2">Deferring saves</th>
+                  <th className="text-right py-1.5 px-2">Withdrawal costs</th>
+                  <th className="text-right py-1.5 px-2">Gap</th>
+                  <th className="text-left py-1.5 px-2">Points to</th>
+                  <th className="text-right py-1.5 px-2">Deferrals that year</th>
+                </tr>
+              </thead>
+              <tbody>
+                {result.years.map(y => (
+                  <tr key={y.age} className="border-b border-slate-700/50">
+                    <td className="py-1.5 px-2 text-slate-100 font-medium">{y.age}</td>
+                    <td className="py-1.5 px-2 text-right text-amber-400">{pct(y.rateNow)}</td>
+                    <td className="py-1.5 px-2 text-right text-sky-400">{pct(y.rateLater)}</td>
+                    <td className={`py-1.5 px-2 text-right ${y.gap > 0 ? 'text-emerald-400' : y.gap < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+                      {y.gap > 0 ? '+' : ''}{(y.gap * 100).toFixed(1)}
+                    </td>
+                    <td className="py-1.5 px-2">
+                      <span className={
+                        y.favors === 'traditional' ? 'text-emerald-400'
+                        : y.favors === 'roth' ? 'text-purple-400' : 'text-slate-400'}>
+                        {y.favors === 'close' ? 'too close to call' : y.favors}
+                      </span>
+                    </td>
+                    <td className="py-1.5 px-2 text-right text-slate-400 text-xs">
+                      {formatCurrency(y.deferrals.traditional)} pre-tax
+                      {y.deferrals.roth > 0 && ` · ${formatCurrency(y.deferrals.roth)} Roth`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* ── The whole-plan check ────────────────────────────────────── */}
+          <div className="bg-slate-900/60 border border-slate-700/50 rounded-lg p-4">
+            <div className="flex items-start justify-between gap-4 flex-wrap">
+              <div>
+                <div className="text-xs uppercase tracking-wide text-slate-500">
+                  And what the whole plan says
+                </div>
+                <p className="text-xs text-slate-400 mt-1 max-w-xl">
+                  The rate rule ignores everything that is not a rate — that Roth balances carry no RMD, feed
+                  no Social Security torpedo and pass to heirs untaxed; that a bigger pre-tax balance is a
+                  bigger widow's-year problem. Some of that outweighs a few points of rate, so the plan is run
+                  all three ways.
+                </p>
+              </div>
+              <select value={mode} onChange={e => setMode(e.target.value)}
+                      className="bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs">
+                <option value="equalTakeHome">Hold take-home pay equal</option>
+                <option value="equalContribution">Hold the contribution equal</option>
+              </select>
+            </div>
+
+            <table className="w-full text-sm mt-4">
+              <thead>
+                <tr className="border-b border-slate-700 text-slate-400">
+                  <th className="text-left py-1.5">Where future deferrals go</th>
+                  <th className="text-right py-1.5">Lifetime tax</th>
+                  <th className="text-right py-1.5">After-tax legacy</th>
+                </tr>
+              </thead>
+              <tbody>
+                {['current', 'allTraditional', 'allRoth'].map(k => result.variants[k] && (
+                  <tr key={k} className={`border-b border-slate-700/50 ${k === result.best ? 'bg-emerald-900/10' : ''}`}>
+                    <td className="py-1.5 text-slate-200">
+                      {variantLabel[k]}
+                      {k === result.best && <span className="text-[10px] text-emerald-400 ml-2">BEST HERE</span>}
+                      {result.variants[k].fails && <span className="text-[10px] text-red-400 ml-2">RUNS OUT</span>}
+                    </td>
+                    <td className="py-1.5 text-right text-slate-300">{formatCurrency(result.variants[k].lifetimeTax)}</td>
+                    <td className="py-1.5 text-right font-semibold text-slate-100">{formatCurrency(result.variants[k].afterTaxLegacy)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <p className="text-[11px] text-slate-500 mt-3">{result.neutrality.note}</p>
+            {result.anyFails && (
+              <p className="text-xs text-amber-400/90 mt-2">
+                At least one version of this plan runs out of money, so these are being compared on shortfall
+                rather than on legacy. Fix the shortfall first — which bucket you save into is a second-order
+                question next to not having enough.
+              </p>
+            )}
+          </div>
+
+          {/* ── Converting before you stop working ──────────────────────── */}
+          {early && (
+            <div className="bg-slate-900/60 border border-slate-700/50 rounded-lg p-4">
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+                Should you convert before you stop working?
+              </div>
+              <p className="text-sm text-slate-300">
+                Opening your conversion window at {early.startAge} instead of {early.currentStartAge} would convert{' '}
+                <strong>{formatCurrency(early.convertedWhileWorking)}</strong> while you are still earning, and{' '}
+                {early.helps
+                  ? <>leave <strong className="text-emerald-400">{formatCurrency(Math.abs(early.delta))} more</strong> after-tax legacy.</>
+                  : <>leave <strong className="text-red-400">{formatCurrency(Math.abs(early.delta))} less</strong>.</>}
+              </p>
+              <p className="text-xs text-slate-500 mt-2">
+                {early.helps
+                  ? 'That is the less common answer, and it usually means your pre-tax balance is too large to drain in the bridge years alone — the cheap years run out before the balance does.'
+                  : 'The usual answer, and the reason is stacking: a conversion sits on top of your salary, so it is taxed at the top of your working rate instead of filling the empty bracket space a retirement year offers.'}
+                {' '}Lifetime tax {early.extraTax >= 0 ? 'rises' : 'falls'} by {formatCurrency(Math.abs(early.extraTax))}.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── WHO PAYS THE CONVERSION TAX ──────────────────────────────────────────────
 // The two routes are compared by after-tax legacy in the Roth Roadmap report.
 // What that comparison cannot show is the part people actually get wrong: the
@@ -5877,6 +6097,16 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
         oneTimeEvents={oneTimeEvents}
         recurringExpenses={recurringExpenses}
         setPersonalInfo={setPersonalInfo}
+      />
+
+      {/* The accumulation-years decision, ahead of the retirement-years ones. */}
+      <DeferralDecisionPanel
+        accounts={accounts}
+        assets={assets}
+        incomeStreams={incomeStreams}
+        oneTimeEvents={oneTimeEvents}
+        personalInfo={personalInfo}
+        recurringExpenses={recurringExpenses}
       />
 
       {/* Who pays the conversion tax — and what the taxable dollars cost. */}

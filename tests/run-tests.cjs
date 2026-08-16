@@ -8837,6 +8837,174 @@ section('P72 — a conversion schedule with stages, and what the taxable account
   }
 }
 
+section('P73 — traditional or Roth, in the years you are still working');
+{
+  const { deferralDecision, switchDeferrals, convertWhileWorking, marginalCostOfNextDollar,
+          projectedWithdrawalRate } = engine;
+
+  const working = (o = {}) => {
+    const sc = baseScenario({
+      myAge: 53, spouseAge: 51, myRetirementAge: 62, spouseRetirementAge: 62,
+      myBirthYear: TODAY_YEAR - 53, spouseBirthYear: TODAY_YEAR - 51,
+      state: 'Missouri', desiredRetirementIncome: 120000, legacyAge: 92,
+      myLifeExpectancy: 92, spouseLifeExpectancy: 92, heirTaxRate: 0.25, ...o,
+    });
+    sc.accts = [
+      { id: 1, name: '401k', type: '401k', balance: 1400000, contributionMode: 'percent',
+        employeePercent: 0.12, employerMatchPercent: 0.04, cagr: 0.06, startAge: 53, stopAge: 62, owner: 'me', contributor: 'me' },
+      { id: 2, name: 'Roth IRA', type: 'roth_ira', balance: 150000, contribution: 8000, contributionGrowth: 0.03,
+        cagr: 0.06, startAge: 53, stopAge: 62, owner: 'me', contributor: 'me' },
+      { id: 3, name: 'Brokerage', type: 'brokerage', balance: 600000, contribution: 20000, contributionGrowth: 0.03,
+        cagr: 0.05, startAge: 53, stopAge: 62, owner: 'joint', contributor: 'me', costBasisPercent: 0.5 },
+    ];
+    sc.streams = [
+      { id: 1, name: 'Salary', type: 'earned_income', amount: 230000, startAge: 53, endAge: 61, cola: 0.03, owner: 'me' },
+      { id: 2, name: 'My SS', type: 'social_security', amount: 50000, startAge: 70, endAge: 92, cola: 0.025, owner: 'me' },
+    ];
+    return { pi: sc.pi, accts: sc.accts, streams: sc.streams,
+             assetList: [], events: [], recurring: [], currentYear: TODAY_YEAR };
+  };
+
+  // ── The switch moves contributions, never balances ───────────────────────
+  {
+    const ctx = working();
+    const roth = switchDeferrals(ctx.accts, { to: 'roth', taxRate: 0.25 });
+    const src = roth.find(a => a.id === 1);
+    eq(src.balance, 1400000, 'the pre-tax balance stays exactly where it was');
+    eq(src.employeePercent, 0, 'but its employee deferral is gone');
+    eq(src.employerMatchPercent, 0.04, 'and the employer match never moves — a match is pre-tax by law');
+    const dest = roth.find(a => a.type === 'roth_401k');
+    ok(dest, 'a Roth 401(k) receives the deferral');
+    eq(dest.balance, 0, 'starting from nothing — this is about future dollars only');
+    eq(dest.employerMatchPercent, 0, 'and it carries no match of its own');
+  }
+
+  // ── Cash neutrality: the comparison must not hand Roth free money ───────
+  // The bug this pins: moving $28,000 from traditional to Roth unchanged costs
+  // real extra tax, and if the model pays that from nowhere the portfolio
+  // arrives at retirement identical in size but entirely tax-free. Measured on
+  // this plan before the fix: $74,866 of extra working-year tax and a
+  // retirement portfolio identical to the dollar.
+  {
+    const ctx = working();
+    const base = computeProjections(ctx.pi, ctx.accts, ctx.streams, [], [], [], TODAY_YEAR);
+    const rothAccts = switchDeferrals(ctx.accts, { to: 'roth', taxRate: 0.267, mode: 'equalTakeHome' });
+    const roth = computeProjections(ctx.pi, rothAccts, ctx.streams, [], [], [], TODAY_YEAR);
+
+    const at62 = (p) => (p.find(r => r.myAge === 62) || {}).totalPortfolio || 0;
+    ok(Math.abs(at62(roth) - at62(base)) > 1000,
+      'the Roth variant does NOT arrive at retirement with an identical portfolio');
+    lt(at62(roth), at62(base),
+      'it arrives with less, because the same paycheck bought a smaller Roth contribution');
+
+    const dest = rothAccts.find(a => a.type === 'roth_401k');
+    approx(dest.employeePercent, 0.12 * (1 - 0.267),
+      'the Roth deferral is scaled to what the same take-home buys', 0.001);
+  }
+
+  // ── Equal-contribution is the other honest framing, not a free lunch ────
+  {
+    const ctx = working();
+    const d = deferralDecision(ctx, { mode: 'equalContribution' });
+    eq(d.neutrality.mode, 'equalContribution', 'the mode is reported');
+    ok(/deferral limit/.test(d.neutrality.note), 'and says when it is the right framing');
+    const brokerage = switchDeferrals(ctx.accts, { to: 'roth', taxRate: 0.267,
+      mode: 'equalContribution', deferralDollars: 27600 }).find(a => a.type === 'brokerage');
+    lt(brokerage.contribution, 20000, 'the taxable account funds the extra tax rather than nobody funding it');
+    const dest = switchDeferrals(ctx.accts, { to: 'roth', taxRate: 0.267, mode: 'equalContribution' })
+      .find(a => a.type === 'roth_401k');
+    eq(dest.employeePercent, 0.12, 'while the contribution itself is held equal');
+  }
+
+  // ── The year-by-year table ──────────────────────────────────────────────
+  {
+    const ctx = working();
+    const d = deferralDecision(ctx);
+    eq(d.years.length, 62 - 53, 'one row per remaining working year');
+    eq(d.years[0].age, 53, 'starting at the current age');
+    lt(d.years[d.years.length - 1].age, 62, 'and stopping before retirement');
+    gt(d.years[0].rateNow, 0, 'each year has a rate the deferral would save');
+    gt(d.rateLater.rate, 0, 'and a projected rate at withdrawal to compare it against');
+    eq(d.years[0].gap, d.years[0].rateNow - d.years[0].rateLater, 'the gap is the difference');
+    d.years.forEach(y => {
+      const expected = Math.abs(y.gap) < 0.01 ? 'close' : (y.gap > 0 ? 'traditional' : 'roth');
+      eq(y.favors, expected, `age ${y.age}: the verdict follows the gap`);
+    });
+    gt(d.years[0].deferrals.traditional, 0, 'and the row says how many dollars the decision is about');
+  }
+
+  // ── rateNow is measured DOWNWARD, which is the question being asked ─────
+  // What a deferral saves is what removing a dollar of income is worth, not
+  // what adding one costs. They differ at a bracket edge — and a deferral
+  // decision is only ever interesting at a bracket edge.
+  {
+    const ctx = working();
+    const proj = computeProjections(ctx.pi, ctx.accts, ctx.streams, [], [], [], TODAY_YEAR);
+    const row = proj.find(r => r.myAge === 55);
+    const down = marginalCostOfNextDollar({ row, pi: ctx.pi, probe: -1000 });
+    const up = marginalCostOfNextDollar({ row, pi: ctx.pi, probe: 1000 });
+    ok(down, 'a negative probe is accepted');
+    gt(down.rate, 0, 'and reports a positive rate — removing income saves tax');
+    gt(up.rate, 0, 'as does the upward probe');
+    eq(marginalCostOfNextDollar({ row, pi: ctx.pi, probe: 0 }), null, 'a zero probe is still rejected');
+  }
+
+  // ── Ranking survives a plan that fails every way ────────────────────────
+  // Three variants that all run out of money end at zero legacy, and sorting on
+  // legacy alone would crown whichever happened to come first.
+  {
+    const ctx = working({ desiredRetirementIncome: 600000 });
+    const d = deferralDecision(ctx);
+    eq(d.anyFails, true, 'the failure is reported rather than hidden');
+    const best = d.variants[d.best];
+    Object.values(d.variants).forEach(v => {
+      ok(!v.fails || best.fails, 'a failing variant never outranks a solvent one');
+      if (best.fails) ok(best.shortfall <= v.shortfall, 'and among failures the smallest shortfall wins');
+    });
+  }
+
+  // ── "Rate later" must not be read off the converting plan ──────────────
+  // The same trap the break-even work hit. With aggressive conversions the
+  // pre-tax account is empty by the mid-60s, so the marginal rate across the
+  // retirement years collapses — not because those dollars were cheap, but
+  // because the conversion already paid 39% on them. Reading that back as
+  // "what a deferral costs later" flatters traditional with a bill already
+  // booked elsewhere. Measured on this plan: 10.0% against the true 22.0%.
+  {
+    const plain = deferralDecision(working());
+    eq(plain.rateLaterFromBaseline, false, 'a plan with no conversions needs no baseline');
+
+    const conv = working();
+    conv.pi = { ...conv.pi, rothConversionBracket: '24%' };
+    const d = deferralDecision(conv);
+    eq(d.rateLaterFromBaseline, true, 'a converting plan measures the later rate without conversions');
+    eq(d.rateLater.rate, plain.rateLater.rate,
+      'giving the same later rate as the identical plan that never converted');
+
+    // And prove the trap is real: the converting projection's own rate is lower.
+    const selfReferential = projectedWithdrawalRate(
+      computeProjections(conv.pi, conv.accts, conv.streams, [], [], [], TODAY_YEAR), conv.pi);
+    lt(selfReferential.rate, d.rateLater.rate,
+      'the converting plan reports a lower later rate — which is what would have been believed');
+    d.years.forEach(y => eq(y.rateLater, d.rateLater.rate, 'every row compares against the same later rate'));
+  }
+
+  // ── Converting while still working ──────────────────────────────────────
+  {
+    const ctx = working();
+    eq(convertWhileWorking(ctx), null, 'a plan with no conversion has nothing to bring forward');
+    const conv = { ...ctx, pi: { ...ctx.pi, rothConversionBracket: '24%' } };
+    const cw = convertWhileWorking(conv);
+    ok(cw, 'a plan with conversions can be asked');
+    eq(cw.startAge, 53, 'the earlier start is today');
+    gt(cw.currentStartAge, cw.startAge, 'against a window that opens later');
+    gt(cw.convertedWhileWorking, 0, 'and it does convert during the working years');
+    eq(typeof cw.helps, 'boolean', 'with a verdict either way — this is not assumed');
+    eq(convertWhileWorking(conv, { startAge: 70 }), null,
+      'asking to start after retirement is not a question about working years');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

@@ -5438,8 +5438,13 @@ const taxBreakpoints = ({ row, pi = {}, numMedicareEligible = null } = {}) => {
 // deduction phasing out, preferential gains being re-rated or NIIT switching on,
 // and state. IRMAA is added separately because it is a cliff two years out
 // rather than a rate on this dollar.
+// A NEGATIVE probe asks the mirror-image question — what the LAST dollar of
+// income is worth removing — which is the rate a traditional deferral actually
+// saves. The two differ at a bracket edge, and the deferral decision lives
+// exactly at bracket edges, so approximating one with the other would be wrong
+// in the only place the answer is close.
 const marginalCostOfNextDollar = ({ row, pi = {}, probe = 1000, numMedicareEligible = null } = {}) => {
-  if (!row || !(probe > 0)) return null;
+  if (!row || !probe || !Number.isFinite(probe)) return null;
   const fs = row.effectiveFilingStatus || row.filingStatus || pi.filingStatus || 'married_joint';
   const idx = (row.year || BASE_TAX_YEAR) - BASE_TAX_YEAR;
   const infl = pi.inflationRate ?? 0.03;
@@ -6442,6 +6447,347 @@ const accountsAtSavingsTarget = (accts, { currentPersonal = 0, targetDollars = 0
   if (!Array.isArray(accts)) return [];
   if (currentPersonal > 0) return scaleOwnContributions(accts, Math.max(0, targetDollars) / currentPersonal);
   return addOwnContribution(accts, Math.max(0, targetDollars));
+};
+
+// ── TRADITIONAL OR ROTH, WHILE YOU ARE STILL WORKING ─────────────────────────
+// Every conversion tool in this app answers a question that only opens at
+// retirement. The bigger decision, for anyone still earning, is which bucket
+// this year's savings go into — and it gets made silently, by whatever the
+// payroll form was set to years ago, every payday for the rest of a career.
+//
+// The rule is one line: defer when the rate you avoid now is higher than the
+// rate you will pay later. What makes it hard is that both halves are moving.
+// The rate now walks up as pay rises, and the rate later depends on a plan that
+// has not happened yet. So this reports the comparison YEAR BY YEAR rather than
+// as a single verdict, and then checks the verdict by running the whole plan
+// both ways — because a per-year rate comparison ignores everything that is not
+// a rate, and some of what it ignores is large.
+
+// Which Roth type a pre-tax account's contributions would go to instead.
+// Employer plans keep their plan type; an IRA stays an IRA.
+const ROTH_COUNTERPART = {
+  '401k': 'roth_401k', '403b': 'roth_403b', '457b': 'roth_457b', 'traditional_ira': 'roth_ira',
+};
+const TRADITIONAL_COUNTERPART = Object.fromEntries(
+  Object.entries(ROTH_COUNTERPART).map(([k, v]) => [v, k]));
+
+// Move FUTURE employee contributions to the other bucket, leaving balances
+// where they are. Switching an account's type outright would convert the whole
+// existing balance for free, which is not the decision being modelled — the
+// question is where the NEXT dollar goes.
+//
+// THE COMPARISON HAS TO BE CASH-NEUTRAL, and getting this wrong is the classic
+// error in this analysis. $28,000 into a traditional 401(k) and $28,000 into a
+// Roth 401(k) are not the same decision: the Roth version costs more take-home
+// pay, because the deduction is gone. A model that moves the contribution
+// across unchanged pays that extra tax out of nowhere — the portfolio arrives
+// at retirement identical in size but entirely tax-free, and Roth "wins" by a
+// margin that is pure accounting error. (Measured on a real plan before this
+// was fixed: $74,866 of extra working-year tax, and a retirement portfolio
+// identical to the dollar.)
+//
+// Two framings are defensible, and which one is right depends on whether the
+// deferral limit binds:
+//
+//   equalTakeHome     The textbook comparison. The Roth contribution is scaled
+//                     to what the same paycheck buys — $28,000 traditional at a
+//                     26.7% rate is $20,524 of Roth. Correct when you choose
+//                     how much to save.
+//
+//   equalContribution Contribute the same number either way and fund the extra
+//                     tax by saving less in the taxable account. Correct when
+//                     you are already at the 402(g) limit, where a Roth dollar
+//                     genuinely buys more sheltered space than a traditional
+//                     one and that is a real Roth advantage.
+//
+// The employer match never moves. A match is pre-tax by default, and while
+// SECURE 2.0 §604 permits a Roth match it is elective, immediately taxable, and
+// not something to assume on a user's behalf. In percent mode the two rates are
+// already stored separately, so only employeePercent travels.
+const switchDeferrals = (accounts, { to = 'roth', taxRate = 0, mode = 'equalTakeHome',
+                                     deferralDollars = null } = {}) => {
+  if (!Array.isArray(accounts)) return accounts || [];
+  const map = to === 'roth' ? ROTH_COUNTERPART : TRADITIONAL_COUNTERPART;
+  const rate = Math.min(0.9, Math.max(0, taxRate || 0));
+  // Moving TO Roth costs tax, so the same paycheck buys less; moving to
+  // traditional refunds it, so the same paycheck buys more.
+  const scale = mode === 'equalTakeHome'
+    ? (to === 'roth' ? (1 - rate) : 1 / Math.max(0.1, 1 - rate))
+    : 1;
+  const out = [];
+  let nextId = accounts.reduce((m, a) => Math.max(m, Number(a && a.id) || 0), 0);
+  let taxableAdjustment = 0;   // equalContribution: what the taxable account funds
+
+  accounts.forEach(a => {
+    const target = a && map[a.type];
+    const isPercent = a && a.contributionMode === 'percent';
+    const employee = isPercent ? (a.employeePercent || 0) : (a.contribution || 0);
+    if (!target || employee <= 0) { out.push(a); return; }
+
+    const moved = employee * scale;
+    if (mode === 'equalContribution' && !isPercent && deferralDollars === null) {
+      // The tax the switch costs (or refunds), paid from taxable savings.
+      taxableAdjustment += (to === 'roth' ? -1 : 1) * employee * rate;
+    }
+
+    // The source keeps its balance, its growth, and its employer match.
+    out.push(isPercent ? { ...a, employeePercent: 0 } : { ...a, contribution: 0 });
+
+    // A sibling account of the other type receives the employee contribution.
+    // Merged into an existing account of that type when the user already has
+    // one, so the projection doesn't sprout a duplicate row every time this
+    // runs — and so the destination's own growth rate is respected.
+    const existing = out.find(x => x && x.type === target && x.owner === a.owner);
+    if (existing) {
+      if (isPercent && existing.contributionMode === 'percent') {
+        existing.employeePercent = (existing.employeePercent || 0) + moved;
+        return;
+      }
+      if (!isPercent && existing.contributionMode !== 'percent') {
+        existing.contribution = (existing.contribution || 0) + moved;
+        return;
+      }
+    }
+    nextId += 1;
+    out.push({
+      id: nextId,
+      name: `${a.name} (${to === 'roth' ? 'Roth' : 'pre-tax'} deferrals)`,
+      type: target,
+      balance: 0,
+      cagr: a.cagr,
+      startAge: a.startAge,
+      stopAge: a.stopAge,
+      owner: a.owner,
+      contributor: a.contributor,
+      ...(isPercent
+        ? { contributionMode: 'percent', employeePercent: moved, employerMatchPercent: 0 }
+        : { contribution: moved, contributionGrowth: a.contributionGrowth || 0 }),
+    });
+  });
+
+  // Percent-of-salary accounts carry a rate, not a dollar figure, so the caller
+  // supplies the dollar deferral it measured from the projection. Held flat
+  // rather than grown with salary — an approximation, and a stated one: it
+  // understates the funding in later years, which is the conservative direction
+  // for the mode that already flatters Roth.
+  if (mode === 'equalContribution' && deferralDollars !== null) {
+    taxableAdjustment = (to === 'roth' ? -1 : 1) * deferralDollars * rate;
+  }
+  if (taxableAdjustment !== 0) {
+    const brokerage = out.find(x => x && isBrokerageAccount(x.type) && (x.contribution || 0) > 0)
+      || out.find(x => x && isBrokerageAccount(x.type));
+    if (brokerage) {
+      brokerage.contribution = Math.max(0, (brokerage.contribution || 0) + taxableAdjustment);
+    }
+  }
+  return out;
+};
+
+// How much employee deferral is going in each year, and where. The table needs
+// this to say what the decision is actually worth in dollars rather than only
+// in percentage points.
+const deferralsInYear = (row, accts) => {
+  const per = row.perAccountContributions || {};
+  let traditional = 0, roth = 0;
+  (accts || []).forEach(a => {
+    const amt = per[a.id] || 0;
+    if (amt <= 0) return;
+    if (isRothAccount(a.type)) roth += amt;
+    else if (isPreTaxAccount(a.type)) traditional += amt;
+  });
+  return { traditional: Math.round(traditional), roth: Math.round(roth) };
+};
+
+const deferralDecision = (ctx, opts2 = {}) => {
+  const probe = opts2.probe || 1000;
+  if (!ctx || !ctx.pi) return null;
+  const pi = ctx.pi;
+  const run = (over = {}, accts = ctx.accts) => computeProjections({ ...pi, ...over }, accts,
+    ctx.streams, ctx.assetList || [], ctx.events || [], ctx.recurring || [], ctx.currentYear);
+
+  const current = run();
+  if (!current.length) return null;
+
+  const retireAge = pi.myRetirementAge || 65;
+  // The rate later has to be read from a plan with NO conversions, and this is
+  // the same trap the break-even work hit. On a plan converting aggressively,
+  // the pre-tax account is empty by the mid-60s, so the marginal rate across
+  // the retirement years collapses to 10% — not because those dollars were
+  // cheap, but because they were already taxed at 39% on the way out. Reading
+  // that 10% back as "what a deferral will cost you later" makes traditional
+  // look enormously better than it is, on the strength of a tax bill the
+  // conversion programme already paid.
+  //
+  // So the comparison is against the rate the pre-tax balance would face if
+  // left alone. That is the alternative a deferral decision is actually made
+  // against.
+  const converting = rothConversionIsPlanned(pi);
+  const baseline = converting
+    ? run(withoutRothConversions(pi))
+    : current;
+  const later = projectedWithdrawalRate(baseline, pi);
+
+  // ── The year-by-year comparison ────────────────────────────────────────
+  // rateNow uses a NEGATIVE probe: the question is what removing a dollar of
+  // income saves, not what adding one costs. At a bracket edge those differ,
+  // and a deferral decision is only ever interesting at a bracket edge.
+  const years = current
+    .filter(r => r.myAge < retireAge)
+    .map(r => {
+      const m = marginalCostOfNextDollar({ row: r, pi, probe: -Math.abs(probe) });
+      const rateNow = m ? m.rate : 0;
+      const gap = rateNow - later.rate;
+      return {
+        age: r.myAge,
+        year: r.year,
+        rateNow,
+        federalNow: m ? m.federalRate : 0,
+        stateNow: m ? m.stateRate : 0,
+        rateLater: later.rate,
+        gap,
+        // A gap under a point is noise given everything the projection does not
+        // know. Saying "traditional, by 0.4 points" would be false precision.
+        favors: Math.abs(gap) < 0.01 ? 'close' : (gap > 0 ? 'traditional' : 'roth'),
+        deferrals: deferralsInYear(r, ctx.accts),
+        ssTorpedo: m ? m.components.ssTorpedo : 0,
+        irmaa: m ? m.components.irmaa : 0,
+      };
+    });
+
+  // ── The whole-plan check ───────────────────────────────────────────────
+  // A per-year rate comparison ignores everything that is not a rate: that
+  // Roth balances carry no RMD, that a smaller pre-tax balance means a smaller
+  // widow's-year problem and a smaller heir tax bill, that a traditional
+  // deferral frees cash today which then compounds in a taxable account. Some
+  // of that is worth more than the rate gap. So run it both ways.
+  const opts = { legacyAge: pi.legacyAge || 95, retirementAge: retireAge,
+                 heirTaxRate: pi.heirTaxRate ?? 0.25 };
+  const score = (proj) => {
+    const s = scoreRothStrategy(proj, opts);
+    if (!s) return null;
+    const short = planShortfall(proj, { retirementAge: retireAge });
+    return { ...s, fails: short ? short.fails : false, shortfall: short ? short.totalShortfall : 0 };
+  };
+
+  // The rate used to make the switch cash-neutral is the one measured on the
+  // first working year — the rate the decision is actually made at.
+  const switchRate = years.length ? years[0].rateNow : 0;
+  const mode = opts2.mode === 'equalContribution' ? 'equalContribution' : 'equalTakeHome';
+  const firstYearDeferral = years.length ? years[0].deferrals : { traditional: 0, roth: 0 };
+  const sw = (to) => switchDeferrals(ctx.accts, { to, taxRate: switchRate, mode,
+    deferralDollars: mode === 'equalContribution'
+      ? (to === 'roth' ? firstYearDeferral.traditional : firstYearDeferral.roth)
+      : null });
+  const variants = {
+    current: score(current),
+    allRoth: score(run({}, sw('roth'))),
+    allTraditional: score(run({}, sw('traditional'))),
+  };
+  // Ranking cannot be legacy alone. On a plan that runs out of money every way
+  // you cut it, all three variants end at zero and the "winner" is whichever
+  // happened to sort first — a coin toss presented as advice. Solvency first,
+  // then how badly it misses, then legacy.
+  const ranked = Object.entries(variants)
+    .filter(([, v]) => v)
+    .sort((a, b) => {
+      if (a[1].fails !== b[1].fails) return a[1].fails ? 1 : -1;
+      if (a[1].fails && b[1].fails) return a[1].shortfall - b[1].shortfall;
+      return b[1].afterTaxLegacy - a[1].afterTaxLegacy;
+    });
+  const best = ranked.length ? ranked[0][0] : 'current';
+  const anyFails = Object.values(variants).some(v => v && v.fails);
+
+  return {
+    retireAge,
+    workingYears: years.length,
+    rateLater: later,
+    // Whether the "later" rate came from a no-conversion baseline rather than
+    // from the plan as configured. Shown, because a reader comparing this
+    // figure against the conversion tables will otherwise think one is wrong.
+    rateLaterFromBaseline: converting,
+    years,
+    variants,
+    best,
+    // How the switch was made cash-neutral, so the reader can see the
+    // comparison is like-for-like rather than having to trust that it is.
+    neutrality: {
+      mode,
+      taxRate: switchRate,
+      note: mode === 'equalTakeHome'
+        ? `Roth contributions are scaled to what the same take-home pay buys at your ${Math.round(switchRate * 1000) / 10}% marginal rate. Contributing the same NUMBER to a Roth would cost more paycheck, and comparing those two would flatter Roth by exactly the tax nobody paid.`
+        : `Contributions are held equal and the extra tax is funded by saving less in the taxable account. This is the right framing when you are already at the deferral limit — there, a Roth dollar shelters more than a traditional one, and that is a genuine advantage.`,
+    },
+    // When every variant runs out of money, the legacy figures are all zero and
+    // the comparison is between shortfalls, not between outcomes. Say so — a
+    // reader shown "all-Roth wins" on three zeros would take it as a real result.
+    anyFails,
+    // What switching every future employee deferral is worth, against the mix
+    // in place today. Signed, and allowed to be negative — "your current split
+    // already beats both extremes" is a real and useful answer.
+    rothDelta: variants.allRoth && variants.current
+      ? variants.allRoth.afterTaxLegacy - variants.current.afterTaxLegacy : 0,
+    traditionalDelta: variants.allTraditional && variants.current
+      ? variants.allTraditional.afterTaxLegacy - variants.current.afterTaxLegacy : 0,
+  };
+};
+
+// ── SHOULD I CONVERT BEFORE I STOP WORKING? ──────────────────────────────────
+// The default conversion window opens at retirement for a good reason: a
+// conversion stacks on top of salary, so while you are working it is taxed at
+// the top of your working rate rather than in the empty bracket space a
+// retirement year offers. That is the usual answer, and it is usually right.
+//
+// It is not always right. A large pre-tax balance can be too big to drain in
+// the bridge years alone, and a year with a bonus-free salary, a sabbatical, or
+// a spouse who has already stopped can be cheaper than it looks. Rather than
+// asserting either way, this converts while working and reports what happened.
+const convertWhileWorking = (ctx, { startAge = null } = {}) => {
+  if (!ctx || !ctx.pi || !rothConversionIsPlanned(ctx.pi)) return null;
+  const pi = ctx.pi;
+  const retireAge = pi.myRetirementAge || 65;
+  const from = startAge ?? pi.myAge;
+  if (from >= retireAge) return null;   // nothing to bring forward
+
+  const run = (over) => computeProjections({ ...pi, ...over }, ctx.accts, ctx.streams,
+    ctx.assetList || [], ctx.events || [], ctx.recurring || [], ctx.currentYear);
+  const opts = { legacyAge: pi.legacyAge || 95, retirementAge: retireAge,
+                 heirTaxRate: pi.heirTaxRate ?? 0.25 };
+  const score = (proj) => {
+    const s = scoreRothStrategy(proj, opts);
+    if (!s) return null;
+    const short = planShortfall(proj, { retirementAge: retireAge });
+    return { ...s, fails: short ? short.fails : false };
+  };
+
+  const stages = conversionStagesOf(pi);
+  const currentStart = stages.length ? Math.min(...stages.map(s => s.startAge)) : retireAge;
+
+  // Extend the schedule backwards rather than replacing it, so the comparison
+  // isolates the START AGE and changes nothing else about the strategy.
+  const earlier = stages.length
+    ? stages.map((s, i) => i === 0 ? { ...s, startAge: from } : s)
+    : null;
+
+  const asIs = score(run({}));
+  const earlyProj = earlier ? run({ rothConversionStages: earlier }) : null;
+  const early = earlyProj ? score(earlyProj) : null;
+  if (!asIs || !early) return null;
+
+  const convertedWhileWorking = earlyProj
+    .filter(r => r.myAge < retireAge)
+    .reduce((s, r) => s + (r.rothConversion || 0), 0);
+
+  return {
+    startAge: from,
+    currentStartAge: currentStart,
+    retireAge,
+    asIs, early,
+    convertedWhileWorking: Math.round(convertedWhileWorking),
+    delta: early.afterTaxLegacy - asIs.afterTaxLegacy,
+    helps: early.afterTaxLegacy > asIs.afterTaxLegacy,
+    // The reason it usually does not: a conversion stacks on salary.
+    extraTax: early.lifetimeTax - asIs.lifetimeTax,
+  };
 };
 
 // ── WHAT BREAKS FIRST ────────────────────────────────────────────────────────
@@ -9322,6 +9668,7 @@ const describePlanPatch = (state, patch) => {
     qcdTaxSavings,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
     conversionStagesOf, conversionStageAt, irmaaAwareConversionStages,
+    deferralDecision, convertWhileWorking, switchDeferrals,
     MEDICARE_ELIGIBILITY_AGE,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,
