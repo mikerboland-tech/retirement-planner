@@ -45,10 +45,20 @@
     red:     { dark: '#e66767', light: '#e34948' },
   };
 
-  // Entities, mapped to slots. The mapping is deliberate rather than arbitrary:
-  // where two entities appear stacked against each other, they are given slots
-  // whose adjacent separation was measured, and the stack order below is the
-  // order the charts render in.
+  // Entities, mapped to slots. TWO constraints, in this order:
+  //
+  //   1. What the colour MEANS to someone thinking about money. Earned income is
+  //      green because earnings are green. Social Security is blue. Roth is
+  //      green because it is the most prized dollar in the plan. Money leaving
+  //      for the IRS is red. A conversion — a transfer, not income — is violet.
+  //      A palette that ignores this is learnable only by memorising a legend.
+  //
+  //   2. Measured separation on the pairs that actually touch. Semantics choose
+  //      the hue; the validator decides whether that choice is legal, and where
+  //      it is not, the FREE slots move rather than the meaningful ones.
+  //
+  // The first pass of this file honoured only constraint 2 and produced blue
+  // earned income and orange Social Security — separable, and meaningless.
   //
   //   Balance sheet   preTax / roth / brokerage / nonLiquid
   //     worst adjacent pair: yellow↔aqua, CVD ΔE 8.4 dark / 9.1 light,
@@ -60,20 +70,20 @@
   //     normal-vision 19.3 dark / 19.6 light.
   const SERIES = {
     // ── Balance sheet ──────────────────────────────────────────────────────
-    preTax:    SLOTS.blue,
-    roth:      SLOTS.aqua,
-    brokerage: SLOTS.yellow,
-    nonLiquid: SLOTS.violet,
+    preTax:    SLOTS.blue,    // taxed on the way out
+    roth:      SLOTS.aqua,    // green — the most prized dollar in the plan
+    brokerage: SLOTS.yellow,  // gold, the flexible middle bucket
+    nonLiquid: SLOTS.violet,  // not spendable
 
     // ── Income and flows, in the order they stack ──────────────────────────
-    earnedIncome:        SLOTS.blue,
-    socialSecurity:      SLOTS.orange,
-    pension:             SLOTS.aqua,
-    otherIncome:         SLOTS.yellow,
-    withdrawalVoluntary: SLOTS.magenta,
-    rmd:                 SLOTS.green,
-    rothConversion:      SLOTS.violet,
-    conversionTaxDraw:   SLOTS.red,
+    earnedIncome:        SLOTS.green,    // earnings are green
+    socialSecurity:      SLOTS.blue,     // the government cheque
+    pension:             SLOTS.orange,
+    otherIncome:         SLOTS.aqua,
+    withdrawalVoluntary: SLOTS.yellow,   // gold, same as the brokerage it mostly comes from
+    rmd:                 SLOTS.magenta,  // stands apart: this one is not your choice
+    rothConversion:      SLOTS.violet,   // a transfer, not income
+    conversionTaxDraw:   SLOTS.red,      // money leaving for the IRS
   };
 
   // Tax-bracket thresholds are a MAGNITUDE, not an identity — 12% then 22% then
@@ -100,7 +110,7 @@
   // Chart furniture. Grid and axis are deliberately recessive; the tooltip sits
   // one step above the chart surface so it reads as floating.
   const CHROME = {
-    surface:      { dark: '#0f172a', light: '#fcfcfb' },
+    surface:      { dark: '#0f172a', light: '#f8fafc' },
     surfaceRaised:{ dark: '#1e293b', light: '#ffffff' },
     grid:         { dark: '#2b3a52', light: '#e6e6e2' },
     axis:         { dark: '#7c8ba1', light: '#6b6b66' },
