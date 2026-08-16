@@ -49,6 +49,7 @@ const {
   rothConversionIsPlanned, withoutRothConversions, withRothConversionTarget,
   rothConversionModeLabel, rothConversionModeOf,
   taxBreakpoints, marginalCostOfNextDollar,
+  conversionStagesOf, irmaaAwareConversionStages, conversionFundingCost,
   survivorTaxComparison, survivorSSLoss, scoreRothStrategy,
   planShortfall, breakingPoint, accountsAtSavingsTarget,
   splitBothContributors, breakEvenTaxRate, conversionFundingComparison,
@@ -5279,6 +5280,151 @@ function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, pro
 }
 
 
+// ── WHO PAYS THE CONVERSION TAX ──────────────────────────────────────────────
+// The two routes are compared by after-tax legacy in the Roth Roadmap report.
+// What that comparison cannot show is the part people actually get wrong: the
+// brokerage dollars handed to the IRS are gone at the START of a thirty-year
+// projection, so what you gave up is not the tax bill — it is the tax bill plus
+// everything it would have compounded into. No break-even formula counts that.
+function ConversionFundingPanel({ personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses }) {
+  const [open, setOpen] = useState(false);
+  const result = useMemo(() => {
+    if (!open || !rothConversionIsPlanned(personalInfo)) return null;
+    try {
+      return conversionFundingCost({
+        pi: personalInfo, accts: accounts, streams: incomeStreams,
+        assetList: assets, events: oneTimeEvents, recurring: recurringExpenses,
+        currentYear: new Date().getFullYear(),
+      });
+    } catch (e) { return { error: e.message }; }
+  }, [open, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
+
+  if (!rothConversionIsPlanned(personalInfo)) return null;
+  const current = personalInfo.rothConversionTaxSource === 'brokerage' ? 'brokerage' : 'withdrawal';
+
+  return (
+    <div className={cardStyle}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h4 className="text-lg font-semibold text-slate-100">Who pays the conversion tax</h4>
+          <p className="text-sm text-slate-400 mt-1">
+            Selling brokerage shares to pay the bill, against letting the withdrawal solver find the money —
+            including what the brokerage dollars would have been worth if you had kept them.
+          </p>
+        </div>
+        <button className={buttonSecondary} onClick={() => setOpen(v => !v)}>
+          {open ? 'Hide' : 'Run the comparison'}
+        </button>
+      </div>
+
+      {open && !result && <p className="text-sm text-slate-500 mt-4">Running two full projections…</p>}
+      {result && result.error && (
+        <p className="text-sm text-red-400 mt-4">Could not run the comparison: {result.error}</p>
+      )}
+
+      {result && !result.error && (
+        <div className="mt-5 space-y-5">
+          {result.degenerate && (
+            <div className="bg-amber-900/20 border border-amber-500/30 rounded-lg p-3 text-sm text-amber-200/90">
+              {result.degenerateNote}
+            </div>
+          )}
+
+          {/* The exact ledger. afterTaxLegacy is roth + brokerage + pre-tax net
+              of the heirs' rate, so differencing the two runs bucket by bucket
+              reproduces the headline with nothing left over. */}
+          <div>
+            <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+              Paying from the brokerage, measured against paying from the portfolio
+            </div>
+            <div className="space-y-1.5">
+              {result.ledger.map(l => (
+                <div key={l.key} className="flex items-center justify-between bg-slate-900/60 border border-slate-700/50 rounded-lg px-3 py-2">
+                  <span className="text-sm text-slate-300">{l.label}</span>
+                  <span className={`text-sm font-semibold ${l.amount >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {l.amount >= 0 ? '+' : '−'}{formatCurrency(Math.abs(l.amount))}
+                  </span>
+                </div>
+              ))}
+              <div className="flex items-center justify-between border-t border-slate-600/50 px-3 pt-2 mt-1">
+                <span className="text-sm font-semibold text-slate-200">
+                  Net — {result.better === 'brokerage' ? 'paying from the brokerage wins' : 'paying from the portfolio wins'}
+                </span>
+                <span className={`text-base font-bold ${result.fundingDelta >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {formatCurrency(Math.abs(result.fundingDelta))}
+                </span>
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-500 mt-2">
+              You are currently set to pay from <strong className="text-slate-300">
+              {current === 'brokerage' ? 'the brokerage' : 'the normal withdrawal priority'}</strong>.
+              {result.checks[0].ok && ' The three lines above reconcile to the net exactly — this is a decomposition, not an attribution.'}
+            </p>
+          </div>
+
+          {/* The part the formulas skip. */}
+          <div className="bg-slate-900/60 border border-slate-700/50 rounded-lg p-4">
+            <div className="text-xs uppercase tracking-wide text-slate-500 mb-3">
+              The cost of not having those brokerage assets
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <div className="text-xs text-slate-500">Paid to the IRS from taxable</div>
+                <div className="text-lg font-semibold text-slate-200">{formatCurrency(result.taxableAccountCost.principal)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">Growth it never made</div>
+                <div className="text-lg font-semibold text-red-400">{formatCurrency(result.taxableAccountCost.forgoneGrowth)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">Would have been worth at {result.taxableAccountCost.horizonAge}</div>
+                <div className="text-lg font-bold text-slate-100">{formatCurrency(result.taxableAccountCost.wouldHaveBeenWorth)}</div>
+              </div>
+            </div>
+            <p className="text-xs text-slate-400 mt-3">
+              Each year's tax payment compounded at your taxable accounts' own {Math.round(result.taxableAccountCost.cagr * 1000) / 10}%
+              growth to age {result.taxableAccountCost.horizonAge}. Raising that cash also realized{' '}
+              <strong className="text-slate-300">{formatCurrency(result.taxableAccountCost.gainsTaxToRaiseIt)}</strong> of extra
+              capital-gains tax along the way — the line people forget, because "cash from the brokerage" sounds free to raise.
+            </p>
+            {result.taxableAccountCost.absorbed && (
+              <p className="text-xs text-amber-400/90 mt-2">
+                Note: your taxable account reaches zero under both routes, so its line in the ledger above is $0. That does not
+                mean spending it was free — the cost surfaced years earlier as a larger draw on everything else, which is what
+                the net figure captures.
+              </p>
+            )}
+          </div>
+
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-700 text-slate-400">
+                <th className="text-left py-1.5">Route</th>
+                <th className="text-right py-1.5">Converted</th>
+                <th className="text-right py-1.5">Lifetime tax</th>
+                <th className="text-right py-1.5">Lifetime IRMAA</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[['Pay from taxable', result.fromTaxable, 'brokerage'], ['Pay from the portfolio', result.fromPortfolio, 'withdrawal']].map(([label, r, key]) => (
+                <tr key={key} className={`border-b border-slate-700/50 ${key === result.better ? 'bg-emerald-900/10' : ''}`}>
+                  <td className="py-1.5 text-slate-200">
+                    {label}
+                    {key === current && <span className="text-[10px] text-amber-400 ml-2">YOUR SETTING</span>}
+                  </td>
+                  <td className="py-1.5 text-right text-slate-300">{formatCurrency(r.lifetimeConversions)}</td>
+                  <td className="py-1.5 text-right text-slate-300">{formatCurrency(r.lifetimeTax)}</td>
+                  <td className="py-1.5 text-right text-slate-300">{formatCurrency(r.lifetimeIRMAA)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setPersonalInfo }) {
   // What the charitable giving actually saves, measured by running the plan with
   // and without the QCD exclusion. Two projections, computed once here and shared
@@ -5731,6 +5877,16 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
         oneTimeEvents={oneTimeEvents}
         recurringExpenses={recurringExpenses}
         setPersonalInfo={setPersonalInfo}
+      />
+
+      {/* Who pays the conversion tax — and what the taxable dollars cost. */}
+      <ConversionFundingPanel
+        accounts={accounts}
+        assets={assets}
+        incomeStreams={incomeStreams}
+        oneTimeEvents={oneTimeEvents}
+        personalInfo={personalInfo}
+        recurringExpenses={recurringExpenses}
       />
 
       {/* Roth Conversion Simulator */}
@@ -10342,6 +10498,116 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
             )}
           </div>
 
+
+          {/* ── Staged schedule ────────────────────────────────────────────
+              One target for the whole window is the wrong shape for the
+              decision: the years before Medicare reads your income are cheaper
+              than the years after, and a plan that converts hard while it is
+              free and throttles once it isn't could not be expressed here at
+              all until now. */}
+          <div className="mt-3 p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={Array.isArray(localInfo.rothConversionStages) && localInfo.rothConversionStages.length > 0}
+                onChange={e => handleChange('rothConversionStages',
+                  e.target.checked ? irmaaAwareConversionStages(localInfo) : null)}
+                className="mt-0.5 accent-purple-500"
+              />
+              <span>
+                <span className="text-xs font-medium text-slate-200">Use a staged schedule</span>
+                <span className="block text-[10px] text-slate-500 mt-0.5">
+                  Convert to one target while your income is invisible to Medicare, then to a lower one once
+                  it isn't. IRMAA reads the MAGI you reported {IRMAA_TIER_LOOKBACK_YEARS} years earlier, so
+                  age {65 - IRMAA_TIER_LOOKBACK_YEARS - 1} is the last free year and {65 - IRMAA_TIER_LOOKBACK_YEARS} is
+                  the first that buys a surcharge. Ticking this builds that schedule from your own window; every
+                  field stays editable.
+                </span>
+              </span>
+            </label>
+
+            {Array.isArray(localInfo.rothConversionStages) && localInfo.rothConversionStages.length > 0 && (() => {
+              const stages = localInfo.rothConversionStages;
+              const tiers = irmaaTierOptions(localInfo.filingStatus || 'married_joint');
+              const setStage = (i, patch) => handleChange('rothConversionStages',
+                stages.map((s, j) => j === i ? { ...s, ...patch } : s));
+              const targetValue = (s) => Number.isInteger(s.irmaaTier) ? `irmaa:${s.irmaaTier}`
+                : s.bracket ? `bracket:${s.bracket}` : 'amount';
+              const setTarget = (i, v) => {
+                if (v.startsWith('irmaa:')) setStage(i, { irmaaTier: Number(v.slice(6)), bracket: '', amount: 0 });
+                else if (v.startsWith('bracket:')) setStage(i, { irmaaTier: null, bracket: v.slice(8), amount: 0 });
+                else setStage(i, { irmaaTier: null, bracket: '', amount: stages[i].amount || 50000 });
+              };
+              return (
+                <div className="mt-3 space-y-2">
+                  {stages.map((s, i) => (
+                    <div key={i} className="flex flex-wrap items-end gap-2 p-2 bg-slate-900/60 rounded-lg border border-slate-700/40">
+                      <input
+                        type="text" value={s.label || `Stage ${i + 1}`}
+                        onChange={e => setStage(i, { label: e.target.value })}
+                        className="w-32 bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs"
+                      />
+                      <div>
+                        <label className="block text-[10px] text-slate-500">From age</label>
+                        <input type="number" value={s.startAge ?? ''} onChange={e => setStage(i, { startAge: Number(e.target.value) || 0 })}
+                          className="w-16 bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-500">Through</label>
+                        <input type="number" value={s.endAge ?? ''} onChange={e => setStage(i, { endAge: Number(e.target.value) || 0 })}
+                          className="w-16 bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs" />
+                      </div>
+                      <div className="flex-1 min-w-[170px]">
+                        <label className="block text-[10px] text-slate-500">Convert up to</label>
+                        <select value={targetValue(s)} onChange={e => setTarget(i, e.target.value)}
+                          className="w-full bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs">
+                          <option value="bracket:22%">Top of the 22% bracket</option>
+                          <option value="bracket:24%">Top of the 24% bracket</option>
+                          <option value="bracket:32%">Top of the 32% bracket</option>
+                          {tiers.filter(t => !t.isTop).map(t => (
+                            <option key={t.index} value={`irmaa:${t.index}`}>
+                              IRMAA tier {t.index} edge ({formatCurrency(t.ceiling)} MAGI)
+                            </option>
+                          ))}
+                          <option value="amount">A fixed amount</option>
+                        </select>
+                      </div>
+                      {!Number.isInteger(s.irmaaTier) && !s.bracket && (
+                        <div>
+                          <label className="block text-[10px] text-slate-500">Amount</label>
+                          <CurrencyCell value={s.amount || 0} onValueChange={v => setStage(i, { amount: v })}
+                            className="w-28 bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs" />
+                        </div>
+                      )}
+                      <button
+                        onClick={() => handleChange('rothConversionStages', stages.filter((_, j) => j !== i))}
+                        className="text-slate-500 hover:text-red-400 text-xs px-1 pb-1" title="Remove this stage"
+                      >✕</button>
+                    </div>
+                  ))}
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => handleChange('rothConversionStages', stages.concat([{
+                        label: `Stage ${stages.length + 1}`,
+                        startAge: (stages[stages.length - 1]?.endAge || localInfo.myRetirementAge || 65) + 1,
+                        endAge: getDefaultRothConversionWindow(localInfo).endAge,
+                        bracket: '22%', amount: 0, irmaaTier: null,
+                      }]))}
+                      className="text-xs text-purple-400 hover:text-purple-300"
+                    >+ Add stage</button>
+                    <button
+                      onClick={() => handleChange('rothConversionStages', irmaaAwareConversionStages(localInfo))}
+                      className="text-xs text-slate-400 hover:text-slate-200"
+                    >Rebuild the IRMAA-aware schedule</button>
+                  </div>
+                  <p className="text-[10px] text-slate-500">
+                    A year belongs to exactly one stage — the first it falls in. Years outside every stage convert
+                    nothing, and the window fields above are ignored while a schedule is set.
+                  </p>
+                </div>
+              );
+            })()}
+          </div>
           <div className="mt-3 p-3 bg-purple-900/20 border border-purple-700/30 rounded-lg">
             <p className="text-xs text-purple-300 font-medium mb-1">&#128161; Roth Conversion Strategy</p>
             <p className="text-xs text-slate-400">

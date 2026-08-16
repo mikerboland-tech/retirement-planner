@@ -8683,6 +8683,160 @@ section('P71 — the AI patch layer: the model proposes, the engine decides');
   }
 }
 
+section('P72 — a conversion schedule with stages, and what the taxable account costs to spend');
+{
+  const { conversionStagesOf, conversionStageAt, irmaaAwareConversionStages,
+          conversionFundingCost, IRMAA_TIER_LOOKBACK_YEARS, MEDICARE_ELIGIBILITY_AGE } = engine;
+
+  const mk = (o = {}) => baseScenario({
+    myAge: 58, spouseAge: 56, myRetirementAge: 60, spouseRetirementAge: 60,
+    myBirthYear: TODAY_YEAR - 58, spouseBirthYear: TODAY_YEAR - 56,
+    state: 'Missouri', desiredRetirementIncome: 110000, legacyAge: 92,
+    myLifeExpectancy: 92, spouseLifeExpectancy: 92, ...o,
+  });
+
+  // ── A one-target plan is a one-stage schedule, and nothing changes ───────
+  // Every existing plan, scenario, export and optimizer candidate has to keep
+  // working: the flat fields ARE the schedule when no stages are given.
+  {
+    const pi = mk({ rothConversionBracket: '24%' }).pi;
+    const stages = conversionStagesOf(pi);
+    eq(stages.length, 1, 'a flat plan resolves to exactly one stage');
+    eq(stages[0].bracket, '24%', 'carrying the target it was given');
+    eq(stages[0].startAge, 60, 'and the smart-default start age');
+    eq(conversionStagesOf(mk().pi).length, 0, 'while a plan with no conversion has no stages');
+    eq(conversionStageAt(mk().pi, 62), null, 'so no year converts');
+  }
+
+  // ── The stage boundary is derived from the lookback, not typed ───────────
+  // 62 is the last year invisible to Medicare and 63 the first that sets a
+  // surcharge. Hardcoding those would go quietly wrong if the lookback moved.
+  {
+    const pi = mk({ rothConversionBracket: '24%' }).pi;
+    const stages = irmaaAwareConversionStages(pi);
+    eq(stages.length, 2, 'the schedule has a free stage and a charged one');
+    eq(stages[0].endAge, MEDICARE_ELIGIBILITY_AGE - IRMAA_TIER_LOOKBACK_YEARS - 1,
+      'the free stage ends the last year invisible to IRMAA');
+    eq(stages[0].endAge, 62, 'which is 62 today');
+    eq(stages[1].startAge, 63, 'and the charged stage starts the next year');
+    eq(stages[0].bracket, '24%', 'converting to a bracket while it is free');
+    eq(stages[1].irmaaTier, 1, 'and to an IRMAA tier once it is not');
+    eq(stages[1].bracket, '', 'with the bracket cleared, since the modes are exclusive');
+  }
+
+  // ── A window that never reaches the hinge stays one stage ────────────────
+  // An empty second stage would look editable and convert nothing.
+  {
+    const pi = mk({ rothConversionBracket: '24%' }).pi;
+    eq(irmaaAwareConversionStages(pi, { startAge: 55, endAge: 61 }).length, 1,
+      'a window ending before 63 needs no second stage');
+    eq(irmaaAwareConversionStages(pi, { startAge: 66, endAge: 72 }).length, 1,
+      'and one starting after it needs no first');
+    eq(irmaaAwareConversionStages(pi, { startAge: 66, endAge: 72 })[0].irmaaTier, 1,
+      'the surviving stage being the charged one');
+  }
+
+  // ── Each year is governed by exactly one stage ───────────────────────────
+  {
+    const pi = { ...mk().pi, rothConversionStages: [
+      { label: 'A', startAge: 60, endAge: 62, bracket: '24%' },
+      { label: 'B', startAge: 63, endAge: 70, irmaaTier: 1 },
+    ] };
+    eq(conversionStageAt(pi, 59), null, 'before the schedule, nothing');
+    eq(conversionStageAt(pi, 60).label, 'A', 'first year of stage A');
+    eq(conversionStageAt(pi, 62).label, 'A', 'last year of stage A — inclusive');
+    eq(conversionStageAt(pi, 63).label, 'B', 'first year of stage B');
+    eq(conversionStageAt(pi, 70).label, 'B', 'last year of stage B');
+    eq(conversionStageAt(pi, 71), null, 'after the schedule, nothing again');
+    // An overlap resolves to one stage rather than to the sum of two.
+    const overlap = { ...mk().pi, rothConversionStages: [
+      { label: 'A', startAge: 60, endAge: 70, bracket: '24%' },
+      { label: 'B', startAge: 65, endAge: 75, irmaaTier: 1 },
+    ] };
+    eq(conversionStageAt(overlap, 67).label, 'A', 'an overlapping year takes the first stage, not both');
+  }
+
+  // ── A stage with no target is not a stage ───────────────────────────────
+  {
+    const pi = { ...mk().pi, rothConversionStages: [
+      { label: 'A', startAge: 60, endAge: 62 },
+      { label: 'B', startAge: 63, endAge: 70, irmaaTier: 1 },
+    ] };
+    eq(conversionStagesOf(pi).length, 1, 'a stage with no amount, bracket or tier is dropped');
+    eq(conversionStageAt(pi, 61), null, 'so its years convert nothing');
+  }
+
+  // ── The projection honours the schedule ─────────────────────────────────
+  {
+    const sc = mk({ rothConversionBracket: '24%' });
+    sc.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 1800000, contribution: 0, contributionGrowth: 0, cagr: 0.06, startAge: 58, stopAge: 58, owner: 'me', contributor: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 150000, contribution: 0, contributionGrowth: 0, cagr: 0.06, startAge: 58, stopAge: 58, owner: 'me', contributor: 'me' },
+      { id: 3, name: 'Brok', type: 'brokerage', balance: 700000, contribution: 0, contributionGrowth: 0, cagr: 0.05, startAge: 58, stopAge: 58, owner: 'joint', contributor: 'me', costBasisPercent: 0.4 },
+    ];
+    sc.streams = [{ id: 1, name: 'My SS', type: 'social_security', amount: 45000, startAge: 70, endAge: 92, cola: 0.02, owner: 'me' }];
+    const flat = computeProjections(sc.pi, sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+
+    const stagedPi = { ...sc.pi, rothConversionStages: irmaaAwareConversionStages(sc.pi) };
+    const staged = computeProjections(stagedPi, sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+
+    const at = (proj, age) => proj.find(r => r.myAge === age) || {};
+    eq(at(staged, 61).rothConversionStage, 'Before IRMAA', 'the row reports which stage governed it');
+    eq(at(staged, 64).rothConversionStage, 'IRMAA applies', 'and it switches at the hinge');
+    eq(at(flat, 61).rothConversionStage, 'Stage 1', 'a flat plan reports its single stage');
+
+    // Identical while both stages say the same thing; different after.
+    approx(at(staged, 61).rothConversion, at(flat, 61).rothConversion,
+      'the free years convert the same under both plans', 0.001);
+    lt(at(staged, 64).rothConversion, at(flat, 64).rothConversion,
+      'and the charged years convert less under the staged plan — which is the point');
+
+    const irmaaOf = (proj) => proj.filter(r => r.myAge >= 60).reduce((s, r) => s + (r.irmaaSurcharge || 0), 0);
+    lt(irmaaOf(staged), irmaaOf(flat), 'throttling at the hinge buys less lifetime IRMAA');
+  }
+
+  // ── What the taxable account costs to spend ─────────────────────────────
+  {
+    const sc = mk({ rothConversionBracket: '24%' });
+    sc.accts = [
+      { id: 1, name: 'IRA', type: 'traditional_ira', balance: 1800000, contribution: 0, contributionGrowth: 0, cagr: 0.06, startAge: 58, stopAge: 58, owner: 'me', contributor: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 150000, contribution: 0, contributionGrowth: 0, cagr: 0.06, startAge: 58, stopAge: 58, owner: 'me', contributor: 'me' },
+      { id: 3, name: 'Brok', type: 'brokerage', balance: 700000, contribution: 0, contributionGrowth: 0, cagr: 0.05, startAge: 58, stopAge: 58, owner: 'joint', contributor: 'me', costBasisPercent: 0.4 },
+    ];
+    sc.streams = [];
+    const ctx = { pi: sc.pi, accts: sc.accts, streams: sc.streams, assetList: [], events: [], recurring: [], currentYear: TODAY_YEAR };
+    const f = conversionFundingCost(ctx);
+
+    ok(f, 'a plan with conversions produces a funding cost');
+    eq(conversionFundingCost({ ...ctx, pi: mk().pi }), null, 'and a plan without them produces none');
+
+    // The decomposition is exact by construction — this proves it rather than
+    // asserting it in a comment.
+    eq(f.checks[0].ok, true, 'the three buckets reconcile to the funding difference');
+    eq(f.checks[0].residual, 0, 'with no residual to explain away');
+    eq(f.ledger.reduce((s, l) => s + l.amount, 0), f.fundingDelta,
+      'and the ledger sums to the headline');
+
+    // The opportunity cost is a counterfactual on the dollars, not a bucket
+    // difference — it has to survive the taxable account reaching zero.
+    const t = f.taxableAccountCost;
+    gt(t.principal, 0, 'tax was actually paid from the taxable account');
+    gt(t.forgoneGrowth, 0, 'and those dollars would have grown');
+    eq(t.wouldHaveBeenWorth, t.principal + t.forgoneGrowth, 'the two parts sum to the whole');
+    gt(t.wouldHaveBeenWorth, t.principal, 'which is more than the principal, over decades');
+    gt(t.gainsTaxToRaiseIt, 0, 'and selling appreciated shares to raise it cost capital-gains tax');
+
+    // The trap this guards: 'withdrawal' means "follow withdrawal priority", so
+    // on a brokerage-first plan the two routes are one route and a comparison
+    // reading ~0 would be mistaken for "the choice does not matter".
+    const bFirst = conversionFundingCost({ ...ctx,
+      pi: { ...sc.pi, withdrawalPriority: ['brokerage', 'pretax', 'roth'] } });
+    eq(bFirst.degenerate, true, 'a brokerage-first plan is flagged as a degenerate comparison');
+    ok(bFirst.degenerateNote, 'and says why rather than reporting a meaningless number');
+    eq(f.degenerate, false, 'while a pretax-first plan is a real comparison');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

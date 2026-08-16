@@ -4862,6 +4862,10 @@ const withRothConversionTarget = (pi, target = {}) => ({
 // still applies as a plain MAGI target in those years, which is a coherent thing
 // to want, but it is not buying anything.
 const IRMAA_TIER_LOOKBACK_YEARS = 2;
+// Medicare's start age, named so the "last year invisible to IRMAA" derivation
+// below reads as arithmetic rather than as two magic numbers that happen to be
+// three apart.
+const MEDICARE_ELIGIBILITY_AGE = 65;
 // How far under the edge to stop. A projected MAGI that lands exactly ON an edge
 // is one rounding error, one unexpected 1099, or one fund distribution away from
 // crossing it and owing the whole surcharge. A thousand dollars of headroom
@@ -4922,6 +4926,96 @@ const rothConversionModeLabel = (pi, fmt = (v) => '$' + Math.round(v).toLocaleSt
     case 'fixed':   return `${fmt(pi.rothConversionAmount || 0)}/yr`;
     default:        return 'none planned';
   }
+};
+
+// ── A CONVERSION SCHEDULE WITH MORE THAN ONE SETTING ─────────────────────────
+// One target across the whole window is the wrong shape for the decision this
+// feature exists to serve. The years before Medicare reads your income are
+// genuinely cheaper than the years after: at 62 a conversion costs bracket and
+// nothing else, and at 63 the same conversion also buys a Part B surcharge two
+// years out. A plan that converts hard while it is free and throttles when it
+// stops being free is not an exotic strategy — it is the obvious one, and until
+// now there was no way to express it.
+//
+// A stage is the existing three-mode target plus an age range. `stages` is the
+// whole schedule; the flat rothConversion* fields remain the one-stage case and
+// are synthesized into a stage here, so every existing plan, scenario, export
+// and optimizer candidate keeps working untouched.
+//
+// Stages are resolved per year rather than blended: a year belongs to exactly
+// one stage. Overlaps resolve to the FIRST matching stage, so a schedule that
+// was edited into an inconsistent state converts at some defensible rate rather
+// than at the sum of two targets.
+const conversionStagesOf = (pi) => {
+  if (!pi) return [];
+  const explicit = Array.isArray(pi.rothConversionStages) ? pi.rothConversionStages : null;
+  if (explicit && explicit.length) {
+    return explicit
+      .filter(s => s && (s.amount > 0 || s.bracket || Number.isInteger(s.irmaaTier)))
+      .map((s, i) => ({
+        index: i,
+        label: s.label || `Stage ${i + 1}`,
+        startAge: Number.isFinite(s.startAge) ? s.startAge : 0,
+        endAge: Number.isFinite(s.endAge) ? s.endAge : MAX_AGE,
+        amount: s.amount || 0,
+        bracket: s.bracket || '',
+        irmaaTier: Number.isInteger(s.irmaaTier) ? s.irmaaTier : null,
+      }));
+  }
+  if (!rothConversionIsPlanned(pi)) return [];
+  const window = getDefaultRothConversionWindow(pi);
+  return [{
+    index: 0,
+    label: 'Stage 1',
+    startAge: pi.rothConversionStartAge > 0 ? pi.rothConversionStartAge : window.startAge,
+    endAge: pi.rothConversionEndAge > 0 ? pi.rothConversionEndAge : window.endAge,
+    amount: pi.rothConversionAmount || 0,
+    bracket: pi.rothConversionBracket || '',
+    irmaaTier: Number.isInteger(pi.rothConversionIrmaaTier) ? pi.rothConversionIrmaaTier : null,
+  }];
+};
+
+// The stage governing a given age, or null when this year converts nothing.
+const conversionStageAt = (pi, age) => {
+  const stages = conversionStagesOf(pi);
+  for (const s of stages) {
+    if (age >= s.startAge && age <= s.endAge) return s;
+  }
+  return null;
+};
+
+// The staged schedule this user is actually asking for, built from their own
+// plan rather than from round numbers: convert to a bracket while the income is
+// invisible to Medicare, then fall back to filling an IRMAA tier once it isn't.
+//
+// The boundary is derived, not typed. IRMAA reads the MAGI from two years
+// earlier, so the last free year is the one whose income lands the year before
+// Medicare starts — and if that constant ever changes, this moves with it
+// instead of quietly becoming wrong.
+const irmaaAwareConversionStages = (pi, {
+  freeBracket = '24%',
+  chargedTier = 1,
+  startAge = null,
+  endAge = null,
+} = {}) => {
+  const window = getDefaultRothConversionWindow(pi);
+  const from = startAge ?? (pi.rothConversionStartAge > 0 ? pi.rothConversionStartAge : window.startAge);
+  const to = endAge ?? (pi.rothConversionEndAge > 0 ? pi.rothConversionEndAge : window.endAge);
+  const lastFreeAge = MEDICARE_ELIGIBILITY_AGE - IRMAA_TIER_LOOKBACK_YEARS - 1;
+
+  // A window that ends before the hinge, or starts after it, is a one-stage
+  // plan. Emitting an empty second stage would look like a schedule the user
+  // could edit and would convert nothing.
+  if (to <= lastFreeAge) {
+    return [{ label: 'Before IRMAA', startAge: from, endAge: to, bracket: freeBracket, amount: 0, irmaaTier: null }];
+  }
+  if (from > lastFreeAge) {
+    return [{ label: 'IRMAA applies', startAge: from, endAge: to, bracket: '', amount: 0, irmaaTier: chargedTier }];
+  }
+  return [
+    { label: 'Before IRMAA', startAge: from, endAge: lastFreeAge, bracket: freeBracket, amount: 0, irmaaTier: null },
+    { label: 'IRMAA applies', startAge: lastFreeAge + 1, endAge: to, bracket: '', amount: 0, irmaaTier: chargedTier },
+  ];
 };
 
 // ── FEEDING THE DETAILED RETURN INTO PROJECTION YEAR 0 ───────────────────────
@@ -6104,6 +6198,135 @@ const conversionFundingComparison = (ctx, { heirTaxRate = 0.25 } = {}) => {
     // the user most needs to see.
     conversionDelta: Math.max(b.afterTaxLegacy, c.afterTaxLegacy) - a.afterTaxLegacy,
     conversionHelps: Math.max(b.afterTaxLegacy, c.afterTaxLegacy) > a.afterTaxLegacy,
+  };
+};
+
+// ── WHAT THE TAXABLE ACCOUNT COSTS YOU TO SPEND ──────────────────────────────
+// conversionFundingComparison answers which funding route ends up ahead.
+// It does not answer the question people actually ask, which is *why* — and in
+// particular what it costs to no longer own the brokerage dollars you handed to
+// the IRS. That cost is real, it is large, and it is invisible in every
+// break-even formula: the money is gone at the start of a thirty-year
+// projection, so what you gave up is the balance plus everything it would have
+// compounded into, minus the capital-gains tax you paid to liberate it.
+//
+// The decomposition below is exact rather than attributed. afterTaxLegacy is
+// defined as roth + brokerage + preTax × (1 − heirRate), so differencing the
+// two runs bucket by bucket reproduces the funding delta by construction —
+// there is no residual to explain away, and `checks` proves it rather than
+// asserting it.
+const conversionFundingCost = (ctx, { heirTaxRate = 0.25 } = {}) => {
+  if (!ctx || !ctx.pi || !rothConversionIsPlanned(ctx.pi)) return null;
+  const pi = ctx.pi;
+  const heirRate = pi.heirTaxRate ?? heirTaxRate;
+  const legacyAge = pi.legacyAge || 95;
+  const retirementAge = pi.myRetirementAge;
+  const run = (over) => computeProjections({ ...pi, ...over }, ctx.accts, ctx.streams,
+    ctx.assetList || [], ctx.events || [], ctx.recurring || [], ctx.currentYear);
+
+  const fromTaxable = run({ rothConversionTaxSource: 'brokerage' });
+  const fromPortfolio = run({ rothConversionTaxSource: 'withdrawal' });
+
+  const endOf = (proj) => rowAtOrLast(proj, legacyAge) || {};
+  const A = endOf(fromTaxable), B = endOf(fromPortfolio);
+  const sum = (proj, field) => proj
+    .filter(p => p.myAge >= (retirementAge ?? 0))
+    .reduce((s, p) => s + (p[field] || 0), 0);
+
+  const rothGain = (A.rothBalance || 0) - (B.rothBalance || 0);
+  const taxableCost = (A.brokerageBalance || 0) - (B.brokerageBalance || 0);
+  const preTaxGain = ((A.preTaxBalance || 0) - (B.preTaxBalance || 0)) * (1 - heirRate);
+  const fundingDelta = rothGain + taxableCost + preTaxGain;
+
+  // The principal actually handed over, and what it would have become.
+  //
+  // This is NOT the horizon bucket difference above, and the distinction is the
+  // whole reason this function exists. On a plan that spends its taxable account
+  // down to zero either way, the horizon difference in that bucket is exactly
+  // zero — the cost was real but it surfaced somewhere else, as a bigger draw on
+  // something else years earlier. Reporting zero there and calling it "what the
+  // taxable account cost you" would be arithmetically true and completely
+  // misleading.
+  //
+  // So the opportunity cost is computed as a counterfactual on the dollars
+  // themselves: each year's tax payment compounded at the taxable account's own
+  // growth rate to the end of the plan. It answers "what would those specific
+  // dollars have become", which is the question, and it stands whether or not
+  // the account survived to the horizon.
+  const brokerageAccts = (ctx.accts || []).filter(a => a && isBrokerageAccount(a.type));
+  const taxableCagr = brokerageAccts.length
+    ? brokerageAccts.reduce((s2, a) => s2 + (a.cagr || 0) * (a.balance || 0), 0)
+      / Math.max(1, brokerageAccts.reduce((s2, a) => s2 + (a.balance || 0), 0))
+    : 0.05;
+  const horizonAge = (rowAtOrLast(fromTaxable, legacyAge) || {}).myAge || legacyAge;
+  let principal = 0;
+  let compounded = 0;
+  fromTaxable.forEach(row => {
+    const paid = row.conversionTaxWithdrawal || 0;
+    if (paid <= 0) return;
+    principal += paid;
+    compounded += paid * Math.pow(1 + taxableCagr, Math.max(0, horizonAge - row.myAge));
+  });
+  const forgoneGrowth = compounded - principal;
+
+  // Selling appreciated shares to pay someone else's tax bill is itself a
+  // taxable event. It is the most commonly forgotten line in this decision:
+  // people compare "cash from the brokerage" against "withhold from the IRA"
+  // as though the first were free to raise.
+  const gainsTaxCost = sum(fromTaxable, 'capitalGainsTax') - sum(fromPortfolio, 'capitalGainsTax');
+
+  // 'withdrawal' means "follow the plan's own withdrawal priority", so on a
+  // plan that draws brokerage first the two routes are the SAME route and the
+  // comparison is measuring a plan against itself. Silently returning ~0 would
+  // read as "the choice doesn't matter here", which is the opposite of true.
+  const priority = Array.isArray(pi.withdrawalPriority) ? pi.withdrawalPriority : ['pretax', 'brokerage', 'roth'];
+  const degenerate = priority[0] === 'brokerage';
+
+  return {
+    heirRate,
+    fromTaxable: { endRoth: A.rothBalance || 0, endBrokerage: A.brokerageBalance || 0, endPreTax: A.preTaxBalance || 0,
+                   lifetimeConversions: Math.round(sum(fromTaxable, 'rothConversion')),
+                   lifetimeTax: Math.round(sum(fromTaxable, 'totalTax')),
+                   lifetimeIRMAA: Math.round(sum(fromTaxable, 'irmaaSurcharge')) },
+    fromPortfolio: { endRoth: B.rothBalance || 0, endBrokerage: B.brokerageBalance || 0, endPreTax: B.preTaxBalance || 0,
+                     lifetimeConversions: Math.round(sum(fromPortfolio, 'rothConversion')),
+                     lifetimeTax: Math.round(sum(fromPortfolio, 'totalTax')),
+                     lifetimeIRMAA: Math.round(sum(fromPortfolio, 'irmaaSurcharge')) },
+    // The ledger, signed from the taxable-funded plan's point of view.
+    ledger: [
+      { key: 'roth', label: 'More of the conversion reached the Roth', amount: Math.round(rothGain) },
+      { key: 'preTax', label: 'Pre-tax left to heirs, after their tax', amount: Math.round(preTaxGain) },
+      { key: 'taxable', label: 'Taxable account you no longer own', amount: Math.round(taxableCost) },
+    ],
+    // The headline the break-even formulas skip: what the dollars you spent
+    // would have been worth if you had simply kept them.
+    taxableAccountCost: {
+      principal: Math.round(principal),
+      forgoneGrowth: Math.round(forgoneGrowth),
+      wouldHaveBeenWorth: Math.round(compounded),
+      gainsTaxToRaiseIt: Math.round(gainsTaxCost),
+      cagr: taxableCagr,
+      horizonAge,
+      // Whether the horizon ledger can show this cost at all. When the taxable
+      // account reaches zero under both routes, its line in the ledger is zero
+      // and the cost has been absorbed by the rest of the plan — worth saying,
+      // because a reader comparing the two figures will otherwise assume one of
+      // them is wrong.
+      absorbed: Math.abs(taxableCost) < 1 && (A.brokerageBalance || 0) < 1,
+    },
+    fundingDelta: Math.round(fundingDelta),
+    better: fundingDelta > 0 ? 'brokerage' : 'withdrawal',
+    degenerate,
+    degenerateNote: degenerate
+      ? "This plan withdraws from the brokerage account first, so 'pay from the portfolio' and 'pay from taxable' are close to the same instruction — the comparison below has little room to differ. Reorder withdrawal priority to make the choice mean something."
+      : null,
+    // The decomposition is exact by construction; this proves it instead of
+    // claiming it, the same way conversionCostAudit does.
+    checks: [{
+      label: 'The three buckets reconcile to the funding difference',
+      residual: Math.round(fundingDelta - (rothGain + taxableCost + preTaxGain)),
+      ok: Math.abs(fundingDelta - (rothGain + taxableCost + preTaxGain)) < 1,
+    }],
   };
 };
 
@@ -7633,26 +7856,20 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     //   'balance' the source account ran out
     let conversionLimit = rothConversionModeOf(pi) === 'none' ? 'none' : 'window';
     let conversionTaxWithdrawal = 0; // Extra portfolio draw executed to pay the conversion's tax bill
-    const conversionAmount = pi.rothConversionAmount || 0;
-    // Use smart defaults when start/end ages aren't explicitly set.
-    // The engine respects any non-zero value the user has configured, but
-    // falls back to dynamic defaults (retirement age → year before RMDs)
-    // when the values are 0/null/missing.
-    const defaultWindow = getDefaultRothConversionWindow(pi);
-    const conversionStartAge = pi.rothConversionStartAge && pi.rothConversionStartAge > 0
-      ? pi.rothConversionStartAge
-      : defaultWindow.startAge;
-    const conversionEndAge = pi.rothConversionEndAge && pi.rothConversionEndAge > 0
-      ? pi.rothConversionEndAge
-      : defaultWindow.endAge;
-    const conversionBracket = pi.rothConversionBracket || ''; // e.g. '22%', '24%', '32%'
-    // IRMAA-fill mode. Mutually exclusive with bracket-fill; the UI enforces
-    // that, and if both somehow arrive the IRMAA ceiling wins, since it is the
-    // strictly more expensive limit to breach.
-    const conversionIrmaaTier = Number.isInteger(pi.rothConversionIrmaaTier)
-      ? pi.rothConversionIrmaaTier : null;
+    // Which conversion setting governs THIS year. One-target plans resolve to a
+    // single synthesized stage spanning the whole window (smart defaults for an
+    // unset start/end still apply, inside conversionStagesOf), so nothing about
+    // an existing plan changes; a staged schedule picks the stage this age falls
+    // in and the rest of the block below is unaware there was ever a choice.
+    const conversionStage = conversionStageAt(pi, myAge);
+    const conversionAmount = conversionStage ? conversionStage.amount : 0;
+    const conversionBracket = conversionStage ? conversionStage.bracket : ''; // e.g. '22%', '24%', '32%'
+    // IRMAA-fill mode. Mutually exclusive with bracket-fill within a stage; the
+    // UI enforces that, and if both somehow arrive the IRMAA ceiling wins, since
+    // it is the strictly more expensive limit to breach.
+    const conversionIrmaaTier = conversionStage ? conversionStage.irmaaTier : null;
 
-    if (myAge >= conversionStartAge && myAge <= conversionEndAge) {
+    if (conversionStage) {
       // Determine the target conversion amount for this year
       let targetConversion = 0;
 
@@ -8542,6 +8759,10 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // converted less than its target reads as a deliberate pause rather than
       // an unexplained dip.
       rothConversionThrottled: conversionThrottled,
+      // Which stage of a staged schedule governed this year. Undefined on a
+      // one-target plan, so a chart or table can key off its presence rather
+      // than special-casing the label "Stage 1".
+      rothConversionStage: conversionStage ? conversionStage.label : undefined,
       rothConversionLimit: conversionThrottled ? 'guardrail'
         : rothConversionThisYear > 0 ? conversionLimit
         : (conversionLimit === 'ceiling' || conversionLimit === 'target' ? 'balance' : conversionLimit),
@@ -9095,10 +9316,13 @@ const describePlanPatch = (state, patch) => {
     scaleOwnContributions, addOwnContribution, accountsAtSavingsTarget,
     splitBothContributors, BOTH_SPLIT_EMPLOYEE_SHARE,
     taxableGrowthFactor, breakEvenTaxRate, conversionFundingComparison,
+    conversionFundingCost,
     betrFromNetReturn, betrSensitivity, presentValueOfTaxes,
     convertEverythingAnalysis, levelConversionToDrain, convertEverythingPI,
     qcdTaxSavings,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
+    conversionStagesOf, conversionStageAt, irmaaAwareConversionStages,
+    MEDICARE_ELIGIBILITY_AGE,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,
     routeK1, applyPartnerBasis, applyPassiveLossRules, computeScheduleD,
