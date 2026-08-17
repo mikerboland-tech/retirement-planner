@@ -508,6 +508,11 @@ function MobilePlanner() {
     return dep ? dep.myAge : null;
   }, [projections, retirementAge]);
   
+  const [themeMode, setThemeMode] = useState(() => {
+    try { return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'; }
+    catch (e) { return 'dark'; }
+  });
+
   const yearsToRetirement = Math.max(0, retirementAge - currentAge);
   const planSurvives = depletionAge === null || depletionAge > legacyAge;
   const surplusAtLegacy = legacyProj?.totalPortfolio || 0;
@@ -518,7 +523,28 @@ function MobilePlanner() {
       <header className="bg-slate-900 border-b border-slate-800 px-4 py-3 sticky top-0 z-10" style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))' }}>
         <div className="flex items-baseline justify-between gap-2">
           <h1 className="text-lg font-bold text-slate-100">Retirement What-If</h1>
-          <span className="text-[10px] text-slate-600 tabular-nums">v{typeof window !== 'undefined' && window.APP_VERSION ? window.APP_VERSION : 'dev'}</span>
+          <div className="flex items-center gap-2">
+            {/* Mobile draws no charts, so the whole theme switch is the CSS
+                variable flip — no JS palette to keep in step. The preference is
+                the same localStorage key the desktop uses, so choosing light on
+                one lands on the other. */}
+            <button
+              onClick={() => {
+                const next = themeMode === 'dark' ? 'light' : 'dark';
+                setThemeMode(next);
+                try {
+                  if (next === 'light') document.documentElement.setAttribute('data-theme', 'light');
+                  else document.documentElement.removeAttribute('data-theme');
+                  localStorage.setItem('retirement_planner_theme', next);
+                } catch (e) { /* storage unavailable — the in-memory switch still holds */ }
+              }}
+              className="text-sm px-2 py-0.5 rounded text-slate-400 active:bg-slate-800"
+              aria-label={themeMode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {themeMode === 'dark' ? '☀️' : '🌙'}
+            </button>
+            <span className="text-[10px] text-slate-600 tabular-nums">v{typeof window !== 'undefined' && window.APP_VERSION ? window.APP_VERSION : 'dev'}</span>
+          </div>
         </div>
         <p className="text-xs text-slate-500">Quick gut-check using the full engine</p>
       </header>

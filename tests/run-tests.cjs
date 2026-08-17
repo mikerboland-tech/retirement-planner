@@ -9227,6 +9227,144 @@ section('P74 — the palette: colour-vision separation, re-derived rather than t
   }
 }
 
+section('P76 — the token layer, and a light mode that is measured rather than eyeballed');
+{
+  // Light mode is 4,000 Tailwind classes reinterpreted, not rewritten. Nothing
+  // about that is safe to check by looking at one screenshot: the classes that
+  // break are the rare ones (a text step used on an unexpected ground), and they
+  // break to invisible rather than to ugly. So the pairs the UI actually renders
+  // are enumerated here and held to WCAG AA in BOTH modes.
+  const theme = require('../theme.js');
+  const fs2 = require('fs');
+  const path2 = require('path');
+  const ROOT2 = path2.resolve(__dirname, '..');
+
+  const lin2 = (h) => {
+    const v = h.trim().replace(/^#/, '');
+    return [0, 2, 4].map(i2 => {
+      const c = parseInt(v.slice(i2, i2 + 2), 16) / 255;
+      return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    });
+  };
+  const lum2 = (h) => { const [r, g, b] = lin2(h); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+  const ratio = (a, b) => { const [hi, lo] = [lum2(a), lum2(b)].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
+  const tw = (family, step, mode) => {
+    const v = theme.TW[family][step];
+    return v[mode] !== undefined ? v[mode] : v.dark;
+  };
+
+  // Every text step the UI puts on a card (bg-slate-800) or on the page
+  // (bg-slate-900), with the count of real uses so a failure says how much of the
+  // app it is talking about.
+  const TEXT_ON_SURFACE = [
+    ['slate', 100, 'headings',      214],
+    ['slate', 200, 'strong body',   139],
+    ['slate', 300, 'body',          237],
+    ['slate', 400, 'secondary',     562],
+    ['slate', 500, 'muted labels',  437],
+  ];
+  theme.MODES.forEach(mode => {
+    ['800', '900'].forEach(groundStep => {
+      const ground = tw('slate', groundStep, mode);
+      TEXT_ON_SURFACE.forEach(([fam, step, role, uses]) => {
+        gt(ratio(tw(fam, step, mode), ground), 4.5,
+          `${mode}: text-${fam}-${step} (${role}, ${uses} uses) clears AA on bg-slate-${groundStep}`);
+      });
+    });
+
+    // The accent families are read as text at 300/400 and used as a tinted panel
+    // ground at 900. Both readings have to survive the fold.
+    ['amber', 'emerald', 'red', 'sky', 'purple', 'orange', 'pink', 'cyan', 'blue'].forEach(fam => {
+      [300, 400].forEach(step => {
+        gt(ratio(tw(fam, step, mode), tw('slate', '800', mode)), 4.5,
+          `${mode}: text-${fam}-${step} clears AA on a card`);
+      });
+      // A 900-step panel is a background; body text sits on it.
+      gt(ratio(tw('slate', 100, mode), tw(fam, 900, mode)), 4.5,
+        `${mode}: heading text is legible on a ${fam}-900 tinted panel`);
+    });
+
+    // slate must genuinely INVERT, or light mode is just dark mode with a
+    // different card colour. Page ground and heading ink swap ends.
+    const page = tw('slate', 900, mode), heading = tw('slate', 100, mode);
+    ok(mode === 'dark' ? lum2(page) < lum2(heading) : lum2(page) > lum2(heading),
+      `${mode}: the slate ramp is read from the correct end — page and heading ink are on opposite sides`);
+  });
+
+  // The generated head block is the one piece that lives in two files at once.
+  // Forgetting to run the build has to fail here rather than ship a stale palette
+  // next to a fresh theme.js.
+  {
+    const block = theme.headBlock();
+    ['index.html', 'mobile.html'].forEach(f => {
+      const html = fs2.readFileSync(path2.join(ROOT2, f), 'utf8');
+      ok(html.includes(block),
+        `${f} carries the current generated theme token block — run tools/build.cjs if this fails`);
+    });
+    // The <alpha-value> placeholder is load-bearing: without it every one of the
+    // ~200 opacity modifiers in the source (bg-slate-800/60) silently stops
+    // working, which looks like a subtle layout bug rather than a colour one.
+    Object.entries(theme.tailwindColors()).forEach(([fam, steps]) => {
+      Object.entries(steps).forEach(([step, decl]) => {
+        ok(/^rgb\(var\(--c-[a-z]+-\d+\) \/ <alpha-value>\)$/.test(decl),
+          `${fam}-${step} is declared in channel-triplet form, so opacity modifiers keep working`);
+      });
+    });
+    // Tailwind's extend REPLACES a family's whole scale, so a step left out
+    // stops existing rather than falling back.
+    Object.keys(theme.TW).forEach(fam => {
+      eq(Object.keys(theme.tailwindColors()[fam]).length, 11,
+        `${fam} ships the full 50–950 scale, so no class silently resolves to nothing`);
+    });
+    // Printed reports are dark-on-white in both themes; if the ramp inverted
+    // under them they would print white ink on white paper.
+    const css = theme.cssVariables();
+    ok(css.includes('#report-print {'),
+      'the print scope exists so reports never follow the theme');
+    // It has to carry the DARK column: dark slate-900 is the near-black the
+    // reports use as ink, so pinning it is what keeps text-slate-900 printable.
+    const printScope = css.slice(css.indexOf('#report-print {'));
+    ok(printScope.includes(`--c-slate-900:${theme.triplet(theme.TW.slate[900].dark)};`),
+      'the print scope pins the dark column, so text-slate-900 stays dark ink on white paper');
+  }
+
+  // The categorical cycle replaced four hand-picked arrays. Its wrap is a real
+  // adjacency the moment a table has more rows than the cycle has slots.
+  {
+    const MACHADO2 = {
+      protan: [[0.152286, 1.052583, -0.204868], [0.114503, 0.786281, 0.099216], [-0.003882, -0.048116, 1.051998]],
+      deutan: [[0.367322, 0.860646, -0.227968], [0.280085, 0.672501, 0.047413], [-0.011820, 0.042940, 0.968881]],
+    };
+    const oklab2 = ([r, g, b]) => {
+      const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+      const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+      const s3 = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+      return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s3,
+              1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s3,
+              0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s3];
+    };
+    const sim2 = (h, k) => {
+      const [r, g, b] = lin2(h), M = MACHADO2[k], cl = (c) => Math.max(0, Math.min(1, c));
+      return [cl(M[0][0]*r + M[0][1]*g + M[0][2]*b), cl(M[1][0]*r + M[1][1]*g + M[1][2]*b), cl(M[2][0]*r + M[2][1]*g + M[2][2]*b)];
+    };
+    const dE2 = (a, b, k) => {
+      const x = oklab2(k ? sim2(a, k) : lin2(a)), y = oklab2(k ? sim2(b, k) : lin2(b));
+      return 100 * Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
+    };
+    theme.MODES.forEach(mode => {
+      const cyc = theme.resolve(mode).categorical;
+      eq(cyc.length, 8, `${mode}: the categorical cycle has one entry per slot`);
+      for (let i2 = 0; i2 < cyc.length; i2++) {
+        const j2 = (i2 + 1) % cyc.length;
+        const a = cyc[i2], b = cyc[j2];
+        gt(Math.min(dE2(a, b, 'protan'), dE2(a, b, 'deutan')), 8.0,
+          `${mode}: categorical ${i2}→${j2}${j2 === 0 ? ' (the wrap)' : ''} separates under colour-vision deficiency`);
+        gt(dE2(a, b), 15.0, `${mode}: categorical ${i2}→${j2} separates in full colour vision`);
+      }
+    });
+  }
+}
+
 section('P75 — one rule for whose salary it is');
 {
   // The projection splits a jointly-owned salary evenly while both are living

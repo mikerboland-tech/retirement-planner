@@ -80,5 +80,40 @@ for (const file of TARGETS) {
   console.log(`  built ${path.basename(outPath)}  (${kb(src)} KB source -> ${kb(code)} KB compiled)`);
 }
 
+// ---------------------------------------------------------------------------
+// The theme token block.
+//
+// Every Tailwind colour in the app resolves through a CSS custom property, and
+// the values live in theme.js so the palette has one home. They have to reach
+// the browser in the document HEAD, before first paint — a runtime injection
+// would flash the wrong theme on load for anyone whose saved preference is
+// light. So they are stamped into the HTML between markers here.
+//
+// Drift is caught rather than prevented: a test in the suite regenerates this
+// block from theme.js and asserts the HTML still matches. Forgetting to run the
+// build fails the suite instead of shipping a stale palette.
+// ---------------------------------------------------------------------------
+const theme = require(path.join(ROOT, 'theme.js'));
+const { open: OPEN, close: CLOSE } = theme.HEAD_MARKERS;
+
+for (const file of ['index.html', 'mobile.html']) {
+  const htmlPath = path.join(ROOT, file);
+  if (!fs.existsSync(htmlPath)) continue;
+  const html = fs.readFileSync(htmlPath, 'utf8');
+  const a = html.indexOf(OPEN), b = html.indexOf(CLOSE);
+  if (a === -1 || b === -1) {
+    console.error(`  FAIL  ${file}: theme token markers not found`);
+    failed = true;
+    continue;
+  }
+  const next = html.slice(0, a) + theme.headBlock() + html.slice(b + CLOSE.length);
+  if (next !== html) {
+    fs.writeFileSync(htmlPath, next);
+    console.log(`  wrote theme tokens into ${file}`);
+  } else {
+    console.log(`  theme tokens in ${file} already current`);
+  }
+}
+
 if (failed) process.exit(1);
 console.log('\nDone. Commit the .compiled.js files alongside the source.');

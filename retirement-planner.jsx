@@ -66,8 +66,38 @@ const {
 // both surface steppings; tests/run-tests.cjs re-derives the colour-vision
 // separation of every adjacent pair, so a palette edit that makes two stacked
 // series indistinguishable fails the suite rather than shipping.
-const THEME = PlannerTheme.resolve('dark');
+// Dark is the default; the pre-paint script in index.html has already stamped
+// data-theme on <html> for a returning light-mode user, so reading it back here
+// keeps the JS palette and the CSS variables in agreement from the first frame.
+const initialThemeMode = (() => {
+  try { return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'; }
+  catch (e) { return 'dark'; }
+})();
+const THEME = PlannerTheme.resolve(initialThemeMode);
 const SERIES = THEME.series;
+
+// Charts are the one part of the UI that cannot ride the CSS variables: Recharts
+// computes legend swatches, tooltip chrome and axis ticks in JS, where var() is
+// an opaque string it will happily hand to canvas as garbage. So the JS palette
+// switches separately — by REPAINTING THESE TWO OBJECTS IN PLACE rather than
+// rebinding them. Every one of the ~130 call sites reads THEME.x / SERIES.y
+// during render, so swapping the contents and re-rendering is enough; the
+// alternative was threading a context through every chart component in the file.
+// SERIES must stay identical to THEME.series or the two would drift apart on the
+// first switch.
+const applyThemeMode = (mode) => {
+  const next = PlannerTheme.resolve(mode);
+  Object.keys(THEME).forEach(k => { if (k !== 'series') delete THEME[k]; });
+  Object.assign(THEME, next);
+  Object.keys(SERIES).forEach(k => delete SERIES[k]);
+  Object.assign(SERIES, next.series);
+  THEME.series = SERIES;
+  try {
+    if (mode === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    else document.documentElement.removeAttribute('data-theme');
+    localStorage.setItem('retirement_planner_theme', mode);
+  } catch (e) { /* storage unavailable — the in-memory switch still holds */ }
+};
 
 // ============================================
 // Sankey Diagram Component for Cash Flow Visualization
@@ -90,7 +120,7 @@ const SankeyDiagram = React.memo(({ data, width = 900, height = 500 }) => {
   if (incomeTotal === 0 || expenseTotal === 0 || income.length === 0 || expenses.length === 0) {
     return (
       <svg width={width} height={height} style={{ background: 'transparent' }}>
-        <text x={width / 2} y={height / 2} textAnchor="middle" fill="#64748b" fontSize="14">
+        <text x={width / 2} y={height / 2} textAnchor="middle" fill={THEME.inkMuted} fontSize="14">
           No cash flow data to display
         </text>
       </svg>
@@ -193,7 +223,7 @@ const SankeyDiagram = React.memo(({ data, width = 900, height = 500 }) => {
   return (
     <svg width={width} height={height} style={{ background: 'transparent' }}>
       {/* Title */}
-      <text x={width / 2} y={25} textAnchor="middle" fill="#e2e8f0" fontSize="18" fontWeight="600">
+      <text x={width / 2} y={25} textAnchor="middle" fill={THEME.inkPrimary} fontSize="18" fontWeight="600">
         {title}
       </text>
       
@@ -223,7 +253,7 @@ const SankeyDiagram = React.memo(({ data, width = 900, height = 500 }) => {
             x={node.x - 10}
             y={node.y + node.height / 2}
             textAnchor="end"
-            fill="#cbd5e1"
+            fill={THEME.inkSecondary}
             fontSize="13"
             fontWeight="500"
             dominantBaseline="middle"
@@ -234,7 +264,7 @@ const SankeyDiagram = React.memo(({ data, width = 900, height = 500 }) => {
             x={node.x - 10}
             y={node.y + node.height / 2 + 14}
             textAnchor="end"
-            fill="#64748b"
+            fill={THEME.inkMuted}
             fontSize="11"
             dominantBaseline="middle"
           >
@@ -258,7 +288,7 @@ const SankeyDiagram = React.memo(({ data, width = 900, height = 500 }) => {
             x={node.x + node.width + 10}
             y={node.y + node.height / 2}
             textAnchor="start"
-            fill="#cbd5e1"
+            fill={THEME.inkSecondary}
             fontSize="13"
             fontWeight="500"
             dominantBaseline="middle"
@@ -269,7 +299,7 @@ const SankeyDiagram = React.memo(({ data, width = 900, height = 500 }) => {
             x={node.x + node.width + 10}
             y={node.y + node.height / 2 + 14}
             textAnchor="start"
-            fill="#64748b"
+            fill={THEME.inkMuted}
             fontSize="11"
             dominantBaseline="middle"
           >
@@ -283,7 +313,7 @@ const SankeyDiagram = React.memo(({ data, width = 900, height = 500 }) => {
         x={padding.left}
         y={padding.top - 20}
         textAnchor="middle"
-        fill="#94a3b8"
+        fill={THEME.inkMuted}
         fontSize="12"
         fontWeight="600"
       >
@@ -295,7 +325,7 @@ const SankeyDiagram = React.memo(({ data, width = 900, height = 500 }) => {
         x={width - padding.right + 10}
         y={padding.top - 20}
         textAnchor="middle"
-        fill="#94a3b8"
+        fill={THEME.inkMuted}
         fontSize="12"
         fontWeight="600"
       >
@@ -3086,17 +3116,17 @@ function RateCurveTooltip({ active, payload, label, probeAmount }) {
   }
 
   return (
-    <div style={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: 8, padding: '10px 12px', fontSize: 12, color: '#e2e8f0', maxWidth: 320 }}>
+    <div style={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: 8, padding: '10px 12px', fontSize: 12, color: THEME.inkPrimary, maxWidth: 320 }}>
       <div style={{ fontWeight: 600, marginBottom: 6 }}>Age {label}</div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-        <span style={{ color: '#d95926' }}>Cost of converting {formatCurrency(probeAmount)}</span>
+        <span style={{ color: SERIES.pension }}>Cost of converting {formatCurrency(probeAmount)}</span>
         <strong>{pct(row.marginalRate)}</strong>
       </div>
-      {driver && <div style={{ color: '#94a3b8', fontSize: 11, marginBottom: 6 }}>driver: {driver}</div>}
+      {driver && <div style={{ color: THEME.inkMuted, fontSize: 11, marginBottom: 6 }}>driver: {driver}</div>}
 
       {c && (
-        <div style={{ margin: '6px 0', paddingLeft: 8, borderLeft: '2px solid #334155', color: '#cbd5e1' }}>
+        <div style={{ margin: '6px 0', paddingLeft: 8, borderLeft: '2px solid #334155', color: THEME.inkSecondary }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
             <span>income tax</span><span>{money(c.taxDeltaExIrmaa)} · {(c.ratePoints.incomeTax * 100).toFixed(1)} pts</span>
           </div>
@@ -3121,7 +3151,7 @@ function RateCurveTooltip({ active, payload, label, probeAmount }) {
               The surcharge does not grow with the conversion, so a larger one
               spreads the same dollars over a larger base. */}
           {c.irmaaDelta > 0 && (
-            <div style={{ color: '#94a3b8', marginTop: 4 }}>
+            <div style={{ color: THEME.inkMuted, marginTop: 4 }}>
               This {money(c.irmaaDelta)} surcharge is fixed regardless of conversion size —
               converting more spreads it over a larger base, converting less may avoid it entirely.
             </div>
@@ -3129,15 +3159,15 @@ function RateCurveTooltip({ active, payload, label, probeAmount }) {
         </div>
       )}
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, color: '#3987e5' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, color: SERIES.socialSecurity }}>
         <span>Average rate you pay</span><span>{pct(row.effectiveRate)}</span>
       </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, color: '#199e70' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, color: SERIES.otherIncome }}>
         <span>Tax bracket</span><span>{pct(row.bracket)}</span>
       </div>
 
       {row.cliffHeadroom !== null && row.cliffHeadroom !== undefined && (
-        <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid #334155', color: row.cliffHeadroom < 15000 ? '#fbbf24' : '#94a3b8', fontSize: 11 }}>
+        <div style={{ marginTop: 6, paddingTop: 6, borderTop: `1px solid ${THEME.grid}`, color: row.cliffHeadroom < 15000 ? '#fbbf24' : '#94a3b8', fontSize: 11 }}>
           {money(row.cliffHeadroom)} of room before the next Medicare tier
           {row.cliffHeadroom < 15000 ? ' — any extra income here trips it, not just a conversion' : ''}
         </div>
@@ -3648,17 +3678,17 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                       encoding that keeps it distinguishable without color. */}
                   <Line
                     type="monotone" dataKey="bracket" name="Tax bracket"
-                    stroke="#199e70" strokeWidth={2} strokeDasharray="5 4" dot={false}
+                    stroke={SERIES.otherIncome} strokeWidth={2} strokeDasharray="5 4" dot={false}
                     label={lastPointLabel('bracket', '#199e70', iBracket)}
                   />
                   <Line
                     type="monotone" dataKey="effectiveRate" name="Average rate you pay"
-                    stroke="#3987e5" strokeWidth={2} dot={false}
+                    stroke={SERIES.socialSecurity} strokeWidth={2} dot={false}
                     label={lastPointLabel('average', '#3987e5', iEff)}
                   />
                   <Line
                     type="monotone" dataKey="marginalRatePlot" name={`Cost of converting $${(RATE_PROBE / 1000).toFixed(0)}k more`}
-                    stroke="#d95926" strokeWidth={2} dot={false} connectNulls={false}
+                    stroke={SERIES.pension} strokeWidth={2} dot={false} connectNulls={false}
                     label={lastPointLabel('conversion', '#d95926', iMarg)}
                   />
                   {/* Capped years: mark them and print the true value, so a
@@ -3666,7 +3696,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                   {capped.map(r => (
                     <ReferenceDot
                       key={`cap-${r.age}`} x={r.age} y={yMax} r={5}
-                      fill="#d95926" stroke="#1e293b" strokeWidth={2}
+                      fill={SERIES.pension} stroke={THEME.surfaceRaised} strokeWidth={2}
                       label={{ value: `${(r.marginalRate * 100).toFixed(0)}%`, position: 'top', fill: '#fb923c', fontSize: 11 }}
                     />
                   ))}
@@ -5386,9 +5416,9 @@ function DeferralDecisionPanel({ personalInfo, accounts, incomeStreams, assets, 
                 }))} margin={{ top: 8, right: 24, left: 0, bottom: 4 }}>
                   <CartesianGrid stroke={THEME.grid} strokeDasharray="3 3" />
                   <XAxis dataKey="age" stroke={THEME.axis} tick={{ fontSize: 11 }}
-                         label={{ value: 'Your age', position: 'insideBottom', offset: -2, fill: '#64748b', fontSize: 11 }} />
+                         label={{ value: 'Your age', position: 'insideBottom', offset: -2, fill: THEME.inkMuted, fontSize: 11 }} />
                   <YAxis stroke={THEME.axis} tick={{ fontSize: 11 }} unit="%" />
-                  <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
+                  <Tooltip contentStyle={{ background: THEME.surface, border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
                            formatter={(v, n) => [`${v}%`, n === 'now' ? 'Saved by deferring now' : 'Paid at withdrawal']} />
                   <Legend formatter={(v) => v === 'now' ? 'Saved by deferring now' : 'Paid at withdrawal'}
                           wrapperStyle={{ fontSize: 11 }} />
@@ -7105,7 +7135,7 @@ function ScenarioComparisonTab({ activeScenarioId, assets, computeProjections, c
     return dataPoint;
   });
   
-  const chartColors = ['#f59e0b', '#22c55e', '#3b82f6', '#ef4444', '#8b5cf6'];
+  const chartColors = THEME.categorical;
   
   return (
     <div className="space-y-6">
@@ -7245,49 +7275,49 @@ function StressTestTab({ accounts, assets, currentYear, incomeStreams, oneTimeEv
       name: '2000–2002 Dot-Com Crash',
       description: 'Three consecutive years of losses after the tech bubble burst',
       returns: [-9.1, -11.9, -22.1, 28.7, 10.9], // 2000-2004
-      color: '#ef4444'
+      color: THEME.categorical[0]
     },
     {
       id: 'gfc_2008',
       name: '2007–2009 Financial Crisis',
       description: 'The Great Recession with a devastating 2008',
       returns: [5.5, -37.0, 26.5, 15.1, 2.1], // 2007-2011
-      color: '#f97316'
+      color: THEME.categorical[1]
     },
     {
       id: 'stagflation_1973',
       name: '1973–1974 Stagflation',
       description: 'Oil crisis + high inflation + recession',
       returns: [-14.7, -26.5, 37.2, 23.8, -7.2], // 1973-1977
-      color: '#eab308'
+      color: THEME.categorical[2]
     },
     {
       id: 'lost_decade_2000',
       name: '2000–2009 Lost Decade',
       description: 'Full decade of near-zero stock returns with two crashes',
       returns: [-9.1, -11.9, -22.1, 28.7, 10.9, 4.9, 15.8, 5.5, -37.0, 26.5],
-      color: '#a855f7'
+      color: THEME.categorical[3]
     },
     {
       id: 'covid_2020',
       name: '2020 COVID Crash + Recovery',
       description: 'Sharp crash followed by rapid recovery',
       returns: [-34.0, 30.0, 18.4, 28.7, -18.1], // Approximate Q1 drawdown as annual, then recovery
-      color: '#06b6d4'
+      color: THEME.categorical[4]
     },
     {
       id: 'mild_bear',
       name: 'Mild Bear (–15%, –10%)',
       description: 'A moderate downturn in the first two years',
       returns: [-15.0, -10.0, 5.0, 8.0, 12.0],
-      color: '#84cc16'
+      color: THEME.categorical[5]
     },
     {
       id: 'japan_1990',
       name: '1990s Japan-Style Stagnation',
       description: 'Prolonged low/negative returns (no quick recovery)',
       returns: [-3.0, -5.0, 2.0, -2.0, 1.0, -4.0, 3.0, 0.0, -1.0, 2.0],
-      color: '#ec4899'
+      color: THEME.categorical[6]
     }
   ];
   
@@ -7314,7 +7344,7 @@ function StressTestTab({ accounts, assets, currentYear, incomeStreams, oneTimeEv
           name: 'Custom Scenario',
           description: `User-defined: ${parsed.map(r => r > 0 ? '+' + r + '%' : r + '%').join(', ')}`,
           returns: parsed,
-          color: '#64748b'
+          color: THEME.inkMuted
         });
       }
     }
@@ -7562,22 +7592,22 @@ function StressTestTab({ accounts, assets, currentYear, incomeStreams, oneTimeEv
                       dataKey="age" 
                       type="number" 
                       domain={[retirementAge, endAge]}
-                      tick={{ fill: '#94a3b8', fontSize: 12 }}
-                      label={{ value: 'Age', position: 'insideBottom', offset: -5, fill: '#94a3b8' }}
+                      tick={{ fill: THEME.inkMuted, fontSize: 12 }}
+                      label={{ value: 'Age', position: 'insideBottom', offset: -5, fill: THEME.inkMuted }}
                       allowDuplicatedCategory={false}
                     />
                     <YAxis 
-                      tick={{ fill: '#94a3b8', fontSize: 12 }}
+                      tick={{ fill: THEME.inkMuted, fontSize: 12 }}
                       tickFormatter={v => v >= 1000000 ? `$${(v/1000000).toFixed(1)}M` : `$${(v/1000).toFixed(0)}k`}
                     />
                     <Tooltip 
                       contentStyle={{ backgroundColor: THEME.surfaceRaised, border: '1px solid #334155', borderRadius: '8px' }}
-                      labelStyle={{ color: '#e2e8f0' }}
+                      labelStyle={{ color: THEME.inkPrimary }}
                       formatter={(value, name) => [formatCurrency(value), name]}
                       labelFormatter={label => `Age ${label}`}
                     />
                     <Legend formatter={legendInk} />
-                    <ReferenceLine y={0} stroke="#475569" strokeDasharray="3 3" />
+                    <ReferenceLine y={0} stroke={THEME.grid} strokeDasharray="3 3" />
                     {stressResults.map(result => (
                       <Line 
                         key={result.id}
@@ -9075,7 +9105,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
           }
         }
         
-        const chartColors = ['#ef4444', '#eab308', '#22c55e', '#8b5cf6', '#3b82f6'];
+        const chartColors = THEME.categorical;
         
         // Whether the user has Roth conversions enabled. Affects banner display
         // and whether the ranking table shows a "Roth Conv." column.
@@ -9422,7 +9452,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
               <ResponsiveContainer width="100%" height={400}>
                 <LineChart data={portfolioChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
-                  <XAxis dataKey="age" stroke={THEME.axis} label={{ value: 'Your Age', position: 'insideBottom', offset: -5, fill: '#94a3b8' }} />
+                  <XAxis dataKey="age" stroke={THEME.axis} label={{ value: 'Your Age', position: 'insideBottom', offset: -5, fill: THEME.inkMuted }} />
                   <YAxis stroke={THEME.axis} tickFormatter={v => v >= 1000000 ? `$${(v/1000000).toFixed(1)}M` : `$${(v/1000).toFixed(0)}k`} />
                   <Tooltip 
                     contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}` }} 
@@ -11921,14 +11951,14 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
                 swatch already carries identity; the words are text and wear a
                 text color, so they stay legible at small sizes and in the
                 CVD/print case where the hue is not the signal. */}
-            <Legend formatter={(value) => <span style={{ color: '#cbd5e1' }}>{value}</span>} />
+            <Legend formatter={(value) => <span style={{ color: THEME.inkSecondary }}>{value}</span>} />
             {/* Retirement is where the accumulation story ends and the drawdown
                 one begins; without it the reader cannot tell which half of the
                 curve they are looking at. */}
             {retAge >= data[0].age && retAge <= data[data.length - 1].age && (
               <ReferenceLine
                 x={retAge} stroke={THEME.axis} strokeDasharray="4 4"
-                label={{ value: 'retire', fill: '#94a3b8', fontSize: 11, position: 'insideTopLeft' }}
+                label={{ value: 'retire', fill: THEME.inkMuted, fontSize: 11, position: 'insideTopLeft' }}
               />
             )}
             <Line
@@ -12436,10 +12466,8 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
 
         {showIndividualAccounts ? (() => {
           // Stable color palette per account index
-          const acctColors = [
-            '#34d399','#a78bfa','#38bdf8','#fb923c','#f472b6',
-            '#facc15','#818cf8','#4ade80','#f87171','#22d3ee'
-          ];
+          // One validated categorical cycle instead of a per-table hand-picked list.
+          const acctColors = THEME.categorical;
           const colorFor = (idx) => acctColors[idx % acctColors.length];
           const typeLabel = (type) => ({
             '401k':'401k','traditional_ira':'Trad IRA','457b':'457b','403b':'403b',
@@ -12473,7 +12501,7 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
                           {accounts.map((acct, i) => {
                             const bal = (p.perAccountBalances || {})[acct.id] || 0;
                             return (
-                              <td key={acct.id} className="py-1.5 px-2 text-right font-mono" style={{ color: bal > 0 ? colorFor(i) : '#475569' }}>
+                              <td key={acct.id} className="py-1.5 px-2 text-right font-mono" style={{ color: bal > 0 ? colorFor(i) : THEME.inkMuted }}>
                                 {bal > 0 ? formatCurrency(bal) : '—'}
                               </td>
                             );
@@ -12647,10 +12675,8 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
         </p>
         
         {showIndividualContribs ? (() => {
-          const acctColors = [
-            '#34d399','#a78bfa','#38bdf8','#fb923c','#f472b6',
-            '#facc15','#818cf8','#4ade80','#f87171','#22d3ee'
-          ];
+          // One validated categorical cycle instead of a per-table hand-picked list.
+          const acctColors = THEME.categorical;
           const colorFor = (idx) => acctColors[idx % acctColors.length];
           const contribYears = projections.filter(p => {
             const contribs = p.perAccountContributions || {};
@@ -12695,7 +12721,7 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
                         {accounts.map((acct, i) => {
                           const c = contribs[acct.id] || 0;
                           return (
-                            <td key={acct.id} className="py-1.5 px-2 text-right font-mono" style={{ color: c > 0 ? colorFor(i) : '#475569' }}>
+                            <td key={acct.id} className="py-1.5 px-2 text-right font-mono" style={{ color: c > 0 ? colorFor(i) : THEME.inkMuted }}>
                               {c > 0 ? formatCurrency(c) : '—'}
                             </td>
                           );
@@ -14080,7 +14106,7 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
                         items: [
                           { color: '#f59e0b', label: 'Gold Area — Needed for Spending', desc: 'The withdrawal rate driven by your actual spending needs. This is the portion you\'re choosing to take out.' },
                           { color: '#06b6d4', label: 'Cyan Area — Excess from RMD', desc: 'Additional withdrawals forced by RMD rules beyond what you need. You pay tax on these but reinvest the after-tax amount.' },
-                          { color: '#ffffff', label: 'White Line — Total Rate', desc: 'Your combined withdrawal rate (needed + excess). This is what matters for portfolio sustainability.' },
+                          { color: THEME.inkPrimary, label: 'Bright Line — Total Rate', desc: 'Your combined withdrawal rate (needed + excess). This is what matters for portfolio sustainability.' },
                           { color: '#22c55e', label: 'Green Dashed — 4% Safe Line', desc: 'The traditional safe withdrawal rate from the Trinity Study. Staying below this line means historically your portfolio would last 30+ years.' },
                           { color: '#ef4444', label: 'Red Dashed — 6% Risk Line', desc: 'Above this level, portfolio failure risk increases significantly.' }
                         ],
@@ -18701,6 +18727,15 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
 
 function RetirementPlanner() {
   const [activeTab, setActiveTab] = useState('dashboard');
+  // The palette switch is done by applyThemeMode BEFORE setState, so the single
+  // re-render this triggers already reads the new values. Doing it in an effect
+  // would paint one frame of the old chart colours against the new surface.
+  const [themeMode, setThemeMode] = useState(initialThemeMode);
+  const toggleTheme = () => {
+    const next = themeMode === 'dark' ? 'light' : 'dark';
+    applyThemeMode(next);
+    setThemeMode(next);
+  };
   const [currentYear] = useState(new Date().getFullYear());
   const [saveStatus, setSaveStatus] = useState('');
   const [showImportExport, setShowImportExport] = useState(false);
@@ -19296,6 +19331,14 @@ function RetirementPlanner() {
               <p className="text-xs text-slate-500 mt-1">v{typeof window !== 'undefined' && window.APP_VERSION ? window.APP_VERSION : 'dev'}</p>
             </div>
           )}
+          <button
+            onClick={toggleTheme}
+            className={`mt-2 w-full flex items-center justify-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 py-1.5 rounded hover:bg-slate-700/50 transition-colors`}
+            title={themeMode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          >
+            <span>{themeMode === 'dark' ? '☀️' : '🌙'}</span>
+            {!sidebarCollapsed && <span>{themeMode === 'dark' ? 'Light mode' : 'Dark mode'}</span>}
+          </button>
         </div>
         
         {/* Navigation */}
