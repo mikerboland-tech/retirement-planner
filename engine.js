@@ -6553,13 +6553,203 @@ const addOwnContribution = (accts, dollars) => {
     : a);
 };
 
+// ── WHERE THE NEXT SAVED DOLLAR SHOULD GO ────────────────────────────────────
+// Scaling every account by one factor preserves the saver's MIX, which sounds
+// respectful and gives bad advice the moment a limit binds. On the app's own
+// default plan — two 401(k)s and a Roth IRA — raising the savings rate by half
+// pushed the IRA to $9,000 against a $7,500 cap and reported a breach, while
+// $34,600 of untouched 401(k) room sat next to it. The tool then suggested a
+// taxable brokerage. Nobody would choose that; the arithmetic chose it.
+//
+// So the extra money is placed the way a person would place it: fill the
+// tax-advantaged buckets in a priority order, each only up to what the IRS
+// allows, and let a taxable account catch whatever is left over. The order is a
+// PARAMETER rather than a constant, because reasonable people disagree about it
+// (HSA-first versus IRA-first is a genuine argument, not an error) and because a
+// plan with an employer match on only one spouse's plan has its own answer.
+//
+// Limits are per PERSON — two spouses each get their own 402(g) and IRA cap — so
+// headroom is computed per owner, not per household.
+//
+// What this deliberately does NOT model: filling to the employer match first,
+// the usual first step in any priority list. This engine stores a match as an
+// unconditional percent of salary, independent of what the employee defers, so
+// there is no match to "capture" by contributing more. Encoding a match-capture
+// step here would be modelling a formula the projection does not run.
+const SAVINGS_FILL_ORDER = ['hsa', 'ira', 'workplace', 'taxable'];
+
+const savingsBucketOf = (a) => {
+  if (!a) return null;
+  if (a.type === 'hsa') return 'hsa';
+  if (IRA_TYPES.has(a.type)) return 'ira';
+  if (DEFERRAL_TYPES.has(a.type)) return 'workplace';
+  if (isBrokerageAccount(a.type)) return 'taxable';
+  return null;   // non-liquid or unknown: never a destination
+};
+
+// This year's employee dollars for a row, in whichever mode it is stored.
+const employeeDollarsOf = (a, salaries = {}) => {
+  if (!a) return 0;
+  if ((a.contributor || 'me') === 'employer') return 0;
+  if (a.contributionMode === 'percent') {
+    const sal = (a.owner === 'spouse' ? salaries.spouse : salaries.me) || 0;
+    return sal * (a.employeePercent || 0);
+  }
+  return a.contribution || 0;
+};
+
+// Per-owner room left in each capped bucket, given what the accounts already do.
+const savingsHeadroom = (accts, pi = {}, salaries = {}) => {
+  const room = {};
+  ['me', 'spouse'].forEach(owner => {
+    const age = owner === 'spouse' ? (pi.spouseAge || 0) : (pi.myAge || 0);
+    const mine = (accts || []).filter(a => a && (a.owner === 'spouse' ? 'spouse' : 'me') === owner);
+    let deferral = 0, ira = 0, hsa = 0;
+    mine.forEach(a => {
+      const d = employeeDollarsOf(a, salaries);
+      const b = savingsBucketOf(a);
+      if (b === 'workplace') deferral += d;
+      else if (b === 'ira') ira += d;
+      else if (b === 'hsa') hsa += d;
+    });
+    const cu = workplaceCatchUp(age);
+    room[owner] = {
+      workplace: Math.max(0, (LIMIT_402G + cu) - deferral),
+      ira: Math.max(0, (LIMIT_IRA + (age >= 50 ? LIMIT_IRA_CATCHUP : 0)) - ira),
+      hsa: Math.max(0, (pi.filingStatus === 'married_joint' ? LIMIT_HSA_FAMILY : LIMIT_HSA_SELF)
+                       + (age >= 55 ? LIMIT_HSA_CATCHUP_55 : 0) - hsa),
+      taxable: Infinity,
+    };
+  });
+  return room;
+};
+
+// Add `dollars` to the plan, filling buckets in `order` and never past a limit.
+// Returns the new account list plus a ledger, because a number that moved with
+// no account named beside it is exactly what made the old warning useless.
+const fillSavingsToTarget = (accts, { dollars = 0, pi = {}, salaries = {},
+                                      order = SAVINGS_FILL_ORDER } = {}) => {
+  const placements = [];
+  if (!Array.isArray(accts) || !(dollars > 0)) {
+    return { accounts: accts || [], placements, overflow: 0, unplaced: Math.max(0, dollars) };
+  }
+  const room = savingsHeadroom(accts, pi, salaries);
+  const added = new Map();          // account id -> dollars added
+  let left = dollars;
+
+  order.forEach(bucket => {
+    if (left <= 0.5) return;
+    // Within a bucket, the accounts with room, largest room first — it keeps the
+    // number of touched accounts down, which reads better in the ledger.
+    const rows = accts
+      .map(a => ({ a, owner: a && a.owner === 'spouse' ? 'spouse' : 'me' }))
+      .filter(({ a }) => savingsBucketOf(a) === bucket && (a.contributor || 'me') !== 'employer')
+      .map(x => ({ ...x, room: (room[x.owner] || {})[bucket] }))
+      .filter(x => x.room > 0.5)
+      .sort((x, y) => (y.room === Infinity ? 1 : y.room) - (x.room === Infinity ? 1 : x.room));
+
+    rows.forEach(({ a, owner, room: r }) => {
+      if (left <= 0.5) return;
+      const take = Math.min(left, r === Infinity ? left : r);
+      if (!(take > 0.5)) return;
+      added.set(a.id, (added.get(a.id) || 0) + take);
+      placements.push({ id: a.id, name: a.name, bucket, owner, added: take,
+                        capped: r !== Infinity && take >= r - 0.5 });
+      if (r !== Infinity) room[owner][bucket] = r - take;
+      left -= take;
+    });
+  });
+
+  const accounts = accts.map(a => {
+    const extra = added.get(a && a.id);
+    if (!(extra > 0)) return a;
+    // Fixed-dollar from here on: a percent row would need the salary re-divided
+    // out, and the caller is working in dollars.
+    return { ...a, contributionMode: 'amount', contributor: 'me',
+             contribution: employeeDollarsOf(a, salaries) + extra };
+  });
+  // `unplaced` is money the plan has nowhere to put — every bucket in the order
+  // is capped or absent. Saying so is the useful part: it means "open an
+  // account", not "you cannot save this much".
+  return { accounts, placements, overflow: 0, unplaced: Math.max(0, left) };
+};
+
+// Take `dollars` back OUT, draining the order in reverse — the last dollar in is
+// the first dollar out, so cutting back sheds taxable saving before it touches
+// anything sheltered. Symmetric with the fill, and the advice a person would
+// give.
+const drainSavingsToTarget = (accts, { dollars = 0, salaries = {},
+                                       order = SAVINGS_FILL_ORDER } = {}) => {
+  const placements = [];
+  if (!Array.isArray(accts) || !(dollars > 0)) {
+    return { accounts: accts || [], placements, overflow: 0, unplaced: 0 };
+  }
+  const removed = new Map();
+  let left = dollars;
+  [...order].reverse().forEach(bucket => {
+    if (left <= 0.5) return;
+    const rows = accts
+      .filter(a => savingsBucketOf(a) === bucket && (a.contributor || 'me') !== 'employer')
+      .map(a => ({ a, have: employeeDollarsOf(a, salaries) - (removed.get(a.id) || 0) }))
+      .filter(x => x.have > 0.5)
+      .sort((x, y) => y.have - x.have);
+    rows.forEach(({ a, have }) => {
+      if (left <= 0.5) return;
+      const take = Math.min(left, have);
+      if (!(take > 0.5)) return;
+      removed.set(a.id, (removed.get(a.id) || 0) + take);
+      placements.push({ id: a.id, name: a.name, bucket,
+                        owner: a.owner === 'spouse' ? 'spouse' : 'me', added: -take, capped: false });
+      left -= take;
+    });
+  });
+  const accounts = accts.map(a => {
+    const cut = removed.get(a && a.id);
+    if (!(cut > 0)) return a;
+    return { ...a, contributionMode: 'amount', contributor: 'me',
+             contribution: Math.max(0, employeeDollarsOf(a, salaries) - cut) };
+  });
+  return { accounts, placements, overflow: 0, unplaced: Math.max(0, left) };
+};
+
 // The account list that makes the saver's own contributions equal targetDollars.
 // currentPersonal is what they contribute today, measured the same way — the UI
 // reads it off the projection's perAccountContributions so growth is included.
-const accountsAtSavingsTarget = (accts, { currentPersonal = 0, targetDollars = 0 } = {}) => {
+//
+// With `pi`/`salaries` supplied this fills and drains by priority order and
+// respects every limit; without them it falls back to the old proportional
+// scale, which is still what an unknown-salary caller can honestly do.
+const accountsAtSavingsTarget = (accts, { currentPersonal = 0, targetDollars = 0,
+                                          pi = null, salaries = null,
+                                          order = SAVINGS_FILL_ORDER } = {}) => {
   if (!Array.isArray(accts)) return [];
-  if (currentPersonal > 0) return scaleOwnContributions(accts, Math.max(0, targetDollars) / currentPersonal);
-  return addOwnContribution(accts, Math.max(0, targetDollars));
+  const target = Math.max(0, targetDollars);
+  if (pi && salaries) {
+    const delta = target - currentPersonal;
+    if (Math.abs(delta) <= 0.5) return accts;
+    return (delta > 0
+      ? fillSavingsToTarget(accts, { dollars: delta, pi, salaries, order })
+      : drainSavingsToTarget(accts, { dollars: -delta, salaries, order })).accounts;
+  }
+  if (currentPersonal > 0) return scaleOwnContributions(accts, target / currentPersonal);
+  return addOwnContribution(accts, target);
+};
+
+// Same as above, but returns the ledger alongside the accounts so the UI can say
+// which account each dollar went into and which cap stopped it.
+const savingsTargetPlan = (accts, { currentPersonal = 0, targetDollars = 0,
+                                    pi = {}, salaries = {},
+                                    order = SAVINGS_FILL_ORDER } = {}) => {
+  const target = Math.max(0, targetDollars);
+  const delta = target - currentPersonal;
+  if (!Array.isArray(accts) || Math.abs(delta) <= 0.5) {
+    return { accounts: accts || [], placements: [], unplaced: 0, delta: 0,
+             headroom: savingsHeadroom(accts || [], pi, salaries) };
+  }
+  const res = delta > 0
+    ? fillSavingsToTarget(accts, { dollars: delta, pi, salaries, order })
+    : drainSavingsToTarget(accts, { dollars: -delta, salaries, order });
+  return { ...res, delta, headroom: savingsHeadroom(res.accounts, pi, salaries) };
 };
 
 // ── TRADITIONAL OR ROTH, WHILE YOU ARE STILL WORKING ─────────────────────────
@@ -9789,6 +9979,8 @@ const describePlanPatch = (state, patch) => {
     validatePlanPatch, applyPlanPatch, describePlanPatch,
     planShortfall, breakingPoint, STRESS_DIMENSIONS,
     scaleOwnContributions, addOwnContribution, accountsAtSavingsTarget,
+    SAVINGS_FILL_ORDER, savingsBucketOf, employeeDollarsOf, savingsHeadroom,
+    fillSavingsToTarget, drainSavingsToTarget, savingsTargetPlan,
     splitBothContributors, BOTH_SPLIT_EMPLOYEE_SHARE,
     taxableGrowthFactor, breakEvenTaxRate, conversionFundingComparison,
     conversionFundingCost,

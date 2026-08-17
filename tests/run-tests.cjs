@@ -9531,6 +9531,135 @@ section('P80 — an edge has three answers, and only one of them is a number');
   eq(engine.breakingPoint(null, 'spending'), null, 'and so does a missing context');
 }
 
+section('P81 — the next saved dollar goes where a person would put it');
+{
+  // Reported from the live app: raising the savings-rate slider on the DEFAULT
+  // plan warned about the IRA limit and suggested a taxable brokerage, while two
+  // barely-funded 401(k)s sat next to it with room to spare. The cause was that
+  // the what-if scaled every account by one factor to preserve the saver's mix,
+  // and never consulted a limit.
+  //
+  // The app's own default accounts, verbatim — this is the plan a new user sees.
+  const salaries = { me: 90000, spouse: 70000 };
+  const pi = { myAge: 35, spouseAge: 33, filingStatus: 'married_joint' };
+  const DEFER = 0.06;
+  const defaults = () => ([
+    { id: 1, name: 'My 401(k)', type: '401k', balance: 60000, contributionMode: 'percent',
+      employeePercent: DEFER, employerMatchPercent: 0.04, cagr: 0.07, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Spouse 401(k)', type: '401k', balance: 30000, contributionMode: 'percent',
+      employeePercent: DEFER, employerMatchPercent: 0.04, cagr: 0.07, owner: 'spouse', contributor: 'me' },
+    { id: 3, name: 'My Roth IRA', type: 'roth_ira', balance: 15000, contribution: 6000,
+      cagr: 0.07, owner: 'me', contributor: 'me' },
+    { id: 4, name: 'Savings', type: 'brokerage', balance: 15000, contribution: 2400,
+      cagr: 0.04, owner: 'joint', contributor: 'me' },
+  ]);
+  const personal = salaries.me * DEFER + salaries.spouse * DEFER + 6000 + 2400;
+  const planAt = (mult, order) => engine.savingsTargetPlan(defaults(), {
+    currentPersonal: personal, targetDollars: personal * mult, pi, salaries, order });
+
+  // The exact regression: 1.5x the savings rate.
+  {
+    const old = engine.scaleOwnContributions(defaults(), 1.5);
+    const oldBreaches = engine.checkContributionLimits(old, pi, salaries);
+    ok(oldBreaches.some(b => b.kind === 'ira'),
+      'the proportional scale that shipped does breach the IRA cap at 1.5x — this is the reported bug');
+
+    const plan = planAt(1.5);
+    eq(engine.checkContributionLimits(plan.accounts, pi, salaries).length, 0,
+      'the limit-aware fill reaches the same savings rate with no breach at all');
+    // And the money went somewhere useful rather than to a brokerage.
+    ok(plan.placements.some(p => p.bucket === 'workplace' && p.added > 0),
+      'the overflow lands in a 401(k) that had room, not in a taxable account');
+    ok(!plan.placements.some(p => p.bucket === 'taxable'),
+      'nothing is pushed to taxable while sheltered room remains');
+  }
+
+  // Every dollar asked for is placed, and never more.
+  [1.25, 1.5, 2, 3].forEach(mult => {
+    const plan = planAt(mult);
+    const moved = plan.placements.reduce((sum, p) => sum + p.added, 0);
+    approx(moved + plan.unplaced, plan.delta,
+      `${mult}x: the placements account for exactly the requested change`, 1e-6);
+    eq(engine.checkContributionLimits(plan.accounts, pi, salaries).length, 0,
+      `${mult}x: the fill never lands above a limit`);
+  });
+
+  // Taxable is the last resort, and it IS reached — the brokerage advice was not
+  // wrong in general, only wrong while sheltered room was still open.
+  {
+    const plan = planAt(4);
+    const taxable = plan.placements.filter(p => p.bucket === 'taxable');
+    eq(taxable.length, 1, 'at 4x the sheltered buckets fill and the remainder reaches taxable');
+    ok(plan.placements.filter(p => p.bucket === 'workplace').every(p => p.capped),
+      'and it only gets there once every workplace account is at its cap');
+  }
+
+  // Limits are per PERSON. Both spouses' 401(k) room is available, not one cap
+  // shared across the household.
+  {
+    const plan = planAt(4);
+    const workplace = plan.placements.filter(p => p.bucket === 'workplace');
+    eq(new Set(workplace.map(p => p.owner)).size, 2,
+      'both spouses\' deferral room is used — the 402(g) cap is per person');
+    gt(workplace.reduce((s, p) => s + p.added, 0), engine.LIMIT_402G,
+      'so the household can defer more than one person\'s limit');
+  }
+
+  // The order is a parameter and it actually steers the money.
+  {
+    const iraFirst = planAt(1.5, ['ira', 'workplace', 'hsa', 'taxable']);
+    const workFirst = planAt(1.5, ['workplace', 'ira', 'hsa', 'taxable']);
+    eq(iraFirst.placements[0].bucket, 'ira', 'IRA-first fills the IRA first');
+    eq(workFirst.placements[0].bucket, 'workplace', 'workplace-first fills the 401(k) first');
+    // Same dollars either way — the order changes the destination, not the total.
+    approx(iraFirst.placements.reduce((s, p) => s + p.added, 0),
+           workFirst.placements.reduce((s, p) => s + p.added, 0),
+           'reordering moves the same money to different accounts', 1e-6);
+  }
+
+  // Cutting back drains in REVERSE order: taxable saving goes before anything
+  // sheltered. The opposite would tell someone to give up tax-advantaged room
+  // and keep their brokerage deposits.
+  {
+    const plan = planAt(0.5);
+    lt(plan.delta, 0, 'halving the rate is a reduction');
+    eq(plan.placements[0].bucket, 'taxable', 'the taxable account is cut first');
+    ok(plan.placements.every(p => p.added < 0), 'a reduction only ever removes');
+  }
+
+  // A plan with nowhere left to put the money says so, instead of silently
+  // reporting a savings rate it cannot reach.
+  {
+    const noTaxable = defaults().filter(a => a.type !== 'brokerage');
+    const cur = salaries.me * DEFER + salaries.spouse * DEFER + 6000;
+    const plan = engine.savingsTargetPlan(noTaxable, {
+      currentPersonal: cur, targetDollars: cur + 200000, pi, salaries });
+    gt(plan.unplaced, 0, 'with every sheltered bucket capped and no brokerage, the remainder is unplaced');
+    eq(engine.checkContributionLimits(plan.accounts, pi, salaries).length, 0,
+      'and it is reported rather than stuffed into an account past its limit');
+  }
+
+  // An employer-funded row is never a destination — the saver cannot direct it.
+  {
+    const withMatchRow = defaults().concat([{ id: 9, name: 'Employer match', type: '401k',
+      balance: 0, contribution: 5000, owner: 'me', contributor: 'employer', cagr: 0.07 }]);
+    const cur = personal;
+    const plan = engine.savingsTargetPlan(withMatchRow, {
+      currentPersonal: cur, targetDollars: cur * 1.5, pi, salaries });
+    ok(!plan.placements.some(p => p.id === 9),
+      'the employer-contributed row is not somewhere the saver can add money');
+  }
+
+  // Falling back is still honest: with no salaries to reason about, the old
+  // proportional scale is what an unknown-salary caller can legitimately do.
+  {
+    const scaled = engine.accountsAtSavingsTarget(defaults(), {
+      currentPersonal: personal, targetDollars: personal * 1.5 });
+    ok(scaled.some(a => a.type === 'roth_ira' && a.contribution === 9000),
+      'without pi/salaries the function still scales proportionally, unchanged');
+  }
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of

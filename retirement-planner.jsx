@@ -54,6 +54,7 @@ const {
   deferralDecision, convertWhileWorking,
   survivorTaxComparison, survivorSSLoss, scoreRothStrategy,
   planShortfall, breakingPoint, accountsAtSavingsTarget,
+  savingsTargetPlan, SAVINGS_FILL_ORDER, savingsBucketOf,
   splitBothContributors, breakEvenTaxRate, conversionFundingComparison,
   betrSensitivity, presentValueOfTaxes, convertEverythingAnalysis,
   getFederalDeduction, NIIT_THRESHOLDS,
@@ -11978,6 +11979,9 @@ const SR_WHATIF_COLOR = SERIES.pension;
 // Same two hues, stepped so they clear 4.5:1 as text. The swatch and the chart
 // strokes above keep the series value — a fill only has to clear 3:1 — but a bold
 // figure tinted to match the line is text, and the series value fails that bar.
+// Plain names for the four destinations. "workplace" is the engine's word for
+// 401(k)/403(b)/457(b) — accurate, and not what anyone calls their own account.
+const SR_BUCKET_LABEL = { hsa: 'HSA', ira: 'IRA', workplace: '401(k)/403(b)', taxable: 'Brokerage' };
 const SR_BASE_INK = THEME.ink.socialSecurity;
 const SR_WHATIF_INK = THEME.ink.pension;
 
@@ -12013,6 +12017,11 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
                               myContributions, savingsRate }) {
   const [target, setTarget] = useState(null);   // null = follow the plan's own rate
   const [infoOpen, setInfoOpen] = useState(false);
+  // Which bucket the next saved dollar fills. A parameter, not a constant:
+  // HSA-first versus IRA-first is a real disagreement among people who have
+  // thought about it, and a household with a match on only one plan has its own
+  // answer. Local to the explorer — it steers a what-if, not the saved plan.
+  const [fillOrder, setFillOrder] = useState(SAVINGS_FILL_ORDER);
   const pi = personalInfo;
   const baseRate = savingsRate || 0;
 
@@ -12029,24 +12038,32 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
 
   const scenario = useMemo(() => {
     const targetDollars = currentEarnedIncome * (targetRate / 100);
-    const accts = accountsAtSavingsTarget(accounts, {
-      currentPersonal: myContributions, targetDollars,
-    });
-    const proj = computeProjections(pi, accts, incomeStreams, assets,
-      oneTimeEvents, recurringExpenses);
+    // Salaries first: the fill is limit-aware and every limit is per person, so
+    // it cannot run without knowing whose salary is whose.
     const salaries = { me: 0, spouse: 0 };
     (incomeStreams || []).forEach(st => {
       // Joint earned income is split, exactly as computeProjections splits it —
-      // the 402(g) and 415(c) checks below are per-person, so attributing it all
-      // to one would flag a breach the engine does not model.
+      // the 402(g) and 415(c) checks are per-person, so attributing it all to one
+      // would flag a breach the engine does not model.
       if (st.type === 'earned_income') {
         if (st.owner === 'joint') { salaries.me += (st.amount || 0) / 2; salaries.spouse += (st.amount || 0) / 2; }
         else salaries[st.owner === 'spouse' ? 'spouse' : 'me'] += (st.amount || 0);
       }
     });
-    return { proj, accts, targetDollars, breaches: checkContributionLimits(accts, pi, salaries) };
+    // Fill the buckets in priority order instead of scaling every account by one
+    // factor. The old scale preserved the saver's MIX, which meant a plan with a
+    // small Roth IRA and two barely-funded 401(k)s pushed the IRA past its cap and
+    // reported a breach while $34,600 of 401(k) room sat untouched next to it.
+    const plan = savingsTargetPlan(accounts, {
+      currentPersonal: myContributions, targetDollars, pi, salaries, order: fillOrder,
+    });
+    const accts = plan.accounts;
+    const proj = computeProjections(pi, accts, incomeStreams, assets,
+      oneTimeEvents, recurringExpenses);
+    return { proj, accts, targetDollars, plan, salaries,
+             breaches: checkContributionLimits(accts, pi, salaries) };
   }, [accounts, assets, incomeStreams, oneTimeEvents, pi, recurringExpenses,
-      currentEarnedIncome, myContributions, targetRate]);
+      currentEarnedIncome, myContributions, targetRate, fillOrder]);
 
   const data = useMemo(() => (projections || []).map(p => {
     const alt = scenario.proj.find(q => q.year === p.year);
@@ -12097,7 +12114,8 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
             sections={[{
               heading: 'How this works',
               items: [
-                { icon: '🎚️', label: 'The slider', desc: 'Sets your gross savings rate — your own contributions as a percentage of earned income. Moving it scales every contribution you personally make, in proportion, so your split between pre-tax, Roth and taxable is preserved.' },
+                { icon: '🎚️', label: 'The slider', desc: 'Sets your gross savings rate — your own contributions as a percentage of earned income. Moving it up fills your accounts in priority order and never past an IRS limit; moving it down cuts in reverse, shedding taxable saving before anything sheltered. The panel below names every account the money moved through.' },
+                { icon: '🪣', label: 'Fill order', desc: 'Which bucket the next dollar goes into: HSA, then IRA, then 401(k)/403(b), then a taxable brokerage. That order is a defensible default, not a law — HSA-first versus IRA-first is a real argument, and a household with a match on only one plan has its own answer, so you can reorder it. Limits are per person, so both spouses\' deferral room counts.' },
                 { icon: '🏢', label: 'Employer money', desc: 'Never scaled. A match is your employer\'s contribution, not yours, and it does not count toward your savings rate. If your match rises with your deferral, the real result is better than what you see here.' },
                 { icon: '🧮', label: 'Not a formula', desc: 'Each position of the slider re-runs the full projection engine — the same one behind every other number in this app — so the answer includes the tax effect of the extra deferral, IRS limits, RMDs and your withdrawal order.' },
                 { icon: '💸', label: 'Where it comes from', desc: 'The extra savings has to come out of spending. This chart shows what you gain, not what you give up; only you can price the second half.' },
@@ -12158,18 +12176,95 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
         </div>
       </div>
 
+      {/* Where the money actually goes. The old version of this panel only ever
+          appeared to say "you have broken a limit", which was true of the
+          proportional scale that produced it and useless as advice. The fill is
+          limit-aware now, so the panel's job is to show the waterfall — which
+          account each dollar landed in, and which cap stopped it. */}
+      {changed && scenario.plan.placements.length > 0 && (
+        <div className="mb-4 p-3 bg-slate-800/40 border border-slate-700/50 rounded-lg">
+          <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+            <div className="text-xs font-semibold text-slate-300">
+              {up ? 'Where the extra goes' : 'What gets cut first'}
+            </div>
+            <div className="text-[11px] text-slate-500">
+              filled in order · {fillOrder.map(b => SR_BUCKET_LABEL[b]).join(' → ')}
+            </div>
+          </div>
+          <div className="space-y-1">
+            {scenario.plan.placements.map((pl, i) => (
+              <div key={i} className="flex items-baseline justify-between gap-3 text-xs">
+                <span className="text-slate-400">
+                  {pl.name}
+                  <span className="text-slate-500 ml-1.5">{SR_BUCKET_LABEL[pl.bucket]}</span>
+                  {pl.capped && <span className="text-amber-400 ml-1.5">· at its limit</span>}
+                </span>
+                <span className="tabular-nums font-medium"
+                      style={{ color: pl.added > 0 ? THEME.status.good : THEME.inkSecondary }}>
+                  {pl.added > 0 ? '+' : '−'}{formatCurrency(Math.abs(pl.added))}/yr
+                </span>
+              </div>
+            ))}
+          </div>
+          {scenario.plan.unplaced > 0.5 && (
+            <p className="text-xs text-amber-300 mt-2 leading-relaxed">
+              {formatCurrency(scenario.plan.unplaced)}/yr has nowhere to go — every account in your plan
+              is at its IRS limit. Saving this much means opening another account: a taxable brokerage
+              takes unlimited contributions, and an HSA is the only one left with a tax break attached.
+            </p>
+          )}
+          {/* The order is the disagreement, so it is editable rather than
+              asserted. Buckets you own no account in are shown greyed — moving
+              them changes nothing, and hiding them would make the list look
+              arbitrary. */}
+          <div className="mt-3 pt-2 border-t border-slate-700/50 flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] text-slate-500 mr-1">Fill order:</span>
+            {fillOrder.map((b, i) => {
+              const owned = (accounts || []).some(a => savingsBucketOf(a) === b);
+              return (
+                <button
+                  key={b}
+                  disabled={i === 0}
+                  onClick={() => setFillOrder(prev => {
+                    const next = [...prev];
+                    [next[i - 1], next[i]] = [next[i], next[i - 1]];
+                    return next;
+                  })}
+                  title={i === 0 ? 'Filled first' : `Move ${SR_BUCKET_LABEL[b]} ahead of ${SR_BUCKET_LABEL[fillOrder[i - 1]]}`}
+                  className={`px-2 py-0.5 rounded text-[11px] border transition-colors ${
+                    owned ? 'border-slate-600 text-slate-300' : 'border-slate-700/60 text-slate-500'
+                  } ${i === 0 ? 'opacity-70' : 'hover:bg-slate-700/50 hover:text-slate-100'}`}
+                >
+                  {i > 0 && <span className="text-slate-500 mr-0.5">↑</span>}
+                  {SR_BUCKET_LABEL[b]}
+                </button>
+              );
+            })}
+            {fillOrder.join() !== SAVINGS_FILL_ORDER.join() && (
+              <button onClick={() => setFillOrder(SAVINGS_FILL_ORDER)}
+                      className="ml-1 text-[11px] text-slate-500 hover:text-slate-300 underline decoration-dotted">
+                reset
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* A breach can still happen: the plan as ENTERED may already be over a
+          limit before the slider moves. The fill never adds past a cap, so
+          anything reported here was there to begin with. */}
       {scenario.breaches.length > 0 && (
         <div className="mb-4 p-3 bg-amber-500/5 border border-amber-500/40 rounded-lg space-y-1">
           <div className="text-xs font-semibold text-amber-300">
-            At {targetRate.toFixed(1)}% this plan would exceed an IRS limit
+            This plan is already above an IRS limit
           </div>
           {scenario.breaches.map((b, i) => (
             <p key={i} className="text-xs text-slate-400 leading-relaxed">{b.message}</p>
           ))}
           <p className="text-xs text-slate-500 leading-relaxed">
             The projection does not silently cap contributions, so the line above assumes money the IRS
-            would not let you defer. Above the limit, the extra would have to go somewhere else — a
-            taxable brokerage account, or an HSA — which grows the same money under different tax rules.
+            would not let you defer. The savings-rate fill never adds past a limit, so this comes from the
+            accounts as entered — worth fixing on the rows above.
           </p>
         </div>
       )}
