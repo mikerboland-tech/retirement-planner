@@ -9227,6 +9227,57 @@ section('P74 — the palette: colour-vision separation, re-derived rather than t
   }
 }
 
+section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
+{
+  // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of
+  // $9.6M where the Dashboard showed roughly $30M. Neither number was wrong — the
+  // Sensitivity tab quotes today's dollars and the Dashboard quotes nominal, and
+  // over a 39-year horizon at 3% that is a factor of 3.17. What was wrong was that
+  // the only thing on screen saying so was a caption in the smallest muted type on
+  // the page.
+  //
+  // The relationship is pinned here so that if the two tabs ever diverge for a
+  // REAL reason, it cannot be waved off as the same benign units gap.
+  const sc = baseScenario({ myAge: 51, spouseAge: 51, myRetirementAge: 60,
+                            spouseRetirementAge: 60, legacyAge: 90,
+                            myLifeExpectancy: 90, spouseLifeExpectancy: 90,
+                            inflationRate: 0.03 });
+  const proj = computeProjections(sc.pi, sc.accts, sc.streams, sc.assets || [], [], []);
+  const at90 = proj.find(p => p.myAge === 90);
+  ok(at90, 'the projection reaches the legacy age');
+
+  const nominal = at90.totalPortfolio;              // what the Dashboard tile reads
+  const real = deflateToToday(nominal, sc.pi.myAge, 90, sc.pi.inflationRate);  // what Sensitivity reads
+
+  gt(nominal, 0, 'the nominal balance at the legacy age is positive');
+  gt(nominal, real, 'the nominal balance is the larger of the two — inflation runs one way');
+
+  const horizon = 90 - sc.pi.myAge;
+  const expected = Math.pow(1 + sc.pi.inflationRate, horizon);
+  approx(nominal / real, expected,
+    'the whole gap between the two tabs is the deflator and nothing else', 1e-9);
+  approx(expected, 3.167,
+    'at this horizon and rate the factor is ~3.17 — the size of the discrepancy reported', 0.001);
+
+  // Deflating to the user's own age is a no-op, which is what makes "today's
+  // dollars" actually mean today.
+  approx(deflateToToday(nominal, sc.pi.myAge, sc.pi.myAge, sc.pi.inflationRate), nominal,
+    'a balance already at the current age is already in today\'s dollars', 1e-9);
+
+  // With no inflation the two currencies collapse into one, so both tabs must
+  // quote the identical figure and there is nothing left to disclose.
+  {
+    const flat = baseScenario({ myAge: 51, spouseAge: 51, myRetirementAge: 60,
+                                spouseRetirementAge: 60, legacyAge: 90,
+                                myLifeExpectancy: 90, spouseLifeExpectancy: 90,
+                                inflationRate: 0 });
+    const p2 = computeProjections(flat.pi, flat.accts, flat.streams, flat.assets || [], [], []);
+    const n2 = p2.find(p => p.myAge === 90).totalPortfolio;
+    approx(deflateToToday(n2, flat.pi.myAge, 90, 0), n2,
+      'with no inflation the two tabs quote the identical figure', 1e-9);
+  }
+}
+
 section('P76 — the token layer, and a light mode that is measured rather than eyeballed');
 {
   // Light mode is 4,000 Tailwind classes reinterpreted, not rewritten. Nothing

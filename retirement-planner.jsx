@@ -9525,7 +9525,15 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
   
   const [results, setResults] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
-  
+  // Nominal vs today's dollars, mirroring the Monte Carlo tab's control. Real is
+  // the default because it is the only valid basis for the inflation lever — each
+  // of those scenarios ends in a different currency — but the dashboard reports
+  // nominal, so the two tabs disagreed by the deflator with nothing on screen
+  // saying so.
+  const [showRealDollars, setShowRealDollars] = useState(true);
+  const money = (step, key) => showRealDollars ? step[key] : step[key + 'Nominal'];
+  const dollarBasis = showRealDollars ? "today's $" : 'future $';
+
   // Define the sensitivity variables and their ranges
   const sensitivityVars = [
     {
@@ -9803,6 +9811,13 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
             scenarioInflation: scenInflation,
             portfolioAtRetirement: toToday(atRetirement?.totalPortfolio || 0, scenarioRetAge),
             portfolioAtEnd: toToday(atEnd?.totalPortfolio || 0, endAge),
+            // Both currencies are carried so the toggle never re-runs the sweep —
+            // and so the nominal figures can be reconciled against the dashboard,
+            // which reports nominal. A user comparing the two tabs sees a ~3x gap
+            // at a 39-year horizon and has no way to tell it is the deflator.
+            portfolioAtRetirementNominal: atRetirement?.totalPortfolio || 0,
+            portfolioAtEndNominal: atEnd?.totalPortfolio || 0,
+            lifetimeTaxNominal: proj.reduce((sum, p) => sum + (p.totalTax || 0), 0),
             survives: !failureAge,
             failureAge: failureAge?.myAge || null,
             lifetimeTax,
@@ -9906,16 +9921,46 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
       
       {results && (
         <>
+          {/* Which currency every figure below is quoted in. This was previously a
+              caption in the smallest muted type on the page, above a table whose
+              whole content is dollar amounts — so the tab silently disagreed with
+              the dashboard by the deflator (a factor of ~3 over a 39-year horizon)
+              and the explanation was the easiest thing on screen to miss. */}
+          <div className={cardStyle}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={showRealDollars}
+                  onChange={e => setShowRealDollars(e.target.checked)}
+                  className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-amber-500 focus:ring-amber-500/50"
+                />
+                <span title="The inflation scenarios each end in a different currency, so their raw future-dollar balances are not comparable with one another. Deflating every scenario by its own rate makes them comparable and puts them in money you can judge today.">
+                  Show in today's dollars
+                </span>
+              </label>
+              <p className="text-xs text-slate-500 max-w-xl">
+                {showRealDollars
+                  ? <>Every figure on this tab is in <span className="text-slate-300">today's dollars</span>. The Dashboard quotes the same balances in <span className="text-slate-300">future (nominal) dollars</span>, so it will read higher — by {(() => {
+                      const yrs = Math.max(0, endAge - personalInfo.myAge);
+                      const f = Math.pow(1 + (personalInfo.inflationRate || 0), yrs);
+                      return `${f.toFixed(1)}\u00d7 at age ${endAge}`;
+                    })()}. Untick to compare the two directly.</>
+                  : <>Every figure on this tab is in <span className="text-slate-300">future (nominal) dollars</span>, matching the Dashboard. Inflation scenarios are not comparable with each other on this basis — tick the box to put them in one currency.</>}
+              </p>
+            </div>
+          </div>
+
           {/* Tornado chart: which variables matter most */}
           <div className={cardStyle}>
             <h4 className="text-lg font-semibold text-slate-200 mb-2">Impact Ranking: Which Variables Matter Most?</h4>
-            <p className="text-xs text-slate-500 mb-4">Shows the range of ending portfolio values, in today's dollars, when each variable is adjusted to its minimum and maximum test values. Wider bars = your plan is more sensitive to that variable.</p>
+            <p className="text-xs text-slate-500 mb-4">Shows the range of ending portfolio values, in {dollarBasis === "today's $" ? "today's dollars" : 'future (nominal) dollars'}, when each variable is adjusted to its minimum and maximum test values. Wider bars = your plan is more sensitive to that variable.</p>
             
             {(() => {
               // Build tornado data: for each variable, get the min and max portfolio-at-end
-              const basePortfolio = results[0]?.stepResults.find(s => s.isBase)?.portfolioAtEnd || 0;
+              const basePortfolio = money(results[0]?.stepResults.find(s => s.isBase) || {}, 'portfolioAtEnd') || 0;
               const tornadoData = results.map(variable => {
-                const portfolios = variable.stepResults.map(s => s.portfolioAtEnd);
+                const portfolios = variable.stepResults.map(s => money(s, 'portfolioAtEnd'));
                 const minPortfolio = Math.min(...portfolios);
                 const maxPortfolio = Math.max(...portfolios);
                 return {
@@ -9988,7 +10033,10 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
             <div key={variable.id} className={cardStyle}>
               <h4 className="text-lg font-semibold text-slate-200 mb-1">{variable.label}</h4>
               <p className="text-xs text-slate-500 mb-3">
-                Base: {variable.formatStep(variable.baseValue, 0)} · all dollar figures in today's dollars
+                Base: {variable.formatStep(variable.baseValue, 0)} · all dollar figures in {showRealDollars ? "today's dollars" : 'future (nominal) dollars'}
+                {!showRealDollars && variable.scenarioInflation && (
+                  <span className="text-amber-400"> · these scenarios each end in a DIFFERENT currency, so compare them in today's dollars instead</span>
+                )}
               </p>
               
               <div className="overflow-x-auto">
@@ -9996,8 +10044,8 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
                   <thead>
                     <tr className="border-b border-slate-700/50">
                       <th className="text-left py-2 px-3 text-slate-400 font-medium">Scenario</th>
-                      <th className="text-right py-2 px-3 text-slate-400 font-medium">Portfolio at {retirementAge}</th>
-                      <th className="text-right py-2 px-3 text-slate-400 font-medium">Portfolio at {endAge}</th>
+                      <th className="text-right py-2 px-3 text-slate-400 font-medium">Portfolio at {retirementAge}<span className="block text-[10px] font-normal text-slate-500">{dollarBasis}</span></th>
+                      <th className="text-right py-2 px-3 text-slate-400 font-medium">Portfolio at {endAge}<span className="block text-[10px] font-normal text-slate-500">{dollarBasis}</span></th>
                       <th className="text-right py-2 px-3 text-slate-400 font-medium">vs Base</th>
                       <th className="text-center py-2 px-3 text-slate-400 font-medium">Survives?</th>
                       <th className="text-right py-2 px-3 text-slate-400 font-medium">Lifetime Tax</th>
@@ -10005,11 +10053,13 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
                   </thead>
                   <tbody>
                     {variable.stepResults.map((step, stepIdx) => {
-                      const baseEnd = variable.stepResults.find(s => s.isBase)?.portfolioAtEnd || 0;
-                      const diff = step.portfolioAtEnd - baseEnd;
+                      const baseStep = variable.stepResults.find(s => s.isBase);
+                      const baseEnd = (baseStep ? money(baseStep, 'portfolioAtEnd') : 0) || 0;
+                      const stepEnd = money(step, 'portfolioAtEnd');
+                      const diff = stepEnd - baseEnd;
                       
                       return (
-                        <tr key={stepIdx} className={`border-b border-slate-800/50 ${step.isBase ? 'bg-amber-500/10' : ''} ${getImpactBg(step.portfolioAtEnd, baseEnd)}`}>
+                        <tr key={stepIdx} className={`border-b border-slate-800/50 ${step.isBase ? 'bg-amber-500/10' : ''} ${getImpactBg(stepEnd, baseEnd)}`}>
                           <td className="py-2 px-3">
                             <span className={`font-medium ${step.isBase ? 'text-amber-400' : 'text-slate-200'}`}>
                               {step.label}
@@ -10017,9 +10067,9 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
                             {step.isBase && <span className="text-amber-500 text-xs ml-2">◆ Current</span>}
                             {!step.isBase && <span className="text-slate-600 text-xs ml-2">({step.deltaLabel})</span>}
                           </td>
-                          <td className="py-2 px-3 text-right text-slate-300">{formatCurrency(step.portfolioAtRetirement)}</td>
-                          <td className={`py-2 px-3 text-right font-medium ${getImpactColor(step.portfolioAtEnd, baseEnd)}`}>
-                            {formatCurrency(step.portfolioAtEnd)}
+                          <td className="py-2 px-3 text-right text-slate-300">{formatCurrency(money(step, 'portfolioAtRetirement'))}</td>
+                          <td className={`py-2 px-3 text-right font-medium ${getImpactColor(stepEnd, baseEnd)}`}>
+                            {formatCurrency(stepEnd)}
                           </td>
                           <td className={`py-2 px-3 text-right ${diff > 0 ? 'text-emerald-400' : diff < 0 ? 'text-red-400' : 'text-slate-500'}`}>
                             {step.isBase ? '—' : `${diff > 0 ? '+' : ''}${formatCurrency(diff)}`}
@@ -10030,7 +10080,7 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
                               : <span className="text-red-400">✗ {step.failureAge}</span>
                             }
                           </td>
-                          <td className="py-2 px-3 text-right text-slate-400">{formatCurrency(step.lifetimeTax)}</td>
+                          <td className="py-2 px-3 text-right text-slate-400">{formatCurrency(money(step, 'lifetimeTax'))}</td>
                         </tr>
                       );
                     })}
