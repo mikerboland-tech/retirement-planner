@@ -9660,6 +9660,132 @@ section('P81 — the next saved dollar goes where a person would put it');
   }
 }
 
+section('P82 — one cap, two accounts: the fill has to remember what it already spent');
+{
+  // P81 shipped a waterfall whose entire promise was "never past a limit", and
+  // it broke on the second account in a bucket. The default plan could not show
+  // it: one 401(k) each and a single Roth IRA means every (owner, bucket) pair
+  // holds exactly one account, so a headroom figure read once is never read
+  // again. A traditional AND a Roth IRA for the same person — or a 401(k) and a
+  // 403(b) — share one cap, and each was handed the full amount.
+  //
+  // The lesson is about the fixture, not the arithmetic: a test pack built only
+  // from the reported case can only ever catch the reported case.
+  const salaries = { me: 200000, spouse: 150000 };
+  const pi = { myAge: 40, spouseAge: 40, filingStatus: 'married_joint' };
+  const row = (id, name, type, owner) => ({ id, name, type, owner, contributor: 'me',
+    contributionMode: 'amount', contribution: 0, balance: 1000, cagr: 0.07 });
+
+  // Two IRAs, one person, one $7,500 cap between them.
+  {
+    const accts = [row('a', 'My Roth IRA', 'roth_ira', 'me'),
+                   row('b', 'My Traditional IRA', 'traditional_ira', 'me')];
+    const r = engine.fillSavingsToTarget(accts, { dollars: 30000, pi, salaries,
+                                                  order: ['ira', 'taxable'] });
+    const total = r.accounts.reduce((s, a) => s + a.contribution, 0);
+    approx(total, engine.LIMIT_IRA, 'a traditional and a Roth IRA share one cap, not one each');
+    eq(engine.checkContributionLimits(r.accounts, pi, salaries).length, 0,
+      'and the validator agrees the result is legal');
+    approx(r.unplaced, 30000 - engine.LIMIT_IRA, 'the money that would not fit is reported, not absorbed');
+  }
+
+  // Two workplace plans, one person, one $24,500 elective-deferral cap.
+  {
+    const accts = [row('c', 'My 401(k)', '401k', 'me'),
+                   row('d', 'My 403(b)', '403b', 'me')];
+    const r = engine.fillSavingsToTarget(accts, { dollars: 80000, pi, salaries,
+                                                  order: ['workplace'] });
+    const total = r.accounts.reduce((s, a) => s + a.contribution, 0);
+    approx(total, engine.LIMIT_402G, '401(k) and 403(b) deferrals share one 402(g) limit');
+  }
+
+  // Three accounts deep, to prove the fix is not an off-by-one that happens to
+  // work for exactly two.
+  {
+    const accts = [row('e', 'IRA one', 'roth_ira', 'me'),
+                   row('f', 'IRA two', 'traditional_ira', 'me'),
+                   row('g', 'IRA three', 'roth_ira', 'me')];
+    const r = engine.fillSavingsToTarget(accts, { dollars: 50000, pi, salaries, order: ['ira'] });
+    approx(r.accounts.reduce((s, a) => s + a.contribution, 0), engine.LIMIT_IRA,
+      'a third account in the same bucket gets no fresh allowance either');
+  }
+
+  // Two people is still two caps — the fix must not over-correct into treating
+  // a household as one saver.
+  {
+    const accts = [row('h', 'My IRA', 'roth_ira', 'me'),
+                   row('i', 'Spouse IRA', 'roth_ira', 'spouse')];
+    const r = engine.fillSavingsToTarget(accts, { dollars: 30000, pi, salaries, order: ['ira'] });
+    approx(r.accounts.reduce((s, a) => s + a.contribution, 0), engine.LIMIT_IRA * 2,
+      'two spouses genuinely do get an IRA limit each');
+  }
+
+  // The HSA is the exception, and it was wrong in BOTH implementations: the fill
+  // and the validator each gave a married couple the full family limit twice.
+  // Under §223(b)(5) spouses under family coverage share one limit.
+  {
+    const accts = [row('j', 'My HSA', 'hsa', 'me'),
+                   row('k', 'Spouse HSA', 'hsa', 'spouse')];
+    const r = engine.fillSavingsToTarget(accts, { dollars: 40000, pi, salaries, order: ['hsa'] });
+    approx(r.accounts.reduce((s, a) => s + a.contribution, 0), engine.LIMIT_HSA_FAMILY,
+      'a married couple shares ONE family HSA limit, not one each');
+
+    // And the validator sees a household over the limit even when neither
+    // spouse is over their own ceiling — the case it was structurally blind to.
+    const overfilled = accts.map(a => ({ ...a, contribution: engine.LIMIT_HSA_FAMILY }));
+    const breaches = engine.checkContributionLimits(overfilled, pi, salaries);
+    ok(breaches.some(b => b.kind === 'hsa_family'),
+      'two spouses each at the family limit is a household breach the per-owner check cannot see');
+    eq(breaches.filter(b => b.kind === 'hsa').length, 0,
+      'and neither of them individually exceeds their own ceiling, which is why it was missed');
+  }
+
+  // A single filer has no household pool to share, so nothing here may shrink
+  // the limit they actually get.
+  {
+    const single = { myAge: 40, filingStatus: 'single' };
+    const accts = [row('l', 'My HSA', 'hsa', 'me')];
+    const r = engine.fillSavingsToTarget(accts, { dollars: 40000, pi: single, salaries, order: ['hsa'] });
+    approx(r.accounts.reduce((s, a) => s + a.contribution, 0), engine.LIMIT_HSA_SELF,
+      'a single filer still gets the full self-only limit');
+  }
+
+  // The age-55 catch-up stays individual on top of the shared family pool.
+  {
+    const older = { myAge: 57, spouseAge: 57, filingStatus: 'married_joint' };
+    const accts = [row('m', 'My HSA', 'hsa', 'me'),
+                   row('n', 'Spouse HSA', 'hsa', 'spouse')];
+    const r = engine.fillSavingsToTarget(accts, { dollars: 40000, pi: older, salaries, order: ['hsa'] });
+    approx(r.accounts.reduce((s, a) => s + a.contribution, 0),
+      engine.LIMIT_HSA_FAMILY + engine.LIMIT_HSA_CATCHUP_55 * 2,
+      'both spouses over 55 add their own catch-up to the one shared family limit');
+  }
+
+  // The invariant the whole waterfall rests on, stated once: whatever a fill
+  // reports placing is exactly what the accounts changed by, and the result is
+  // always legal. Run across a spread of amounts and a crowded account list.
+  {
+    const accts = [row('o', 'My 401(k)', '401k', 'me'),
+                   row('p', 'My 403(b)', '403b', 'me'),
+                   row('q', 'Spouse 401(k)', '401k', 'spouse'),
+                   row('r', 'My Roth IRA', 'roth_ira', 'me'),
+                   row('s', 'My Trad IRA', 'traditional_ira', 'me'),
+                   row('t', 'Spouse IRA', 'roth_ira', 'spouse'),
+                   row('u', 'My HSA', 'hsa', 'me'),
+                   row('v', 'Spouse HSA', 'hsa', 'spouse'),
+                   row('w', 'Brokerage', 'brokerage', 'joint')];
+    [1000, 25000, 60000, 120000, 400000].forEach(dollars => {
+      const r = engine.fillSavingsToTarget(accts, { dollars, pi, salaries });
+      const moved = r.accounts.reduce((s, a) => s + a.contribution, 0);
+      const ledger = r.placements.reduce((s, p) => s + p.added, 0);
+      approx(moved, ledger, `at $${dollars} the ledger accounts for every dollar that moved`);
+      approx(moved + r.unplaced, dollars, `at $${dollars} placed plus unplaced is what was asked for`);
+      eq(engine.checkContributionLimits(r.accounts, pi, salaries).length, 0,
+        `at $${dollars} the filled plan breaks no limit`);
+    });
+  }
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of

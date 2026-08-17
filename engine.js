@@ -2397,9 +2397,31 @@ const checkContributionLimits = (accounts, pi, salaries = {}) => {
     const iraCap = LIMIT_IRA + (age >= 50 ? LIMIT_IRA_CATCHUP : 0);
     if (ira > iraCap + 1) out.push({ owner, kind: 'ira', amount: ira, limit: iraCap,
       message: `${who} IRA contributions total $${Math.round(ira).toLocaleString()}/yr, above the $${iraCap.toLocaleString()} limit. Traditional and Roth IRAs share it.` });
+    // This is the INDIVIDUAL ceiling. For a married couple the family limit is
+    // also the household's total (see the shared check below), so one spouse
+    // alone cannot exceed it either.
     const hsaCap = (pi.filingStatus === 'married_joint' ? LIMIT_HSA_FAMILY : LIMIT_HSA_SELF) + (age >= 55 ? LIMIT_HSA_CATCHUP_55 : 0);
     if (hsa > hsaCap + 1) out.push({ owner, kind: 'hsa', amount: hsa, limit: hsaCap,
       message: `${who} HSA contributions total $${Math.round(hsa).toLocaleString()}/yr, above the $${hsaCap.toLocaleString()} limit.` });
+  }
+
+  // §223(b)(5): spouses covered by a family HDHP share ONE family limit — it is
+  // a household pool, not a cap each. Two spouses can therefore each sit under
+  // their own ceiling while the household is over the only limit that is real,
+  // which the per-owner loop above can never see. Only the age-55 catch-up is
+  // individual, so it adds to the household total once per person over 55.
+  if (pi.filingStatus === 'married_joint') {
+    let household = 0;
+    for (const a of accounts) {
+      if (a.type !== 'hsa') continue;
+      const s = split(a);
+      if (s) household += s.employee + s.employer;
+    }
+    const cap = LIMIT_HSA_FAMILY
+      + ((pi.myAge || 0) >= 55 ? LIMIT_HSA_CATCHUP_55 : 0)
+      + ((pi.spouseAge || 0) >= 55 ? LIMIT_HSA_CATCHUP_55 : 0);
+    if (household > cap + 1) out.push({ owner: 'household', kind: 'hsa_family', amount: household, limit: cap,
+      message: `Your household's HSA contributions total $${Math.round(household).toLocaleString()}/yr, above the $${cap.toLocaleString()} family limit. A married couple under family coverage shares one HSA limit between them — it is not $${LIMIT_HSA_FAMILY.toLocaleString()} each — though anyone 55 or older adds their own $${LIMIT_HSA_CATCHUP_55.toLocaleString()} catch-up on top.` });
   }
   return out;
 };
@@ -6598,9 +6620,20 @@ const employeeDollarsOf = (a, salaries = {}) => {
   return a.contribution || 0;
 };
 
-// Per-owner room left in each capped bucket, given what the accounts already do.
+// Room left in each capped bucket, given what the accounts already do.
+//
+// Most limits are per PERSON — two spouses each get their own 402(g) and their
+// own IRA cap. The HSA is the exception. Under §223(b)(5) spouses covered by a
+// family HDHP share ONE family limit: it is a household pool, not a cap each.
+// Only the age-55 catch-up is individual, and it has to sit in that person's
+// own HSA. So `shared` carries the household pool and `room[owner]` the
+// individual ceiling; a fill has to respect both, and for the HSA the binding
+// one is usually `shared`.
 const savingsHeadroom = (accts, pi = {}, salaries = {}) => {
-  const room = {};
+  const married = pi.filingStatus === 'married_joint';
+  const hsaBase = married ? LIMIT_HSA_FAMILY : LIMIT_HSA_SELF;
+  const room = { shared: {} };
+  let hsaHousehold = 0;
   ['me', 'spouse'].forEach(owner => {
     const age = owner === 'spouse' ? (pi.spouseAge || 0) : (pi.myAge || 0);
     const mine = (accts || []).filter(a => a && (a.owner === 'spouse' ? 'spouse' : 'me') === owner);
@@ -6612,15 +6645,23 @@ const savingsHeadroom = (accts, pi = {}, salaries = {}) => {
       else if (b === 'ira') ira += d;
       else if (b === 'hsa') hsa += d;
     });
+    hsaHousehold += hsa;
     const cu = workplaceCatchUp(age);
     room[owner] = {
       workplace: Math.max(0, (LIMIT_402G + cu) - deferral),
       ira: Math.max(0, (LIMIT_IRA + (age >= 50 ? LIMIT_IRA_CATCHUP : 0)) - ira),
-      hsa: Math.max(0, (pi.filingStatus === 'married_joint' ? LIMIT_HSA_FAMILY : LIMIT_HSA_SELF)
-                       + (age >= 55 ? LIMIT_HSA_CATCHUP_55 : 0) - hsa),
+      hsa: Math.max(0, hsaBase + (age >= 55 ? LIMIT_HSA_CATCHUP_55 : 0) - hsa),
       taxable: Infinity,
     };
   });
+  // Unmarried filers have no household pool to share — the individual ceiling
+  // above is the whole story, so the shared pool must not bind.
+  room.shared.hsa = married
+    ? Math.max(0, hsaBase
+        + ((pi.myAge || 0) >= 55 ? LIMIT_HSA_CATCHUP_55 : 0)
+        + ((pi.spouseAge || 0) >= 55 ? LIMIT_HSA_CATCHUP_55 : 0)
+        - hsaHousehold)
+    : Infinity;
   return room;
 };
 
@@ -6641,21 +6682,39 @@ const fillSavingsToTarget = (accts, { dollars = 0, pi = {}, salaries = {},
     if (left <= 0.5) return;
     // Within a bucket, the accounts with room, largest room first — it keeps the
     // number of touched accounts down, which reads better in the ledger.
+    //
+    // Room is read LIVE inside the loop, never captured up front. Two accounts
+    // in the same bucket for the same person share one cap — a traditional and
+    // a Roth IRA, or a 401(k) and a 403(b) — so a snapshot taken before the
+    // loop hands the second account room the first one already spent. That is
+    // precisely the breach this whole function exists to prevent.
+    const effective = (owner) => {
+      const own = (room[owner] || {})[bucket];
+      const shared = room.shared[bucket];
+      return Math.min(own === undefined ? Infinity : own,
+                      shared === undefined ? Infinity : shared);
+    };
     const rows = accts
       .map(a => ({ a, owner: a && a.owner === 'spouse' ? 'spouse' : 'me' }))
       .filter(({ a }) => savingsBucketOf(a) === bucket && (a.contributor || 'me') !== 'employer')
-      .map(x => ({ ...x, room: (room[x.owner] || {})[bucket] }))
-      .filter(x => x.room > 0.5)
-      .sort((x, y) => (y.room === Infinity ? 1 : y.room) - (x.room === Infinity ? 1 : x.room));
+      .map(x => ({ ...x, snapRoom: effective(x.owner) }))
+      .filter(x => x.snapRoom > 0.5)
+      .sort((x, y) => (y.snapRoom === Infinity ? 1 : y.snapRoom)
+                    - (x.snapRoom === Infinity ? 1 : x.snapRoom));
 
-    rows.forEach(({ a, owner, room: r }) => {
+    rows.forEach(({ a, owner }) => {
       if (left <= 0.5) return;
+      const r = effective(owner);
+      if (!(r > 0.5)) return;
       const take = Math.min(left, r === Infinity ? left : r);
       if (!(take > 0.5)) return;
       added.set(a.id, (added.get(a.id) || 0) + take);
       placements.push({ id: a.id, name: a.name, bucket, owner, added: take,
                         capped: r !== Infinity && take >= r - 0.5 });
-      if (r !== Infinity) room[owner][bucket] = r - take;
+      const own = (room[owner] || {})[bucket];
+      if (own !== undefined && own !== Infinity) room[owner][bucket] = own - take;
+      const shared = room.shared[bucket];
+      if (shared !== undefined && shared !== Infinity) room.shared[bucket] = shared - take;
       left -= take;
     });
   });
@@ -10082,6 +10141,7 @@ const describePlanPatch = (state, patch) => {
     getPlanningHorizonYears,
     realReturn, inflateToAge, deflateToToday, coastFire,
     LIMIT_402G, LIMIT_415C, LIMIT_IRA, LIMIT_HSA_SELF, LIMIT_HSA_FAMILY,
+    LIMIT_IRA_CATCHUP, LIMIT_HSA_CATCHUP_55,
     LIMIT_CATCHUP_50, LIMIT_CATCHUP_60_63,
     DEFERRAL_TYPES, IRA_TYPES, workplaceCatchUp, checkContributionLimits,
     streamColaYears, streamAmountAtAge, streamOwnerAge,
