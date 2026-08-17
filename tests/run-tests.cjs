@@ -8595,7 +8595,7 @@ section('P71 — the AI patch layer: the model proposes, the engine decides');
     const { state: after } = applyPlanPatch(before, [
       { op: 'set', target: 'personalInfo', field: 'desiredRetirementIncome', value: 125000 },
       { op: 'update', target: 'accounts', id: 1, values: { balance: 600000 } },
-      { op: 'add', target: 'incomeStreams', values: { name: 'Pension', type: 'pension', amount: 24000, owner: 'spouse' } },
+      { op: 'add', target: 'incomeStreams', values: { name: 'Pension', type: 'pension', amount: 24000, owner: 'spouse', startAge: 65, endAge: 95 } },
       { op: 'remove', target: 'incomeStreams', id: 2 },
     ]);
     eq(JSON.stringify(before), snapshot, 'the plan handed in is untouched');
@@ -9867,6 +9867,68 @@ section('P83 — an account with no contribution window funds nothing, silently'
     const p4 = engine.computeProjections(pi, half, streams, [], [], []);
     approx((p4[0].perAccountContributions || {})[1], 5000, 'a stated stopAge is honoured');
     eq((p4[12].perAccountContributions || {})[1], 0, 'and it still stops where it was told to');
+  }
+
+  // ── The same trap in the other two collections ──────────────────────────
+  // Accounts were not special. An income stream and a recurring expense are
+  // gated the same way and were inert the same way. They get DIFFERENT fixes,
+  // and the difference is the point.
+
+  // An income stream's startAge is not bookkeeping — for Social Security it is
+  // the claim age, and it drives the reduction/delayed-credit factor and the
+  // spousal benefit. There is no honest default for that, so the patch layer
+  // refuses the row instead of inventing a decision the reader never made.
+  {
+    const st = { personalInfo: pi, accounts: [], incomeStreams: [], assets: [], events: [], recurring: [] };
+    const bad = { ops: [{ op: 'add', target: 'incomeStreams',
+      values: { name: 'Pension', type: 'pension', amount: 40000, owner: 'me' } }] };
+    const v = engine.validatePlanPatch(st, bad);
+    ok(!v.ok, 'a stream with no age window is rejected rather than silently paying nothing');
+    ok(/startAge/.test(v.errors.join(' ')) && /endAge/.test(v.errors.join(' ')),
+      'and the error names both missing fields, so the model can fix it');
+
+    const good = { ops: [{ op: 'add', target: 'incomeStreams',
+      values: { name: 'Pension', type: 'pension', amount: 40000, owner: 'me',
+                startAge: 65, endAge: 90 } }] };
+    ok(engine.validatePlanPatch(st, good).ok, 'stating the window is all it takes');
+    const applied = engine.applyPlanPatch(st, good).state;
+    const proj2 = engine.computeProjections(applied.personalInfo, [
+      { id: 9, name: 'B', type: 'brokerage', balance: 100000, contribution: 0, cagr: 0.05,
+        startAge: 40, stopAge: 40, owner: 'joint', contributor: 'me', costBasisPercent: 0.5 },
+    ], applied.incomeStreams, [], [], []);
+    const at65 = proj2.find(r => r.myAge === 65);
+    gt(at65.totalIncome, 0, 'and the pension actually pays once it starts');
+  }
+
+  // An expense has no such ambiguity: one the reader did not bound runs from now
+  // to the end of the plan. Getting this wrong makes a plan look CHEAPER than it
+  // is, which is the dangerous direction, so it is defaulted rather than refused.
+  {
+    const st = { personalInfo: pi, accounts: [], incomeStreams: [], assets: [], events: [], recurring: [] };
+    const patch2 = { ops: [{ op: 'add', target: 'recurringExpenses',
+      values: { name: 'Travel', amount: 12000, category: 'travel' } }] };
+    const v = engine.validatePlanPatch(st, patch2);
+    ok(v.ok, 'an unbounded expense is accepted');
+    const row = engine.applyPlanPatch(st, patch2).state.recurringExpenses[0];
+    eq(row.startAge, 40, 'and it starts now');
+    eq(row.endAge, 90, 'and runs to the end of the plan');
+  }
+
+  // The engine backstops the expense case too, for a row that never went
+  // through the patch layer — an imported plan or a hand-edited file.
+  {
+    const accts = [{ id: 1, name: 'B', type: 'brokerage', balance: 1000000, contribution: 0,
+                     cagr: 0.05, startAge: 40, stopAge: 40, owner: 'joint', contributor: 'me',
+                     costBasisPercent: 0.5 }];
+    const bounded = engine.computeProjections(pi, accts, streams, [], [],
+      [{ id: 1, name: 'Travel', amount: 12000, startAge: 40, endAge: 90, inflationRate: 0.03 }]);
+    const unbounded = engine.computeProjections(pi, accts, streams, [], [],
+      [{ id: 1, name: 'Travel', amount: 12000, inflationRate: 0.03 }]);
+    // Identical plans: one states the obvious window, one omits it. They must
+    // now agree, where before the unbounded one silently cost nothing.
+    approx(unbounded[0].recurringExpenses, bounded[0].recurringExpenses,
+      'an expense with no window costs the same as one bounded to the whole plan');
+    gt(bounded[0].recurringExpenses, 0, 'and that is a real, non-zero cost');
   }
 }
 

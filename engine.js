@@ -3294,7 +3294,14 @@ const calculateRecurringExpenses = (expenses, myAge, spouseAge, yearsFromNow, ge
 
   expenses.forEach(exp => {
     const ownerAge = exp.owner === 'spouse' ? spouseAge : myAge;
-    if (ownerAge >= exp.startAge && ownerAge <= exp.endAge) {
+    // Same trap as the contribution window: `ownerAge >= undefined` is false, so
+    // an expense with no age bounds is skipped in every year and the plan looks
+    // cheaper than it is. An unbounded expense means "always" — bound it that
+    // way rather than dropping it. A row that really should not apply says so
+    // with a window that excludes the year.
+    const from = Number.isFinite(exp.startAge) ? exp.startAge : -Infinity;
+    const to = Number.isFinite(exp.endAge) ? exp.endAge : Infinity;
+    if (ownerAge >= from && ownerAge <= to) {
       const expInflation = exp.inflationRate !== undefined ? exp.inflationRate : generalInflation;
       const inflationFactor = Math.pow(1 + expInflation, yearsFromNow);
       const adjustedAmount = exp.amount * inflationFactor * survivorSpendFactor;
@@ -7289,6 +7296,15 @@ const breakingPoint = (ctx, dimension, { steps = 16 } = {}) => {
 // owner's retirement age. An account genuinely meant never to receive money
 // says so the explicit way — startAge === stopAge, the idiom the test fixtures
 // already use — and that is left exactly as it is.
+// The last age the plan is asked about. legacyAge is what the UI calls it; the
+// life expectancies are the fallback, and 95 is the last resort so an open-ended
+// window is never accidentally empty.
+const planHorizonAge = (pi = {}) => {
+  const candidates = [pi.legacyAge, pi.myLifeExpectancy, pi.spouseLifeExpectancy]
+    .filter(Number.isFinite);
+  return candidates.length ? Math.max(...candidates) : 95;
+};
+
 const normalizeContributionWindow = (accts, pi = {}) => {
   if (!Array.isArray(accts)) return [];
   return accts.map(a => {
@@ -9741,7 +9757,13 @@ const PLAN_COLLECTIONS = {
   },
   incomeStreams: {
     label: 'income stream',
-    required: ['name', 'type', 'amount'],
+    // startAge/endAge are required, unlike accounts and expenses where the
+    // window can be defaulted honestly. A stream's startAge is not bookkeeping:
+    // for social_security it IS the claim age, and it drives the reduction or
+    // delayed-credit factor and the spousal benefit. Guessing one would be
+    // inventing a decision the reader never made. The model has the plan in
+    // front of it and can state both.
+    required: ['name', 'type', 'amount', 'startAge', 'endAge'],
     fields: {
       name: { type: 'string' },
       type: { type: 'enum', values: ['earned_income', 'social_security', 'pension', 'business', 'rental', 'annuity', 'other'] },
@@ -10001,13 +10023,25 @@ const validatePlanPatch = (state, patch) => {
 // them here puts the same values a person would have got, per owner, and leaves
 // them visible and editable in the Accounts tab afterwards.
 const patchRowDefaults = (target, values, pi = {}) => {
-  if (target !== 'accounts' || !isPlainObject(values)) return values;
+  if (!isPlainObject(values)) return values;
   const spouse = values.owner === 'spouse';
   const age = spouse ? pi.spouseAge : pi.myAge;
   const ret = spouse ? pi.spouseRetirementAge : pi.myRetirementAge;
   const out = { ...values };
-  if (!Number.isFinite(out.startAge) && Number.isFinite(age)) out.startAge = age;
-  if (!Number.isFinite(out.stopAge) && Number.isFinite(ret)) out.stopAge = ret;
+  if (target === 'accounts') {
+    if (!Number.isFinite(out.startAge) && Number.isFinite(age)) out.startAge = age;
+    if (!Number.isFinite(out.stopAge) && Number.isFinite(ret)) out.stopAge = ret;
+    return out;
+  }
+  // An expense with no window is ignored entirely, which makes a plan look
+  // CHEAPER than it is — the dangerous direction to be wrong in. Unlike a
+  // stream's claim age there is nothing to guess here: an expense the reader
+  // did not bound runs from now to the end of the plan.
+  if (target === 'recurringExpenses') {
+    if (!Number.isFinite(out.startAge) && Number.isFinite(age)) out.startAge = age;
+    if (!Number.isFinite(out.endAge)) out.endAge = planHorizonAge(pi);
+    return out;
+  }
   return out;
 };
 
