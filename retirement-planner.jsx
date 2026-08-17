@@ -3086,7 +3086,7 @@ function RateCurveTooltip({ active, payload, label, probeAmount }) {
   }
 
   return (
-    <div style={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: 8, padding: '10px 12px', fontSize: 12, color: '#e2e8f0', maxWidth: 320 }}>
+    <div style={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: 8, padding: '10px 12px', fontSize: 12, color: '#e2e8f0', maxWidth: 320 }}>
       <div style={{ fontWeight: 600, marginBottom: 6 }}>Age {label}</div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
@@ -3625,11 +3625,11 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                   const capped = clipped.filter(r => r.overCap);
                   return (
                 <LineChart data={clipped} margin={{ top: 20, right: 96, left: 20, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                  <XAxis dataKey="age" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
+                  <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+                  <XAxis dataKey="age" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
                   {/* One axis: every series is a percentage. */}
                   <YAxis
-                    stroke="#94a3b8" tick={{ fill: '#94a3b8' }}
+                    stroke={THEME.axis} tick={{ fill: THEME.axis }}
                     tickFormatter={v => `${(v * 100).toFixed(0)}%`}
                     domain={[0, yMax]}
                     allowDataOverflow
@@ -3738,19 +3738,26 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
         <div className="h-80">
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={conversionAnalysis} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="age" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
-              <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8' }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="age" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
+              <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
               <Tooltip 
-                contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }} 
+                contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} 
                 formatter={(v, name) => [formatCurrency(v), name]}
                 labelFormatter={l => `Age ${l}`}
               />
               <Legend formatter={legendInk} />
-              <Bar dataKey="baseIncome" stackId="income" fill="#3b82f6" name="Base Income" />
-              <Bar dataKey="conversionAmount" stackId="income" fill="#10b981" name="Roth Conversion" />
-              <Line type="monotone" dataKey="baseTotalTax" stroke="#ef4444" strokeWidth={2} dot={false} name="Tax Without Conv." strokeDasharray="5 5" />
-              <Line type="monotone" dataKey="withTotalTax" stroke="#f97316" strokeWidth={2} dot={false} name="Tax With Conv." />
+              {/* Base income is the backdrop and the conversion is the subject, so base takes
+                  the recessive baseline token rather than a series hue that would claim it
+                  is one particular kind of income — and the previous pairing, Social
+                  Security blue against conversion violet, was ΔE 1.9 under deuteranopia.
+                  The two tax lines are the SAME quantity under two scenarios: the
+                  counterfactual muted and dashed, the actual solid, so the pair reads as
+                  before/after rather than as two unrelated series. */}
+              <Bar dataKey="baseIncome" stackId="income" fill={THEME.baseline} name="Base Income" />
+              <Bar dataKey="conversionAmount" stackId="income" fill={SERIES.rothConversion} name="Roth Conversion" />
+              <Line type="monotone" dataKey="baseTotalTax" stroke={THEME.inkMuted} strokeWidth={2} dot={false} name="Tax Without Conv." strokeDasharray="5 5" />
+              <Line type="monotone" dataKey="withTotalTax" stroke={THEME.lines.taxBurden} strokeWidth={2} dot={false} name="Tax With Conv." />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -5377,10 +5384,10 @@ function DeferralDecisionPanel({ personalInfo, accounts, incomeStreams, assets, 
                   now: Math.round(y.rateNow * 1000) / 10,
                   later: Math.round(y.rateLater * 1000) / 10,
                 }))} margin={{ top: 8, right: 24, left: 0, bottom: 4 }}>
-                  <CartesianGrid stroke="#334155" strokeDasharray="3 3" />
-                  <XAxis dataKey="age" stroke="#94a3b8" tick={{ fontSize: 11 }}
+                  <CartesianGrid stroke={THEME.grid} strokeDasharray="3 3" />
+                  <XAxis dataKey="age" stroke={THEME.axis} tick={{ fontSize: 11 }}
                          label={{ value: 'Your age', position: 'insideBottom', offset: -2, fill: '#64748b', fontSize: 11 }} />
-                  <YAxis stroke="#94a3b8" tick={{ fontSize: 11 }} unit="%" />
+                  <YAxis stroke={THEME.axis} tick={{ fontSize: 11 }} unit="%" />
                   <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
                            formatter={(v, n) => [`${v}%`, n === 'now' ? 'Saved by deferring now' : 'Paid at withdrawal']} />
                   <Legend formatter={(v) => v === 'now' ? 'Saved by deferring now' : 'Paid at withdrawal'}
@@ -5940,11 +5947,11 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
         <div className="h-96">
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={taxPlanningData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="myAge" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
-              <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8' }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="myAge" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
+              <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
               <Tooltip 
-                contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }} 
+                contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} 
                 formatter={(v, name) => [formatCurrency(v), name]}
                 labelFormatter={l => `Age ${l}`}
               />
@@ -6926,11 +6933,11 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
             <div className="h-80">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={showRealDollars && simResults.percentileBandsReal ? simResults.percentileBandsReal : simResults.percentileBands}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                  <XAxis dataKey="age" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
-                  <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8' }} tickFormatter={v => `$${(v/1e6).toFixed(1)}M`} />
+                  <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+                  <XAxis dataKey="age" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
+                  <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1e6).toFixed(1)}M`} />
                   <Tooltip 
-                    contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }} 
+                    contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} 
                     formatter={(v) => formatCurrency(v)}
                     labelFormatter={l => `Age ${l}`}
                   />
@@ -6961,16 +6968,16 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
             <div className="h-72">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                  <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
                   <XAxis 
                     dataKey="age" 
-                    stroke="#94a3b8" 
-                    tick={{ fill: '#94a3b8' }}
+                    stroke={THEME.axis} 
+                    tick={{ fill: THEME.axis }}
                     domain={[simResults.startAge, 95]}
                     type="number"
                     allowDataOverflow
                   />
-                  <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8' }} tickFormatter={v => `$${(v/1e6).toFixed(1)}M`} />
+                  <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1e6).toFixed(1)}M`} />
                   {simResults.portfolioPaths.map((path, idx) => (
                     <Line 
                       key={idx}
@@ -7202,10 +7209,10 @@ function ScenarioComparisonTab({ activeScenarioId, assets, computeProjections, c
           <h4 className="text-lg font-semibold text-amber-400 mb-4">Portfolio Projection Comparison</h4>
           <ResponsiveContainer width="100%" height={400}>
             <LineChart data={comparisonChartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="age" stroke="#94a3b8" />
-              <YAxis stroke="#94a3b8" tickFormatter={(v) => `$${(v/1000000).toFixed(1)}M`} />
-              <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569' }} formatter={(value) => [formatCurrency(value), '']} />
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="age" stroke={THEME.axis} />
+              <YAxis stroke={THEME.axis} tickFormatter={(v) => `$${(v/1000000).toFixed(1)}M`} />
+              <Tooltip contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}` }} formatter={(value) => [formatCurrency(value), '']} />
               <Legend formatter={legendInk} />
               <Line type="monotone" dataKey="Current Plan" stroke="#f59e0b" strokeWidth={2} dot={false} />
               {selectedScenarios.map((id, idx) => {
@@ -7550,7 +7557,7 @@ function StressTestTab({ accounts, assets, currentYear, incomeStreams, oneTimeEv
               <div style={{ height: 450 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart margin={{ top: 10, right: 30, left: 20, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                    <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
                     <XAxis 
                       dataKey="age" 
                       type="number" 
@@ -7564,7 +7571,7 @@ function StressTestTab({ accounts, assets, currentYear, incomeStreams, oneTimeEv
                       tickFormatter={v => v >= 1000000 ? `$${(v/1000000).toFixed(1)}M` : `$${(v/1000).toFixed(0)}k`}
                     />
                     <Tooltip 
-                      contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }}
+                      contentStyle={{ backgroundColor: THEME.surfaceRaised, border: '1px solid #334155', borderRadius: '8px' }}
                       labelStyle={{ color: '#e2e8f0' }}
                       formatter={(value, name) => [formatCurrency(value), name]}
                       labelFormatter={label => `Age ${label}`}
@@ -8285,11 +8292,11 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
         <div className="h-80">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="age" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
-              <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8' }} tickFormatter={v => `$${(v/1000000).toFixed(1)}M`} />
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="age" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
+              <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000000).toFixed(1)}M`} />
               <Tooltip 
-                contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }} 
+                contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} 
                 formatter={(v, name) => [formatCurrency(v), name.replace('Portfolio', '')]}
                 labelFormatter={l => `Age ${l}`}
               />
@@ -8319,11 +8326,11 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
         <div className="h-80">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="age" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
-              <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8' }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="age" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
+              <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
               <Tooltip 
-                contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }} 
+                contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} 
                 formatter={(v, name) => [formatCurrency(v), name.replace('Withdrawal', '')]}
                 labelFormatter={l => `Age ${l}`}
               />
@@ -9414,11 +9421,11 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
               <h4 className="text-lg font-semibold text-amber-400 mb-4">Portfolio Value Over Time — Key Scenarios</h4>
               <ResponsiveContainer width="100%" height={400}>
                 <LineChart data={portfolioChartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                  <XAxis dataKey="age" stroke="#94a3b8" label={{ value: 'Your Age', position: 'insideBottom', offset: -5, fill: '#94a3b8' }} />
-                  <YAxis stroke="#94a3b8" tickFormatter={v => v >= 1000000 ? `$${(v/1000000).toFixed(1)}M` : `$${(v/1000).toFixed(0)}k`} />
+                  <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+                  <XAxis dataKey="age" stroke={THEME.axis} label={{ value: 'Your Age', position: 'insideBottom', offset: -5, fill: '#94a3b8' }} />
+                  <YAxis stroke={THEME.axis} tickFormatter={v => v >= 1000000 ? `$${(v/1000000).toFixed(1)}M` : `$${(v/1000).toFixed(0)}k`} />
                   <Tooltip 
-                    contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569' }} 
+                    contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}` }} 
                     formatter={(value, name) => [formatCurrency(value), name]} 
                   />
                   <Legend formatter={legendInk} />
@@ -11902,11 +11909,11 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
       <div className="h-80">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 10, right: 76, left: 10, bottom: 5 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-            <XAxis dataKey="age" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
+            <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+            <XAxis dataKey="age" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
             {/* One axis: both series are the same measure in the same units. */}
             <YAxis
-              stroke="#94a3b8" tick={{ fill: '#94a3b8' }}
+              stroke={THEME.axis} tick={{ fill: THEME.axis }}
               tickFormatter={v => v >= 1000000 ? `$${(v / 1000000).toFixed(1)}M` : `$${Math.round(v / 1000)}K`}
             />
             <Tooltip content={<SavingsRateTooltip baseRate={baseRate} targetRate={targetRate} />} />
@@ -11920,7 +11927,7 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
                 curve they are looking at. */}
             {retAge >= data[0].age && retAge <= data[data.length - 1].age && (
               <ReferenceLine
-                x={retAge} stroke="#94a3b8" strokeDasharray="4 4"
+                x={retAge} stroke={THEME.axis} strokeDasharray="4 4"
                 label={{ value: 'retire', fill: '#94a3b8', fontSize: 11, position: 'insideTopLeft' }}
               />
             )}
@@ -13596,30 +13603,39 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
             Hide
           </button>
         </div>
+        {/* KPI tiles. These used to be five unrelated hues — emerald, sky, amber,
+            purple, pink — one per tile. That reads as a category legend, which
+            invites the eye to look for a meaning the colours do not have: they
+            are five money figures, and none of them is "the green one" in any
+            sense the palette can defend. Colour on a KPI tile has to earn its
+            place by encoding something, so it is now reserved for the one number
+            here that has a good/bad reading — the savings rate, which already has
+            savingsRateStatus() to say which. The rest are ink, and the label
+            underneath does the wayfinding the colour was pretending to do. */}
         <div className={`grid gap-3 ${isPreRetirement && dashSavingsRate !== null ? 'grid-cols-2 lg:grid-cols-6' : 'grid-cols-2 lg:grid-cols-5'}`}>
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           <div className="text-slate-500 text-xs mb-0.5">Total Net Worth</div>
-          <div className="text-xl font-bold text-emerald-400">{formatCurrency(current?.totalNetWorth)}</div>
+          <div className="text-xl font-bold text-slate-100">{formatCurrency(current?.totalNetWorth)}</div>
           <div className="text-xs text-slate-500">Portfolio + Assets</div>
         </div>
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           <div className="text-slate-500 text-xs mb-0.5">Liquid Portfolio</div>
-          <div className="text-xl font-bold text-sky-400">{formatCurrency(current?.totalPortfolio)}</div>
+          <div className="text-xl font-bold text-slate-100">{formatCurrency(current?.totalPortfolio)}</div>
           <div className="text-xs text-slate-500">Retirement funds</div>
         </div>
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           <div className="text-slate-500 text-xs mb-0.5">At Retirement (Age {retirementAge})</div>
-          <div className="text-xl font-bold text-amber-400">{formatCurrency(retirementProjection?.totalNetWorth)}</div>
+          <div className="text-xl font-bold text-slate-100">{formatCurrency(retirementProjection?.totalNetWorth)}</div>
           <div className="text-xs text-slate-500">Portfolio: {formatCurrency(retirementProjection?.totalPortfolio)}</div>
         </div>
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           <div className="text-slate-500 text-xs mb-0.5">Retirement Income</div>
-          <div className="text-xl font-bold text-purple-400">{formatCurrency(retirementProjection?.totalGuaranteedIncome)}</div>
+          <div className="text-xl font-bold text-slate-100">{formatCurrency(retirementProjection?.totalGuaranteedIncome)}</div>
           <div className="text-xs text-slate-500">SS + Pension + Other</div>
         </div>
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           <div className="text-slate-500 text-xs mb-0.5">Legacy at {personalInfo.legacyAge || 95}</div>
-          <div className="text-xl font-bold text-pink-400">{formatCurrency(projections.find(p => p.myAge === (personalInfo.legacyAge || 95))?.totalNetWorth)}</div>
+          <div className="text-xl font-bold text-slate-100">{formatCurrency(projections.find(p => p.myAge === (personalInfo.legacyAge || 95))?.totalNetWorth)}</div>
           <div className="text-xs text-slate-500">Total estate value</div>
         </div>
         {isPreRetirement && dashSavingsRate !== null && (
@@ -13627,12 +13643,12 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
             <div className="text-slate-500 text-xs mb-0.5">Savings Rate</div>
             <div className="flex items-center gap-3">
               <div>
-                <span className="text-xl font-bold text-amber-400">{dashSavingsRate.toFixed(1)}%</span>
+                <span className="text-xl font-bold" style={{ color: THEME.status[savingsRateStatus(dashSavingsRate)] }}>{dashSavingsRate.toFixed(1)}%</span>
                 <span className="text-xs text-slate-500 ml-1">gross</span>
               </div>
               {dashAfterTaxSavingsRate !== null && (
                 <div>
-                  <span className="text-xl font-bold text-emerald-400">{dashAfterTaxSavingsRate.toFixed(1)}%</span>
+                  <span className="text-xl font-bold" style={{ color: THEME.status[savingsRateStatus(dashAfterTaxSavingsRate)] }}>{dashAfterTaxSavingsRate.toFixed(1)}%</span>
                   <span className="text-xs text-slate-500 ml-1">net</span>
                 </div>
               )}
@@ -13737,10 +13753,10 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
         <div className="h-72">
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={netWorthData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="myAge" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
-              <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8' }} tickFormatter={v => `$${(v/1e6).toFixed(1)}M`} />
-              <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }} formatter={v => formatCurrency(v)} labelFormatter={l => `Age ${l}`} />
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="myAge" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
+              <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1e6).toFixed(1)}M`} />
+              <Tooltip contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} formatter={v => formatCurrency(v)} labelFormatter={l => `Age ${l}`} />
               <Legend formatter={legendInk} />
               {/* A 1px surface-coloured stroke between stacked bands: the gap is
                   what lets a reader see the boundary without relying on the two
@@ -13750,7 +13766,7 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
               <Area type="monotone" dataKey="brokerageBalance" stackId="1" fill={SERIES.brokerage} stroke={SERIES.brokerage} strokeWidth={1.5} fillOpacity={0.72} name="Brokerage" />
               <Area type="monotone" dataKey="netAssetValue" stackId="1" fill={SERIES.nonLiquid} stroke={SERIES.nonLiquid} strokeWidth={1.5} fillOpacity={0.72} name="Non-Liquid Assets" />
               <Line type="monotone" dataKey="totalNetWorth" stroke={THEME.inkPrimary} strokeWidth={2} dot={false} name="Total Net Worth" />
-              <ReferenceLine x={retirementAge} stroke="#ef4444" strokeDasharray="5 5" />
+              <ReferenceLine x={retirementAge} stroke={THEME.reference} strokeDasharray="5 5" />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -13787,9 +13803,9 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
                 {
                   heading: 'The Lines',
                   items: [
-                    { color: '#ef4444', label: 'Red Solid — Desired Spending', desc: 'The annual income you said you need in retirement (from Personal Info), adjusted upward each year for inflation. If Spending Phases are enabled, this line also steps down at your go-go and slow-go boundary ages. This is your spending target.' },
-                    { color: '#10b981', label: 'Green Dashed — Net Income After Tax', desc: 'What you actually take home after federal and state taxes. This is the number that matters — it needs to meet or exceed the red line for your plan to work.' },
-                    { color: '#dc2626', label: 'Dark Red Dotted — Total Tax', desc: 'Your combined federal + state + FICA payroll tax burden. The gap between the top of the bars and the green dashed line.' }
+                    { color: THEME.lines.target, label: 'Bright Solid — Desired Spending', desc: 'The annual income you said you need in retirement (from Personal Info), adjusted upward each year for inflation. If Spending Phases are enabled, this line also steps down at your go-go and slow-go boundary ages. This is your spending target.' },
+                    { color: THEME.lines.netAfterTax, label: 'Green Dashed — Net Income After Tax', desc: 'What you actually take home after federal and state taxes. This is the number that matters — it needs to meet or exceed the red line for your plan to work.' },
+                    { color: THEME.lines.taxBurden, label: 'Amber Dotted — Total Tax', desc: 'Your combined federal + state + FICA payroll tax burden. The gap between the top of the bars and the green dashed line.' }
                   ]
                 },
                 {
@@ -13867,41 +13883,41 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
         <div className="h-72">
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={incomeData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="myAge" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
-              <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8' }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
-              <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }} formatter={v => formatCurrency(v)} labelFormatter={l => `Age ${l}`} />
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="myAge" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
+              <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
+              <Tooltip contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} formatter={v => formatCurrency(v)} labelFormatter={l => `Age ${l}`} />
               <Legend formatter={legendInk} />
-              <Bar dataKey="earnedIncome" stackId="income" fill="#22c55e" name="Earned Income" />
-              <Bar dataKey="socialSecurity" stackId="income" fill="#3b82f6" name="Social Security" />
-              <Bar dataKey="pension" stackId="income" fill="#8b5cf6" name="Pension" />
-              <Bar dataKey="otherIncome" stackId="income" fill="#06b6d4" name="Other Income" />
-              <Bar dataKey="portfolioWithdrawal" stackId="income" fill="#f59e0b" name="Portfolio Withdrawal" />
+              <Bar dataKey="earnedIncome" stackId="income" fill={SERIES.earnedIncome} name="Earned Income" />
+              <Bar dataKey="socialSecurity" stackId="income" fill={SERIES.socialSecurity} name="Social Security" />
+              <Bar dataKey="pension" stackId="income" fill={SERIES.pension} name="Pension" />
+              <Bar dataKey="otherIncome" stackId="income" fill={SERIES.otherIncome} name="Other Income" />
+              <Bar dataKey="portfolioWithdrawal" stackId="income" fill={SERIES.withdrawalVoluntary} name="Portfolio Withdrawal" />
               {/* The conversion-tax draw is a REAL withdrawal (it pays the conversion's
                   tax bill), so it stacks as solid income; it flows straight out again
                   via the tax line. */}
-              <Bar dataKey="conversionTaxWithdrawal" stackId="income" fill="#d97706" name="Conversion Tax Draw" />
+              <Bar dataKey="conversionTaxWithdrawal" stackId="income" fill={SERIES.conversionTaxDraw} name="Conversion Tax Draw" />
               {/* Roth conversions ride on top of the stack but are styled translucent
                   with a dashed outline: they are account TRANSFERS (pre-tax → Roth),
                   not spendable income, so they must read as "different in kind" from
                   the solid income segments. Their presence explains why the tax line
                   spikes in conversion years. */}
               {planHasConversions && showConversionsOnIncomeChart && (
-                <Bar dataKey="rothConversion" stackId="income" fill="#ec4899" fillOpacity={0.3} stroke="#ec4899" strokeDasharray="4 2" name="Roth Conversion (transfer)" />
+                <Bar dataKey="rothConversion" stackId="income" fill={SERIES.rothConversion} fillOpacity={0.3} stroke={SERIES.rothConversion} strokeDasharray="4 2" name="Roth Conversion (transfer)" />
               )}
-              <Line type="monotone" dataKey="desiredIncome" stroke="#ef4444" strokeWidth={3} dot={false} name="Desired Spending" />
-              <Line type="monotone" dataKey="netIncome" stroke="#10b981" strokeWidth={2} dot={false} name="Net Income (after tax)" strokeDasharray="5 5" />
-              <Line type="monotone" dataKey="totalTax" stroke="#dc2626" strokeWidth={1} dot={false} name="Total Tax" strokeDasharray="3 3" />
-              <ReferenceLine x={retirementAge} stroke="#ef4444" strokeDasharray="5 5" />
+              <Line type="monotone" dataKey="desiredIncome" stroke={THEME.lines.target} strokeWidth={3} dot={false} name="Desired Spending" />
+              <Line type="monotone" dataKey="netIncome" stroke={THEME.lines.netAfterTax} strokeWidth={2} dot={false} name="Net Income (after tax)" strokeDasharray="5 5" />
+              <Line type="monotone" dataKey="totalTax" stroke={THEME.lines.taxBurden} strokeWidth={2} dot={false} name="Total Tax" strokeDasharray="2 3" />
+              <ReferenceLine x={retirementAge} stroke={THEME.reference} strokeDasharray="5 5" />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
         <p className="text-xs text-slate-500 mt-2">
-          Bars show gross income sources. <span className="text-red-400">Red solid line</span> = desired spending.
-          <span className="text-emerald-400 ml-1">Green dashed line</span> = net income after taxes (affected by QCD savings).
-          <span className="text-red-600 ml-1">Dark red dotted line</span> = total tax burden.
+          Bars show gross income sources. <span style={{ color: THEME.lines.target }}>Bright solid line</span> = desired spending.
+          <span style={{ color: THEME.lines.netAfterTax }} className="ml-1">Green dashed line</span> = net income after taxes (affected by QCD savings).
+          <span style={{ color: THEME.lines.taxBurden }} className="ml-1">Amber dotted line</span> = total tax burden.
           {planHasConversions && showConversionsOnIncomeChart && (
-            <span className="text-pink-400 ml-1">Pink translucent segment</span>
+            <span style={{ color: SERIES.rothConversion }} className="ml-1">Translucent outlined segment</span>
           )}
           {planHasConversions && showConversionsOnIncomeChart && (
             <span> = Roth conversion — an account transfer, not spendable income. Its tax is prepaid in that year, which is why the green line dips during the conversion window.</span>
@@ -14102,16 +14118,16 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={withdrawalRateData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                    <XAxis dataKey="myAge" stroke="#94a3b8" tick={{ fill: '#94a3b8' }} />
+                    <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+                    <XAxis dataKey="myAge" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
                     <YAxis 
-                      stroke="#94a3b8" 
-                      tick={{ fill: '#94a3b8' }} 
+                      stroke={THEME.axis} 
+                      tick={{ fill: THEME.axis }} 
                       tickFormatter={v => `${v.toFixed(0)}%`}
                       domain={[0, Math.max(8, Math.ceil((peakData?.withdrawalRate || 4) + 1))]}
                     />
                     <Tooltip 
-                      contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }} 
+                      contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} 
                       formatter={(v, name) => {
                         const labels = {
                           neededRate: 'Needed for Spending',
@@ -14123,14 +14139,16 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
                       }}
                       labelFormatter={l => `Age ${l}`} 
                     />
-                    <ReferenceLine y={4} stroke="#22c55e" strokeDasharray="5 5" />
-                    <ReferenceLine y={6} stroke="#ef4444" strokeDasharray="5 5" />
+                    {/* 4% and 6% genuinely ARE a safe/unsafe threshold pair, so these are the one
+                        place on this chart where a status colour carries meaning. */}
+                    <ReferenceLine y={4} stroke={THEME.status.good} strokeDasharray="5 5" />
+                    <ReferenceLine y={6} stroke={THEME.status.critical} strokeDasharray="5 5" />
                     <Area 
                       type="monotone" 
                       dataKey="neededRate" 
                       stackId="1"
-                      stroke="#f59e0b" 
-                      fill="#f59e0b"
+                      stroke={SERIES.withdrawalVoluntary} 
+                      fill={SERIES.withdrawalVoluntary}
                       fillOpacity={0.6}
                       name="neededRate"
                     />
@@ -14138,15 +14156,15 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
                       type="monotone" 
                       dataKey="excessRate" 
                       stackId="1"
-                      stroke="#06b6d4" 
-                      fill="#06b6d4"
+                      stroke={SERIES.rmd} 
+                      fill={SERIES.rmd}
                       fillOpacity={0.6}
                       name="excessRate"
                     />
                     <Line 
                       type="monotone" 
                       dataKey="withdrawalRate" 
-                      stroke="#ffffff" 
+                      stroke={THEME.inkPrimary} 
                       strokeWidth={2}
                       dot={false}
                       name="withdrawalRate"

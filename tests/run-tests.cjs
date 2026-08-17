@@ -9154,6 +9154,45 @@ section('P74 — the palette: colour-vision separation, re-derived rather than t
     ok(mode === 'dark' ? dL[2] > dL[1] && dL[1] > dL[0] : dL[2] < dL[1] && dL[1] < dL[0],
       `${mode}: the median is the most prominent step and the tails recede`);
 
+    // Lines drawn over a stacked bar chart are the case the stack validation
+    // above does NOT cover: a line crosses bars for its whole length, so the
+    // pair that has to separate is line-vs-bar, not line-vs-line. Measured on
+    // the palette shipped through v1.78.0, the income-vs-spending overlay lines
+    // were ΔE 2.4 (desired spending vs the pension bar), 4.0 (net income vs the
+    // conversion-tax-draw bar) and 4.2 (total tax vs pension) — three lines that
+    // vanished into the bars they were drawn on top of. And the spending line
+    // and the tax line were ΔE 6.1 from EACH OTHER: two reds, one chart.
+    //
+    // The bars own the hue channel, so the lines separate on LIGHTNESS instead,
+    // living as a tier above the whole bar band in dark mode and below it in
+    // light mode.
+    const barBand = theme.STACKS.incomeFlows.map(e => oklab(lin(t.series[e]))[0]);
+    const barLo = Math.min(...barBand), barHi = Math.max(...barBand);
+    Object.entries(t.lines).forEach(([name, hex]) => {
+      theme.STACKS.incomeFlows.forEach(e => {
+        const bar = t.series[e];
+        gt(Math.min(dE(hex, bar, 'protan'), dE(hex, bar, 'deutan'), dE(hex, bar)), CVD_FLOOR - 0.001,
+          `${mode}: the '${name}' line separates from the '${e}' bar it is drawn across`);
+      });
+      const L = oklab(lin(hex))[0];
+      ok(mode === 'dark' ? L > barHi : L < barLo,
+        `${mode}: the '${name}' line sits outside the bar band on lightness, which is the channel the bars leave free`);
+      gt(contrast(hex, t.surface), 4.5, `${mode}: the '${name}' line is legible against the chart surface`);
+    });
+    // Line-to-line separation is the weaker constraint — they cross each other
+    // at a handful of points, not everywhere — and each line additionally ships
+    // its own dash pattern. Full colour vision still has to tell them apart.
+    {
+      const names = Object.keys(t.lines);
+      for (let i2 = 0; i2 < names.length; i2++) {
+        for (let j2 = i2 + 1; j2 < names.length; j2++) {
+          const a = t.lines[names[i2]], b = t.lines[names[j2]];
+          gt(dE(a, b), NORMAL_FLOOR - 0.001,
+            `${mode}: the '${names[i2]}' and '${names[j2]}' lines separate in full colour vision`);
+        }
+      }
+    }
+
     // Every series colour has to differ from the surface, or a legend swatch
     // painted with it is an invisible legend. This is exactly how the net-worth
     // chart lost its swatches: the Area stroke was set to the surface colour to
