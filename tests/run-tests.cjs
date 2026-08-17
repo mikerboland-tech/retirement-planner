@@ -9786,6 +9786,90 @@ section('P82 — one cap, two accounts: the fill has to remember what it already
   }
 }
 
+section('P83 — an account with no contribution window funds nothing, silently');
+{
+  // Found by walking the AI patch layer rather than the UI. The projection gates
+  // contributions on `ownerAge >= account.startAge && ownerAge < account.stopAge`.
+  // Both comparisons against undefined are false, so an account that never had
+  // the two fields set contributes $0 for the life of the plan — with the
+  // contribution amount sitting right there in the row, and no total anywhere
+  // that would show it missing.
+  //
+  // The account form always defaulted both, so no hand-entered account was ever
+  // in this state. But startAge/stopAge are not in the patch schema's `required`
+  // list, so a model asked to "add a 401(k) I put $20,000 a year into" emitted a
+  // patch that validated clean, described itself correctly in the review panel,
+  // was approved by the reader — and produced an account that stayed at zero
+  // forever.
+  const pi = { myAge: 40, spouseAge: 38, filingStatus: 'married_joint',
+               myRetirementAge: 65, spouseRetirementAge: 62, legacyAge: 90,
+               myLifeExpectancy: 90, spouseLifeExpectancy: 90,
+               inflationRate: 0.03, state: 'CA', desiredRetirementIncome: 100000 };
+  const streams = [{ id: 1, name: 'My Salary', type: 'earned_income', amount: 150000,
+                     startAge: 40, endAge: 64, cola: 0.03, owner: 'me' }];
+  const state = { personalInfo: pi, accounts: [], incomeStreams: streams,
+                  assets: [], events: [], recurring: [] };
+
+  // The patch a model emits for the request above, verbatim — no window fields.
+  const patch = { ops: [
+    { op: 'add', target: 'accounts', values: { name: 'New 401(k)', type: '401k', balance: 0,
+        contribution: 20000, contributionMode: 'fixed', cagr: 0.07, owner: 'me', contributor: 'me' } },
+    { op: 'add', target: 'accounts', values: { name: 'Spouse IRA', type: 'roth_ira', balance: 0,
+        contribution: 7000, cagr: 0.07, owner: 'spouse', contributor: 'me' } },
+  ] };
+
+  const verdict = engine.validatePlanPatch(state, patch);
+  ok(verdict.ok, 'the patch validates — the schema does not require a contribution window');
+
+  const next = engine.applyPlanPatch(state, patch).state;
+  const mine = next.accounts.find(a => a.name === 'New 401(k)');
+  const theirs = next.accounts.find(a => a.name === 'Spouse IRA');
+  eq(mine.startAge, 40, 'an added account starts contributing at its owner\'s current age');
+  eq(mine.stopAge, 65, 'and stops at its owner\'s retirement age');
+  // Per owner, which is better than the account form manages — it defaults both
+  // ages from the primary regardless of who owns the row.
+  eq(theirs.startAge, 38, "a spouse-owned row uses the SPOUSE's age, not the primary's");
+  eq(theirs.stopAge, 62, "and the spouse's retirement age");
+
+  const proj = engine.computeProjections(next.personalInfo, next.accounts, next.incomeStreams, [], [], []);
+  const yr0 = proj[0].perAccountContributions || {};
+  approx(yr0[mine.id], 20000, 'the account the reader approved actually receives its $20,000');
+  approx(yr0[theirs.id], 7000, 'and the spouse IRA receives its $7,000');
+  gt(proj[10].totalPortfolio, 0, 'ten years in, the money exists');
+
+  // The engine defends itself too, for any row that reaches it without a window
+  // — an imported plan, a hand-edited file, an older saved scenario.
+  {
+    const raw = [{ id: 1, name: 'Orphan 401(k)', type: '401k', balance: 0,
+                   contribution: 12000, cagr: 0.07, owner: 'me', contributor: 'me' }];
+    const p2 = engine.computeProjections(pi, raw, streams, [], [], []);
+    approx((p2[0].perAccountContributions || {})[1], 12000,
+      'an account with no window at all still funds, rather than silently doing nothing');
+  }
+
+  // And the explicit "this account never receives money" idiom — startAge equal
+  // to stopAge, which the fixtures in this file have always used — must survive
+  // untouched. Defaulting a MISSING window must not override a stated one.
+  {
+    const closed = [{ id: 1, name: 'Inherited IRA', type: 'traditional_ira', balance: 500000,
+                      contribution: 9999, cagr: 0.06, startAge: 40, stopAge: 40,
+                      owner: 'me', contributor: 'me' }];
+    const p3 = engine.computeProjections(pi, closed, streams, [], [], []);
+    eq((p3[0].perAccountContributions || {})[1], 0,
+      'startAge === stopAge still means no contributions, deliberately');
+    eq((p3[5].perAccountContributions || {})[1], 0, 'and it stays that way in later years');
+  }
+
+  // A partial window is filled in on the missing side only.
+  {
+    const half = [{ id: 1, name: 'Half-specified', type: '401k', balance: 0, contribution: 5000,
+                    cagr: 0.07, stopAge: 50, owner: 'me', contributor: 'me' }];
+    const p4 = engine.computeProjections(pi, half, streams, [], [], []);
+    approx((p4[0].perAccountContributions || {})[1], 5000, 'a stated stopAge is honoured');
+    eq((p4[12].perAccountContributions || {})[1], 0, 'and it still stops where it was told to');
+  }
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of

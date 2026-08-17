@@ -7273,6 +7273,41 @@ const breakingPoint = (ctx, dimension, { steps = 16 } = {}) => {
   return { dimension, value: a, breaksAt: b, alreadyFails: false, survivesRange: false };
 };
 
+// A contribution window with no bounds funds NOTHING. The projection gates
+// contributions on `ownerAge >= account.startAge && ownerAge < account.stopAge`,
+// and both comparisons against `undefined` are false — so an account that never
+// had the two fields set contributes $0 for the life of the plan, silently,
+// with the contribution amount sitting right there in the row.
+//
+// The manual account form has always defaulted both from the plan, so a
+// hand-entered account is never in this state. The AI patch layer does not
+// require them, which meant a model asked to "add a 401(k) I put $20,000 a year
+// into" produced a validated, approved account that stayed at zero forever and
+// never appeared in a single total.
+//
+// Missing bounds now mean "the whole working life": start now, stop at the
+// owner's retirement age. An account genuinely meant never to receive money
+// says so the explicit way — startAge === stopAge, the idiom the test fixtures
+// already use — and that is left exactly as it is.
+const normalizeContributionWindow = (accts, pi = {}) => {
+  if (!Array.isArray(accts)) return [];
+  return accts.map(a => {
+    if (!a) return a;
+    const hasStart = Number.isFinite(a.startAge);
+    const hasStop = Number.isFinite(a.stopAge);
+    if (hasStart && hasStop) return a;
+    // 'joint' follows the primary, which is what the account form does.
+    const spouse = a.owner === 'spouse';
+    const age = spouse ? pi.spouseAge : pi.myAge;
+    const ret = spouse ? pi.spouseRetirementAge : pi.myRetirementAge;
+    return {
+      ...a,
+      startAge: hasStart ? a.startAge : (Number.isFinite(age) ? age : 0),
+      stopAge: hasStop ? a.stopAge : (Number.isFinite(ret) ? ret : Infinity),
+    };
+  });
+};
+
 function computeProjections(pi, accts, streams, assetList, events = [], recurringExpensesList = [], currentYearArg, opts = {}) {
   // currentYear used to be captured from RetirementPlanner's closure. It's now an
   // explicit parameter (with a fallback) so this function can be moved to module
@@ -7311,6 +7346,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     ? spendingRule.initialWithdrawalRate : null;
   let guardrailPrevYear = null; // last pushed year row (for prior-year rate)
   let prevYearRow = null;       // last pushed row, tracked unconditionally
+  // Before anything reads them: an account with no contribution window funds
+  // nothing at all, which is never what the row means. See the helper above.
+  accts = normalizeContributionWindow(accts, pi);
   const years = [];
   let accountBalances = accts.reduce((acc, account) => ({ ...acc, [account.id]: account.balance }), {});
   
@@ -9953,6 +9991,26 @@ const validatePlanPatch = (state, patch) => {
   };
 };
 
+// A row the model adds has to be as complete as one the account form would
+// build, or it is inert the moment it is approved. The form defaults the
+// contribution window from the plan; the patch layer never did, and startAge /
+// stopAge are not in `required` — so an approved "add a 401(k) I put $20,000 a
+// year into" landed as an account that funded nothing, forever.
+//
+// Requiring the fields instead would push the guess onto the model. Defaulting
+// them here puts the same values a person would have got, per owner, and leaves
+// them visible and editable in the Accounts tab afterwards.
+const patchRowDefaults = (target, values, pi = {}) => {
+  if (target !== 'accounts' || !isPlainObject(values)) return values;
+  const spouse = values.owner === 'spouse';
+  const age = spouse ? pi.spouseAge : pi.myAge;
+  const ret = spouse ? pi.spouseRetirementAge : pi.myRetirementAge;
+  const out = { ...values };
+  if (!Number.isFinite(out.startAge) && Number.isFinite(age)) out.startAge = age;
+  if (!Number.isFinite(out.stopAge) && Number.isFinite(ret)) out.stopAge = ret;
+  return out;
+};
+
 // Apply the VALID operations of a patch to a plan state, returning a new state.
 // Invalid ones are skipped rather than throwing: the caller has already shown
 // the reader which ones failed and why, and half a reviewed change is better
@@ -9979,7 +10037,7 @@ const applyPlanPatch = (state, patch, { nextId } = {}) => {
     if (o.op === 'set') {
       next.personalInfo[o.field] = o.after;
     } else if (o.op === 'add') {
-      next[o.target] = next[o.target].concat([{ id: mintId(), ...o.values }]);
+      next[o.target] = next[o.target].concat([{ id: mintId(), ...patchRowDefaults(o.target, o.values, next.personalInfo) }]);
     } else if (o.op === 'update') {
       next[o.target] = next[o.target].map(r => (r && r.id === o.raw.id) ? { ...r, ...o.values } : r);
     } else if (o.op === 'remove') {
