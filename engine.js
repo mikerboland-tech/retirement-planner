@@ -2574,6 +2574,42 @@ const getDefaultRothConversionWindow = (personalInfo) => {
   };
 };
 
+// ── WHOSE SALARY IS IT ───────────────────────────────────────────────────────
+// A percent-of-salary contribution needs to know the owner's pay, and a stream
+// owned 'joint' belongs to the household rather than to either person. The
+// projection loop already has a rule for that — split it evenly while both are
+// living, and give it entirely to the survivor afterwards — but the UI had its
+// own filter that simply tested `stream.owner === owner` and dropped joint
+// earned income on the floor. So the engine sized an 8%-of-pay deferral off a
+// salary the Accounts tab said was zero, and the two disagreed with nothing on
+// screen to say which was right.
+//
+// This is the rule, exported, so there is one of it. Survivor state is a
+// parameter because the caller in the UI is always asking about today, when
+// both are alive, while the loop asks about a particular projected year.
+const earnedIncomeByOwner = (streams, { primaryAlive = true, spouseAlive = true } = {}) => {
+  const out = { me: 0, spouse: 0 };
+  (streams || []).forEach(s => {
+    if (!s || s.type !== 'earned_income') return;
+    const amount = s.amount || 0;
+    // An individually-owned salary stops when its owner does. Handling only the
+    // joint split and leaving this out would have made the helper right for the
+    // UI (where both are always alive) and quietly wrong for any caller asking
+    // about a projected year — a third version of the same rule, which is the
+    // thing this function exists to prevent.
+    if (s.owner === 'me' && !primaryAlive) return;
+    if (s.owner === 'spouse' && !spouseAlive) return;
+    if (s.owner === 'joint') {
+      const living = (primaryAlive ? 1 : 0) + (spouseAlive ? 1 : 0);
+      if (living === 2) { out.me += amount / 2; out.spouse += amount / 2; }
+      else if (primaryAlive) out.me += amount;
+      else out.spouse += amount;
+    } else if (s.owner === 'spouse') out.spouse += amount;
+    else out.me += amount;
+  });
+  return out;
+};
+
 // ── END-OF-PLAN ROW LOOKUP ───────────────────────────────────────────────────
 // The row to measure terminal wealth on. A plain `find(p => p.myAge === age)`
 // is not safe: with survivor modeling on, the projection STOPS the year both
@@ -9731,7 +9767,7 @@ const describePlanPatch = (state, patch) => {
     PAY_PERIODS_PER_YEAR, payPeriodsElapsed, projectPayrollYearEnd,
     buildTaxSituation, compareTraditionalVsRoth, projectedWithdrawalRate,
     projectedWithdrawalCost,
-    detailedCurrentYearDecision, taxFieldsFromReturn,
+    detailedCurrentYearDecision, taxFieldsFromReturn, earnedIncomeByOwner,
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
     SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,
     marginalCostOfNextDollar, survivorTaxComparison, survivorSSLoss,

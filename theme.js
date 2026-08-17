@@ -98,6 +98,20 @@
     light: ['#a9b4c2', '#7c8ba1', '#4f5f78', '#22304a'],
   };
 
+  // A distribution is a magnitude, not a set of categories. The percentile bands
+  // used five saturated hues running green→red, which said two wrong things at
+  // once: that the five bands are unrelated things, and that the 10th percentile
+  // is a failure rather than simply the low end of a range. One hue, stepped by
+  // distance from the median, says the true thing — these are the same quantity
+  // seen at different confidence.
+  //
+  // Ordered p10, p25, p50, p75, p90, so the median is the most prominent step
+  // and the tails recede symmetrically on both sides.
+  const DISTRIBUTION_RAMP = {
+    dark:  ['#2b4a68', '#356e9e', '#4a90d9', '#356e9e', '#2b4a68'],
+    light: ['#c3d7ec', '#7ba7d4', '#2a78d6', '#7ba7d4', '#c3d7ec'],
+  };
+
   // Reserved. Never used for "series 5", and never carrying meaning alone — a
   // status colour always ships next to a word or an icon.
   const STATUS = {
@@ -125,7 +139,7 @@
   // JS, where a var() reference is an opaque string.
   const resolve = (mode = 'dark') => {
     const pick = (o) => o[mode] !== undefined ? o[mode] : o.dark;
-    const out = { mode, series: {}, status: {}, bracket: pick(BRACKET_RAMP) };
+    const out = { mode, series: {}, status: {}, bracket: pick(BRACKET_RAMP), distribution: pick(DISTRIBUTION_RAMP) };
     Object.entries(SERIES).forEach(([k, v]) => { out.series[k] = pick(v); });
     Object.entries(STATUS).forEach(([k, v]) => { out.status[k] = pick(v); });
     Object.entries(CHROME).forEach(([k, v]) => { out[k] = pick(v); });
@@ -140,5 +154,5 @@
                   'withdrawalVoluntary', 'rmd', 'rothConversion', 'conversionTaxDraw'],
   };
 
-  return { SLOTS, SERIES, BRACKET_RAMP, STATUS, CHROME, STACKS, resolve, MODES: ['dark', 'light'] };
+  return { SLOTS, SERIES, BRACKET_RAMP, DISTRIBUTION_RAMP, STATUS, CHROME, STACKS, resolve, MODES: ['dark', 'light'] };
 });

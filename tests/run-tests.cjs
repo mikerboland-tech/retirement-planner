@@ -9142,6 +9142,18 @@ section('P74 — the palette: colour-vision separation, re-derived rather than t
     gt(Math.abs(L[L.length - 1] - L[0]), 0.3,
       `${mode}: the bracket ramp spans enough range end to end`);
 
+    // A distribution is one quantity seen at five confidences, not five
+    // categories. The ramp has to be symmetric about the median and step
+    // outward, or it is saying the tails are different KINDS of thing — and a
+    // green→red version additionally says the low tail is a failure.
+    const D = t.distribution;
+    eq(D.length, 5, `${mode}: the distribution ramp has a step per percentile band`);
+    eq(D[0], D[4], `${mode}: the 10th and 90th are the same distance from the median, so the same step`);
+    eq(D[1], D[3], `${mode}: as are the 25th and 75th`);
+    const dL = D.map(h => oklab(lin(h))[0]);
+    ok(mode === 'dark' ? dL[2] > dL[1] && dL[1] > dL[0] : dL[2] < dL[1] && dL[1] < dL[0],
+      `${mode}: the median is the most prominent step and the tails recede`);
+
     // Every series colour has to differ from the surface, or a legend swatch
     // painted with it is an invisible legend. This is exactly how the net-worth
     // chart lost its swatches: the Area stroke was set to the surface colour to
@@ -9173,6 +9185,58 @@ section('P74 — the palette: colour-vision separation, re-derived rather than t
         ok(sv !== ev, `status '${sk}' is not reused as the '${ek}' series colour`);
       });
     });
+  }
+}
+
+section('P75 — one rule for whose salary it is');
+{
+  // The projection splits a jointly-owned salary evenly while both are living
+  // and gives it entirely to the survivor afterwards. The Accounts tab had its
+  // own filter — `stream.owner === owner` — which dropped joint earned income
+  // on the floor, so a percent-of-salary account showed $0 of contribution
+  // while the engine funded it perfectly well off the same streams.
+  const { earnedIncomeByOwner } = engine;
+  const streams = [
+    { type: 'earned_income', amount: 100000, owner: 'me' },
+    { type: 'earned_income', amount: 60000, owner: 'joint' },
+    { type: 'earned_income', amount: 40000, owner: 'spouse' },
+    { type: 'pension', amount: 30000, owner: 'joint' },   // not earned income
+  ];
+
+  {
+    const r = earnedIncomeByOwner(streams);
+    eq(r.me, 130000, 'a joint salary splits evenly while both are living');
+    eq(r.spouse, 70000, 'on both sides');
+    eq(r.me + r.spouse, 200000, 'and nothing is created or lost in the split');
+  }
+  {
+    const r = earnedIncomeByOwner(streams, { primaryAlive: false });
+    eq(r.me, 0, "a deceased owner's own salary stops");
+    eq(r.spouse, 100000, 'and the survivor takes the whole joint stream on top of their own');
+  }
+  {
+    const r = earnedIncomeByOwner(streams, { spouseAlive: false });
+    eq(r.spouse, 0, 'symmetrically for the spouse');
+    eq(r.me, 160000, 'and the primary takes the joint stream');
+  }
+  eq(earnedIncomeByOwner([]).me, 0, 'no streams is no income, not a crash');
+  eq(earnedIncomeByOwner(null).spouse, 0, 'and neither is a missing list');
+
+  // The rule has to agree with what the projection actually does with the same
+  // streams, which is the only reason to have exported it.
+  {
+    const sc = baseScenario({ myAge: 50, spouseAge: 50, myRetirementAge: 60, spouseRetirementAge: 60 });
+    sc.streams = [{ id: 1, name: 'Household', type: 'earned_income', amount: 200000,
+                    startAge: 50, endAge: 59, cola: 0, owner: 'joint' }];
+    sc.accts = [{ id: 1, name: '401k', type: '401k', balance: 100000, contributionMode: 'percent',
+                  employeePercent: 0.10, employerMatchPercent: 0, cagr: 0, startAge: 50, stopAge: 60,
+                  owner: 'me', contributor: 'me' }];
+    const proj = computeProjections(sc.pi, sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+    const contributed = (proj[0].perAccountContributions || {})[1] || 0;
+    const share = earnedIncomeByOwner(sc.streams).me;
+    approx(contributed, share * 0.10,
+      'the projection funds a percent-of-salary account off the same joint share the helper reports', 0.01);
+    gt(contributed, 0, 'which is more than the zero the old filter would have produced');
   }
 }
 

@@ -46,6 +46,7 @@ const {
   computeTaxReturn, buildTaxSituation, compareTraditionalVsRoth,
   projectPayrollYearEnd, marginalRateOn, saltCapFor, projectedWithdrawalRate,
   detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling, IRMAA_TIER_LOOKBACK_YEARS,
+  earnedIncomeByOwner, projectedWithdrawalCost,
   rothConversionIsPlanned, withoutRothConversions, withRothConversionTarget,
   rothConversionModeLabel, rothConversionModeOf,
   taxBreakpoints, marginalCostOfNextDollar,
@@ -6934,11 +6935,15 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
                     labelFormatter={l => `Age ${l}`}
                   />
                   <Legend formatter={legendInk} />
-                  <Area type="monotone" dataKey="p90" stackId="1" fill="#10b981" stroke="#10b981" fillOpacity={0.2} name="90th Percentile" />
-                  <Area type="monotone" dataKey="p75" stackId="2" fill="#22c55e" stroke="#22c55e" fillOpacity={0.2} name="75th Percentile" />
-                  <Area type="monotone" dataKey="p50" stackId="3" fill="#eab308" stroke="#eab308" fillOpacity={0.3} name="Median (50th)" />
-                  <Area type="monotone" dataKey="p25" stackId="4" fill="#f97316" stroke="#f97316" fillOpacity={0.2} name="25th Percentile" />
-                  <Area type="monotone" dataKey="p10" stackId="5" fill="#ef4444" stroke="#ef4444" fillOpacity={0.2} name="10th Percentile" />
+                  {/* One hue, stepped by distance from the median. Five saturated
+                      hues running green→red said the bands were unrelated things
+                      AND that the 10th percentile is a failure — it is the low end
+                      of a range, which is what a percentile means. */}
+                  <Area type="monotone" dataKey="p90" stackId="1" fill={THEME.distribution[4]} stroke={THEME.distribution[4]} fillOpacity={0.2} name="90th Percentile" />
+                  <Area type="monotone" dataKey="p75" stackId="2" fill={THEME.distribution[3]} stroke={THEME.distribution[3]} fillOpacity={0.25} name="75th Percentile" />
+                  <Area type="monotone" dataKey="p50" stackId="3" fill={THEME.distribution[2]} stroke={THEME.distribution[2]} fillOpacity={0.45} name="Median (50th)" />
+                  <Area type="monotone" dataKey="p25" stackId="4" fill={THEME.distribution[1]} stroke={THEME.distribution[1]} fillOpacity={0.25} name="25th Percentile" />
+                  <Area type="monotone" dataKey="p10" stackId="5" fill={THEME.distribution[0]} stroke={THEME.distribution[0]} fillOpacity={0.2} name="10th Percentile" />
                   {simSettings.startAge > personalInfo.myAge && (
                     <ReferenceLine x={simSettings.startAge} stroke="#10b981" strokeDasharray="5 5" label={{ value: 'Sim Start', position: 'top', fill: '#10b981', fontSize: 12 }} />
                   )}
@@ -9465,9 +9470,12 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
   // mode stores rates, not dollars, so reading `contribution` alone reports $0 for
   // a percentage saver. Mirrors what computeProjections does with the same fields:
   // employee deferral plus employer match, off the owner's current salary.
-  const salaryOf = (owner) => incomeStreams
-    .filter(s => s.type === 'earned_income' && s.owner === owner)
-    .reduce((sum, s) => sum + (s.amount || 0), 0);
+  // Reads the engine's own rule rather than re-deriving it. The local version
+  // tested `s.owner === owner`, which silently dropped every joint earned-income
+  // stream — so a household whose salary is entered as joint saw $0 of
+  // contribution on a percent-of-salary account that the projection was funding
+  // perfectly well.
+  const salaryOf = (owner) => earnedIncomeByOwner(incomeStreams)[owner === 'spouse' ? 'spouse' : 'me'];
   const annualContributionOf = (a) => {
     if (a.contributionMode === 'percent') {
       const salary = a.owner === 'spouse' ? salaryOf('spouse') : salaryOf('me');
@@ -10154,7 +10162,10 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
     
     // Check if myAge > myRetirementAge (already retired)
     if (info.myAge >= info.myRetirementAge) {
-      const activeEarned = incomeStreams.filter(s => s.type === 'earned_income' && s.endAge > info.myAge && s.owner === 'me');
+      // 'joint' counts here too: a jointly-owned salary running past the
+      // primary's retirement age is exactly the situation this warns about.
+      const activeEarned = incomeStreams.filter(s => s.type === 'earned_income' && s.endAge > info.myAge
+        && (s.owner === 'me' || s.owner === 'joint'));
       if (activeEarned.length > 0) {
         warnings.push({
           type: 'already_retired_but_earning',
