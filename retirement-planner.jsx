@@ -979,7 +979,7 @@ const InfoCard = React.memo(({ title, sections, isOpen, onToggle }) => {
       <button
         tabIndex={-1}
         onClick={onToggle}
-        className="flex items-center gap-1.5 text-amber-400/70 hover:text-amber-400 transition-colors px-2.5 py-1 rounded-full border border-amber-500/30 hover:border-amber-500/50 hover:bg-amber-500/10 text-xs font-medium"
+        className="flex items-center gap-1.5 text-amber-400 hover:text-amber-300 transition-colors px-2.5 py-1 rounded-full border border-amber-500/30 hover:border-amber-500/50 hover:bg-amber-500/10 text-xs font-medium"
         title={`What is ${title}?`}
       >
         <svg width="14" height="14" viewBox="0 0 20 20" fill="none">
@@ -2903,7 +2903,7 @@ function TaxYearSnapshot({ projections, personalInfo, qcdSavings }) {
                       </span>
                     </>
                   )}
-                  {!b.filled && <span className="text-slate-600 italic">—</span>}
+                  {!b.filled && <span className="text-slate-500 italic">—</span>}
                 </div>
               </div>
               {b.filled && (
@@ -2920,7 +2920,7 @@ function TaxYearSnapshot({ projections, personalInfo, qcdSavings }) {
                     ></div>
                   </div>
                   {b.remaining !== null && b.remaining > 0 && (
-                    <div className="text-slate-600 text-xs mt-0.5">{formatCurrency(b.remaining)} room remaining in bracket</div>
+                    <div className="text-slate-500 text-xs mt-0.5">{formatCurrency(b.remaining)} room remaining in bracket</div>
                   )}
                 </div>
               )}
@@ -3056,7 +3056,7 @@ function TaxYearSnapshot({ projections, personalInfo, qcdSavings }) {
             <div key={label} className="flex justify-between items-start gap-3 py-0.5">
               <span className="text-slate-400">
                 {label}
-                {note && <span className="block text-[10px] text-slate-600">{note}</span>}
+                {note && <span className="block text-[10px] text-slate-500">{note}</span>}
               </span>
               <span className="text-slate-200 tabular-nums whitespace-nowrap">{formatCurrency(v)}</span>
             </div>
@@ -3128,7 +3128,7 @@ function TaxYearSnapshot({ projections, personalInfo, qcdSavings }) {
                 <div key={t.label} className="flex justify-between items-start gap-3 text-xs py-0.5">
                   <span className="text-slate-400">
                     {t.label}
-                    <span className="text-[10px] text-slate-600"> · on {t.basis}</span>
+                    <span className="text-[10px] text-slate-500"> · on {t.basis}</span>
                   </span>
                   <span className="whitespace-nowrap">
                     <span className={t.distance < 25000 ? 'text-amber-300' : 'text-emerald-400'}>
@@ -3145,7 +3145,7 @@ function TaxYearSnapshot({ projections, personalInfo, qcdSavings }) {
             </div>
           )}
           {Math.abs(marginal.reconstructionError || 0) > 25 && (
-            <p className="text-[10px] text-slate-600 mt-2">
+            <p className="text-[10px] text-slate-500 mt-2">
               Rebuilt tax for this year differs from the projection&rsquo;s own figure by
               {' '}{formatCurrency(Math.abs(marginal.reconstructionError))}; treat the split above as indicative.
             </p>
@@ -3859,7 +3859,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                   <ReferenceArea
                     x1={conversionSettings.startAge} x2={conversionSettings.endAge}
                     fill="#38bdf8" fillOpacity={0.07} stroke="#38bdf8" strokeOpacity={0.25}
-                    label={{ value: 'your conversion window', fill: '#7dd3fc', fontSize: 11, position: 'insideTop' }}
+                    label={{ value: 'your conversion window', fill: THEME.inkSecondary, fontSize: 11, position: 'insideTop' }}
                   />
                   {/* Fixed-order categorical slots, validated against this
                       surface. Dashed bracket line doubles as the secondary
@@ -3867,17 +3867,17 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                   <Line
                     type="monotone" dataKey="bracket" name="Tax bracket"
                     stroke={SERIES.otherIncome} strokeWidth={2} strokeDasharray="5 4" dot={false}
-                    label={lastPointLabel('bracket', '#199e70', iBracket)}
+                    label={lastPointLabel('bracket', THEME.ink.otherIncome, iBracket)}
                   />
                   <Line
                     type="monotone" dataKey="effectiveRate" name="Average rate you pay"
                     stroke={SERIES.socialSecurity} strokeWidth={2} dot={false}
-                    label={lastPointLabel('average', '#3987e5', iEff)}
+                    label={lastPointLabel('average', THEME.ink.socialSecurity, iEff)}
                   />
                   <Line
                     type="monotone" dataKey="marginalRatePlot" name={`Cost of converting $${(RATE_PROBE / 1000).toFixed(0)}k more`}
                     stroke={SERIES.pension} strokeWidth={2} dot={false} connectNulls={false}
-                    label={lastPointLabel('conversion', '#d95926', iMarg)}
+                    label={lastPointLabel('conversion', THEME.ink.pension, iMarg)}
                   />
                   {/* Capped years: mark them and print the true value, so a
                       clamped axis never silently understates a cliff. */}
@@ -3993,7 +3993,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
               <th className="text-right py-2 px-2 text-slate-400 font-medium">Tax (w/ conv)</th>
               <th className="text-right py-2 px-2 text-slate-400 font-medium">Total Cost</th>
               <th className="text-right py-2 px-2 text-slate-400 font-medium" title="What each converted dollar costs, all in: income tax plus the IRMAA it triggers two years later plus any ACA subsidy it burns. This is a marginal rate on the converted dollars — it is expected to sit ABOVE your tax bracket, and hovering a row shows why.">
-                Cost per $ Converted <span className="text-slate-600" title="All-in: income tax, the IRMAA it triggers two years later, and any ACA subsidy it burns. Hover a figure for the breakdown.">ⓘ</span>
+                Cost per $ Converted <span className="text-slate-500" title="All-in: income tax, the IRMAA it triggers two years later, and any ACA subsidy it burns. Hover a figure for the breakdown.">ⓘ</span>
               </th>
               <th className="text-right py-2 px-2 text-slate-400 font-medium">IRMAA Δ</th>
               <th className="text-right py-2 px-2 text-slate-400 font-medium">Cumulative</th>
@@ -4162,7 +4162,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                         <td className={`py-1 px-2 ${label.startsWith('  ') ? 'text-slate-500 pl-6' : 'text-slate-300'}`}>{label.trim()}</td>
                         <td className="py-1 px-2 text-right text-slate-400">{formatCurrency(o)}</td>
                         <td className="py-1 px-2 text-right text-slate-300">{formatCurrency(w)}</td>
-                        <td className={`py-1 px-2 text-right font-medium ${w - o > 0 ? 'text-amber-400' : w - o < 0 ? 'text-emerald-400' : 'text-slate-600'}`}>
+                        <td className={`py-1 px-2 text-right font-medium ${w - o > 0 ? 'text-amber-400' : w - o < 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
                           {w - o === 0 ? '—' : (w - o > 0 ? '+' : '−') + formatCurrency(Math.abs(w - o))}
                         </td>
                       </tr>
@@ -4202,7 +4202,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                         <div className={st.kind === 'total' ? 'text-amber-400 font-semibold' : st.kind === 'subtotal' ? 'text-slate-200 font-medium' : 'text-slate-300'}>{st.label}</div>
                         <div className="text-[11px] text-slate-500 leading-relaxed mt-0.5">{st.detail}</div>
                       </td>
-                      <td className={`py-1.5 px-2 text-right whitespace-nowrap ${st.kind === 'total' ? 'text-amber-400 font-bold' : st.amount === 0 ? 'text-slate-600' : 'text-slate-200'}`}>{formatCurrency(st.amount)}</td>
+                      <td className={`py-1.5 px-2 text-right whitespace-nowrap ${st.kind === 'total' ? 'text-amber-400 font-bold' : st.amount === 0 ? 'text-slate-500' : 'text-slate-200'}`}>{formatCurrency(st.amount)}</td>
                       <td className={`py-1.5 px-2 text-right whitespace-nowrap ${st.kind === 'total' ? 'text-amber-400 font-bold' : 'text-slate-500'}`}>{pct(st.amount)}</td>
                     </tr>
                   ))}
@@ -4377,7 +4377,7 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
               className="w-20 bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-100 text-center" />
           </div>
           <button onClick={isRunning ? undefined : runOptimizer} disabled={isRunning}
-            className={`px-4 py-1.5 rounded-lg text-sm font-medium ${isRunning ? 'bg-slate-700 text-slate-400' : 'bg-amber-600/20 text-amber-400 border border-amber-500/30 hover:bg-amber-600/30'}`}>
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium ${isRunning ? 'bg-slate-700 text-slate-300' : 'bg-amber-600/20 text-amber-400 border border-amber-500/30 hover:bg-amber-600/30'}`}>
             {isRunning ? `Optimizing… ${progress}%` : 'Run Optimizer'}
           </button>
         </div>
@@ -5216,7 +5216,7 @@ function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, pro
                         <td className={`py-1.5 pr-4 ${memo ? 'text-slate-500' : key ? 'text-slate-100 font-medium' : 'text-slate-300'}`}>
                           {line.label}
                           {line.which && <span className="ml-2 text-xs text-amber-400">({line.which})</span>}
-                          {memo && <span className="ml-2 text-[10px] text-slate-600">memo — already inside the line above</span>}
+                          {memo && <span className="ml-2 text-[10px] text-slate-500">memo — already inside the line above</span>}
                         </td>
                         <td className={`py-1.5 text-right tabular-nums whitespace-nowrap ${
                           memo ? 'text-slate-500' : key ? 'text-slate-100 font-semibold' : 'text-slate-300'}`}>
@@ -6202,7 +6202,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
                     key={b.key} type="monotone" dataKey={b.key}
                     stroke={THEME.bracket[b.slot]} strokeWidth={2} dot={false}
                     name={`Top of ${b.pct} Bracket`} strokeDasharray={b.dash}
-                    label={lastPointLabel(b.pct, THEME.bracket[b.slot], iLast)}
+                    label={lastPointLabel(b.pct, THEME.inkSecondary, iLast)}
                   />
                 ));
               })()}
@@ -7690,7 +7690,7 @@ function StressTestTab({ accounts, assets, currentYear, incomeStreams, oneTimeEv
                   <span className="text-sm font-medium text-slate-200">{s.name}</span>
                 </div>
                 <p className="text-xs text-slate-500 mt-0.5">{s.description}</p>
-                <p className="text-xs text-slate-600 mt-0.5 font-mono">
+                <p className="text-xs text-slate-500 mt-0.5 font-mono">
                   Returns: {s.returns.map(r => (r >= 0 ? '+' : '') + r.toFixed(1) + '%').join(', ')}
                 </p>
               </div>
@@ -9085,7 +9085,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, detailLevel, 
                 className={`text-xs px-3 py-1 rounded font-medium transition-all ${
                   useMcStressTest 
                     ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                    : 'bg-slate-700 text-slate-400 border border-slate-600 hover:bg-slate-600'
+                    : 'bg-slate-700 text-slate-300 border border-slate-600 hover:bg-slate-600'
                 }`}
               >
                 {useMcStressTest ? '✓ On' : '○ Off'}
@@ -9130,7 +9130,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, detailLevel, 
                       className={`w-full mt-1 text-xs px-2 py-1 rounded font-medium border transition-all ${
                         mcLongevity
                           ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                          : 'bg-slate-700 text-slate-400 border-slate-600 hover:bg-slate-600'
+                          : 'bg-slate-700 text-slate-300 border-slate-600 hover:bg-slate-600'
                       }`}
                     >
                       {mcLongevity ? '✓ Sampled' : '○ Fixed'}
@@ -9437,7 +9437,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, detailLevel, 
                       {formatCurrency(bestOverall.afterTaxAtLegacy)} after tax
                       {bestOverall.depletionAge
                         ? <span className="text-red-400"> · runs dry at {bestOverall.depletionAge}</span>
-                        : <span className="text-emerald-500/80"> · never runs dry</span>}
+                        : <span className="text-emerald-400"> · never runs dry</span>}
                     </p>
                   </div>
                 )}
@@ -9449,7 +9449,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, detailLevel, 
                       {formatCurrency(bestOverall.afterTaxAtLegacy)} after tax
                       {bestOverall.depletionAge
                         ? <span className="text-red-400"> · runs dry at {bestOverall.depletionAge}</span>
-                        : <span className="text-emerald-500/80"> · never runs dry</span>}
+                        : <span className="text-emerald-400"> · never runs dry</span>}
                     </p>
                   </div>
                 ) : (
@@ -9548,7 +9548,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, detailLevel, 
                           {/* Terminal wealth alone cannot separate a plan that ran
                               dry at 78 from one that ran dry at 88 — both end at $0
                               and tie. The age is the decision-relevant part. */}
-                          <td className={`text-right py-2 px-2 ${s.depletionAge ? 'text-red-400 font-semibold' : 'text-slate-600'}`}>
+                          <td className={`text-right py-2 px-2 ${s.depletionAge ? 'text-red-400 font-semibold' : 'text-slate-500'}`}>
                             {s.depletionAge ? `age ${s.depletionAge}` : '—'}
                           </td>
                           <td className="text-right py-2 px-2 text-sky-400">{formatCurrency(s.lifetimeSS)}</td>
@@ -9642,7 +9642,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, detailLevel, 
                     formatter={(value, name) => [formatCurrency(value), name]} 
                   />
                   <Legend formatter={legendInk} />
-                  <ReferenceLine x={personalInfo.myRetirementAge} stroke="#f59e0b" strokeDasharray="5 5" label={{ value: 'Retire', fill: '#f59e0b', fontSize: 11 }} />
+                  <ReferenceLine x={personalInfo.myRetirementAge} stroke={THEME.reference} strokeDasharray="5 5" label={{ value: 'Retire', fill: THEME.inkSecondary, fontSize: 11 }} />
                   {chartScenarios.map((s, i) => (
                     <Line key={s.label} type="monotone" dataKey={s.label} stroke={chartColors[i % chartColors.length]} 
                       strokeWidth={s === currentScenario ? 3 : 1.5} dot={false} 
@@ -10198,7 +10198,7 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
                   })}
                   <div className="flex items-center gap-3 mt-1">
                     <div className="w-40" />
-                    <div className="flex-1 flex text-[10px] text-slate-600">
+                    <div className="flex-1 flex text-[10px] text-slate-500">
                       <div className="flex-1 text-right pr-1">← Worse</div>
                       <div className="w-px" />
                       <div className="flex-1 pl-1">Better →</div>
@@ -10247,7 +10247,7 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
                               {step.label}
                             </span>
                             {step.isBase && <span className="text-amber-500 text-xs ml-2">◆ Current</span>}
-                            {!step.isBase && <span className="text-slate-600 text-xs ml-2">({step.deltaLabel})</span>}
+                            {!step.isBase && <span className="text-slate-500 text-xs ml-2">({step.deltaLabel})</span>}
                           </td>
                           <td className="py-2 px-3 text-right text-slate-300">{formatCurrency(money(step, 'portfolioAtRetirement'))}</td>
                           <td className={`py-2 px-3 text-right font-medium ${getImpactColor(stepEnd, baseEnd)}`}>
@@ -11338,14 +11338,14 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
                     <button 
                       onClick={moveUp}
                       disabled={idx === 0}
-                      className={`px-2 py-1 rounded text-sm ${idx === 0 ? 'text-slate-600 cursor-not-allowed' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}
+                      className={`px-2 py-1 rounded text-sm ${idx === 0 ? 'text-slate-500 cursor-not-allowed' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}
                     >
                       &#9650;
                     </button>
                     <button 
                       onClick={moveDown}
                       disabled={idx === priority.length - 1}
-                      className={`px-2 py-1 rounded text-sm ${idx === priority.length - 1 ? 'text-slate-600 cursor-not-allowed' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}
+                      className={`px-2 py-1 rounded text-sm ${idx === priority.length - 1 ? 'text-slate-500 cursor-not-allowed' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}
                     >
                       &#9660;
                     </button>
@@ -11971,8 +11971,15 @@ function employerContribShare(account, amount) {
 // never rests on hue alone. Both slots are from the app's validated categorical
 // palette and pass all six checks against this surface (worst adjacent CVD ΔE
 // 26.8 protan / 32.4 tritan, normal-vision 31.8).
-const SR_BASE_COLOR = '#3987e5';
-const SR_WHATIF_COLOR = '#d95926';
+// Read from the palette rather than pinned, or they stay dark in light mode —
+// which is exactly how a stray #d95926 turned up on a white card.
+const SR_BASE_COLOR = SERIES.socialSecurity;
+const SR_WHATIF_COLOR = SERIES.pension;
+// Same two hues, stepped so they clear 4.5:1 as text. The swatch and the chart
+// strokes above keep the series value — a fill only has to clear 3:1 — but a bold
+// figure tinted to match the line is text, and the series value fails that bar.
+const SR_BASE_INK = THEME.ink.socialSecurity;
+const SR_WHATIF_INK = THEME.ink.pension;
 
 function SavingsRateTooltip({ active, payload, label, baseRate, targetRate }) {
   if (!active || !payload || !payload.length) return null;
@@ -12137,7 +12144,7 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
         <div className="flex items-center gap-4">
           <div>
             <div className="text-slate-500 text-xs mb-0.5">You'd save</div>
-            <div className="text-lg font-bold" style={{ color: SR_WHATIF_COLOR }}>
+            <div className="text-lg font-bold" style={{ color: SR_WHATIF_INK }}>
               {formatCurrency(scenario.targetDollars)}<span className="text-xs text-slate-500 font-normal">/yr</span>
             </div>
           </div>
@@ -12197,13 +12204,13 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
               type="monotone" dataKey="current" name={`Your plan (${baseRate.toFixed(1)}%)`}
               stroke={SR_BASE_COLOR} strokeWidth={2} strokeDasharray="5 4" dot={false}
               isAnimationActive={false}
-              label={lastPointLabel('your plan', SR_BASE_COLOR, iBase)}
+              label={lastPointLabel('your plan', SR_BASE_INK, iBase)}
             />
             <Line
               type="monotone" dataKey="whatIf" name={`At ${targetRate.toFixed(1)}%`}
               stroke={SR_WHATIF_COLOR} strokeWidth={2} dot={false}
               isAnimationActive={false}
-              label={lastPointLabel(`${targetRate.toFixed(1)}%`, SR_WHATIF_COLOR, iAlt)}
+              label={lastPointLabel(`${targetRate.toFixed(1)}%`, SR_WHATIF_INK, iAlt)}
             />
           </LineChart>
         </ResponsiveContainer>
@@ -12242,7 +12249,7 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
           <div className="text-slate-500 text-xs mb-0.5">
             {up || !changed ? 'What each extra dollar becomes' : 'What each dollar skipped costs'}
           </div>
-          <div className="text-lg font-bold" style={{ color: changed && multiple ? SR_WHATIF_COLOR : undefined }}>
+          <div className="text-lg font-bold" style={{ color: changed && multiple ? SR_WHATIF_INK : undefined }}>
             {changed && multiple && multiple > 0 ? `$${multiple.toFixed(2)}` : '—'}
           </div>
           <div className="text-xs text-slate-500">by age {retAge}, after growth</div>
@@ -12792,13 +12799,13 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
                         <td className="py-1.5 px-2 text-right text-purple-400 font-mono">{formatCurrency(p.rothBalance)}</td>
                         <td className="py-1.5 px-2 text-right text-sky-400 font-mono">{formatCurrency(p.brokerageBalance)}</td>
                         <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">{formatCurrency(p.totalPortfolio)}</td>
-                        <td className={`py-1.5 px-2 text-right font-mono ${hasRMD ? 'text-red-400' : 'text-slate-600'}`}>
+                        <td className={`py-1.5 px-2 text-right font-mono ${hasRMD ? 'text-red-400' : 'text-slate-500'}`}>
                           {hasRMD ? formatCurrency(p.rmd) : '—'}
                         </td>
-                        <td className={`py-1.5 px-2 text-right font-mono ${p.portfolioWithdrawal > 0 ? 'text-orange-400' : 'text-slate-600'}`}>
+                        <td className={`py-1.5 px-2 text-right font-mono ${p.portfolioWithdrawal > 0 ? 'text-orange-400' : 'text-slate-500'}`}>
                           {p.portfolioWithdrawal > 0 ? formatCurrency(p.portfolioWithdrawal) : '—'}
                         </td>
-                        <td className={`py-1.5 px-2 text-right font-mono ${hasExcess ? 'text-cyan-400' : 'text-slate-600'}`}>
+                        <td className={`py-1.5 px-2 text-right font-mono ${hasExcess ? 'text-cyan-400' : 'text-slate-500'}`}>
                           {hasExcess ? formatCurrency(p.excessRMD) : '—'}
                         </td>
                       </tr>
@@ -12961,10 +12968,10 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
                         <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">
                           {total > 0 ? formatCurrency(total) : '—'}
                         </td>
-                        <td className={`py-1.5 px-2 text-right font-mono ${grossRate !== null && grossRate > 0 ? 'text-amber-400' : 'text-slate-600'}`}>
+                        <td className={`py-1.5 px-2 text-right font-mono ${grossRate !== null && grossRate > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
                           {grossRate !== null && grossRate > 0 ? `${grossRate.toFixed(1)}%` : '—'}
                         </td>
-                        <td className={`py-1.5 px-2 text-right font-mono ${netRate !== null && netRate > 0 ? 'text-emerald-400' : 'text-slate-600'}`}>
+                        <td className={`py-1.5 px-2 text-right font-mono ${netRate !== null && netRate > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
                           {netRate !== null && netRate > 0 ? `${netRate.toFixed(1)}%` : '—'}
                         </td>
                       </tr>
@@ -13022,22 +13029,22 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
                           <tr key={p.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${total === 0 ? 'opacity-40' : ''}`}>
                             <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
                             <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
-                            <td className={`py-1.5 px-2 text-right font-mono ${preTaxC > 0 ? 'text-emerald-400' : 'text-slate-600'}`}>
+                            <td className={`py-1.5 px-2 text-right font-mono ${preTaxC > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
                               {preTaxC > 0 ? formatCurrency(preTaxC) : '—'}
                             </td>
-                            <td className={`py-1.5 px-2 text-right font-mono ${rothC > 0 ? 'text-purple-400' : 'text-slate-600'}`}>
+                            <td className={`py-1.5 px-2 text-right font-mono ${rothC > 0 ? 'text-purple-400' : 'text-slate-500'}`}>
                               {rothC > 0 ? formatCurrency(rothC) : '—'}
                             </td>
-                            <td className={`py-1.5 px-2 text-right font-mono ${brokerageC > 0 ? 'text-sky-400' : 'text-slate-600'}`}>
+                            <td className={`py-1.5 px-2 text-right font-mono ${brokerageC > 0 ? 'text-sky-400' : 'text-slate-500'}`}>
                               {brokerageC > 0 ? formatCurrency(brokerageC) : '—'}
                             </td>
                             <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">
                               {total > 0 ? formatCurrency(total) : '—'}
                             </td>
-                            <td className={`py-1.5 px-2 text-right font-mono ${grossRate !== null && grossRate > 0 ? 'text-amber-400' : 'text-slate-600'}`}>
+                            <td className={`py-1.5 px-2 text-right font-mono ${grossRate !== null && grossRate > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
                               {grossRate !== null && grossRate > 0 ? `${grossRate.toFixed(1)}%` : '—'}
                             </td>
-                            <td className={`py-1.5 px-2 text-right font-mono ${netRate !== null && netRate > 0 ? 'text-emerald-400' : 'text-slate-600'}`}>
+                            <td className={`py-1.5 px-2 text-right font-mono ${netRate !== null && netRate > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
                               {netRate !== null && netRate > 0 ? `${netRate.toFixed(1)}%` : '—'}
                             </td>
                           </tr>
@@ -13743,7 +13750,7 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
             New here? A one-minute tour explains what each tab answers.
           </span>
           <button onClick={onTakeTour}
-            className="px-3 py-1.5 text-xs font-medium bg-sky-600 hover:bg-sky-500 text-white rounded-lg transition-colors">
+            className="px-3 py-1.5 text-xs font-medium bg-sky-700 hover:bg-sky-600 text-white rounded-lg transition-colors">
             Take the tour
           </button>
           <button onClick={onDismissTour}
@@ -13849,7 +13856,7 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
             here that has a good/bad reading — the savings rate, which already has
             savingsRateStatus() to say which. The rest are ink, and the label
             underneath does the wayfinding the colour was pretending to do. */}
-        <div className={`grid gap-3 ${isPreRetirement && dashSavingsRate !== null ? 'grid-cols-2 lg:grid-cols-6' : 'grid-cols-2 lg:grid-cols-5'}`}>
+        <div className={`grid gap-3 ${isPreRetirement && dashSavingsRate !== null ? 'grid-cols-2 md:grid-cols-3 2xl:grid-cols-6' : 'grid-cols-2 md:grid-cols-3 2xl:grid-cols-5'}`}>
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           <div className="text-slate-500 text-xs mb-0.5">Total Net Worth</div>
           <div className="text-xl font-bold text-slate-100">{formatCurrency(current?.totalNetWorth)}</div>
@@ -13878,14 +13885,14 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
         {isPreRetirement && dashSavingsRate !== null && (
           <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
             <div className="text-slate-500 text-xs mb-0.5">Savings Rate</div>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-col">
               <div>
                 <span className="text-xl font-bold" style={{ color: THEME.status[savingsRateStatus(dashSavingsRate)] }}>{dashSavingsRate.toFixed(1)}%</span>
                 <span className="text-xs text-slate-500 ml-1">gross</span>
               </div>
               {dashAfterTaxSavingsRate !== null && (
                 <div>
-                  <span className="text-xl font-bold" style={{ color: THEME.status[savingsRateStatus(dashAfterTaxSavingsRate)] }}>{dashAfterTaxSavingsRate.toFixed(1)}%</span>
+                  <span className="text-base font-bold" style={{ color: THEME.status[savingsRateStatus(dashAfterTaxSavingsRate)] }}>{dashAfterTaxSavingsRate.toFixed(1)}%</span>
                   <span className="text-xs text-slate-500 ml-1">net</span>
                 </div>
               )}
@@ -14713,13 +14720,13 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
                           done its worst. */}
                       <td className="py-1 px-2 text-right text-purple-400">
                         {m.ssTorpedo > 0 ? `${m.ssTorpedo}%`
-                          : !m.hasSS ? <span className="text-slate-600" title="Not collecting Social Security yet">—</span>
+                          : !m.hasSS ? <span className="text-slate-500" title="Not collecting Social Security yet">—</span>
                           : m.ssMaxedOut ? <span className="text-slate-500 text-[10px]" title="85% of your benefit is already taxable — the statutory maximum. The next dollar cannot drag any more of it in.">85% maxed</span>
                           : <span className="text-slate-500" title={`${Math.round((m.ssShareBefore || 0) * 100)}% of your benefit is taxable; the next $1,000 does not add to it`}>0%</span>}
                       </td>
                       <td className="py-1 px-2 text-right text-pink-400">
                         {m.irmaa > 0 ? `${m.irmaa}%`
-                          : !m.medicareAge ? <span className="text-slate-600" title="IRMAA applies from age 65">—</span>
+                          : !m.medicareAge ? <span className="text-slate-500" title="IRMAA applies from age 65">—</span>
                           : m.irmaaEdgeDistance !== null && m.irmaaEdgeDistance <= 25000
                             ? <span className="text-amber-500/80 text-[10px]" title="No surcharge on the next $1,000, but the next tier is close — crossing it costs the full tier, not a rate">
                                 {formatCurrency(m.irmaaEdgeDistance)} to edge
@@ -17693,7 +17700,7 @@ const NavGroup = ({ group, activeTab, setActiveTab, sidebarCollapsed }) => (
       </div>
     )}
     {sidebarCollapsed && (
-      <div className="flex justify-center py-2 text-slate-600">
+      <div className="flex justify-center py-2 text-slate-500">
         <span className="text-lg">{group.icon}</span>
       </div>
     )}
@@ -18587,7 +18594,7 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
                   ['🏠','Home','Optional — only affects your net worth'],
                 ].map(([icon,name,detail],i)=>(
                   <div key={name} className="flex items-start gap-3">
-                    <span className="text-slate-600 text-xs font-mono w-3 shrink-0 pt-0.5">{i+1}</span>
+                    <span className="text-slate-500 text-xs font-mono w-3 shrink-0 pt-0.5">{i+1}</span>
                     <span className="shrink-0">{icon}</span>
                     <div className="min-w-0">
                       <span className="text-sm text-slate-200">{name}</span>
@@ -18759,7 +18766,7 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                     <div><label className="text-[10px] text-slate-500 block mb-0.5">Type</label><select value={oi.type} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,type:v}:o)}))}} className={`${inputStyle} text-xs py-1.5`}><option value="rental">Rental</option><option value="business">Business/Consulting</option><option value="annuity">Annuity</option><option value="other">Other</option></select></div>
                     <div><label className="text-[10px] text-slate-500 block mb-0.5">Annual $</label>{dollarInput(oi.amount, v=>setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,amount:v}:o)})), '12,000')}</div>
-                    <div><label className="text-[10px] text-slate-500 block mb-0.5">Ages</label><div className="flex items-center gap-1"><input type="number" value={oi.startAge} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,startAge:v}:o)}))}} className={`${inputStyle} text-xs py-1.5 w-14`} /><span className="text-slate-600">–</span><input type="number" value={oi.endAge} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,endAge:v}:o)}))}} className={`${inputStyle} text-xs py-1.5 w-14`} /></div></div>
+                    <div><label className="text-[10px] text-slate-500 block mb-0.5">Ages</label><div className="flex items-center gap-1"><input type="number" value={oi.startAge} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,startAge:v}:o)}))}} className={`${inputStyle} text-xs py-1.5 w-14`} /><span className="text-slate-500">–</span><input type="number" value={oi.endAge} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,endAge:v}:o)}))}} className={`${inputStyle} text-xs py-1.5 w-14`} /></div></div>
                     <div><label className="text-[10px] text-slate-500 block mb-0.5">Annual growth (%)</label><input type="number" step="0.5" value={oi.cola} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,cola:v}:o)}))}} className={`${inputStyle} text-xs py-1.5`} placeholder="2" /></div>
                     {w.hasSpouse&&<div><label className="text-[10px] text-slate-500 block mb-0.5">Owner</label><select value={oi.owner} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,owner:v}:o)}))}} className={`${inputStyle} text-xs py-1.5`}><option value="me">Me</option><option value="spouse">Spouse</option><option value="joint">Joint</option></select></div>}
                   </div>

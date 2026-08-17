@@ -139,6 +139,29 @@
     taxBurden:   { dark: '#f6c177', light: '#722a00' },
   };
 
+  // The same hue has to do three different jobs, and they do not have the same
+  // bar. As a bar fill or a chart stroke a series colour needs 3:1 against the
+  // chart surface, which every slot above clears. As TEXT — a bold figure tinted
+  // to say "this number belongs to that line" — it needs 4.5:1, and measured
+  // against the card it sits on, ELEVEN of the sixteen slot values fail. Painting
+  // a series colour as a label is a category error, not a one-off mistake, so the
+  // fix is a text-safe stepping rather than a patched call site.
+  //
+  // Each ink is its own slot moved toward the ground's opposite until it clears
+  // the bar — the hue is preserved, so the tinted number still visibly belongs to
+  // its line, it is simply legible now. Several are unchanged because they already
+  // passed.
+  const SLOT_INK = {
+    blue:    { dark: '#4d93e8', light: '#2872cb' },
+    orange:  { dark: '#df7247', light: '#ba5229' },
+    aqua:    { dark: '#27a479', light: '#148059' },
+    yellow:  { dark: '#c98500', light: '#986700' },
+    magenta: { dark: '#dc6d95', light: '#a75976' },
+    green:   { dark: '#45a445', light: '#008300' },
+    violet:  { dark: '#9085e9', light: '#4a3aa7' },
+    red:     { dark: '#e76a6a', light: '#ca4140' },
+  };
+
   // The categorical cycle: N things with no inherent order and no shared
   // magnitude — accounts in a balance table, historical crash scenarios, a
   // handful of compared plans. The UI grew four separate hand-picked arrays for
@@ -151,10 +174,15 @@
 
   // Reserved. Never used for "series 5", and never carrying meaning alone — a
   // status colour always ships next to a word or an icon.
+  // A status colour is read as often as it is drawn — it tints a savings rate, a
+  // verdict, a warning line — so it is held to the TEXT bar, 4.5:1, measured
+  // against the tightest ground it lands on (a raised slate-950 panel in light
+  // mode, not plain white). The dark column already cleared it; three of the four
+  // light values did not, which is what put a 3.68:1 figure on the dashboard.
   const STATUS = {
-    good:     { dark: '#22c07a', light: '#0f8f52' },
-    warning:  { dark: '#e0a832', light: '#a86a06' },
-    serious:  { dark: '#e8834a', light: '#c04f11' },
+    good:     { dark: '#22c07a', light: '#0d7c47' },
+    warning:  { dark: '#e0a832', light: '#996005' },
+    serious:  { dark: '#e8834a', light: '#b64b10' },
     critical: { dark: '#f0736f', light: '#c62b28' },
   };
 
@@ -164,10 +192,10 @@
     surface:      { dark: '#0f172a', light: '#f8fafc' },
     surfaceRaised:{ dark: '#1e293b', light: '#ffffff' },
     grid:         { dark: '#2b3a52', light: '#e6e6e2' },
-    axis:         { dark: '#7c8ba1', light: '#6b6b66' },
+    axis:         { dark: '#8492a7', light: '#6b6b66' },
     inkPrimary:   { dark: '#f1f5f9', light: '#14140f' },
     inkSecondary: { dark: '#b6c2d2', light: '#52514e' },
-    inkMuted:     { dark: '#7c8ba1', light: '#78776f' },
+    inkMuted:     { dark: '#8492a7', light: '#73726b' },
     reference:    { dark: '#e0a832', light: '#a86a06' },  // "you retire here" markers
     // "Everything else" bars: the context an overlay sits on, as in the
     // conversion chart where base income is backdrop and the conversion is the
@@ -229,7 +257,7 @@
     },
     amber: {
       100: { dark: '#fef3c7', light: '#7c4a03' }, 200: { dark: '#fde68a', light: '#8a5206' },
-      300: { dark: '#fcd34d', light: '#96591a' }, 400: { dark: '#fbbf24', light: '#a1620a' },
+      300: { dark: '#fcd34d', light: '#8c5216' }, 400: { dark: '#fbbf24', light: '#96590a' },
       500: { dark: '#f59e0b', light: '#b45309' }, 600: { dark: '#d97706', light: '#b45309' },
       700: { dark: '#b45309', light: '#92400e' }, 800: { dark: '#92400e', light: '#fde9c8' },
       900: { dark: '#78350f', light: '#fdf4e3' },
@@ -412,10 +440,16 @@
   // JS, where a var() reference is an opaque string.
   const resolve = (mode = 'dark') => {
     const pick = (o) => o[mode] !== undefined ? o[mode] : o.dark;
-    const out = { mode, series: {}, status: {}, lines: {}, categorical: CATEGORICAL.map(k => pick(SLOTS[k])), bracket: pick(BRACKET_RAMP), distribution: pick(DISTRIBUTION_RAMP) };
+    const out = { mode, series: {}, status: {}, lines: {}, ink: {}, categorical: CATEGORICAL.map(k => pick(SLOTS[k])), bracket: pick(BRACKET_RAMP), distribution: pick(DISTRIBUTION_RAMP) };
     Object.entries(SERIES).forEach(([k, v]) => { out.series[k] = pick(v); });
     Object.entries(STATUS).forEach(([k, v]) => { out.status[k] = pick(v); });
     Object.entries(LINES).forEach(([k, v]) => { out.lines[k] = pick(v); });
+    // Text-safe inks, keyed by the SERIES name so a call site that draws a series
+    // as a label can ask for it without knowing which slot it lives in.
+    Object.entries(SERIES).forEach(([k, v]) => {
+      const slot = Object.keys(SLOTS).find(sl => SLOTS[sl] === v);
+      out.ink[k] = slot ? pick(SLOT_INK[slot]) : pick(v);
+    });
     Object.entries(CHROME).forEach(([k, v]) => { out[k] = pick(v); });
     return out;
   };
@@ -428,6 +462,6 @@
                   'withdrawalVoluntary', 'rmd', 'rothConversion', 'conversionTaxDraw'],
   };
 
-  return { SLOTS, SERIES, BRACKET_RAMP, DISTRIBUTION_RAMP, LINES, STATUS, CHROME, STACKS, CATEGORICAL, TW,
+  return { SLOTS, SERIES, BRACKET_RAMP, DISTRIBUTION_RAMP, LINES, STATUS, CHROME, STACKS, CATEGORICAL, SLOT_INK, TW,
            triplet, tailwindColors, cssVariables, headBlock, HEAD_MARKERS, resolve, MODES: ['dark', 'light'] };
 });

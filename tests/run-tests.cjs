@@ -9202,6 +9202,59 @@ section('P74 — the palette: colour-vision separation, re-derived rather than t
     });
   });
 
+  // A series colour has to clear a DIFFERENT bar depending on the job it is
+  // doing, and only one of the three is checked above. As a bar fill or a chart
+  // stroke it needs 3:1 against the chart surface. As TEXT — a bold figure tinted
+  // to say "this number belongs to that line" — it needs 4.5:1 against the card
+  // it sits on, and measured on the shipping palette ELEVEN of the sixteen slot
+  // values failed that. Painting a series colour as a label is a category error
+  // rather than a one-off slip, which is why there is a separate ink stepping.
+  theme.MODES.forEach(mode => {
+    const t = theme.resolve(mode);
+    const card = mode === 'dark' ? '#1e293b' : '#f8fafc';
+    Object.entries(t.ink).forEach(([name, hex]) => {
+      gt(contrast(hex, card), 4.5,
+        `${mode}: the '${name}' ink is legible as TEXT on a card, which its series colour is not required to be`);
+    });
+    // The ink has to stay recognisably the same hue, or the tinted figure stops
+    // pointing at its line and the whole device fails.
+    Object.keys(t.ink).forEach(name => {
+      lt(dE(t.ink[name], t.series[name]), 22.0,
+        `${mode}: the '${name}' ink is a step of its series colour, not a different colour`);
+    });
+  });
+
+  // Chart furniture is READ, not just drawn. Axis ticks, end labels and captions
+  // are text on the card, so the tokens that paint them have to clear the text
+  // bar rather than the 3:1 a line gets away with. Both of these measured under
+  // 4.5 on the shipping palette, which is why every chart tick in the app was
+  // marginal and the light-mode ones were failing outright.
+  theme.MODES.forEach(mode => {
+    const t = theme.resolve(mode);
+    const card = mode === 'dark' ? '#1e293b' : '#f8fafc';
+    // Status colours tint verdicts and figures as often as they fill a bar, so
+    // they are held to the same text bar — against the tightest ground they land
+    // on, which in light mode is a raised panel rather than plain white.
+    const raised = mode === 'dark' ? '#1e293b' : '#eef2f7';
+    Object.entries(t.status).forEach(([k, hex]) => {
+      gt(contrast(hex, raised), 4.5,
+        `${mode}: the '${k}' status colour is legible as text on a raised panel`);
+    });
+    ['axis', 'inkMuted', 'inkSecondary', 'inkPrimary'].forEach(tok => {
+      gt(contrast(t[tok], card), 4.5,
+        `${mode}: '${tok}' is legible as text on a card — it labels chart axes, not just draws them`);
+    });
+    // The bracket ramp is the exception and deliberately so: it is a MAGNITUDE
+    // scale whose low steps must stay recessive, so it cannot also be text-legible
+    // without losing the ordering that makes it a scale. Its end labels therefore
+    // use inkSecondary and carry their meaning in words ("12%", "32%"). This
+    // asserts the tension is real rather than an oversight — if a future ramp
+    // happened to be legible throughout, the label could go back to using it.
+    const lowStep = t.bracket[0];
+    lt(contrast(lowStep, card), 4.5,
+      `${mode}: the bracket ramp's recessive end is NOT text-legible, which is why the labels do not use it`);
+  });
+
   // Every entity is defined in both modes, and the dark step is genuinely its
   // own value rather than the light one reused.
   {
