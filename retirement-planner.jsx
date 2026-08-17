@@ -350,7 +350,7 @@ const STORAGE_KEY = 'retirement_planner_data';
 //     payments, prior-year return). Bumped rather than defaulted because this is
 //     a whole new top-level key: an older build round-tripping a v3 export would
 //     drop it silently, and the user would not find out until a tax number moved.
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 // Migrations run in order from the saved version up to SCHEMA_VERSION. Each is
 // a pure (data) => data. Absent entries are skipped, so a version that only adds
@@ -370,6 +370,95 @@ const migrations = {
     const { accounts, split } = splitBothContributors(data.accounts || []);
     return split.length ? { ...data, accounts, contributorSplitNotice: split } : { ...data, accounts };
   },
+  // v4 → v5: section visibility becomes per-tab, because it now covers Social
+  // Security and Monte Carlo as well as the dashboard. The old flat map WAS the
+  // dashboard's, so it moves under that key verbatim and nobody's hidden sections
+  // come back on upgrade. Only explicit choices are carried: an entry that still
+  // matches the old default is dropped so it follows the detail level instead of
+  // being pinned forever by a preference the user never actually expressed.
+  5: (data) => {
+    const flat = data.dashboardVisibility;
+    if (!flat || data.sectionVisibility) return { ...data, sectionVisibility: data.sectionVisibility || {} };
+    const dash = {};
+    Object.entries(flat).forEach(([k, v]) => {
+      if (v !== DEFAULT_DASHBOARD_VISIBILITY[k]) dash[k] = v;
+    });
+    return { ...data, sectionVisibility: Object.keys(dash).length ? { dashboard: dash } : {} };
+  },
+};
+
+// ── SECTION VISIBILITY ──────────────────────────────────────────────────────
+// The dashboard has let users hide sections since early on, and it works, but it
+// was built as a one-off: the list of sections is written twice (once as the
+// settings panel, once as a chain of `visibilitySettings.x &&` guards), so adding
+// a section means remembering both. That does not scale to the tabs that need it
+// most — Social Security and Monte Carlo each render a dozen sections, and a user
+// six years from retirement has no use for half of them.
+//
+// So the list moves into a manifest that drives BOTH the guards and the settings
+// UI, and every section carries a level. Someone who just wants to know whether
+// the plan works picks Essentials and gets four sections; someone tuning a
+// claiming strategy picks Everything. The per-section toggles still win over the
+// level — the level sets a starting point, it does not take the choice away.
+//
+//   essential — you cannot judge the tab without it
+//   standard  — the ordinary working content of the tab
+//   advanced  — diagnostics, methodology, sensitivity, per-scenario detail
+//
+// Transient sections (loading, error, empty states) are deliberately NOT in the
+// manifest: a user must never be able to hide the thing that would have told them
+// why the page is blank.
+const SECTION_LEVELS = ['essentials', 'standard', 'everything'];
+const LEVEL_RANK = { essential: 0, standard: 1, advanced: 2 };
+const LEVEL_SHOWS = { essentials: 0, standard: 1, everything: 2 };
+
+const SECTION_MANIFEST = {
+  dashboard: [
+    { id: 'summaryCards',     label: 'Summary Cards',                 level: 'essential' },
+    { id: 'netWorth',         label: 'Net Worth Projection',          level: 'essential' },
+    { id: 'retirementIncome', label: 'Retirement Income vs Spending', level: 'essential' },
+    { id: 'cashFlow',         label: 'Annual Cash Flow',              level: 'standard' },
+    { id: 'withdrawalRate',   label: 'Portfolio Withdrawal Rate',     level: 'standard' },
+    { id: 'taxSummary',       label: 'Lifetime Tax Summary',          level: 'standard' },
+    { id: 'safeSpending',     label: 'Safe Spending Capacity',        level: 'standard' },
+    { id: 'coastFire',        label: 'Coast FIRE Indicator',          level: 'advanced' },
+    { id: 'lifestyleLegacy',  label: 'Lifestyle vs Legacy',           level: 'advanced' },
+  ],
+  montecarlo: [
+    { id: 'method',        label: 'Simulation Method',            level: 'standard' },
+    { id: 'parameters',    label: 'Simulation Parameters',        level: 'essential' },
+    { id: 'incomeContext', label: 'Income & Withdrawal Context',   level: 'advanced' },
+    // The outcome distribution is the answer the tab exists to give, so it has no
+    // toggle; everything around it does.
+    { id: 'longevity',     label: 'How Long the Money Had to Last', level: 'advanced' },
+    { id: 'guardrails',    label: 'Spending Guardrail Outcomes',   level: 'advanced' },
+    { id: 'perYear',       label: 'Per-Year Historical Outcomes',  level: 'advanced' },
+    { id: 'bands',         label: 'Portfolio Projection Bands',    level: 'essential' },
+    { id: 'paths',         label: 'Sample Simulation Paths',       level: 'standard' },
+
+  ],
+  socialsecurity: [
+    // 'Your Current Plan' and the benefit inputs are deliberately absent: they are
+    // the tab's controls, not its output, and hiding them would leave a page of
+    // results with no way to change what produced them.
+    { id: 'byClaimAge',   label: 'Monthly Benefits by Claiming Age', level: 'standard' },
+    { id: 'controls',     label: 'Analysis Sensitivity Controls',  level: 'advanced' },
+    { id: 'fullPlan',     label: 'Full Plan Impact Analysis',      level: 'essential' },
+    { id: 'heatMap',      label: 'Portfolio Heat Map',             level: 'advanced' },
+    { id: 'overTime',     label: 'Portfolio Value Over Time',      level: 'standard' },
+    { id: 'considerations', label: 'What to Consider',             level: 'standard' },
+  ],
+};
+
+// A section is visible when the user has said so explicitly; otherwise the detail
+// level decides. Stored per tab so "hide the heat map" on Social Security says
+// nothing about the dashboard.
+const sectionIsVisible = (vis, level, tab, id) => {
+  const explicit = vis && vis[tab] && vis[tab][id];
+  if (explicit === true || explicit === false) return explicit;
+  const entry = (SECTION_MANIFEST[tab] || []).find(e => e.id === id);
+  if (!entry) return true;   // not in the manifest: never hideable
+  return LEVEL_RANK[entry.level] <= LEVEL_SHOWS[level || 'standard'];
 };
 
 const DEFAULT_DASHBOARD_VISIBILITY = {
@@ -956,6 +1045,105 @@ InfoCard.displayName = 'InfoCard';
 // scope and avoid the unmount/remount cycle on every parent state change.
 // ============================================
 const cardStyle = "bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-sm border border-slate-700/50 rounded-xl p-6 shadow-xl";
+
+// ── SECTION SHELL ───────────────────────────────────────────────────────────
+// One card, one heading, one hide control, driven by SECTION_MANIFEST. The
+// dashboard's version of this was hand-written per section, which is why the
+// section list existed twice; here a tab declares its sections once and wraps
+// each one.
+const Section = ({ tab, id, title, vis, level, setVis, actions, children, className }) => {
+  if (!sectionIsVisible(vis, level, tab, id)) return null;
+  const entry = (SECTION_MANIFEST[tab] || []).find(e => e.id === id);
+  return (
+    <div className={className || cardStyle}>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div className="flex items-center gap-2">
+          {typeof title === 'string'
+            ? <h4 className="text-lg font-semibold text-slate-100">{title}</h4>
+            : title}
+          {actions}
+        </div>
+        {entry && (
+          <button
+            onClick={() => setVis(prev => ({ ...prev, [tab]: { ...(prev[tab] || {}), [id]: false } }))}
+            className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors shrink-0"
+            title="Hide this section — restore it from Sections at the top of the tab"
+          >
+            Hide
+          </button>
+        )}
+      </div>
+      {children}
+    </div>
+  );
+};
+
+// The per-tab control strip: pick a detail level, or override any single section.
+// The level is global so choosing Essentials once quiets every tab at once; the
+// per-section chips are per tab and win over it.
+const SectionControls = ({ tab, vis, setVis, level, setLevel }) => {
+  const [open, setOpen] = useState(false);
+  const entries = SECTION_MANIFEST[tab] || [];
+  if (!entries.length) return null;
+  const shown = entries.filter(e => sectionIsVisible(vis, level, tab, e.id)).length;
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm">
+          <span className="text-slate-500">Detail:</span>
+          {SECTION_LEVELS.map(l => (
+            <button
+              key={l}
+              onClick={() => setLevel(l)}
+              className={`px-3 py-1 rounded-lg border text-xs capitalize transition-colors ${
+                level === l
+                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                  : 'bg-slate-800/40 border-slate-700/40 text-slate-400 hover:text-slate-200'
+              }`}
+              title={l === 'essentials' ? 'Only what you need to judge whether the plan works'
+                   : l === 'standard'  ? 'The ordinary working content of each tab'
+                   : 'Everything, including diagnostics and methodology'}
+            >
+              {l}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => setOpen(!open)}
+          className="text-xs text-slate-400 hover:text-slate-200 px-3 py-1 rounded-lg border border-slate-700/40 hover:bg-slate-700/40 transition-colors"
+        >
+          {open ? 'Done' : `Sections (${shown}/${entries.length})`}
+        </button>
+      </div>
+      {open && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+          {entries.map(e => {
+            const on = sectionIsVisible(vis, level, tab, e.id);
+            return (
+              <button
+                key={e.id}
+                onClick={() => setVis(prev => ({ ...prev, [tab]: { ...(prev[tab] || {}), [e.id]: !on } }))}
+                className={`px-3 py-2 rounded-lg border text-left text-xs transition-all ${
+                  on ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
+                     : 'bg-slate-800/40 border-slate-700/40 text-slate-500'
+                }`}
+              >
+                <div className="font-medium">{e.label}</div>
+                <div className="mt-0.5 opacity-70">{on ? '✓ Visible' : '✗ Hidden'} · {e.level}</div>
+              </button>
+            );
+          })}
+          <button
+            onClick={() => setVis(prev => ({ ...prev, [tab]: {} }))}
+            className="px-3 py-2 rounded-lg border border-slate-700/40 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-700/40 transition-colors"
+          >
+            Reset to the “{level}” default
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
 const inputStyle = "w-full bg-slate-900/80 border border-slate-600/50 rounded-lg px-4 py-2.5 text-slate-100 focus:outline-none focus:ring-2 focus:ring-amber-500/50 transition-all";
 const labelStyle = "block text-sm font-medium text-slate-400 mb-1.5";
 const buttonPrimary = "bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 font-semibold px-6 py-2.5 rounded-lg transition-all shadow-lg";
@@ -6264,7 +6452,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
 // ============================================
 // MonteCarloTab — Lifted to module scope
 // ============================================
-function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses }) {
+function MonteCarloTab({ accounts, assets, detailLevel, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, sectionVisibility, setDetailLevel, setSectionVisibility }) {
   // Retirement age: always use personalInfo as source of truth
   const retirementProjection = projections.find(p => p.myAge === personalInfo.myRetirementAge);
   const defaultRetirementAge = personalInfo.myRetirementAge;
@@ -6375,10 +6563,11 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
         <h3 className="text-xl font-semibold text-slate-100 mb-2">Monte Carlo Simulation</h3>
         <p className="text-slate-400 text-sm">Stress-test your retirement plan against thousands of randomized market scenarios based on historical volatility patterns.</p>
       </div>
+
+      <SectionControls tab="montecarlo" vis={sectionVisibility} setVis={setSectionVisibility} level={detailLevel} setLevel={setDetailLevel} />
       
       {/* Method Selector */}
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-100 mb-3">Simulation Method</h4>
+      <Section tab="montecarlo" id="method" title={"Simulation Method"} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <button
             onClick={() => setSimSettings({...simSettings, method: 'random'})}
@@ -6468,11 +6657,10 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
             </div>
           </div>
         )}
-      </div>
+      </Section>
       
       {/* Settings */}
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-100 mb-4">Simulation Parameters</h4>
+      <Section tab="montecarlo" id="parameters" title={"Simulation Parameters"} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
         
         {/* Starting Point */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4 pb-4 border-b border-slate-700">
@@ -6654,11 +6842,10 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
             Historical reference: S&P 500 has ~10% mean return with ~15% standard deviation. After inflation, real returns are ~7%.
           </p>
         </div>
-      </div>
+      </Section>
       
       {/* Income Assumptions - What's Being Tested */}
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-100 mb-3">💰 Income & Withdrawal Context</h4>
+      <Section tab="montecarlo" id="incomeContext" title={<>💰 Income & Withdrawal Context</>} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
         <div className="space-y-3">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pb-3 border-b border-slate-700">
             <div>
@@ -6711,7 +6898,7 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
             </p>
           </div>
         </div>
-      </div>
+      </Section>
       
       {/* Results */}
       {simResults && (
@@ -6833,8 +7020,7 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
               </div>
             );
             return (
-              <div className={cardStyle}>
-                <h4 className="text-lg font-semibold text-slate-100 mb-1">🕰️ How Long the Money Had to Last</h4>
+              <Section tab="montecarlo" id="longevity" title={<>🕰️ How Long the Money Had to Last</>} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
                 <p className="text-xs text-slate-400 mb-3">
                   Age of the last surviving member of the household, across every simulation. Success now means the
                   portfolio outlasted the people — not that it reached a fixed birthday.
@@ -6850,14 +7036,13 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
                   the household outlived the fixed planning horizon this plan uses everywhere else — those are years the
                   ordinary projection never models at all.
                 </p>
-              </div>
+              </Section>
             );
           })()}
 
           {/* Guardrail spending outcomes — what flexibility the plan demanded */}
           {simResults.guardrailsEnabled && simResults.guardrailStats && (
-            <div className={cardStyle}>
-              <h4 className="text-lg font-semibold text-slate-100 mb-1">🛤️ Spending Guardrail Outcomes</h4>
+            <Section tab="montecarlo" id="guardrails" title={<>🛤️ Spending Guardrail Outcomes</>} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
               <p className="text-xs text-slate-400 mb-3">
                 With guardrails, "success" means the portfolio survived <em>given</em> these spending adjustments —
                 the numbers below show how much flexing that took.
@@ -6888,13 +7073,12 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
                 Reading it: if the worst-case trough is a spending level you could actually live with (say, 80% of plan),
                 the guardrail success rate is a fairer picture of your plan than the rigid fixed-spending number.
               </p>
-            </div>
+            </Section>
           )}
           
           {/* Historical Summary Table — only when historical mode + 'all' years */}
           {simResults.method === 'historical' && simResults.historicalSummary && simResults.historicalSummary.length > 0 && (
-            <div className={cardStyle}>
-              <h4 className="text-lg font-semibold text-slate-100 mb-2">Per-Year Historical Outcomes</h4>
+            <Section tab="montecarlo" id="perYear" title={"Per-Year Historical Outcomes"} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
               <p className="text-xs text-slate-400 mb-4">
                 Each row is a real {yearsToSimulate}-year sequence starting in the year shown. Sorted worst-first
                 so you can see the historical sequences that would have broken your plan.
@@ -6954,12 +7138,11 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
                 {' '}{simResults.historicalSummary.filter(r => r.successRate < 0.5).length} sequences failed.
                 Overall success rate: <strong className={getSuccessColor(simResults.successRate)}>{(simResults.successRate * 100).toFixed(1)}%</strong>.
               </div>
-            </div>
+            </Section>
           )}
           
           {/* Percentile Bands Chart */}
-          <div className={cardStyle}>
-            <h4 className="text-lg font-semibold text-slate-100 mb-4">Portfolio Projection Bands</h4>
+          <Section tab="montecarlo" id="bands" title={"Portfolio Projection Bands"} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
             <div className="h-80">
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={showRealDollars && simResults.percentileBandsReal ? simResults.percentileBandsReal : simResults.percentileBands}>
@@ -6990,11 +7173,10 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
             <p className="text-xs text-slate-500 mt-2">
               This chart shows the range of possible portfolio outcomes. The median line (yellow) represents the most likely outcome, while the bands show the spread of results from the simulation.
             </p>
-          </div>
+          </Section>
           
           {/* Sample Paths (Spaghetti Chart) */}
-          <div className={cardStyle}>
-            <h4 className="text-lg font-semibold text-slate-100 mb-4">Sample Simulation Paths ({simResults.portfolioPaths.length} of {simResults.totalSimulations} scenarios)</h4>
+          <Section tab="montecarlo" id="paths" title={<>Sample Simulation Paths ({simResults.portfolioPaths.length} of {simResults.totalSimulations} scenarios)</>} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
             <div className="h-72">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart>
@@ -7027,7 +7209,7 @@ function MonteCarloTab({ accounts, assets, incomeStreams, oneTimeEvents, persona
             <p className="text-xs text-slate-500 mt-2">
               Each line represents a single simulation showing how your portfolio might evolve with random market returns. Notice the wide spread - this illustrates the uncertainty inherent in retirement planning.
             </p>
-          </div>
+          </Section>
           
           {/* Interpretation */}
           <div className="p-4 bg-slate-800/50 border border-slate-700/50 rounded-lg">
@@ -8483,7 +8665,7 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
 // ============================================
 // SocialSecurityTab — Lifted to module scope
 // ============================================
-function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents, personalInfo, recurringExpenses, setIncomeStreams }) {
+function SocialSecurityTab({ accounts, assets, computeProjections, detailLevel, incomeStreams, oneTimeEvents, personalInfo, recurringExpenses, sectionVisibility, setDetailLevel, setIncomeStreams, setSectionVisibility }) {
   const mySSStream = incomeStreams.find(s => s.type === 'social_security' && s.owner === 'me');
   const spouseSSStream = incomeStreams.find(s => s.type === 'social_security' && s.owner === 'spouse');
   
@@ -8707,6 +8889,8 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
         <h3 className="text-xl font-semibold text-slate-100 mb-2">Social Security Claiming Strategy Optimizer</h3>
         <p className="text-slate-400 text-sm">Compare benefits at different claiming ages and find your optimal strategy based on life expectancy.</p>
       </div>
+
+      <SectionControls tab="socialsecurity" vis={sectionVisibility} setVis={setSectionVisibility} level={detailLevel} setLevel={setDetailLevel} />
       
       {/* Current Plan Summary — staged edits, explicit Apply. */}
       <div className={`${cardStyle} border-l-4 ${hasUnappliedClaimAges ? 'border-l-sky-500' : 'border-l-amber-500'}`}>
@@ -8801,8 +8985,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
         )}
       </div>
       
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-amber-400 mb-2">Monthly Benefits by Claiming Age</h4>
+      <Section tab="socialsecurity" id="byClaimAge" title={"Monthly Benefits by Claiming Age"} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
         <p className="text-xs text-slate-500 mb-3">Reference table: what your benefit would be at each claim age based on your PIA. This is just SSA math — no recommendation. Scroll down for the Full Plan Impact Analysis to see which age is best for your full plan.</p>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -8844,13 +9027,12 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
             </tbody>
           </table>
         </div>
-      </div>
+      </Section>
       
       {/* ═══════════════════════════════════════════════════════════════════
           ANALYSIS CONTROLS — Affect the Full Plan Impact Analysis below
           ═══════════════════════════════════════════════════════════════════ */}
-      <div className={`${cardStyle} border-l-4 border-l-sky-500`}>
-        <h4 className="text-lg font-semibold text-sky-400 mb-2">⚙️ Analysis Sensitivity Controls</h4>
+      <Section tab="socialsecurity" id="controls" title={<>⚙️ Analysis Sensitivity Controls</>} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility} className={`${cardStyle} border-l-4 border-l-sky-500`}>
         <p className="text-slate-400 text-sm mb-4">
           The full-plan analysis below depends heavily on your assumed portfolio growth rate.
           Researchers and practitioners increasingly agree that the optimal SS claiming age
@@ -8991,7 +9173,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
             )}
           </div>
         </div>
-      </div>
+      </Section>
 
       {/* ═══════════════════════════════════════════════════════════════════
           COMPREHENSIVE PORTFOLIO IMPACT ANALYSIS
@@ -9138,8 +9320,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
               </div>
             )}
             {/* Winner Summary */}
-            <div className={`${cardStyle} border-l-4 border-l-emerald-500`}>
-              <h4 className="text-lg font-semibold text-emerald-400 mb-3">📊 Full Plan Impact Analysis</h4>
+            <Section tab="socialsecurity" id="fullPlan" title={"📊 Full Plan Impact Analysis"} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility} className={`${cardStyle} border-l-4 border-l-emerald-500`}>
               <p className="text-slate-400 text-sm mb-2">
                 {isMarried 
                   ? `Runs your complete retirement plan for ${myAges.length * spouseAges.length} combinations of your and your spouse's claiming ages — including taxes, withdrawals, RMDs, growth, survivor benefits, and Roth conversions — to show the true financial impact.`
@@ -9292,7 +9473,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                   </p>
                 </div>
               </div>
-            </div>
+            </Section>
 
             {/* Ranked Comparison Table */}
             <div className={cardStyle}>
@@ -9402,8 +9583,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
             </div>
 
             {isMarried && (
-              <div className={cardStyle}>
-                <h4 className="text-lg font-semibold text-amber-400 mb-2">Portfolio at Age {legacyAge} — Heat Map</h4>
+              <Section tab="socialsecurity" id="heatMap" title={<>Portfolio at Age {legacyAge} — Heat Map</>} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
                 <p className="text-xs text-slate-500 mb-3">Each cell shows the ending portfolio value. Green = highest, red = lowest. Rows = your claiming age, columns = spouse's claiming age.</p>
                 <div className="overflow-x-auto">
                   <table className="text-sm">
@@ -9443,12 +9623,11 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                   </table>
                 </div>
                 <p className="text-xs text-slate-500 mt-2">◆ Amber ring = your current plan</p>
-              </div>
+              </Section>
             )}
 
             {/* Portfolio Chart */}
-            <div className={cardStyle}>
-              <h4 className="text-lg font-semibold text-amber-400 mb-4">Portfolio Value Over Time — Key Scenarios</h4>
+            <Section tab="socialsecurity" id="overTime" title={<>Portfolio Value Over Time — Key Scenarios</>} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
               <ResponsiveContainer width="100%" height={400}>
                 <LineChart data={portfolioChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -9472,11 +9651,10 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                   ? 'Shows both-claim-early, both-at-FRA, both-claim-late, and the asymmetric strategy (higher earner late / lower earner early) that is often recommended.'
                   : 'Shows portfolio trajectories for early (62), FRA (67), and delayed (70) claiming.'}
               </p>
-            </div>
+            </Section>
 
             {/* Planning Notes */}
-            <div className={`${cardStyle} bg-slate-800/30`}>
-              <h4 className="text-lg font-semibold text-slate-300 mb-3">📝 What to Consider</h4>
+            <Section tab="socialsecurity" id="considerations" title={"📝 What to Consider"} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility} className={`${cardStyle} bg-slate-800/30`}>
               <div className="space-y-2 text-sm text-slate-400">
                 <p>These projections use your actual plan data — tax brackets, withdrawal priority, RMD schedules, Roth conversions, and state taxes are all calculated for each scenario. A few things to keep in mind:</p>
                 <p><span className="text-slate-300 font-medium">Taxes are complex:</span> More SS income means more SS is taxable (up to 85%), but it also means fewer withdrawals from tax-deferred accounts, which reduces taxable income from that source. These effects partially offset, which is why the tax differences between scenarios are often smaller than expected.</p>
@@ -9488,7 +9666,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, incomeStreams
                 )}
                 <p><span className="text-slate-300 font-medium">Life expectancy uncertainty:</span> These projections assume you live to age {legacyAge}. If longevity is shorter, earlier claiming may win; if longer, delayed claiming becomes increasingly valuable. Adjust the life expectancy slider at the top of the tab to test different assumptions.</p>
               </div>
-            </div>
+            </Section>
           </>
         );
       })()}
@@ -13473,20 +13651,28 @@ function LifestyleVsLegacy({ projections, personalInfo, accounts, incomeStreams,
 // ============================================
 // DashboardTab — Lifted to module scope
 // ============================================
-function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections, recurringExpenses, setActiveTab, setDashboardVisibility, setShowDashboardSettings, showDashboardSettings, showTourOffer }) {
+function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, detailLevel, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections, recurringExpenses, setActiveTab, sectionVisibility, setDashboardVisibility, setDetailLevel, setSectionVisibility, setShowDashboardSettings, showDashboardSettings, showTourOffer }) {
   // Session-only: the banner should stop nagging once acknowledged, but must come
   // back next visit while real numbers are still missing.
   const [estimatesDismissed, setEstimatesDismissed] = useState(false);
   const current = projections[0];
   
-  // Use dashboardVisibility from parent state (passed via closure)
-  const visibilitySettings = dashboardVisibility;
-  const setVisibilitySettings = setDashboardVisibility;
+  // The dashboard's section guards stay as they are — `visibilitySettings.x &&`
+  // reads fine and there are a dozen of them — but the ANSWER now comes from the
+  // shared per-tab store, so the detail level reaches this tab too and there is
+  // one source of truth rather than a bespoke map here and a manifest everywhere
+  // else. A Proxy would be cleverer; a plain object built from the manifest is
+  // easier to be sure about.
+  const visibilitySettings = {};
+  SECTION_MANIFEST.dashboard.forEach(e => {
+    visibilitySettings[e.id] = sectionIsVisible(sectionVisibility, detailLevel, 'dashboard', e.id);
+  });
   const showSettings = showDashboardSettings;
   const setShowSettings = setShowDashboardSettings;
-  
+
   const toggleVisibility = (key) => {
-    setVisibilitySettings(prev => ({ ...prev, [key]: !prev[key] }));
+    const on = sectionIsVisible(sectionVisibility, detailLevel, 'dashboard', key);
+    setSectionVisibility(prev => ({ ...prev, dashboard: { ...(prev.dashboard || {}), [key]: !on } }));
   };
   
   // Retirement age: always use personalInfo as source of truth
@@ -13604,41 +13790,12 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
         </button>
       </div>
 
-      {/* Settings Panel */}
-      {showSettings && (
-        <div className={cardStyle}>
-          <h3 className="text-lg font-semibold text-slate-100 mb-3">Dashboard Visibility Settings</h3>
-          <p className="text-sm text-slate-400 mb-4">Toggle sections on/off. Hidden sections can be restored here.</p>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {[
-              { key: 'summaryCards', label: 'Summary Cards' },
-              { key: 'netWorth', label: 'Net Worth Projection' },
-              { key: 'retirementIncome', label: 'Retirement Income vs Spending' },
-              { key: 'cashFlow', label: 'Annual Cash Flow' },
-              { key: 'withdrawalRate', label: 'Portfolio Withdrawal Rate' },
-              { key: 'taxSummary', label: 'Lifetime Tax Summary' },
-              { key: 'safeSpending', label: 'Safe Spending Capacity' },
-              { key: 'coastFire', label: 'Coast FIRE Indicator' },
-              { key: 'lifestyleLegacy', label: 'Lifestyle vs Legacy' },
-            ].map(({ key, label }) => (
-              <button
-                key={key}
-                onClick={() => toggleVisibility(key)}
-                className={`px-4 py-3 rounded-lg border text-left transition-all ${
-                  visibilitySettings[key]
-                    ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
-                    : 'bg-slate-800/40 border-slate-700/40 text-slate-500'
-                }`}
-              >
-                <div className="text-sm font-medium">{label}</div>
-                <div className="text-xs mt-1 opacity-70">
-                  {visibilitySettings[key] ? '✓ Visible' : '✗ Hidden'}
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* The section list used to be written out again here, next to a chain of
+          `visibilitySettings.x &&` guards that had to agree with it by hand. Both
+          now come from SECTION_MANIFEST. */}
+      <div className={cardStyle}>
+        <SectionControls tab="dashboard" vis={sectionVisibility} setVis={setSectionVisibility} level={detailLevel} setLevel={setDetailLevel} />
+      </div>
 
       {/* Compact Summary Row */}
       {visibilitySettings.summaryCards && (
@@ -18868,6 +19025,12 @@ function RetirementPlanner() {
     return savedData?.recurringExpenses || DEFAULT_RECURRING_EXPENSES;
   });
 
+  // Per-tab section visibility plus one global detail level. Only EXPLICIT
+  // choices live in sectionVisibility; everything else follows the level, so a
+  // user who has never touched a toggle keeps getting sensible defaults as
+  // sections are added rather than a frozen snapshot of an old manifest.
+  const [sectionVisibility, setSectionVisibility] = useState(() => savedData?.sectionVisibility || {});
+  const [detailLevel, setDetailLevel] = useState(() => savedData?.detailLevel || 'standard');
   const [dashboardVisibility, setDashboardVisibility] = useState(() => {
     return savedData?.dashboardVisibility || DEFAULT_DASHBOARD_VISIBILITY;
   });
@@ -18945,7 +19108,7 @@ function RetirementPlanner() {
   // Auto-save to localStorage with debouncing to prevent excessive saves
   useEffect(() => {
     const saveTimer = setTimeout(() => {
-      const data = { personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, scenarios, currentYear: currentYearData, lastSaved: new Date().toISOString() };
+      const data = { personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, sectionVisibility, detailLevel, scenarios, currentYear: currentYearData, lastSaved: new Date().toISOString() };
       const result = saveToStorage(data);
       if (result.ok) {
         setSaveStatus('Saved');
@@ -18965,7 +19128,7 @@ function RetirementPlanner() {
       clearTimeout(saveTimer);
       clearTimeout(clearTimer);
     };
-  }, [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, scenarios, currentYearData]);
+  }, [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, sectionVisibility, detailLevel, scenarios, currentYearData]);
   
   // Export data as JSON file
   const handleExport = () => {
@@ -18977,6 +19140,8 @@ function RetirementPlanner() {
       oneTimeEvents,
       recurringExpenses,
       dashboardVisibility,
+      sectionVisibility,
+      detailLevel,
       scenarios,
       currentYear: currentYearData,
       exportDate: new Date().toISOString(),
@@ -19066,6 +19231,8 @@ function RetirementPlanner() {
         // fields here so re-import doesn't fail and the data isn't lost (it's still in
         // the JSON file the user has on disk).
         setDashboardVisibility(data.dashboardVisibility || DEFAULT_DASHBOARD_VISIBILITY);
+        setSectionVisibility(data.sectionVisibility || {});
+        setDetailLevel(data.detailLevel || 'standard');
         if (data.scenarios) setScenarios(data.scenarios);
         // Default-merged, not assigned: an export written before a currentYear
         // field existed must gain it rather than arrive missing it.
@@ -19464,17 +19631,17 @@ function RetirementPlanner() {
         {/* Main Content */}
         <main className="flex-1 overflow-y-auto p-6">
           <div className="max-w-7xl mx-auto">
-            {activeTab === 'dashboard' && <DashboardTab accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
+            {activeTab === 'dashboard' && <DashboardTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
             {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
             {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
             {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={projections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
-            {activeTab === 'socialsecurity' && <SocialSecurityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
+            {activeTab === 'socialsecurity' && <SocialSecurityTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
             {activeTab === 'scenarios' && <ScenarioComparisonTab activeScenarioId={activeScenarioId} assets={assets} computeProjections={computeProjections} createScenario={createScenario} deleteScenario={deleteScenario} loadScenario={loadScenario} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} scenarios={scenarios} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'currentyear' && <CurrentYearTab currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'withdrawal' && <WithdrawalStrategiesTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} />}
-            {activeTab === 'montecarlo' && <MonteCarloTab accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'montecarlo' && <MonteCarloTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'stresstest' && <StressTestTab accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'sensitivity' && <SensitivityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'assistant' && <AiAssistantTab onApply={applyAiPlan} plan={livePlan} projections={projections} />}

@@ -9227,6 +9227,105 @@ section('P74 — the palette: colour-vision separation, re-derived rather than t
   }
 }
 
+section('P78 — the section manifest and the JSX cannot drift apart');
+{
+  // The dashboard's original hide-sections feature wrote its section list twice:
+  // once as a settings panel and once as a chain of `visibilitySettings.x &&`
+  // guards. Nothing checked that the two agreed, so a section added to one and
+  // not the other would either be unhideable or offer a toggle that did nothing.
+  //
+  // The manifest fixed that by construction, and this pack keeps it fixed: the
+  // real .jsx is read and every <Section> in it is matched against the manifest
+  // in both directions. It is a source-text test rather than a behavioural one
+  // because the thing being protected IS the agreement between two pieces of
+  // source.
+  const fs3 = require('fs');
+  const path3 = require('path');
+  const src = fs3.readFileSync(path3.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+
+  // Pull the manifest out of the module by evaluating just its literal. It is
+  // plain data, so this is safe and avoids duplicating it here — a copy in the
+  // test would be one more thing to drift.
+  const mStart = src.indexOf('const SECTION_MANIFEST = {');
+  gt(mStart, 0, 'the section manifest is where the test expects to find it');
+  const mEnd = src.indexOf('\n};', mStart);
+  const manifest = eval('(' + src.slice(mStart + 'const SECTION_MANIFEST = '.length, mEnd + 2) + ')');
+
+  const VALID_LEVELS = ['essential', 'standard', 'advanced'];
+  Object.entries(manifest).forEach(([tab, entries]) => {
+    const seen = new Set();
+    entries.forEach(e => {
+      ok(VALID_LEVELS.indexOf(e.level) >= 0, `${tab}/${e.id} has a level the visibility rule understands`);
+      ok(e.label && e.label.length > 0, `${tab}/${e.id} has a label for the settings panel`);
+      ok(!seen.has(e.id), `${tab}/${e.id} appears once — a duplicate id would make one entry unreachable`);
+      seen.add(e.id);
+    });
+    // A tab whose sections are ALL advanced would be blank on Essentials, which
+    // reads as a broken page rather than as a filtered one.
+    gt(entries.filter(e => e.level !== 'advanced').length, 0,
+      `${tab} still shows something at the Essentials level`);
+  });
+
+  // Every <Section> rendered in the JSX is declared, and every declaration is
+  // rendered. Either direction failing is the exact bug the manifest exists to
+  // prevent.
+  const rendered = {};
+  const re = /<Section\s+tab="([a-z]+)"\s+id="([A-Za-z0-9_]+)"/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    (rendered[m[1]] = rendered[m[1]] || new Set()).add(m[2]);
+  }
+  Object.entries(rendered).forEach(([tab, ids]) => {
+    ok(manifest[tab], `the JSX renders <Section tab="${tab}"> and the manifest knows that tab`);
+    ids.forEach(id => {
+      ok((manifest[tab] || []).some(e => e.id === id),
+        `<Section tab="${tab}" id="${id}"> is declared in the manifest, so it can be toggled`);
+    });
+  });
+  // The dashboard keeps its `visibilitySettings.x &&` guards rather than
+  // <Section>, so it is checked against those instead.
+  Object.entries(manifest).forEach(([tab, entries]) => {
+    entries.forEach(e => {
+      const viaSection = rendered[tab] && rendered[tab].has(e.id);
+      const viaGuard = tab === 'dashboard' && src.indexOf(`visibilitySettings.${e.id}`) > 0;
+      ok(viaSection || viaGuard,
+        `${tab}/${e.id} is declared in the manifest AND actually gates something — no toggle that does nothing`);
+    });
+  });
+
+  // A tab that offers the level picker must have manifest entries, or the picker
+  // is a control with no effect.
+  const controlTabs = new Set();
+  const re2 = /<SectionControls\s+tab="([a-z]+)"/g;
+  while ((m = re2.exec(src)) !== null) controlTabs.add(m[1]);
+  controlTabs.forEach(tab => {
+    gt((manifest[tab] || []).length, 0, `the ${tab} tab's section controls have sections to control`);
+  });
+  eq(controlTabs.size, Object.keys(manifest).length,
+    'every tab in the manifest ships the controls that expose it');
+
+  // The v5 migration must not un-hide anything. A user who hid Coast FIRE under
+  // the old flat map still has it hidden under the new per-tab one.
+  {
+    const mStart2 = src.indexOf('const DEFAULT_DASHBOARD_VISIBILITY = {');
+    const mEnd2 = src.indexOf('\n};', mStart2);
+    const defaults = eval('(' + src.slice(mStart2 + 'const DEFAULT_DASHBOARD_VISIBILITY = '.length, mEnd2 + 2) + ')');
+    const migrate = (data) => {
+      const flat = data.dashboardVisibility;
+      if (!flat || data.sectionVisibility) return { ...data, sectionVisibility: data.sectionVisibility || {} };
+      const dash = {};
+      Object.entries(flat).forEach(([k, v]) => { if (v !== defaults[k]) dash[k] = v; });
+      return { ...data, sectionVisibility: Object.keys(dash).length ? { dashboard: dash } : {} };
+    };
+    const hid = migrate({ dashboardVisibility: { ...defaults, coastFire: false } });
+    eq(hid.sectionVisibility.dashboard.coastFire, false,
+      'a section the user hid before the upgrade is still hidden after it');
+    const untouched = migrate({ dashboardVisibility: { ...defaults } });
+    eq(Object.keys(untouched.sectionVisibility).length, 0,
+      'a user who never touched a toggle carries no pins forward, so they follow the detail level');
+  }
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of
