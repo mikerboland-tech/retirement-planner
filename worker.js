@@ -858,6 +858,44 @@ function runRothOptimizer(jobId, payload) {
     }));
   }
 
+  // STAGED schedules: convert hard while the income is invisible to Medicare,
+  // then fall back once it is not. This is the strategy the staged-conversion
+  // feature exists to express, and until now the sweep had no vocabulary for it —
+  // it could offer "fill to 24% for twelve years" or "hold IRMAA tier 1 for
+  // twelve years", but not the thing that is usually better than both, which is
+  // to do the first until 62 and the second afterwards.
+  //
+  // A conversion at age A sets the premium at A+2 and Medicare starts at 65, so
+  // ages 62 and earlier are free. That is a real hinge in the plan, not a
+  // preference, which is why these candidates are generated rather than left for
+  // the user to think of.
+  //
+  // Only over the plan's own default window, and only where that window actually
+  // straddles the hinge — outside it irmaaAwareConversionStages collapses to one
+  // stage, which would just duplicate a bracket or tier candidate already swept.
+  {
+    const lastFree = (E.MEDICARE_ELIGIBILITY_AGE || 65) - (E.IRMAA_TIER_LOOKBACK_YEARS || 2) - 1;
+    const straddles = defWin.startAge <= lastFree && defWin.endAge > lastFree;
+    if (straddles) {
+      const freeBrackets = ['22%', '24%', '32%'];
+      const chargedTiers = irmaaTiers.map(t => t.index);
+      freeBrackets.forEach(fb => chargedTiers.forEach(ct => {
+        const stages = E.irmaaAwareConversionStages(personalInfo, {
+          freeBracket: fb, chargedTier: ct, startAge: defWin.startAge, endAge: defWin.endAge,
+        });
+        if (stages.length < 2) return;
+        strategies.push({
+          label: `Fill to ${fb} through ${lastFree}, then hold IRMAA tier ${ct}, ages ${defWin.startAge}–${defWin.endAge}`,
+          bracket: '', window: { startAge: defWin.startAge, endAge: defWin.endAge },
+          stages,
+          pi: withRothConversionTarget(personalInfo, {
+            stages, startAge: defWin.startAge, endAge: defWin.endAge,
+          }),
+        });
+      }));
+    }
+  }
+
   // The far bookend: empty the pre-tax account entirely over each window. Almost
   // never the winner, and that is the point — without it the sweep only ever
   // offers partial fills, so a reader cannot see where the ceiling is or what
@@ -922,6 +960,9 @@ function runRothOptimizer(jobId, payload) {
       // Carried so Apply reproduces a drain candidate: it is a fixed-amount
       // strategy, and without the amount Apply would clear the row it came from.
       drainAmount: s.drainAmount || null,
+      // Same reason, for the staged rows: the schedule IS the strategy, and no
+      // combination of bracket + tier + window can reconstruct it.
+      stages: s.stages || null,
       guardrail: !!s.guardrail,
       startAge: s.window ? s.window.startAge : null,
       endAge: s.window ? s.window.endAge : null,

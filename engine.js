@@ -4863,6 +4863,15 @@ const withoutRothConversions = (pi) => ({
   rothConversionAmount: 0,
   rothConversionBracket: '',
   rothConversionIrmaaTier: null,
+  // Stages have to go too, and this is the whole reason: conversionStagesOf
+  // consults an explicit schedule BEFORE any of the scalar modes, so a schedule
+  // left in place silently overrides the target being set. In the optimizer that
+  // meant a user with a staged plan got a sweep in which every candidate — 12%
+  // fill, 32% fill, drain-everything — produced the identical projection, all of
+  // them being their own plan wearing twenty different labels. The three fields
+  // above were cleared for exactly this reason; stages were added later and this
+  // was not updated with them.
+  rothConversionStages: null,
 });
 
 // A copy of the plan converting to exactly ONE target. Used to build candidate
@@ -4870,6 +4879,11 @@ const withoutRothConversions = (pi) => ({
 // would let it override the candidate and make every candidate identical.
 const withRothConversionTarget = (pi, target = {}) => ({
   ...withoutRothConversions(pi),
+  // A staged schedule is a target in its own right — "fill to 24% while IRMAA
+  // cannot see it, then hold an IRMAA tier once it can" is not expressible as any
+  // single bracket or tier. Passed explicitly so it is opted into, never
+  // inherited.
+  ...(Array.isArray(target.stages) && target.stages.length ? { rothConversionStages: target.stages } : {}),
   ...(target.bracket ? { rothConversionBracket: target.bracket } : {}),
   ...(Number.isInteger(target.irmaaTier) ? { rothConversionIrmaaTier: target.irmaaTier } : {}),
   ...(target.amount > 0 ? { rothConversionAmount: target.amount } : {}),

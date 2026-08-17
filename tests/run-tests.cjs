@@ -9326,6 +9326,92 @@ section('P78 — the section manifest and the JSX cannot drift apart');
   }
 }
 
+section('P79 — the optimizer can see a staged schedule, and stops scoring it twenty times');
+{
+  // Two bugs, one cause. conversionStagesOf consults an explicit schedule BEFORE
+  // any scalar mode, and engine.withoutRothConversions — whose entire job is to strip
+  // the inherited strategy so a candidate describes only itself — did not clear
+  // it. So for any user with a staged plan, EVERY candidate in the optimizer
+  // sweep inherited their schedule and produced the identical projection: twenty
+  // rows, one strategy, ranked against each other.
+  //
+  // Measured before the fix on this fixture: the 12% candidate and the 32%
+  // candidate both converted $781,263, which is exactly what the user's own
+  // staged plan converts.
+  const sc = baseScenario({ rothConversionBracket: '24%', rothConversionStartAge: 60, rothConversionEndAge: 72 });
+  const conv = (p) => computeProjections(p, sc.accts, sc.streams, [], [], [])
+    .reduce((sum, r) => sum + (r.rothConversion || 0), 0);
+  const stages = engine.irmaaAwareConversionStages(sc.pi);
+  const staged = { ...sc.pi, rothConversionStages: stages };
+
+  eq(stages.length, 2, 'the plan straddles the IRMAA hinge, so the schedule has a free stage and a charged one');
+  eq(engine.withoutRothConversions(staged).rothConversionStages, null,
+    'stripping the strategy strips the SCHEDULE too — the field that used to survive it');
+
+  const c12 = engine.withRothConversionTarget(staged, { bracket: '12%', startAge: 60, endAge: 72 });
+  const c32 = engine.withRothConversionTarget(staged, { bracket: '32%', startAge: 60, endAge: 72 });
+  eq(c12.rothConversionStages, null,
+    'a bracket candidate built from a staged plan carries no schedule to override it');
+  ok(Math.round(conv(c12)) !== Math.round(conv(c32)),
+    'two different bracket candidates now differ — before the fix both returned the staged plan');
+  ok(Math.round(conv(c12)) !== Math.round(conv(staged)),
+    'a candidate is no longer just the user\'s own plan wearing a different label');
+  gt(conv(c32), conv(c12), 'and they are ordered the way the brackets are');
+
+  // A schedule passed as a target survives, because there it IS the strategy.
+  const cst = engine.withRothConversionTarget(sc.pi, { stages, startAge: 60, endAge: 72 });
+  ok(Array.isArray(cst.rothConversionStages), 'a staged candidate keeps the schedule it was given');
+  approx(conv(cst), conv(staged),
+    'a staged candidate reproduces the staged plan exactly — which is what makes Apply on that row honest', 1e-9);
+
+  // The staged strategy has to be a real alternative, not a relabelling of one of
+  // the single-target candidates. If a bracket sweep could reproduce it there
+  // would be no reason to generate it.
+  {
+    const lastFree = engine.MEDICARE_ELIGIBILITY_AGE - engine.IRMAA_TIER_LOOKBACK_YEARS - 1;
+    eq(lastFree, 62, 'ages 62 and earlier are invisible to IRMAA, which is where the hinge comes from');
+    const st = engine.irmaaAwareConversionStages(sc.pi, { freeBracket: '24%', chargedTier: 1, startAge: 60, endAge: 72 });
+    eq(st[0].endAge, 62, 'the aggressive stage runs through the last IRMAA-free year');
+    eq(st[1].startAge, 63, 'and the cautious stage picks up the year the surcharge starts being set');
+    // The second stage only binds if there is still a pre-tax balance when it
+    // starts. On the default fixture a 24% fill empties a $1M IRA in three years,
+    // so the schedule coincides with the flat 24% fill — correct, and worth
+    // pinning, because it is the case where the staged row is genuinely a
+    // duplicate rather than a distinct strategy.
+    const drainedByHinge = conv(engine.withRothConversionTarget(sc.pi, { stages: st, startAge: 60, endAge: 72 }));
+    const flat24 = conv(engine.withRothConversionTarget(sc.pi, { bracket: '24%', startAge: 60, endAge: 72 }));
+    approx(drainedByHinge, flat24,
+      'when the aggressive stage drains the account before the hinge, the schedule IS the flat fill', 1e-9);
+
+    // With enough pre-tax left to reach the charged years, the schedule becomes a
+    // real third strategy: harder than the tier cap while IRMAA cannot see it,
+    // softer than the bracket fill once it can.
+    const big = baseScenario({ rothConversionStartAge: 60, rothConversionEndAge: 72 });
+    big.accts = big.accts.map(a => a.type === '401k' ? { ...a, balance: 6000000 } : a);
+    const convBig = (p) => computeProjections(p, big.accts, big.streams, [], [], [])
+      .reduce((sum, r) => sum + (r.rothConversion || 0), 0);
+    const stBig = engine.irmaaAwareConversionStages(big.pi, { freeBracket: '24%', chargedTier: 1, startAge: 60, endAge: 72 });
+    const stagedBig = convBig(engine.withRothConversionTarget(big.pi, { stages: stBig, startAge: 60, endAge: 72 }));
+    const bigFill24 = convBig(engine.withRothConversionTarget(big.pi, { bracket: '24%', startAge: 60, endAge: 72 }));
+    const bigTier1 = convBig(engine.withRothConversionTarget(big.pi, { irmaaTier: 1, startAge: 60, endAge: 72 }));
+    ok(Math.round(stagedBig) !== Math.round(bigFill24) && Math.round(stagedBig) !== Math.round(bigTier1),
+      'with the account still alive at the hinge, the schedule is not reproducible by either single target');
+    const lo = Math.min(bigFill24, bigTier1), hi = Math.max(bigFill24, bigTier1);
+    ok(stagedBig >= lo - 1 && stagedBig <= hi + 1,
+      'and it lands between the two, which is the whole point of switching at the hinge');
+  }
+
+  // A window that does not straddle the hinge collapses to one stage. The sweep
+  // skips those, because a one-stage schedule IS a single-target candidate and
+  // would be a duplicate row.
+  {
+    const early = engine.irmaaAwareConversionStages(sc.pi, { startAge: 58, endAge: 61 });
+    eq(early.length, 1, 'a window ending before the hinge is a one-stage plan');
+    const late = engine.irmaaAwareConversionStages(sc.pi, { startAge: 66, endAge: 72 });
+    eq(late.length, 1, 'and so is one starting after it');
+  }
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of

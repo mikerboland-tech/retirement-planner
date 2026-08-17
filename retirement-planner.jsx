@@ -4319,6 +4319,10 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
       // bracket would clear the tier and apply an empty bracket — Apply would
       // silently turn the recommended strategy off.
       ...withRothConversionTarget(prev, {
+        // A staged row's schedule IS the strategy — no bracket + tier + window
+        // can reconstruct "fill to 24% until 62, then hold tier 1". Passing it
+        // through is what makes Apply on those rows mean anything.
+        stages: Array.isArray(row.stages) && row.stages.length ? row.stages : undefined,
         bracket: row.bracket || '',
         irmaaTier: Number.isInteger(row.irmaaTier) ? row.irmaaTier : undefined,
         // A "convert everything" row is a fixed-amount strategy. Without the
