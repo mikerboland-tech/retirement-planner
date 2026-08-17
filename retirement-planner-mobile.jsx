@@ -1,7 +1,8 @@
 // ── shared calc engine (loaded via <script src="engine.js"> in mobile.html) ──
 const PlannerEngine = (typeof window !== 'undefined' && window.PlannerEngine) || {};
 const {
-  MAX_AGE, BROKERAGE_COST_BASIS_ESTIMATE, MAX_ITERATIONS_FOR_TAX_CALC, MONTE_CARLO_TAX_ESTIMATE, SAVE_DEBOUNCE_MS, PRE_TAX_TYPES, ROTH_TYPES, BROKERAGE_TYPES, HSA_TYPES, isPreTaxAccount, isRothAccount, isBrokerageAccount, isHSAAccount, FEDERAL_TAX_BRACKETS_2026, STANDARD_DEDUCTION_2026, STATE_TAX_RATES, STATES_EXEMPT_RETIREMENT_INCOME, STATES_EXEMPT_ALL_RETIREMENT_DISTRIBUTIONS, STATES_THAT_TAX_SS, ALABAMA_TAX_BRACKETS, ALABAMA_PERSONAL_EXEMPTION, ALABAMA_OVER_65_RETIREMENT_EXCLUSION, getAlabamaStandardDeduction, calculateAlabamaTax, FICA_SS_RATE, FICA_SS_WAGE_BASE_2025, FICA_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_THRESHOLD, calculateFICA, RMD_FACTORS, IRMAA_THRESHOLDS_2025, SS_FULL_RETIREMENT_AGE, ACA_FPL_2025, QCD_ANNUAL_LIMIT, QCD_START_AGE, SS_EARNINGS_TEST_LIMIT_2025, SS_EARNINGS_TEST_FRA_LIMIT_2025, MEDICARE_PART_B_STANDARD_2025, calculateIRMAA, calculateIRMAASurcharge, calculateSSEarningsTestReduction, calculateSSBenefit, getRmdStartAge, getDefaultRothConversionWindow, calculateACASubsidy, calculateHealthcareExpenses, calculateRecurringExpenses, MEDICARE_PART_B_PREMIUM_2025, MEDICARE_PART_D_PREMIUM_2025, MEDICARE_SUPPLEMENT_PREMIUM_2025, MEDICARE_OOP_ANNUAL_2025, PRE_65_HEALTHCARE_ANNUAL_2025, MEDICAL_INFLATION_RATE, LTC_MONTHLY_ASSISTED_LIVING_2025, LTC_DEFAULT_DURATION_MONTHS, calculateFederalTax, calculateStateTax, calculateRMD, calculateSocialSecurityTaxableAmount, CAPITAL_GAINS_THRESHOLDS_2025, calculateCapitalGainsTax, calculateNIIT, computeProjections
+  MAX_AGE, BROKERAGE_COST_BASIS_ESTIMATE, MAX_ITERATIONS_FOR_TAX_CALC, MONTE_CARLO_TAX_ESTIMATE, SAVE_DEBOUNCE_MS, PRE_TAX_TYPES, ROTH_TYPES, BROKERAGE_TYPES, HSA_TYPES, isPreTaxAccount, isRothAccount, isBrokerageAccount, isHSAAccount, FEDERAL_TAX_BRACKETS_2026, STANDARD_DEDUCTION_2026, STATE_TAX_RATES, STATES_EXEMPT_RETIREMENT_INCOME, STATES_EXEMPT_ALL_RETIREMENT_DISTRIBUTIONS, STATES_THAT_TAX_SS, ALABAMA_TAX_BRACKETS, ALABAMA_PERSONAL_EXEMPTION, ALABAMA_OVER_65_RETIREMENT_EXCLUSION, getAlabamaStandardDeduction, calculateAlabamaTax, FICA_SS_RATE, FICA_SS_WAGE_BASE_2025, FICA_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_THRESHOLD, calculateFICA, RMD_FACTORS, IRMAA_THRESHOLDS_2025, SS_FULL_RETIREMENT_AGE, ACA_FPL_2025, QCD_ANNUAL_LIMIT, QCD_START_AGE, SS_EARNINGS_TEST_LIMIT_2025, SS_EARNINGS_TEST_FRA_LIMIT_2025, MEDICARE_PART_B_STANDARD_2025, calculateIRMAA, calculateIRMAASurcharge, calculateSSEarningsTestReduction, calculateSSBenefit, getRmdStartAge, getDefaultRothConversionWindow, calculateACASubsidy, calculateHealthcareExpenses, calculateRecurringExpenses, MEDICARE_PART_B_PREMIUM_2025, MEDICARE_PART_D_PREMIUM_2025, MEDICARE_SUPPLEMENT_PREMIUM_2025, MEDICARE_OOP_ANNUAL_2025, PRE_65_HEALTHCARE_ANNUAL_2025, MEDICAL_INFLATION_RATE, LTC_MONTHLY_ASSISTED_LIVING_2025, LTC_DEFAULT_DURATION_MONTHS, calculateFederalTax, calculateStateTax, calculateRMD, calculateSocialSecurityTaxableAmount, CAPITAL_GAINS_THRESHOLDS_2025, calculateCapitalGainsTax, calculateNIIT, computeProjections,
+  planShortfall, breakingPoint, STRESS_DIMENSIONS
 } = PlannerEngine;
 
 // React globals are provided by mobile.html
@@ -246,6 +247,146 @@ function IncomeStreamSection({ title, accentColor, enabled, onToggle, annualPrev
 
 // A simple toggle row used inside an IncomeStreamSection (for the COLA toggle).
 // Compact, designed to fit alongside other compact controls.
+// ── WHAT BREAKS FIRST ───────────────────────────────────────────────────────
+// The desktop app carries three long-form reports. Only this one ports: the
+// other two are about inputs mobile does not collect. The Widow's Year is the
+// tax cliff a surviving spouse walks into when filing turns from joint to
+// single, and mobile is single-filer with no spouse in the model at all — there
+// is no transition to report on. The Roth Roadmap is a schedule for moving money
+// from pre-tax to Roth, and mobile has one blended portfolio rather than the
+// bucket split that report is entirely about. Rendering either here would mean
+// inventing a household the user never entered.
+//
+// What Breaks First needs only a projection and the levers mobile already has,
+// so it ports honestly — and it is the one that answers the question people
+// actually pull out a phone to ask.
+//
+// The edges come from the engine's own bisection, so a number here and the same
+// number on desktop are produced by the same code rather than by two
+// implementations that agree until they don't.
+function BreakingPointPanel({ ctx, projections, retirementAge }) {
+  const [open, setOpen] = useState(false);
+  const [edges, setEdges] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const ledger = useMemo(
+    () => (planShortfall ? planShortfall(projections, { retirementAge }) : null),
+    [projections, retirementAge]);
+
+  // Three bisections is roughly fifty projections. Fast on a laptop, not
+  // necessarily on a phone, so it runs on demand rather than on every keystroke —
+  // and the inputs above change constantly on a slider-driven UI.
+  const findEdges = () => {
+    if (!breakingPoint) return;
+    setBusy(true);
+    setTimeout(() => {
+      try {
+        setEdges({
+          returnDrop: breakingPoint(ctx, 'returnDrop'),
+          inflation: breakingPoint(ctx, 'inflation'),
+          spending: breakingPoint(ctx, 'spending'),
+        });
+      } catch (e) {
+        setEdges({ error: e.message });
+      }
+      setBusy(false);
+    }, 30);
+  };
+
+  if (!ledger) return null;
+  const fmt = (n) => '$' + Math.round(n || 0).toLocaleString('en-US');
+  const survives = !ledger.fails;
+
+  return (
+    <div className="mt-3">
+      <button
+        onClick={() => { setOpen(!open); if (!open && !edges) findEdges(); }}
+        className="w-full py-2.5 text-sm text-slate-400 border border-slate-700 rounded-lg active:bg-slate-800 transition-colors"
+      >
+        {open ? '▲ Hide what breaks first' : '▼ What breaks first?'}
+      </button>
+
+      {open && (
+        <div className="mt-3 space-y-3 text-sm bg-slate-800/40 border border-slate-700 rounded-lg p-3">
+          {/* The verdict, before any of the diagnostics. */}
+          <div>
+            <div className={survives ? 'text-emerald-300 font-semibold' : 'text-red-300 font-semibold'}>
+              {survives ? 'The plan funds every year' : `Short in ${ledger.shortYearCount} year${ledger.shortYearCount === 1 ? '' : 's'}`}
+            </div>
+            {!survives && ledger.firstShortYear && (
+              <div className="text-slate-400 text-xs mt-1">
+                First shortfall at age {ledger.firstShortYear.myAge}
+                {ledger.worstYear && <> · worst is {fmt(ledger.worstYear.unfundedShortfall)} at age {ledger.worstYear.myAge}</>}
+              </div>
+            )}
+            {/* A plan can be short for a while and fully funded again once a
+                pension or Social Security starts. A legacy figure hides that
+                completely, which is why it is called out rather than folded in. */}
+            {!survives && ledger.recovers && (
+              <div className="text-amber-300 text-xs mt-1">
+                It recovers — income starting later covers spending from age {(ledger.lastShortYear || {}).myAge + 1} on.
+              </div>
+            )}
+            {survives && ledger.depletedYear && (
+              <div className="text-amber-300 text-xs mt-1">
+                Every year is funded, but the portfolio hits zero at age {ledger.depletedYear.myAge} and income carries it from there.
+              </div>
+            )}
+          </div>
+
+          <div className="border-t border-slate-700 pt-3">
+            <div className="text-slate-300 font-medium mb-1">How much room is there?</div>
+            <p className="text-[11px] text-slate-500 mb-2 leading-relaxed">
+              Each row is the value at which this plan gives way, with everything else held where it is — not a guess at what is likely.
+            </p>
+            {busy && <div className="text-slate-500 text-xs">Finding the edges…</div>}
+            {edges && edges.error && <div className="text-red-300 text-xs">Could not compute: {edges.error}</div>}
+            {edges && !edges.error && (
+              <div className="space-y-2">
+                <EdgeRow label="Return shortfall it survives"
+                         edge={edges.returnDrop}
+                         format={(v) => `${(v * 100).toFixed(1)} pts below ${'' + (ctx.accts[0] ? (ctx.accts[0].cagr * 100).toFixed(1) : '?')}%`} />
+                <EdgeRow label="Inflation it survives"
+                         edge={edges.inflation}
+                         format={(v) => `${(v * 100).toFixed(1)}%`} />
+                <EdgeRow label="Spending it supports"
+                         edge={edges.spending}
+                         format={(v) => fmt(v) + '/yr'} />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One edge, and it has three outcomes rather than two — printing a number for all
+// of them would be wrong in two of the three cases.
+//
+//   alreadyFails  — the plan is short as it stands, so there is no cushion to
+//                   measure. Reporting the range's endpoint here would show a
+//                   comfortable margin for a plan that is already failing.
+//   survivesRange — nothing inside the tested range breaks it. That is a real
+//                   answer, not a missing one.
+//   otherwise     — `value` is the last value that survives, stated
+//                   conservatively by the engine's bisection.
+function EdgeRow({ label, edge, format }) {
+  if (!edge) return null;
+  return (
+    <div className="flex justify-between items-baseline gap-3">
+      <span className="text-slate-400 text-xs">{label}</span>
+      <span className="tabular-nums text-xs text-right">
+        {edge.alreadyFails
+          ? <span className="text-red-300">already short</span>
+          : edge.survivesRange
+            ? <span className="text-emerald-300">holds throughout</span>
+            : <span className="text-slate-200">{format(edge.value)}</span>}
+      </span>
+    </div>
+  );
+}
+
 function ToggleRow({ label, value, onChange, hint }) {
   return (
     <div className="flex items-center justify-between py-1.5">
@@ -335,7 +476,7 @@ function MobilePlanner() {
   // === Run the engine ===
   // Build minimal personalInfo/accounts/streams from the simple inputs.
   // Use useMemo so calc only re-runs when inputs change.
-  const { projections, retirementProj, legacyProj, sustainableAnnual, ssAnnual, pensionFirstYear, otherFirstYear, guaranteedAtRetirement } = useMemo(() => {
+  const { projections, stressCtx, retirementProj, legacyProj, sustainableAnnual, ssAnnual, pensionFirstYear, otherFirstYear, guaranteedAtRetirement } = useMemo(() => {
     const pi = {
       myAge: currentAge,
       myBirthYear: birthYear,
@@ -462,7 +603,7 @@ function MobilePlanner() {
       proj = computeProjections(pi, accounts, streams, [], [], []);
     } catch (e) {
       console.error('Projection error:', e);
-      return { projections: [], retirementProj: null, legacyProj: null, sustainableAnnual: 0, ssAnnual: 0, pensionFirstYear: 0, otherFirstYear: 0, guaranteedAtRetirement: 0 };
+      return { projections: [], stressCtx: null, retirementProj: null, legacyProj: null, sustainableAnnual: 0, ssAnnual: 0, pensionFirstYear: 0, otherFirstYear: 0, guaranteedAtRetirement: 0 };
     }
     
     const retirementProj = proj.find(p => p.myAge === retirementAge) || null;
@@ -487,6 +628,11 @@ function MobilePlanner() {
     
     return {
       projections: proj,
+      // The same inputs the projection above was built from, in the shape the
+      // engine's bisection expects. Assembled here rather than in the panel so a
+      // stress run and the headline projection can never be describing two
+      // different plans.
+      stressCtx: { pi, accts: accounts, streams, assetList: [], events: [], recurring: [] },
       retirementProj,
       legacyProj,
       sustainableAnnual,
@@ -767,6 +913,10 @@ function MobilePlanner() {
           {showDetails ? '▲ Hide details' : '▼ Show plan details'}
         </button>
         
+        {stressCtx && projections.length > 0 && (
+          <BreakingPointPanel ctx={stressCtx} projections={projections} retirementAge={retirementAge} />
+        )}
+
         {showDetails && retirementProj && legacyProj && (
           <div className="mt-3 space-y-2 text-sm bg-slate-800/40 border border-slate-700 rounded-lg p-3">
             <div className="flex justify-between"><span className="text-slate-400">Years until retirement</span><span className="text-slate-200 tabular-nums">{yearsToRetirement}</span></div>
@@ -788,7 +938,7 @@ function MobilePlanner() {
         )}
         
         <p className="text-[11px] text-slate-600 mt-6 px-2 leading-relaxed text-center">
-          Simplified single-filer model. For full multi-account, spousal, tax, Roth conversion, and IRMAA analysis, use the desktop version. Educational tool — not financial advice.
+          Simplified single-filer model. The survivor-tax and Roth-conversion reports are desktop-only — both are about inputs this model doesn't collect (a spouse, and separate pre-tax/Roth balances). For those, plus multi-account, IRMAA and full tax analysis, use the desktop version. Educational tool — not financial advice.
         </p>
         {/* Escape hatch back to desktop. The ?desktop=1 query param tells index.html
             to skip its mobile redirect, so the user lands on the full desktop app

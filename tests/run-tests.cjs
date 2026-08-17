@@ -9412,6 +9412,72 @@ section('P79 — the optimizer can see a staged schedule, and stops scoring it t
   }
 }
 
+section('P80 — an edge has three answers, and only one of them is a number');
+{
+  // The mobile "what breaks first" panel renders breakingPoint() directly, so the
+  // shape of its result is now a contract rather than an internal detail. It has
+  // three outcomes and printing a number for all three would be wrong twice:
+  //
+  //   alreadyFails  — the plan is short as it stands. There is no cushion to
+  //                   measure, and reporting the tested range's endpoint would
+  //                   show a comfortable margin for a plan that is already failing.
+  //   survivesRange — nothing inside the range breaks it. A real answer.
+  //   otherwise     — value is the last value that survives.
+  const mk = (over) => {
+    const sc = baseScenario(over || {});
+    return { pi: sc.pi, accts: sc.accts, streams: sc.streams, assetList: [], events: [], recurring: [] };
+  };
+
+  // A comfortable plan: spending it supports is a real number above what it spends.
+  {
+    const ctx = mk({ desiredRetirementIncome: 40000 });
+    const e = engine.breakingPoint(ctx, 'spending');
+    ok(e, 'the spending edge is reported');
+    ok(!e.alreadyFails, 'a funded plan is not reported as already failing');
+    ok(Number.isFinite(e.value), 'and its edge is an actual number');
+    gt(e.value, 40000, 'the spending it supports exceeds the spending it plans');
+    gt(e.breaksAt, e.value, 'the breaking value sits above the surviving value — the bisection is stated conservatively');
+  }
+
+  // A plan that is already short. Every dimension must say so rather than
+  // reporting a cushion measured from a failing starting point.
+  {
+    const ctx = mk({ desiredRetirementIncome: 5000000 });
+    ['spending', 'inflation', 'returnDrop'].forEach(dim => {
+      const e = engine.breakingPoint(ctx, dim);
+      ok(e && e.alreadyFails === true,
+        `${dim}: a plan that is already short reports no cushion instead of a false one`);
+      eq(e.value, null, `${dim}: and offers no number to print`);
+    });
+  }
+
+  // A plan with enormous headroom survives the whole tested range on the
+  // return-drop dimension, which is not the same as "breaks at 10 points".
+  {
+    const ctx = mk({ desiredRetirementIncome: 1000 });
+    const e = engine.breakingPoint(ctx, 'returnDrop');
+    ok(e, 'the return-drop edge is reported');
+    ok(e.survivesRange === true || Number.isFinite(e.value),
+      'a very safe plan either survives the range or reports a real edge — never a silent null');
+    if (e.survivesRange) eq(e.value, null, 'surviving the range offers no number to print either');
+  }
+
+  // The three states are mutually exclusive, or the panel's branch order would
+  // decide the answer.
+  ['spending', 'inflation', 'returnDrop'].forEach(dim => {
+    [mk({ desiredRetirementIncome: 40000 }), mk({ desiredRetirementIncome: 5000000 })].forEach((ctx, i2) => {
+      const e = engine.breakingPoint(ctx, dim);
+      if (!e) return;
+      const states = [!!e.alreadyFails, !!e.survivesRange, Number.isFinite(e.value)].filter(Boolean).length;
+      eq(states, 1, `${dim}/${i2}: exactly one of alreadyFails, survivesRange and a numeric edge holds`);
+    });
+  });
+
+  // An unknown dimension is null, not a throw — the panel calls three by name.
+  eq(engine.breakingPoint(mk(), 'nonsense'), null, 'an unknown dimension returns null rather than throwing');
+  eq(engine.breakingPoint(null, 'spending'), null, 'and so does a missing context');
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of
