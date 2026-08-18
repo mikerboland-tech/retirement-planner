@@ -5121,6 +5121,30 @@ const irmaaAwareConversionStages = (pi, {
 // solver reads it while sizing withdrawals; swapping it late would change a
 // number the solver had already used. The returned reconciliation reports both
 // figures so any gap is visible rather than silently absorbed.
+// ── ONE BASIS PER COMPARISON ─────────────────────────────────────────────────
+// The gates above are per-projection, and that is a hazard for any caller whose
+// answer is the DIFFERENCE between two projections. The override stands down
+// when year 0 contains a Roth conversion — so a baseline with no conversion
+// keeps the detailed figures while the probe that adds one falls back to the
+// synthetic year, and the difference between them is then the conversion PLUS
+// the whole detailed-vs-synthetic gap.
+//
+// Measured on the P84 fixture: a $10,000 conversion that really costs $3,366
+// was reported as SAVING $11,924. Not a rounding error — the sign flips, and a
+// marginal-rate curve built on it would recommend converting because it looks
+// free.
+//
+// So: a projection whose absolute figures are reported may use the override; a
+// projection that exists only to be differenced against another must share one
+// basis with it. This predicate is how a caller checks, and what the tests
+// assert against.
+const sameCurrentYearBasis = (...projections) => {
+  const flags = projections
+    .filter(p => Array.isArray(p) && p.length)
+    .map(p => !!p[0].detailedCurrentYear);
+  return flags.every(f => f === flags[0]);
+};
+
 const detailedCurrentYearDecision = ({ yearsFromNow, pi = {}, currentYearReturn = null,
                                        portfolioWithdrawal = 0, rothConversion = 0 } = {}) => {
   if (!pi.useDetailedCurrentYear) return { apply: false, reason: 'not-enabled' };
@@ -10122,7 +10146,7 @@ const describePlanPatch = (state, patch) => {
     PAY_PERIODS_PER_YEAR, payPeriodsElapsed, projectPayrollYearEnd,
     buildTaxSituation, compareTraditionalVsRoth, projectedWithdrawalRate,
     projectedWithdrawalCost,
-    detailedCurrentYearDecision, taxFieldsFromReturn, earnedIncomeByOwner,
+    detailedCurrentYearDecision, sameCurrentYearBasis, taxFieldsFromReturn, earnedIncomeByOwner,
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
     SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,
     marginalCostOfNextDollar, survivorTaxComparison, survivorSSLoss,

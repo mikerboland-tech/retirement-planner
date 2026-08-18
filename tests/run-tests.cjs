@@ -9932,6 +9932,192 @@ section('P83 — an account with no contribution window funds nothing, silently'
   }
 }
 
+section('P84 — the worker and the dashboard describe the same year 0');
+{
+  // Phase 5 fed the detailed current-year return into projection year 0, but
+  // only on the main thread. No worker job was ever handed the return, so with
+  // the opt-in ON the dashboard and every background job disagreed about the
+  // same year of the same plan — the dashboard reading a 1040 and the worker
+  // rebuilding the year from a salary scalar.
+  //
+  // The fix is NOT "pass it everywhere". The override's gates are per
+  // projection, and several worker jobs report the DIFFERENCE between two
+  // projections. This pack pins both halves: applied where absolute figures are
+  // reported, withheld where a difference would otherwise straddle two bases.
+  const { computeTaxReturn, buildTaxSituation, sameCurrentYearBasis } = engine;
+
+  const basePi = {
+    myAge: 54, spouseAge: 52, myBirthYear: TODAY_YEAR - 54, spouseBirthYear: TODAY_YEAR - 52,
+    myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 90,
+    filingStatus: 'married_joint', state: 'Missouri', inflationRate: 0.03,
+    desiredRetirementIncome: 140000, withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+    healthcareModel: 'none', medicalInflation: 0, useDetailedCurrentYear: true,
+  };
+  const accts = [
+    { id: 1, name: '401k', type: '401k', balance: 1400000, contribution: 24500,
+      cagr: 0.06, startAge: 54, stopAge: 65, owner: 'me' },
+    { id: 2, name: 'Roth', type: 'roth_ira', balance: 100000, contribution: 0,
+      cagr: 0.06, startAge: 54, stopAge: 54, owner: 'me' },
+  ];
+  const streams = [{ id: 1, name: 'Salary', type: 'earned_income', amount: 250000,
+                     startAge: 54, endAge: 65, cola: 0.03, owner: 'me' }];
+  const cy = {
+    taxYear: 2026,
+    payroll: [{ id: 1, owner: 'me', asOfDate: '2026-08-07', payFrequency: 'biweekly',
+      ytd: { grossPay: 154000, preTax401kTraditional: 14500, hsa: 3000,
+             section125Health: 3000, fedWithheld: 26000, stateWithheld: 6800 }, remainder: {} }],
+    k1s: [{ id: 2, label: 'A', isPassive: true, basisStart: 400000,
+            boxes: { b1_ordinaryBusiness: 85000, b19_distributions: 60000, b20z_qbi: 85000 } }],
+    estimatedPayments: { federal: [6000, 6000, 0, 0], state: [] },
+    priorYearReturn: { agi: 372000, totalTax: 84000 },
+    otherIncome: { taxableInterest: 3200, qualifiedDividends: 8000 },
+    adjustments: {}, deductions: { mode: 'auto', propertyTax: 9800, mortgageInterest: 14500 },
+  };
+  const ret = computeTaxReturn(buildTaxSituation(cy, basePi));
+  const run = (pi, opts) => computeProjections(pi, accts, streams, [], [], [], 2026, opts);
+
+  // ── The gap this closes ──────────────────────────────────────────────────
+  {
+    const dashboard = run(basePi, { currentYearReturn: ret });
+    const workerWas = run(basePi, {});   // what every worker job used to see
+    eq(dashboard[0].detailedCurrentYear, true, 'the dashboard applies the return');
+    eq(workerWas[0].detailedCurrentYear, false, 'and the un-plumbed worker did not');
+    gt(dashboard[0].federalTax - workerWas[0].federalTax, 10000,
+      'the two disagreed by real money on the same year of the same plan');
+    gt(dashboard[0].magi - workerWas[0].magi, 50000,
+      'and by more still on MAGI, which the IRMAA lookback reads two years out');
+    ok(!sameCurrentYearBasis(dashboard, workerWas),
+      'which is exactly what a mixed basis looks like');
+  }
+
+  // ── Why it is not simply passed everywhere ───────────────────────────────
+  // The marginal-rate curve probes a conversion in EVERY year, year 0 included.
+  // The override stands down on any year-0 conversion, so the probe loses it
+  // while the baseline keeps it, and the difference between them then carries
+  // the whole detailed-vs-synthetic gap.
+  {
+    const basePI = { ...basePi, rothConversionAmount: 0, rothConversionStartAge: 0, rothConversionEndAge: 0 };
+    const probePI = { ...basePi, rothConversionAmount: 10000, rothConversionStartAge: 54,
+                      rothConversionEndAge: 54, rothConversionInflationAdjust: false };
+
+    const mixedBase = run(basePI, { currentYearReturn: ret });
+    const mixedProbe = run(probePI, { currentYearReturn: ret });
+    ok(!sameCurrentYearBasis(mixedBase, mixedProbe),
+      'handing the return to both arms still splits them: the probe converts, so it stands down');
+    eq(mixedProbe[0].detailedCurrentYearReason, 'roth-conversion', 'and says so');
+
+    const mixedCost = mixedProbe[0].federalTax - mixedBase[0].federalTax;
+    const honestBase = run(basePI, {});
+    const honestProbe = run(probePI, {});
+    ok(sameCurrentYearBasis(honestBase, honestProbe), 'withholding it keeps both arms on one basis');
+    const honestCost = honestProbe[0].federalTax - honestBase[0].federalTax;
+
+    gt(honestCost, 0, 'a $10,000 conversion costs tax');
+    lt(mixedCost, 0, 'while the mixed-basis figure reports it as a REFUND — the sign flips');
+    // The magnitude of the lie is exactly the gap between the two bases.
+    approx(honestCost - mixedCost,
+      run(basePI, { currentYearReturn: ret })[0].federalTax - honestBase[0].federalTax,
+      'and the error is precisely the detailed-vs-synthetic gap, nothing else');
+  }
+
+  // ── The rule, stated as a predicate ──────────────────────────────────────
+  {
+    const a = run(basePi, { currentYearReturn: ret });
+    ok(sameCurrentYearBasis(a, run(basePi, { currentYearReturn: ret })),
+      'two projections on the same basis compare equal');
+    ok(sameCurrentYearBasis(a), 'one projection is trivially consistent with itself');
+    ok(sameCurrentYearBasis(), 'and nothing at all is not a violation');
+  }
+
+  // ── Monte Carlo: every sim shares one basis ──────────────────────────────
+  // Sims differ by market path. The gates key off year-0 conversions and
+  // withdrawals, which are identical across sims, so passing the return is safe
+  // and every path starts from the same known year.
+  {
+    const overrides = (seed) => Array.from({ length: 40 }, (_, i) =>
+      ({ marketReturn: 0.02 + ((i * 7 + seed) % 11) / 100, inflation: 0.03 }));
+    const sims = [1, 2, 3].map(seed =>
+      run(basePi, { currentYearReturn: ret, yearOverrides: overrides(seed) }));
+    ok(sameCurrentYearBasis(...sims), 'all Monte Carlo paths agree on the year-0 basis');
+    sims.forEach((sim, i) => eq(sim[0].detailedCurrentYear, true,
+      `and path ${i + 1} starts from the return, like the dashboard`));
+  }
+
+  // ── The shipped worker.js actually carries it ────────────────────────────
+  // Everything above tests the engine. The bug was not in the engine: it was
+  // that no worker job ever handed it the return. So this drives the real
+  // worker file (the P25 pattern) with computeProjections instrumented, and
+  // counts which jobs pass it through.
+  {
+    const vmMod = require('vm');
+    const fs = require('fs');
+    const pathMod = require('path');
+    const ROOT = pathMod.resolve(__dirname, '..');
+
+    const optsSeenBy = (type, payload) => {
+      const seen = [];
+      const sb = {
+        console, Math, Date, JSON, Object, Array, Number, String, Boolean, Set, Map,
+        Infinity, NaN, isNaN, parseFloat, parseInt, Error, RegExp, Promise, undefined,
+        URLSearchParams, __out: [],
+      };
+      sb.self = sb; sb.globalThis = sb;
+      sb.location = { search: '?v=test' };
+      sb.importScripts = (spec) => {
+        vmMod.runInContext(fs.readFileSync(pathMod.join(ROOT, spec.split('?')[0]), 'utf8'), sb);
+        // Wrap AFTER the engine loads and BEFORE worker.js destructures it.
+        const real = sb.PlannerEngine.computeProjections;
+        sb.PlannerEngine.computeProjections = (...args) => { seen.push(args[7] || null); return real(...args); };
+      };
+      sb.postMessage = (m) => { if (m.type !== 'progress') sb.__out.push(m); };
+      vmMod.createContext(sb);
+      vmMod.runInContext(fs.readFileSync(pathMod.join(ROOT, 'worker.js'), 'utf8'), sb);
+      sb.onmessage({ data: { jobId: 1, type, payload } });
+      const err = sb.__out.find(m => m.type === 'error');
+      if (err) throw new Error(type + ': ' + err.error);
+      return seen;
+    };
+
+    const common = { personalInfo: basePi, accounts: accts, incomeStreams: streams,
+                     assets: [], oneTimeEvents: [], recurringExpenses: [], currentYearReturn: ret };
+
+    const mc = optsSeenBy('monteCarlo', { ...common,
+      simSettings: { numSimulations: 3, startAge: 54, volatility: 0.15,
+                     method: 'monteCarlo', expectedReturn: 0.06 } });
+    gt(mc.length, 0, 'the Monte Carlo job really did run projections');
+    eq(mc.filter(o => o && o.currentYearReturn).length, mc.length,
+      'and EVERY one of them carried the return — no path silently re-derives year 0');
+
+    const curve = optsSeenBy('marginalRateCurve', { ...common, probeAmount: 10000 });
+    gt(curve.length, 0, 'the marginal-rate curve really did run projections');
+    eq(curve.filter(o => o && o.currentYearReturn).length, 0,
+      'and NONE of them carried it — the differencing job stays on one basis');
+  }
+
+  // ── The Social Security grid: both ordinary regimes are uniform ──────────
+  // Cells differ by claim age. Below the earliest claim age no cell touches
+  // year 0 at all, so the basis cannot move between them.
+  {
+    const cell = (myClaim, spouseClaim) => computeProjections(basePi, accts, streams.concat([
+      { id: 10, name: 'My SS', type: 'social_security', amount: 42000, startAge: myClaim,
+        endAge: 95, cola: 0.03, owner: 'me' },
+      { id: 11, name: 'Spouse SS', type: 'social_security', amount: 30000, startAge: spouseClaim,
+        endAge: 95, cola: 0.03, owner: 'spouse' },
+    ]), [], [], [], 2026, { currentYearReturn: ret });
+    const cells = [[62, 62], [67, 67], [70, 70], [62, 70]].map(([a, b]) => cell(a, b));
+    ok(sameCurrentYearBasis(...cells),
+      'a pre-retirement plan keeps one basis across every claim age in the grid');
+    cells.forEach((c, i) => eq(c[0].detailedCurrentYear, true,
+      `and cell ${i + 1} starts from the return, like the dashboard`));
+    // The claim ages genuinely do change the plan — otherwise the check above
+    // would pass by measuring nothing.
+    const at70 = cell(70, 70).find(r => r.myAge === 72);
+    const at62 = cell(62, 62).find(r => r.myAge === 72);
+    ok(at70.socialSecurity !== at62.socialSecurity,
+      'the cells really are different plans, so the agreement above means something');
+  }
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of

@@ -94,6 +94,16 @@ function runMonteCarlo(jobId, payload) {
   const {
     simSettings, personalInfo, accounts, incomeStreams,
     assets, oneTimeEvents, recurringExpenses,
+    // When the Current Year tab has been filled in and the opt-in is set, year 0
+    // is known at 1040 granularity. Without this the worker rebuilt year 0 from
+    // a salary scalar while the dashboard used the return, and the two disagreed
+    // on the same year of the same plan — on the P84 fixture by $15,290 of
+    // federal tax and $55,138 of MAGI, which the IRMAA lookback then reads.
+    //
+    // Safe here because every simulation shares one year-0 basis: sims differ by
+    // market path, and the gates key off year-0 conversions and withdrawals,
+    // which are identical across sims.
+    currentYearReturn,
   } = payload;
 
   const piWithLifeExp = { ...personalInfo, legacyAge: personalInfo.legacyAge || 95 };
@@ -218,7 +228,8 @@ function runMonteCarlo(jobId, payload) {
 
     const proj = computeProjections(
       piForSim, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
-      undefined, { yearOverrides: overrides, spendingRule: guardrails || undefined }
+      undefined, { yearOverrides: overrides, spendingRule: guardrails || undefined,
+                   currentYearReturn }
     );
 
     // Build per-sim portfolio path from simSettings.startAge onward.
@@ -455,6 +466,12 @@ function runMonteCarlo(jobId, payload) {
 // ============================================================================
 function runSocialSecurityGrid(jobId, payload, withMC) {
   const {
+    // See runMonteCarlo. Cells differ by claim age; the year-0 basis moves only
+    // if one claim age forces a year-0 portfolio withdrawal while another does
+    // not, which needs a plan sitting exactly on that boundary. Below the
+    // earliest claim age no cell touches year 0, and in retirement every cell
+    // draws, so both ordinary regimes are uniform.
+    currentYearReturn,
     personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
     legacyAge, cagrDelta, myPIA, spousePIA, myBirthYear, spouseBirthYear,
     isMarried,
@@ -625,7 +642,8 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
     }
     const proj = computeProjections(pi, adjustedAccounts,
       reindexSS(modifiedStreams, seq.geoMeanInflation), assets,
-      oneTimeEvents, recurringExpenses, undefined, { yearOverrides: seq.years });
+      oneTimeEvents, recurringExpenses, undefined,
+      { yearOverrides: seq.years, currentYearReturn });
     // rowAtOrLast, not find(): a survivor-modelled plan ends the year both
     // spouses die, so the measurement age can legitimately have no row. Treating
     // that miss as a zero portfolio scored every scenario as a total failure.
@@ -649,7 +667,8 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
   for (const myClaimAge of myAges) {
     for (const spClaimAge of spouseAges) {
       const modifiedStreams = buildStreams(myClaimAge, spClaimAge);
-      const proj = computeProjections(piWithLifeExp, adjustedAccounts, modifiedStreams, assets, oneTimeEvents, recurringExpenses);
+      const proj = computeProjections(piWithLifeExp, adjustedAccounts, modifiedStreams, assets,
+        oneTimeEvents, recurringExpenses, undefined, { currentYearReturn });
 
       const retirementYears = proj.filter(p => p.myAge >= personalInfo.myRetirementAge);
       const lifetimeTax = retirementYears.reduce((sum, p) => sum + p.totalTax, 0);
@@ -757,6 +776,13 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
 //     recurringExpenses, heirTaxRate }
 // Result: { baseline, results: [{ label, bracket, startAge, endAge, ...scores }] }
 // ============================================================================
+// DELIBERATELY does not take currentYearReturn. This job ranks strategies by
+// differencing their projections, and the override stands down on any strategy
+// that converts in year 0 while staying on for one that does not — so the
+// ranking would partly measure which arm got the detailed year rather than which
+// strategy is better. A difference computed on one consistent basis is correct
+// on either basis; a difference computed across two is not a difference at all.
+// See sameCurrentYearBasis in the engine, and P84.
 function runRothOptimizer(jobId, payload) {
   const {
     personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
@@ -1039,6 +1065,13 @@ function runRothOptimizer(jobId, payload) {
 //            taxOnlyRate, bracket, converted, irmaaDelta, acaSubsidyLost,
 //            cliffHeadroom, filingStatus, magi, components }] }
 // ============================================================================
+// DELIBERATELY does not take currentYearReturn, and here the reason is sharpest:
+// the probe adds a conversion to EVERY year including year 0, so the override is
+// guaranteed to stand down on the probe and stay on for the baseline. On the P84
+// fixture that reports a $10,000 conversion as SAVING $11,924 when it costs
+// $3,366 — the sign flips, and the curve would recommend converting because it
+// looks free. The whole output of this job is a difference, so it runs entirely
+// on the synthetic year-0 basis.
 function runMarginalRateCurve(jobId, payload) {
   const {
     personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,

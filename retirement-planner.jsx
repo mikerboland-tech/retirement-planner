@@ -6457,7 +6457,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
 // ============================================
 // MonteCarloTab — Lifted to module scope
 // ============================================
-function MonteCarloTab({ accounts, assets, detailLevel, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, sectionVisibility, setDetailLevel, setSectionVisibility }) {
+function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, sectionVisibility, setDetailLevel, setSectionVisibility }) {
   // Retirement age: always use personalInfo as source of truth
   const retirementProjection = projections.find(p => p.myAge === personalInfo.myRetirementAge);
   const defaultRetirementAge = personalInfo.myRetirementAge;
@@ -6520,7 +6520,7 @@ function MonteCarloTab({ accounts, assets, detailLevel, incomeStreams, oneTimeEv
     setSimError(null);
     const handle = window.PlannerWorker.run({
       type: 'monteCarlo',
-      payload: { simSettings, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses },
+      payload: { simSettings, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, currentYearReturn },
       onProgress: (pct) => setSimProgress(pct),
     });
     activeJobRef.current = handle;
@@ -8670,7 +8670,7 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
 // ============================================
 // SocialSecurityTab — Lifted to module scope
 // ============================================
-function SocialSecurityTab({ accounts, assets, computeProjections, detailLevel, incomeStreams, oneTimeEvents, personalInfo, recurringExpenses, sectionVisibility, setDetailLevel, setIncomeStreams, setSectionVisibility }) {
+function SocialSecurityTab({ accounts, assets, computeProjections, currentYearReturn, detailLevel, incomeStreams, oneTimeEvents, personalInfo, recurringExpenses, sectionVisibility, setDetailLevel, setIncomeStreams, setSectionVisibility }) {
   const mySSStream = incomeStreams.find(s => s.type === 'social_security' && s.owner === 'me');
   const spouseSSStream = incomeStreams.find(s => s.type === 'social_security' && s.owner === 'spouse');
   
@@ -8826,6 +8826,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, detailLevel, 
         type: useMcStressTest ? 'ssMonteCarlo' : 'ssGrid',
         payload: {
           personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
+          currentYearReturn,
           legacyAge: lifeExpectancy, cagrDelta,
           // Both life-expectancy inputs drive the engine's mortality, not just
           // the measurement horizon — otherwise survivor-modelled plans die at
@@ -19742,12 +19743,12 @@ function RetirementPlanner() {
             {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
             {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={projections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
-            {activeTab === 'socialsecurity' && <SocialSecurityTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
+            {activeTab === 'socialsecurity' && <SocialSecurityTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
             {activeTab === 'scenarios' && <ScenarioComparisonTab activeScenarioId={activeScenarioId} assets={assets} computeProjections={computeProjections} createScenario={createScenario} deleteScenario={deleteScenario} loadScenario={loadScenario} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} scenarios={scenarios} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'currentyear' && <CurrentYearTab currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'withdrawal' && <WithdrawalStrategiesTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} />}
-            {activeTab === 'montecarlo' && <MonteCarloTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'montecarlo' && <MonteCarloTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'stresstest' && <StressTestTab accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'sensitivity' && <SensitivityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'assistant' && <AiAssistantTab onApply={applyAiPlan} plan={livePlan} projections={projections} />}
