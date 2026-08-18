@@ -10118,6 +10118,90 @@ section('P84 — the worker and the dashboard describe the same year 0');
   }
 }
 
+section('P85 — the withdrawal solver must price the same state tax the year actually pays');
+{
+  // Found by sweeping the solver rather than reading it: across 296 retired
+  // plans (four states x two healthcare regimes x spending from $40k to $400k),
+  // ask one question — did the year actually net what it set out to spend?
+  //
+  // Every state landed within a few dollars except five, which OVER-delivered by
+  // a nearly constant amount at every spending level. A constant offset is not a
+  // convergence failure; it is a term one side knows about and the other does
+  // not.
+  //
+  // The solver grosses a withdrawal up for the tax it expects. Its state-tax
+  // call omitted qualifiedRetirementWithdrawals, which the FINAL state-tax call
+  // supplies. IL/MS/PA exempt qualified plan distributions outright and NY/NJ
+  // run an exclusionFn that reads the figure directly — so the solver priced tax
+  // on money the final calculation then exempted, withdrew extra to cover a bill
+  // that never arrived, and the surplus left the portfolio for nothing.
+  const mk = (state, over = {}) => ({
+    myAge: 66, spouseAge: 66, myBirthYear: TODAY_YEAR - 66, spouseBirthYear: TODAY_YEAR - 66,
+    myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 90,
+    myLifeExpectancy: 90, spouseLifeExpectancy: 90, filingStatus: 'married_joint',
+    state, inflationRate: 0.03, desiredRetirementIncome: 120000,
+    withdrawalPriority: ['pretax', 'brokerage', 'roth'], healthcareModel: 'none', ...over });
+  const accts = () => ([{ id: 1, name: '401k', type: '401k', balance: 6000000, contribution: 0,
+    contributionGrowth: 0, cagr: 0.06, startAge: 66, stopAge: 66, owner: 'me', contributor: 'me' }]);
+
+  // The invariant, stated once: a retired year funds its spending target plus
+  // that year's healthcare and dated expenses, and nets exactly that — no more.
+  // Over-delivering is not harmless: the surplus is drawn from the portfolio,
+  // taxed, and not spent, so the plan depletes faster than the saver's own
+  // numbers say it should.
+  const delivered = (state, over) => {
+    const row = computeProjections(mk(state, over), accts(), [], [], [], [])[0];
+    const target = row.desiredIncome + (row.healthcareExpense || 0)
+                 + (row.recurringExpenses || 0) + (row.oneTimeExpense || 0);
+    return { over: row.netIncome - target, target, withdrawal: row.portfolioWithdrawal,
+             stateTax: row.stateTax };
+  };
+
+  // The five that were wrong, and why they were the five: three exempt qualified
+  // distributions outright, two run an income-phased exclusion over them.
+  ['Illinois', 'Mississippi', 'Pennsylvania', 'New York', 'New Jersey'].forEach(state => {
+    const d = delivered(state);
+    approx(d.over + d.target, d.target, `${state} nets its target and no more`);
+    lt(Math.abs(d.over), 25, `${state} is within rounding, not thousands out`);
+  });
+
+  // States with no such exclusion were never affected, and must stay unaffected.
+  ['Florida', 'California', 'Missouri', 'Georgia', 'Alabama', 'Iowa'].forEach(state => {
+    const d = delivered(state);
+    lt(Math.abs(d.over), 25, `${state} still lands on its target`);
+  });
+
+  // The size of what was being lost. Illinois exempts the whole distribution, so
+  // its state tax is zero — and the solver was grossing up as though it were not.
+  {
+    const il = delivered('Illinois');
+    eq(il.stateTax, 0, 'Illinois taxes none of a qualified plan distribution');
+    const fl = delivered('Florida');
+    approx(il.withdrawal, fl.withdrawal,
+      'so it must draw the same as a no-income-tax state, not thousands more');
+  }
+
+  // Across the sweep that found it: spending level must not change the answer.
+  // A term the solver double-counts shows up as a constant dollar offset, which
+  // is exactly how this was spotted — the percentage shrank as spending grew
+  // while the dollars stayed put.
+  [40000, 80000, 150000, 250000, 400000].forEach(spend => {
+    ['Illinois', 'New York'].forEach(state => {
+      const d = delivered(state, { desiredRetirementIncome: spend });
+      lt(Math.abs(d.over), 25, `${state} at $${spend} of spending lands on target too`);
+    });
+  });
+
+  // And it holds with the ACA subsidy cliff in play, which is the other place a
+  // solver iteration can be pulled off a fixed point.
+  ['Illinois', 'New York', 'Florida'].forEach(state => {
+    const d = delivered(state, { myAge: 60, spouseAge: 60, myRetirementAge: 59,
+      spouseRetirementAge: 59, myBirthYear: TODAY_YEAR - 60, spouseBirthYear: TODAY_YEAR - 60,
+      healthcareModel: 'aca', desiredRetirementIncome: 90000 });
+    lt(Math.abs(d.over), 25, `${state} lands on target under the ACA model as well`);
+  });
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of

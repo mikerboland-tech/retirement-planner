@@ -8376,7 +8376,15 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // Retirement income for state exemption: pension only (401k/IRA withdrawals are NOT exempt).
           // State taxes capital gains as ordinary income → use the gains-inclusive base.
           const iterRetirementIncome = totalPension;
-          const totalStateTax = calculateStateTax(adjustedNonSSIncome + adjustedTaxableSS, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, adjustedTaxableSS, iterRetirementIncome, { federalTaxPaid: totalFedOrdinary, primaryAge: myAge, spouseAge: spouseAge });
+          // qualifiedRetirementWithdrawals must be passed here for the same reason
+          // the final calculation passes it: IL/MS/PA exempt qualified plan
+          // distributions outright, and NY/NJ run an exclusionFn that reads the
+          // figure directly. Omitting it made the solver price state tax on money
+          // the final calculation then exempted, so it grossed the withdrawal up
+          // for a bill that never arrived and the year over-delivered — by $5,438
+          // in Illinois and $2,397 in New York on the P85 fixture. Raw and
+          // pre-QCD, mirroring the final call exactly.
+          const totalStateTax = calculateStateTax(adjustedNonSSIncome + adjustedTaxableSS, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, adjustedTaxableSS, iterRetirementIncome, { federalTaxPaid: totalFedOrdinary, primaryAge: myAge, spouseAge: spouseAge, qualifiedRetirementWithdrawals: totalPreTaxFromWithdrawals });
 
           // Tax attributable to the withdrawal = total tax minus tax on guaranteed income alone.
           const withdrawalFedTax = totalFedTax - baseFederalTax;
