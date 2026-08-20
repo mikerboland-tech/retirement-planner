@@ -10202,6 +10202,135 @@ section('P85 — the withdrawal solver must price the same state tax the year ac
   });
 }
 
+section('P86 — the IRMAA hinge is derived, and it survives moving tabs');
+{
+  // The Marginal Tax Impact & IRMAA card moved from the Dashboard to Tax
+  // Planning. It answers "what should I do", not "am I okay", and its own help
+  // text already sent readers to that tab for the matching bracket analysis.
+  //
+  // The risk in moving it was specific: its age list is built around the
+  // two-year lookback, and those ages were the ONLY place the pre-Medicare
+  // hinge appeared. The dashboard's IRMAA insight is gated on irmaaInfo, which
+  // is populated only once someone is actually paying a premium — so a
+  // 62-year-old had no IRMAA signal anywhere once the card left.
+  const { irmaaLastFreeAge, irmaaChargedAtAge, MEDICARE_ELIGIBILITY_AGE,
+          IRMAA_TIER_LOOKBACK_YEARS } = engine;
+
+  // The boundary is derived from the two constants, never typed. Three places
+  // used to compute or hard-code it independently.
+  eq(irmaaLastFreeAge(), MEDICARE_ELIGIBILITY_AGE - IRMAA_TIER_LOOKBACK_YEARS - 1,
+    'the last free age follows the Medicare age and the lookback');
+  eq(irmaaLastFreeAge(), 62, 'which today is 62');
+  eq(irmaaChargedAtAge(63), 65, 'income at 63 is charged at 65 — the first year it can cost anything');
+  eq(irmaaChargedAtAge(irmaaLastFreeAge()), MEDICARE_ELIGIBILITY_AGE - 1,
+    "and the last free year's income lands the year before Medicare starts, which is why it is free");
+
+  // The insight's own branch conditions, evaluated as the JSX evaluates them.
+  // 62 gets the "last free year" note; 63 and 64 get the threshold warning; 61
+  // and below get nothing, because that income never reaches a lookback.
+  const branchFor = (age) => {
+    const paysAt = irmaaChargedAtAge(age);
+    if (paysAt >= MEDICARE_ELIGIBILITY_AGE && age < MEDICARE_ELIGIBILITY_AGE) return 'threshold-warning';
+    if (age === irmaaLastFreeAge()) return 'last-free-year';
+    return 'none';
+  };
+  eq(branchFor(60), 'none', 'at 60 nothing is said, because nothing this year can reach IRMAA');
+  eq(branchFor(61), 'none', 'nor at 61');
+  eq(branchFor(62), 'last-free-year', 'at 62 the plan is told this is the last free year');
+  eq(branchFor(63), 'threshold-warning', 'at 63 the first chargeable year is flagged');
+  eq(branchFor(64), 'threshold-warning', 'and at 64');
+  eq(branchFor(65), 'none', 'at 65 the ordinary irmaaInfo warning takes over instead');
+  eq(branchFor(70), 'none', 'and stays in charge after that');
+
+  // The threshold must be indexed to the year the surcharge is PAID, not the
+  // year the income is earned: CMS applies the premium year's brackets to MAGI
+  // from two years prior. Getting this wrong understates the distance to the
+  // next tier by two years of inflation, which is the conservative direction
+  // but still wrong.
+  {
+    const magi = 200000, fs = 'married_joint', infl = 0.03;
+    const earned = engine.nextIRMAAThreshold(magi, fs, 0, infl);
+    const paid = engine.nextIRMAAThreshold(magi, fs, 0 + IRMAA_TIER_LOOKBACK_YEARS, infl);
+    ok(paid && earned, 'both lookups land on a tier');
+    gt(paid.distance, earned.distance,
+      'the paid-year threshold sits higher, so there is more room than the earned-year one suggests');
+    approx(paid.threshold, earned.threshold * Math.pow(1 + infl, IRMAA_TIER_LOOKBACK_YEARS),
+      'and the gap between them is exactly two years of indexing');
+  }
+}
+
+section('P87 — the Tax Planning tab can hide its own sections');
+{
+  // The tab had no SECTION_MANIFEST entry at all, so nothing on it could be put
+  // away and its detail level did nothing. The IRMAA card arriving from the
+  // dashboard would have been the one section on the tab with no way to hide it
+  // — and on the dashboard it had been sharing another section's toggle, so
+  // hiding the Lifetime Tax Summary silently hid the IRMAA table too, and the
+  // IRMAA card's own Hide button hid the summary.
+  const fs4 = require('fs');
+  const path4 = require('path');
+  const src = fs4.readFileSync(path4.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+
+  const mStart = src.indexOf('const SECTION_MANIFEST = {');
+  const mEnd = src.indexOf('\n};', mStart);
+  const manifest = eval('(' + src.slice(mStart + 'const SECTION_MANIFEST = '.length, mEnd + 2) + ')');
+
+  ok(manifest.taxplanning, 'the Tax Planning tab is in the manifest at all');
+  ok(manifest.taxplanning.some(e => e.id === 'marginalIrmaa'),
+    'and the moved IRMAA card is one of its sections');
+  gt(manifest.taxplanning.length, 1,
+    'it is not a manifest of one — the tab’s other cards are hideable too');
+
+  // The toggle it used to share now gates exactly one thing.
+  const taxSummaryGates = (src.match(/visibilitySettings\.taxSummary/g) || []).length;
+  eq(taxSummaryGates, 1,
+    'visibilitySettings.taxSummary gates a single card, matching the one label the manifest gives it');
+
+  // And the card really did leave the dashboard rather than being copied.
+  const dashStart = src.indexOf('function DashboardTab(');
+  const dashEnd = src.indexOf('\nfunction ', dashStart + 10);
+  const dashBody = src.slice(dashStart, dashEnd);
+  ok(dashBody.indexOf('Marginal Tax Impact & IRMAA') < 0,
+    'the dashboard no longer renders the card');
+  const taxStart = src.indexOf('function TaxPlanningTab(');
+  const taxEnd = src.indexOf('\nfunction ', taxStart + 10);
+  ok(src.slice(taxStart, taxEnd).indexOf('Marginal Tax Impact & IRMAA') > 0,
+    'and the Tax Planning tab does');
+
+  // <Section level> is the reader's CURRENT detail level, not the section's own
+  // tier — the tier lives in the manifest. Passing a literal silently breaks the
+  // section, and breaks it in a way nothing else notices: LEVEL_SHOWS is keyed
+  // essentials/standard/everything, so level="essential" or level="advanced"
+  // looks up undefined, the comparison is false, and the section never renders
+  // at any detail level. Three of the four sections on this tab were written
+  // that way and vanished; the fourth happened to say "standard", which is a
+  // real key, so it worked by coincidence and hid the mistake.
+  //
+  // P78 could not catch this: it checks that ids and tabs agree, and these did.
+  // Brace-aware tag extraction: a title like title={<>💰 Context</>} contains a
+  // '>' that a naive [^>]* would stop at, truncating the tag before level= and
+  // reporting a false failure on sections that are perfectly fine.
+  const sectionTags = [];
+  for (let i = src.indexOf('<Section'); i >= 0; i = src.indexOf('<Section', i + 1)) {
+    if (/[A-Za-z]/.test(src[i + 8] || '')) continue;   // skip <SectionControls>
+    let depth = 0;
+    for (let j = i; j < src.length; j++) {
+      const ch = src[j];
+      if (ch === '{') depth++;
+      else if (ch === '}') depth--;
+      else if (ch === '>' && depth === 0) { sectionTags.push(src.slice(i, j + 1)); break; }
+    }
+  }
+  gt(sectionTags.length, 4, 'there are <Section> tags to check');
+  sectionTags.forEach(tag => {
+    const id = (tag.match(/id="([A-Za-z0-9_]+)"/) || [])[1] || '(unknown)';
+    const lvl = tag.match(/level=\{([^}]*)\}/);
+    ok(lvl, `<Section id="${id}"> passes level as an expression, not a literal tier`);
+    if (lvl) eq(lvl[1].trim(), 'detailLevel',
+      `<Section id="${id}"> passes the reader's current detail level`);
+  });
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of

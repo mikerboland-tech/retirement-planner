@@ -45,7 +45,8 @@ const {
   conversionCostComponents, conversionCostAudit, topMarginalBracket,
   computeTaxReturn, buildTaxSituation, compareTraditionalVsRoth,
   projectPayrollYearEnd, marginalRateOn, saltCapFor, projectedWithdrawalRate,
-  detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling, IRMAA_TIER_LOOKBACK_YEARS,
+  detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling, IRMAA_TIER_LOOKBACK_YEARS, nextIRMAAThreshold,
+  irmaaLastFreeAge, irmaaChargedAtAge, MEDICARE_ELIGIBILITY_AGE,
   earnedIncomeByOwner, projectedWithdrawalCost,
   rothConversionIsPlanned, withoutRothConversions, withRothConversionTarget,
   rothConversionModeLabel, rothConversionModeOf,
@@ -424,6 +425,16 @@ const SECTION_MANIFEST = {
     { id: 'safeSpending',     label: 'Safe Spending Capacity',        level: 'standard' },
     { id: 'coastFire',        label: 'Coast FIRE Indicator',          level: 'advanced' },
     { id: 'lifestyleLegacy',  label: 'Lifestyle vs Legacy',           level: 'advanced' },
+  ],
+  // The Tax Planning tab had no manifest entry at all, so nothing on it could be
+  // hidden and its detail level did nothing. The IRMAA card arriving from the
+  // dashboard would otherwise have been the one section on the tab with no way
+  // to put it away.
+  taxplanning: [
+    { id: 'conversionYears', label: 'Roth Conversion Opportunity by Year', level: 'essential' },
+    { id: 'marginalIrmaa',   label: 'Marginal Tax Impact & IRMAA',         level: 'standard' },
+    { id: 'acaSubsidy',      label: 'Roth Conversions vs. ACA Subsidy',    level: 'advanced' },
+    { id: 'charitable',      label: 'What Your Charitable Giving Saves',   level: 'advanced' },
   ],
   montecarlo: [
     { id: 'method',        label: 'Simulation Method',            level: 'standard' },
@@ -5951,7 +5962,7 @@ function ConversionFundingPanel({ personalInfo, accounts, incomeStreams, assets,
   );
 }
 
-function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setPersonalInfo }) {
+function TaxPlanningTab({ accounts, assets, computeProjections, detailLevel, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, sectionVisibility, setDetailLevel, setPersonalInfo, setSectionVisibility }) {
   // What the charitable giving actually saves, measured by running the plan with
   // and without the QCD exclusion. Two projections, computed once here and shared
   // with the snapshot below rather than estimated separately in each place.
@@ -5961,6 +5972,10 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
     currentYear: new Date().getFullYear(),
   }), [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
   const [ageRange, setAgeRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || 95 });
+  const [openInfoCard, setOpenInfoCard] = useState(null);
+  const toggleInfoCard = useCallback((id) => {
+    setOpenInfoCard(prev => prev === id ? null : id);
+  }, []);
   
   // Retirement age: always use personalInfo as source of truth
   const retirementAge = personalInfo.myRetirementAge;
@@ -6112,6 +6127,9 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
         <h3 className="text-xl font-semibold text-slate-100 mb-2">Tax Planning & Roth Conversion Opportunities</h3>
         <p className="text-slate-400 text-sm">Identify years with room in lower tax brackets for potential Roth conversions. The chart shows your taxable income vs. federal bracket thresholds (adjusted for inflation).</p>
       </div>
+
+      <SectionControls tab="taxplanning" vis={sectionVisibility} setVis={setSectionVisibility}
+                       level={detailLevel} setLevel={setDetailLevel} />
       
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -6219,8 +6237,11 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
       </div>
       
       {/* Detailed Table */}
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-100 mb-4">Roth Conversion Opportunity by Year</h4>
+      <Section
+        tab="taxplanning" id="conversionYears" level={detailLevel}
+        vis={sectionVisibility} setVis={setSectionVisibility}
+        title="Roth Conversion Opportunity by Year"
+      >
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -6282,7 +6303,245 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
             <span className="text-purple-400"> Your planned conversion is active (ages {personalInfo.rothConversionStartAge || getDefaultRothConversionWindow(personalInfo).startAge}–{personalInfo.rothConversionEndAge || getDefaultRothConversionWindow(personalInfo).endAge}{`, ${conversionModeLabel(personalInfo)}`}).</span>
           )}
         </p>
-      </div>
+      </Section>
+
+      {/* Moved here from the Dashboard in v1.92.0. It answers "what should I
+          do", not "am I okay" — its own help text already pointed readers to
+          this tab for the matching bracket analysis, and this tab already
+          computes the IRMAA figures per year. On the dashboard it was also
+          sharing another section's visibility toggle; here it owns one. */}
+      {(() => {
+        // Priced by the engine's own marginalCostOfNextDollar, the same function
+        // behind the Tax Planning tab's "Next Dollar" card. This card used to
+        // rebuild all of it by hand and got two things wrong that showed up as
+        // blank columns:
+        //
+        //   MAGI was hand-assembled from gross Social Security and the whole
+        //   portfolio withdrawal — but IRMAA is measured on AGI, which contains
+        //   only the TAXABLE part of the benefit and none of a Roth draw or a
+        //   return of brokerage basis. The row already carries a correct `magi`.
+        //
+        //   And the probe collided with the engine's own IRMAA_FILL_SAFETY_MARGIN.
+        //   A year converting up to an IRMAA ceiling stops $1,000 short of it by
+        //   design, so a +$1,000 probe landed EXACTLY on the edge — where the
+        //   tier has not flipped yet — and reported no IRMAA cost at all in
+        //   precisely the years built to sit against that edge.
+        const computeMarginalForAge = (targetAge) => {
+          const p = projections.find(pr => pr.myAge === targetAge);
+          if (!p) return null;
+          const m = marginalCostOfNextDollar({ row: p, pi: personalInfo, probe: 1000 });
+          if (!m) return null;
+          const irmaaEdge = (m.nextThresholds || []).find(t => /IRMAA/.test(t.label));
+          const ss = p.socialSecurity || 0;
+          return {
+            age: targetAge,
+            rate: Math.round(m.rate * 1000) / 10,
+            fed: Math.round(m.ratePoints.bracket * 1000) / 10,
+            state: Math.round(m.ratePoints.state * 1000) / 10,
+            ssTorpedo: Math.round(m.ratePoints.ssTorpedo * 1000) / 10,
+            irmaa: Math.round(m.ratePoints.irmaa * 1000) / 10,
+            irmaaAnnual: p.irmaaSurcharge || 0,
+            // Everything the blank cells needed in order to say something true.
+            hasSS: ss > 0,
+            ssShareBefore: m.detail.ssTaxableShareBefore,
+            ssMaxedOut: m.detail.ssTaxableShareBefore !== null && m.detail.ssTaxableShareBefore >= 0.8499,
+            medicareAge: targetAge >= 65,
+            irmaaEdgeDistance: irmaaEdge ? irmaaEdge.distance : null,
+            crossedIrmaaEdge: !!m.detail.crossedIrmaaEdge,
+            // What this year's income does to the surcharge two years out. The
+            // whole reason the mid-60s matter, and it was nowhere on screen.
+            setsIrmaaAtAge: targetAge + (IRMAA_TIER_LOOKBACK_YEARS || 2),
+            irmaaReachable: targetAge + (IRMAA_TIER_LOOKBACK_YEARS || 2) >= 65,
+            // What crossing actually costs, in dollars. Expressing a cliff as a
+            // percentage of the probe is arbitrary — the same crossing reads
+            // 400% against $1,000 and 40% against $10,000 — so the dollar figure
+            // is the one that means anything.
+            irmaaCrossCost: m.components.irmaa,
+          };
+        };
+        
+        const currentMarg = computeMarginalForAge(personalInfo.myAge);
+        // Decision-relevant ages, not an every-five-years grid. The old list —
+        // now, 70, 75, 80, 85, 90 — skipped the only years where the answer is
+        // still open. For a 53-year-old it showed 53 and then nothing until 70,
+        // missing the entire window this card exists to inform.
+        //
+        // The hinge is the two-year lookback: the MAGI you report at 63 sets the
+        // Medicare surcharge you pay at 65. That makes 63 the first year a
+        // withdrawal or conversion can cost you IRMAA at all, and 62 the last
+        // year one is free. Those two ages decide more than every later row
+        // combined, and neither was ever shown.
+        const rmdAge = getRmdStartAge(personalInfo.myBirthYear || (new Date().getFullYear() - personalInfo.myAge));
+        const lookback = IRMAA_TIER_LOOKBACK_YEARS || 2;
+        const ages = [...new Set([
+          personalInfo.myAge,                    // where you are now
+          personalInfo.myRetirementAge,          // income changes shape
+          65 - lookback - 1,                     // last year invisible to IRMAA (62)
+          65 - lookback,                         // first year that sets a surcharge (63)
+          65,                                    // Medicare starts; the first bill lands
+          rmdAge,                                // income you no longer choose
+          rmdAge + 5,
+          85,
+        ])]
+          .filter(a => Number.isFinite(a) && a >= personalInfo.myAge)
+          .sort((a, b) => a - b);
+        const marginals = ages.map(computeMarginalForAge).filter(Boolean);
+        
+        return (
+          <Section
+            tab="taxplanning" id="marginalIrmaa" level={detailLevel}
+            vis={sectionVisibility} setVis={setSectionVisibility}
+            title="Marginal Tax Impact & IRMAA"
+            actions={<>
+                <InfoCard
+                  title="Marginal Tax Impact & IRMAA"
+                  isOpen={openInfoCard === 'marginalRates'}
+                  onToggle={() => toggleInfoCard('marginalRates')}
+                  sections={[
+                    {
+                      heading: 'What This Shows',
+                      body: 'This card shows the TRUE cost of withdrawing an extra $1,000 from your pre-tax retirement accounts at different ages. The "true marginal rate" includes not just your tax bracket, but also the hidden costs: Social Security becoming more taxable (the "torpedo" effect) and potential IRMAA surcharges on Medicare premiums.'
+                    },
+                    {
+                      heading: 'SS Tax Torpedo',
+                      body: 'When your income rises, more of your Social Security becomes taxable (up to 85%). This creates a "torpedo zone" where each extra dollar of withdrawal effectively gets taxed at a much higher rate than your bracket suggests — sometimes 1.5x to 1.85x your marginal bracket.'
+                    },
+                    {
+                      heading: 'IRMAA Impact',
+                      body: 'Medicare Income-Related Monthly Adjustment Amount (IRMAA) adds surcharges to your Part B and Part D premiums when your MAGI exceeds certain thresholds. These are cliff-based — crossing a threshold by even $1 triggers the full surcharge for the year. The "Distance to Next Tier" shows how much room you have.'
+                    },
+                    {
+                      heading: 'How to Use This',
+                      body: 'Use this to plan Roth conversions — convert in years when your true marginal rate is lowest. Avoid pushing income into IRMAA tiers. The best conversion years are typically early retirement before Social Security and RMDs begin.',
+                      tip: 'See the Tax Planning tab for a full year-by-year bracket analysis.'
+                    }
+                  ]}
+                />
+              <span className="text-xs text-slate-500">Cost per extra $1,000 withdrawn</span>
+            </>}
+          >
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mb-3">
+              <div className="border rounded-lg px-4 py-3 bg-amber-500/10 border-amber-500/30">
+                <div className="text-slate-400 text-xs mb-0.5">True Marginal Rate (Now)</div>
+                <div className={`text-2xl font-bold ${(currentMarg?.rate || 0) > 35 ? 'text-red-400' : (currentMarg?.rate || 0) > 25 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                  {currentMarg?.crossedIrmaaEdge
+                    ? formatCurrency(currentMarg.irmaaCrossCost + (currentMarg.rate - currentMarg.irmaa) * 10)
+                    : `${currentMarg?.rate || 0}%`}
+                </div>
+                <div className="text-xs text-slate-500">
+                  {currentMarg?.crossedIrmaaEdge
+                    ? `Age ${personalInfo.myAge} — you sit on an IRMAA edge; the next $1K tips a tier`
+                    : `Age ${personalInfo.myAge} — each extra $1K costs $${Math.round((currentMarg?.rate || 0) * 10)}`}
+                </div>
+              </div>
+              <div className="border rounded-lg px-4 py-3 bg-purple-500/10 border-purple-500/30">
+                <div className="text-slate-400 text-xs mb-0.5">SS Tax Torpedo</div>
+                <div className="text-2xl font-bold text-purple-400">
+                  {currentMarg?.ssMaxedOut ? '85%' : `${currentMarg?.ssTorpedo || 0}%`}
+                </div>
+                <div className="text-xs text-slate-500">
+                  {currentMarg?.ssMaxedOut ? 'Already at the statutory maximum — no more to drag in'
+                    : (currentMarg?.ssTorpedo || 0) > 0 ? 'Extra withdrawals make SS taxable'
+                    : !currentMarg?.hasSS ? 'Not collecting Social Security yet'
+                    : `${Math.round((currentMarg?.ssShareBefore || 0) * 100)}% taxable — the next $1K adds none`}
+                </div>
+              </div>
+              <div className="border rounded-lg px-4 py-3 bg-pink-500/10 border-pink-500/30">
+                <div className="text-slate-400 text-xs mb-0.5">IRMAA Surcharge</div>
+                <div className="text-2xl font-bold text-pink-400">{currentMarg?.irmaaAnnual > 0 ? formatCurrency(currentMarg.irmaaAnnual) : '$0'}<span className="text-sm text-slate-400">/yr</span></div>
+                <div className="text-xs text-slate-500">Tier {currentMarg?.irmaaTier || 0}{currentMarg?.irmaa > 0 ? ' — near next cliff!' : ''}</div>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-slate-700">
+                    <th className="text-left py-1 px-2 text-slate-400">Age</th>
+                    <th className="text-left py-1 px-2 text-slate-400">Sets IRMAA at</th>
+                    <th className="text-right py-1 px-2 text-red-400">Federal</th>
+                    <th className="text-right py-1 px-2 text-orange-400">State</th>
+                    <th className="text-right py-1 px-2 text-purple-400">SS Torpedo</th>
+                    <th className="text-right py-1 px-2 text-pink-400">IRMAA</th>
+                    <th className="text-right py-1 px-2 text-amber-400 font-bold">True Rate</th>
+                    <th className="text-right py-1 px-2 text-slate-400">$/yr IRMAA</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {marginals.map((m, i) => (
+                    <tr key={i} className={`border-b border-slate-700/50 ${i === 0 ? 'bg-amber-900/10' : ''}`}>
+                      <td className="py-1 px-2 text-slate-100 font-medium">{m.age}</td>
+                      <td className="py-1 px-2">
+                        {m.irmaaReachable ? (
+                          <span className="text-pink-400/90">age {m.setsIrmaaAtAge}</span>
+                        ) : (
+                          <span className="text-emerald-400/80" title={`Income this year sets the surcharge at ${m.setsIrmaaAtAge}, which is before Medicare — it cannot cost you anything`}>
+                            free
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-1 px-2 text-right text-red-400">{m.fed}%</td>
+                      <td className="py-1 px-2 text-right text-orange-400">{m.state}%</td>
+                      {/* A zero here has three different meanings and a dash
+                          told them apart from nothing. "Already 85%" is the
+                          common one and the one that reads as a bug: the torpedo
+                          costs nothing more precisely because it has already
+                          done its worst. */}
+                      <td className="py-1 px-2 text-right text-purple-400">
+                        {m.ssTorpedo > 0 ? `${m.ssTorpedo}%`
+                          : !m.hasSS ? <span className="text-slate-500" title="Not collecting Social Security yet">—</span>
+                          : m.ssMaxedOut ? <span className="text-slate-500 text-[10px]" title="85% of your benefit is already taxable — the statutory maximum. The next dollar cannot drag any more of it in.">85% maxed</span>
+                          : <span className="text-slate-500" title={`${Math.round((m.ssShareBefore || 0) * 100)}% of your benefit is taxable; the next $1,000 does not add to it`}>0%</span>}
+                      </td>
+                      <td className="py-1 px-2 text-right text-pink-400">
+                        {m.irmaa > 0 ? `${m.irmaa}%`
+                          : !m.medicareAge ? <span className="text-slate-500" title="IRMAA applies from age 65">—</span>
+                          : m.irmaaEdgeDistance !== null && m.irmaaEdgeDistance <= 25000
+                            ? <span className="text-amber-500/80 text-[10px]" title="No surcharge on the next $1,000, but the next tier is close — crossing it costs the full tier, not a rate">
+                                {formatCurrency(m.irmaaEdgeDistance)} to edge
+                              </span>
+                            : <span className="text-slate-500" title="Comfortably inside an IRMAA tier — the next $1,000 crosses nothing">0%</span>}
+                      </td>
+                      {/* A crossing year is not a "rate" year. The surcharge is a
+                          fixed step, so the percentage is an artefact of the
+                          $1,000 probe — the dollar cost is the real quantity and
+                          the badge stops the number being read as a tax rate. */}
+                      <td className={`py-1 px-2 text-right font-bold ${m.rate > 35 ? 'text-red-400' : m.rate > 25 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                        {m.crossedIrmaaEdge ? (
+                          <span title={`This year sits against an IRMAA edge. The next $1,000 tips you into the higher tier, which costs ${formatCurrency(m.irmaaCrossCost)} for the year — a one-time step, not a rate every dollar pays.`}>
+                            <span className="text-[10px] bg-pink-500/20 text-pink-300 px-1 py-0.5 rounded mr-1">cliff</span>
+                            {formatCurrency(m.irmaaCrossCost)}
+                          </span>
+                        ) : `${m.rate}%`}
+                      </td>
+                      <td className="py-1 px-2 text-right text-slate-400">{m.irmaaAnnual > 0 ? formatCurrency(m.irmaaAnnual) : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-xs text-slate-500 mt-2">
+              Ages shown are the ones where the decision is still open, not a five-year grid.{' '}
+              <strong>&ldquo;Sets IRMAA at&rdquo;</strong> is the hinge: Medicare reads the MAGI you
+              reported <em>two years earlier</em>, so income at {65 - (IRMAA_TIER_LOOKBACK_YEARS || 2) - 1} and
+              before is marked <span className="text-emerald-400/80">free</span> — it lands before Medicare
+              and cannot cost a surcharge, however large. Age {65 - (IRMAA_TIER_LOOKBACK_YEARS || 2)} is the
+              first year a withdrawal or conversion can, which makes it the single most consequential year
+              on this table and the one a five-year grid always skipped.
+              True Rate = combined impact of federal tax, state tax, SS becoming taxable, and IRMAA
+              surcharges on each extra $1,000 of pre-tax withdrawal. <strong>&ldquo;85% maxed&rdquo;</strong> means
+              the torpedo has already done its worst — 85% of the benefit is taxable, the statutory
+              ceiling, so the next dollar cannot drag in any more. IRMAA is a <em>cliff</em>, not a rate:
+              a year can show 0% and still sit a few thousand dollars from an edge that costs a full tier
+              to cross, which is why the distance is shown instead of a dash. See Tax Planning tab for
+              full year-by-year detail. Rows marked <strong>cliff</strong> sit right against an IRMAA edge —
+              usually because the plan is deliberately converting up to it. There the next $1,000 tips you
+              into the next tier and the cost shown is the <em>dollar</em> step for that year, not a rate:
+              the same crossing would read 400% against a $1,000 test and 40% against a $10,000 one, so the
+              percentage would tell you nothing.
+            </p>
+          </Section>
+        );
+      })()}
 
       {/* ACA subsidy impact of Roth conversions (pre-65, ACA coverage mode).
           Near the 400% FPL cliff a conversion dollar costs marginal tax PLUS
@@ -6307,8 +6566,11 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
         });
         const totalLost = rows.reduce((s, r) => s + r.subsidyLost, 0);
         return (
-          <div className={cardStyle}>
-            <h4 className="text-lg font-semibold text-slate-100 mb-1">Roth Conversions vs. ACA Subsidy</h4>
+          <Section
+            tab="taxplanning" id="acaSubsidy" level={detailLevel}
+            vis={sectionVisibility} setVis={setSectionVisibility}
+            title="Roth Conversions vs. ACA Subsidy"
+          >
             <p className="text-xs text-slate-400 mb-3">
               Conversions raise MAGI, which shrinks your marketplace premium credit — and above 400% of the poverty
               level the credit vanishes entirely (the 2026 cliff). Near the cliff, a conversion dollar costs its
@@ -6347,7 +6609,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
                 when IRMAA — not the ACA — becomes the constraint.
               </p>
             )}
-          </div>
+          </Section>
         );
       })()}
 
@@ -6355,9 +6617,12 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
       <TaxBreakpointsTable projections={projections} personalInfo={personalInfo} />
 
       {qcdSavings && qcdSavings.totalQcd > 0 && (
-        <div className={cardStyle}>
+        <Section
+          tab="taxplanning" id="charitable" level={detailLevel}
+          vis={sectionVisibility} setVis={setSectionVisibility}
+          title="What Your Charitable Giving Saves"
+        >
           <div className="flex items-center gap-2 mb-1">
-            <h4 className="text-lg font-semibold text-slate-100">What Your Charitable Giving Saves</h4>
             <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">QCD</span>
           </div>
           <p className="text-xs text-slate-400 mb-4 leading-relaxed">
@@ -6397,7 +6662,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, incomeStreams, o
             buys no deduction at all
             {qcdSavings.lifetimeIrmaaSaved > 0 && <>. Medicare surcharges avoided: {formatCurrency(qcdSavings.lifetimeIrmaaSaved)}</>}.
           </p>
-        </div>
+        </Section>
       )}
 
       <TaxYearSnapshot
@@ -14631,245 +14896,6 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
         );
       })()}
       
-      {/* Marginal Tax Impact Dashboard Card */}
-      {visibilitySettings.taxSummary && (() => {
-        // Priced by the engine's own marginalCostOfNextDollar, the same function
-        // behind the Tax Planning tab's "Next Dollar" card. This card used to
-        // rebuild all of it by hand and got two things wrong that showed up as
-        // blank columns:
-        //
-        //   MAGI was hand-assembled from gross Social Security and the whole
-        //   portfolio withdrawal — but IRMAA is measured on AGI, which contains
-        //   only the TAXABLE part of the benefit and none of a Roth draw or a
-        //   return of brokerage basis. The row already carries a correct `magi`.
-        //
-        //   And the probe collided with the engine's own IRMAA_FILL_SAFETY_MARGIN.
-        //   A year converting up to an IRMAA ceiling stops $1,000 short of it by
-        //   design, so a +$1,000 probe landed EXACTLY on the edge — where the
-        //   tier has not flipped yet — and reported no IRMAA cost at all in
-        //   precisely the years built to sit against that edge.
-        const computeMarginalForAge = (targetAge) => {
-          const p = projections.find(pr => pr.myAge === targetAge);
-          if (!p) return null;
-          const m = marginalCostOfNextDollar({ row: p, pi: personalInfo, probe: 1000 });
-          if (!m) return null;
-          const irmaaEdge = (m.nextThresholds || []).find(t => /IRMAA/.test(t.label));
-          const ss = p.socialSecurity || 0;
-          return {
-            age: targetAge,
-            rate: Math.round(m.rate * 1000) / 10,
-            fed: Math.round(m.ratePoints.bracket * 1000) / 10,
-            state: Math.round(m.ratePoints.state * 1000) / 10,
-            ssTorpedo: Math.round(m.ratePoints.ssTorpedo * 1000) / 10,
-            irmaa: Math.round(m.ratePoints.irmaa * 1000) / 10,
-            irmaaAnnual: p.irmaaSurcharge || 0,
-            // Everything the blank cells needed in order to say something true.
-            hasSS: ss > 0,
-            ssShareBefore: m.detail.ssTaxableShareBefore,
-            ssMaxedOut: m.detail.ssTaxableShareBefore !== null && m.detail.ssTaxableShareBefore >= 0.8499,
-            medicareAge: targetAge >= 65,
-            irmaaEdgeDistance: irmaaEdge ? irmaaEdge.distance : null,
-            crossedIrmaaEdge: !!m.detail.crossedIrmaaEdge,
-            // What this year's income does to the surcharge two years out. The
-            // whole reason the mid-60s matter, and it was nowhere on screen.
-            setsIrmaaAtAge: targetAge + (IRMAA_TIER_LOOKBACK_YEARS || 2),
-            irmaaReachable: targetAge + (IRMAA_TIER_LOOKBACK_YEARS || 2) >= 65,
-            // What crossing actually costs, in dollars. Expressing a cliff as a
-            // percentage of the probe is arbitrary — the same crossing reads
-            // 400% against $1,000 and 40% against $10,000 — so the dollar figure
-            // is the one that means anything.
-            irmaaCrossCost: m.components.irmaa,
-          };
-        };
-        
-        const currentMarg = computeMarginalForAge(personalInfo.myAge);
-        // Decision-relevant ages, not an every-five-years grid. The old list —
-        // now, 70, 75, 80, 85, 90 — skipped the only years where the answer is
-        // still open. For a 53-year-old it showed 53 and then nothing until 70,
-        // missing the entire window this card exists to inform.
-        //
-        // The hinge is the two-year lookback: the MAGI you report at 63 sets the
-        // Medicare surcharge you pay at 65. That makes 63 the first year a
-        // withdrawal or conversion can cost you IRMAA at all, and 62 the last
-        // year one is free. Those two ages decide more than every later row
-        // combined, and neither was ever shown.
-        const rmdAge = getRmdStartAge(personalInfo.myBirthYear || (new Date().getFullYear() - personalInfo.myAge));
-        const lookback = IRMAA_TIER_LOOKBACK_YEARS || 2;
-        const ages = [...new Set([
-          personalInfo.myAge,                    // where you are now
-          personalInfo.myRetirementAge,          // income changes shape
-          65 - lookback - 1,                     // last year invisible to IRMAA (62)
-          65 - lookback,                         // first year that sets a surcharge (63)
-          65,                                    // Medicare starts; the first bill lands
-          rmdAge,                                // income you no longer choose
-          rmdAge + 5,
-          85,
-        ])]
-          .filter(a => Number.isFinite(a) && a >= personalInfo.myAge)
-          .sort((a, b) => a - b);
-        const marginals = ages.map(computeMarginalForAge).filter(Boolean);
-        
-        return (
-          <div className={cardStyle}>
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2">
-                <h3 className="text-lg font-semibold text-slate-100">Marginal Tax Impact & IRMAA</h3>
-                <InfoCard
-                  title="Marginal Tax Impact & IRMAA"
-                  isOpen={openInfoCard === 'marginalRates'}
-                  onToggle={() => toggleInfoCard('marginalRates')}
-                  sections={[
-                    {
-                      heading: 'What This Shows',
-                      body: 'This card shows the TRUE cost of withdrawing an extra $1,000 from your pre-tax retirement accounts at different ages. The "true marginal rate" includes not just your tax bracket, but also the hidden costs: Social Security becoming more taxable (the "torpedo" effect) and potential IRMAA surcharges on Medicare premiums.'
-                    },
-                    {
-                      heading: 'SS Tax Torpedo',
-                      body: 'When your income rises, more of your Social Security becomes taxable (up to 85%). This creates a "torpedo zone" where each extra dollar of withdrawal effectively gets taxed at a much higher rate than your bracket suggests — sometimes 1.5x to 1.85x your marginal bracket.'
-                    },
-                    {
-                      heading: 'IRMAA Impact',
-                      body: 'Medicare Income-Related Monthly Adjustment Amount (IRMAA) adds surcharges to your Part B and Part D premiums when your MAGI exceeds certain thresholds. These are cliff-based — crossing a threshold by even $1 triggers the full surcharge for the year. The "Distance to Next Tier" shows how much room you have.'
-                    },
-                    {
-                      heading: 'How to Use This',
-                      body: 'Use this to plan Roth conversions — convert in years when your true marginal rate is lowest. Avoid pushing income into IRMAA tiers. The best conversion years are typically early retirement before Social Security and RMDs begin.',
-                      tip: 'See the Tax Planning tab for a full year-by-year bracket analysis.'
-                    }
-                  ]}
-                />
-                <button
-                  onClick={() => toggleVisibility('taxSummary')}
-                  className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors"
-                  title="Hide this section"
-                >
-                  Hide
-                </button>
-              </div>
-              <span className="text-xs text-slate-500">Cost per extra $1,000 withdrawn</span>
-            </div>
-            <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mb-3">
-              <div className="border rounded-lg px-4 py-3 bg-amber-500/10 border-amber-500/30">
-                <div className="text-slate-400 text-xs mb-0.5">True Marginal Rate (Now)</div>
-                <div className={`text-2xl font-bold ${(currentMarg?.rate || 0) > 35 ? 'text-red-400' : (currentMarg?.rate || 0) > 25 ? 'text-amber-400' : 'text-emerald-400'}`}>
-                  {currentMarg?.crossedIrmaaEdge
-                    ? formatCurrency(currentMarg.irmaaCrossCost + (currentMarg.rate - currentMarg.irmaa) * 10)
-                    : `${currentMarg?.rate || 0}%`}
-                </div>
-                <div className="text-xs text-slate-500">
-                  {currentMarg?.crossedIrmaaEdge
-                    ? `Age ${personalInfo.myAge} — you sit on an IRMAA edge; the next $1K tips a tier`
-                    : `Age ${personalInfo.myAge} — each extra $1K costs $${Math.round((currentMarg?.rate || 0) * 10)}`}
-                </div>
-              </div>
-              <div className="border rounded-lg px-4 py-3 bg-purple-500/10 border-purple-500/30">
-                <div className="text-slate-400 text-xs mb-0.5">SS Tax Torpedo</div>
-                <div className="text-2xl font-bold text-purple-400">
-                  {currentMarg?.ssMaxedOut ? '85%' : `${currentMarg?.ssTorpedo || 0}%`}
-                </div>
-                <div className="text-xs text-slate-500">
-                  {currentMarg?.ssMaxedOut ? 'Already at the statutory maximum — no more to drag in'
-                    : (currentMarg?.ssTorpedo || 0) > 0 ? 'Extra withdrawals make SS taxable'
-                    : !currentMarg?.hasSS ? 'Not collecting Social Security yet'
-                    : `${Math.round((currentMarg?.ssShareBefore || 0) * 100)}% taxable — the next $1K adds none`}
-                </div>
-              </div>
-              <div className="border rounded-lg px-4 py-3 bg-pink-500/10 border-pink-500/30">
-                <div className="text-slate-400 text-xs mb-0.5">IRMAA Surcharge</div>
-                <div className="text-2xl font-bold text-pink-400">{currentMarg?.irmaaAnnual > 0 ? formatCurrency(currentMarg.irmaaAnnual) : '$0'}<span className="text-sm text-slate-400">/yr</span></div>
-                <div className="text-xs text-slate-500">Tier {currentMarg?.irmaaTier || 0}{currentMarg?.irmaa > 0 ? ' — near next cliff!' : ''}</div>
-              </div>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-slate-700">
-                    <th className="text-left py-1 px-2 text-slate-400">Age</th>
-                    <th className="text-left py-1 px-2 text-slate-400">Sets IRMAA at</th>
-                    <th className="text-right py-1 px-2 text-red-400">Federal</th>
-                    <th className="text-right py-1 px-2 text-orange-400">State</th>
-                    <th className="text-right py-1 px-2 text-purple-400">SS Torpedo</th>
-                    <th className="text-right py-1 px-2 text-pink-400">IRMAA</th>
-                    <th className="text-right py-1 px-2 text-amber-400 font-bold">True Rate</th>
-                    <th className="text-right py-1 px-2 text-slate-400">$/yr IRMAA</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {marginals.map((m, i) => (
-                    <tr key={i} className={`border-b border-slate-700/50 ${i === 0 ? 'bg-amber-900/10' : ''}`}>
-                      <td className="py-1 px-2 text-slate-100 font-medium">{m.age}</td>
-                      <td className="py-1 px-2">
-                        {m.irmaaReachable ? (
-                          <span className="text-pink-400/90">age {m.setsIrmaaAtAge}</span>
-                        ) : (
-                          <span className="text-emerald-400/80" title={`Income this year sets the surcharge at ${m.setsIrmaaAtAge}, which is before Medicare — it cannot cost you anything`}>
-                            free
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-1 px-2 text-right text-red-400">{m.fed}%</td>
-                      <td className="py-1 px-2 text-right text-orange-400">{m.state}%</td>
-                      {/* A zero here has three different meanings and a dash
-                          told them apart from nothing. "Already 85%" is the
-                          common one and the one that reads as a bug: the torpedo
-                          costs nothing more precisely because it has already
-                          done its worst. */}
-                      <td className="py-1 px-2 text-right text-purple-400">
-                        {m.ssTorpedo > 0 ? `${m.ssTorpedo}%`
-                          : !m.hasSS ? <span className="text-slate-500" title="Not collecting Social Security yet">—</span>
-                          : m.ssMaxedOut ? <span className="text-slate-500 text-[10px]" title="85% of your benefit is already taxable — the statutory maximum. The next dollar cannot drag any more of it in.">85% maxed</span>
-                          : <span className="text-slate-500" title={`${Math.round((m.ssShareBefore || 0) * 100)}% of your benefit is taxable; the next $1,000 does not add to it`}>0%</span>}
-                      </td>
-                      <td className="py-1 px-2 text-right text-pink-400">
-                        {m.irmaa > 0 ? `${m.irmaa}%`
-                          : !m.medicareAge ? <span className="text-slate-500" title="IRMAA applies from age 65">—</span>
-                          : m.irmaaEdgeDistance !== null && m.irmaaEdgeDistance <= 25000
-                            ? <span className="text-amber-500/80 text-[10px]" title="No surcharge on the next $1,000, but the next tier is close — crossing it costs the full tier, not a rate">
-                                {formatCurrency(m.irmaaEdgeDistance)} to edge
-                              </span>
-                            : <span className="text-slate-500" title="Comfortably inside an IRMAA tier — the next $1,000 crosses nothing">0%</span>}
-                      </td>
-                      {/* A crossing year is not a "rate" year. The surcharge is a
-                          fixed step, so the percentage is an artefact of the
-                          $1,000 probe — the dollar cost is the real quantity and
-                          the badge stops the number being read as a tax rate. */}
-                      <td className={`py-1 px-2 text-right font-bold ${m.rate > 35 ? 'text-red-400' : m.rate > 25 ? 'text-amber-400' : 'text-emerald-400'}`}>
-                        {m.crossedIrmaaEdge ? (
-                          <span title={`This year sits against an IRMAA edge. The next $1,000 tips you into the higher tier, which costs ${formatCurrency(m.irmaaCrossCost)} for the year — a one-time step, not a rate every dollar pays.`}>
-                            <span className="text-[10px] bg-pink-500/20 text-pink-300 px-1 py-0.5 rounded mr-1">cliff</span>
-                            {formatCurrency(m.irmaaCrossCost)}
-                          </span>
-                        ) : `${m.rate}%`}
-                      </td>
-                      <td className="py-1 px-2 text-right text-slate-400">{m.irmaaAnnual > 0 ? formatCurrency(m.irmaaAnnual) : '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <p className="text-xs text-slate-500 mt-2">
-              Ages shown are the ones where the decision is still open, not a five-year grid.{' '}
-              <strong>&ldquo;Sets IRMAA at&rdquo;</strong> is the hinge: Medicare reads the MAGI you
-              reported <em>two years earlier</em>, so income at {65 - (IRMAA_TIER_LOOKBACK_YEARS || 2) - 1} and
-              before is marked <span className="text-emerald-400/80">free</span> — it lands before Medicare
-              and cannot cost a surcharge, however large. Age {65 - (IRMAA_TIER_LOOKBACK_YEARS || 2)} is the
-              first year a withdrawal or conversion can, which makes it the single most consequential year
-              on this table and the one a five-year grid always skipped.
-              True Rate = combined impact of federal tax, state tax, SS becoming taxable, and IRMAA
-              surcharges on each extra $1,000 of pre-tax withdrawal. <strong>&ldquo;85% maxed&rdquo;</strong> means
-              the torpedo has already done its worst — 85% of the benefit is taxable, the statutory
-              ceiling, so the next dollar cannot drag in any more. IRMAA is a <em>cliff</em>, not a rate:
-              a year can show 0% and still sit a few thousand dollars from an edge that costs a full tier
-              to cross, which is why the distance is shown instead of a dash. See Tax Planning tab for
-              full year-by-year detail. Rows marked <strong>cliff</strong> sit right against an IRMAA edge —
-              usually because the plan is deliberately converting up to it. There the next $1,000 tips you
-              into the next tier and the cost shown is the <em>dollar</em> step for that year, not a rate:
-              the same crossing would read 400% against a $1,000 test and 40% against a $10,000 one, so the
-              percentage would tell you nothing.
-            </p>
-          </div>
-        );
-      })()}
       
       {/* Healthcare Cost Projection Card */}
       {healthcareCostsModeled(personalInfo) && (() => {
@@ -15995,6 +16021,48 @@ function buildNextYearActions(projections, personalInfo, accounts, incomeStreams
       amount: fmt(y.irmaaInfo.distToNextTier),
       detail: `Your projected MAGI is ${fmt(y.magi)}. Adding more than ${fmt(y.irmaaInfo.distToNextTier)} of income would push you into the next IRMAA tier and raise your Medicare Part B & D premiums.`,
     });
+  }
+
+  // 5b. IRMAA BEFORE Medicare age. irmaaInfo is only populated once someone is
+  // actually paying a premium, so the warning above cannot fire for the years
+  // that decide it. Because of the two-year lookback, the MAGI reported at 63
+  // sets the surcharge paid at 65 — which makes 63 the first year a conversion
+  // or a large withdrawal can cost IRMAA at all, and 62 the last year one is
+  // free. Those are the years the decision is still open, and until now nothing
+  // on the dashboard said so at any age below 65.
+  else if (y.magi > 0) {
+    const lookback = IRMAA_TIER_LOOKBACK_YEARS || 2;
+    const age = y.myAge;
+    const paysAt = irmaaChargedAtAge(age);
+    const lastFree = irmaaLastFreeAge();
+    // The window worth flagging: the first year that sets a surcharge through
+    // the year before Medicare starts. Earlier than that and the income never
+    // reaches a lookback at all. Both boundaries are derived from the engine's
+    // constants rather than typed, so a change to either moves this with it.
+    if (paysAt >= MEDICARE_ELIGIBILITY_AGE && age < MEDICARE_ELIGIBILITY_AGE) {
+      // Thresholds are indexed to the year the surcharge is PAID, not the year
+      // the income is earned — CMS applies the premium year's brackets to the
+      // MAGI from two years prior. Same convention as irmaaTierCeiling.
+      const edge = nextIRMAAThreshold(y.magi, fs, (y.year - BASE_TAX_YEAR) + lookback,
+                                     (personalInfo && personalInfo.inflationRate) || 0.03);
+      if (edge && isFinite(edge.distance) && edge.distance > 0) {
+        actions.push({
+          id: 'irmaa-lookback', severity: 'warn',
+          title: `This year's income sets your Medicare premium at ${paysAt}`,
+          amount: fmt(edge.distance),
+          detail: `Medicare looks back ${lookback} years, so the MAGI you report at ${age} decides the IRMAA surcharge you pay at ${paysAt}. Your projected MAGI is ${fmt(y.magi)} — adding more than ${fmt(edge.distance)} would cross the next tier. See Marginal Tax Impact & IRMAA on the Tax Planning tab.`,
+        });
+      }
+    } else if (age === lastFree) {
+      // The last year entirely invisible to IRMAA. Worth saying out loud,
+      // because it is the cheapest year in the plan to realise income and the
+      // only signal that it is about to end.
+      actions.push({
+        id: 'irmaa-free-year', severity: 'info',
+        title: 'The last year your income is invisible to IRMAA',
+        detail: `Medicare's ${lookback}-year lookback means income realised this year (age ${age}) never reaches an IRMAA calculation. From next year on it does. If a Roth conversion is on the table, this is the cheapest year in the plan to do it.`,
+      });
+    }
   }
 
   // 6. Estimated quarterly taxes.
@@ -19745,7 +19813,7 @@ function RetirementPlanner() {
             {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={projections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
             {activeTab === 'socialsecurity' && <SocialSecurityTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
             {activeTab === 'scenarios' && <ScenarioComparisonTab activeScenarioId={activeScenarioId} assets={assets} computeProjections={computeProjections} createScenario={createScenario} deleteScenario={deleteScenario} loadScenario={loadScenario} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} scenarios={scenarios} />}
-            {activeTab === 'taxplanning' && <TaxPlanningTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
+            {activeTab === 'taxplanning' && <TaxPlanningTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'currentyear' && <CurrentYearTab currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'withdrawal' && <WithdrawalStrategiesTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} />}
             {activeTab === 'montecarlo' && <MonteCarloTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}

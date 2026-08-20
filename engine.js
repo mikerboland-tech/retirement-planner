@@ -5071,6 +5071,14 @@ const conversionStageAt = (pi, age) => {
 // earlier, so the last free year is the one whose income lands the year before
 // Medicare starts — and if that constant ever changes, this moves with it
 // instead of quietly becoming wrong.
+// The last age whose income never reaches an IRMAA calculation, and the age at
+// which a given year's MAGI is finally charged. Both were derived inline in two
+// places and hard-coded in a third; deriving them once means a change to the
+// lookback or to the Medicare age moves every caller together instead of
+// leaving one quietly wrong.
+const irmaaLastFreeAge = () => MEDICARE_ELIGIBILITY_AGE - IRMAA_TIER_LOOKBACK_YEARS - 1;
+const irmaaChargedAtAge = (age) => age + IRMAA_TIER_LOOKBACK_YEARS;
+
 const irmaaAwareConversionStages = (pi, {
   freeBracket = '24%',
   chargedTier = 1,
@@ -5080,7 +5088,7 @@ const irmaaAwareConversionStages = (pi, {
   const window = getDefaultRothConversionWindow(pi);
   const from = startAge ?? (pi.rothConversionStartAge > 0 ? pi.rothConversionStartAge : window.startAge);
   const to = endAge ?? (pi.rothConversionEndAge > 0 ? pi.rothConversionEndAge : window.endAge);
-  const lastFreeAge = MEDICARE_ELIGIBILITY_AGE - IRMAA_TIER_LOOKBACK_YEARS - 1;
+  const lastFreeAge = irmaaLastFreeAge();
 
   // A window that ends before the hinge, or starts after it, is a one-stage
   // plan. Emitting an empty second stage would look like a schedule the user
@@ -10173,7 +10181,7 @@ const describePlanPatch = (state, patch) => {
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
     conversionStagesOf, conversionStageAt, irmaaAwareConversionStages,
     deferralDecision, convertWhileWorking, switchDeferrals,
-    MEDICARE_ELIGIBILITY_AGE,
+    MEDICARE_ELIGIBILITY_AGE, irmaaLastFreeAge, irmaaChargedAtAge,
     withoutRothConversions, withRothConversionTarget,
     IRMAA_TIER_LOOKBACK_YEARS,
     routeK1, applyPartnerBasis, applyPassiveLossRules, computeScheduleD,
