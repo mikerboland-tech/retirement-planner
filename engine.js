@@ -5394,6 +5394,101 @@ const compareTraditionalVsRoth = (cy, pi, futureMarginalRate, opts = {}) => {
       projectedTotal: p.projected.deferral.projectedTotal,
       cappedByLimit: p.projected.deferral.cappedByLimit,
     })),
+    equalCost: equalCostDeferral({
+      base, shiftAmount, rateNow, rateLater, pi, opts,
+    }),
+  };
+};
+
+// ── THE SAME MONEY OUT OF POCKET ─────────────────────────────────────────────
+// The rate comparison above is right about what it measures and silent about
+// what it leaves out. A $1,000 Roth deferral costs $1,000 of this year's
+// spendable pay. A $1,000 traditional deferral costs less, because it also cuts
+// the tax bill — so the two are not the same decision, and comparing them as
+// though they were quietly credits the traditional side with money it never
+// asked the saver to give up.
+//
+// Putting them on equal footing means the traditional saver invests the tax
+// saving instead of spending it. That side account is a TAXABLE brokerage: it
+// pays tax on dividends every year along the way and capital-gains tax when it
+// is sold. Under a frictionless side account the algebra collapses back to
+// "compare the two rates" exactly — which is why the simple rule is usually
+// taught. The friction is the whole content of this function.
+//
+// Two consequences worth stating plainly, because neither is obvious:
+//
+//   The break-even future rate is NOT this year's rate. It is this year's rate
+//   discounted by how much of the market return the side account concedes to
+//   tax drag. Traditional therefore needs the future rate to be lower than the
+//   naive comparison implies, and the gap widens the longer the horizon.
+//
+//   At the 402(g) cap the argument flips hardest. The cap limits the
+//   CONTRIBUTION, not the cost, so at the cap the traditional saver cannot
+//   shelter the tax saving at all — it has nowhere to go but a taxable account.
+//   A Roth dollar at the cap therefore buys strictly more sheltered space than a
+//   traditional dollar, and Roth can win even when the two tax rates are equal.
+//
+// This models the DISCIPLINED case. A saver who takes the traditional deduction
+// and spends the difference is not running this comparison at all, and the
+// caller is told so rather than left to assume the side account exists.
+const equalCostDeferral = ({ base, shiftAmount, rateNow, rateLater, pi = {}, opts = {} }) => {
+  const years = Math.max(0, opts.years ?? Math.max(0,
+    (pi.myRetirementAge || 65) - (pi.myAge || 0)));
+  const growthRate = opts.growthRate ?? (pi.expectedReturn ?? 0.07);
+
+  // The drag is MEASURED, not assumed: probe the plan's own return with an extra
+  // dollar of qualified dividends and read what it actually costs. That picks up
+  // NIIT and any phaseout the dividend drags along, which a flat 15% would miss
+  // — and for exactly the high earner most likely to be asking this question,
+  // NIIT is 3.8 points of the answer.
+  const divProbe = marginalRateOn(base, 1000, (sit, d) => ({
+    ...sit,
+    income: { ...(sit.income || {}),
+      ordinaryDividends: n_((sit.income || {}).ordinaryDividends) + d,
+      qualifiedDividends: n_((sit.income || {}).qualifiedDividends) + d },
+  }));
+  const dividendTaxRate = Math.max(0, Math.min(1, divProbe.combined));
+  const capGainsTaxRate = opts.capGainsTaxRate ?? dividendTaxRate;
+  const dividendYield = opts.dividendYield ?? 0.02;
+
+  const gross = Math.pow(1 + growthRate, years);
+  const side = taxableGrowthFactor({ years, growthRate, dividendYield,
+                                     dividendTaxRate, capGainsTaxRate,
+                                     costBasisFraction: 1 });
+  // How much of the gross return survives the side account's own taxes. 1.0
+  // would mean a frictionless account, where this whole adjustment vanishes.
+  const dragFactor = gross > 0 ? side.afterTaxValue / gross : 1;
+
+  const outOfPocketRoth = shiftAmount;
+  const outOfPocketTraditional = shiftAmount * (1 - rateNow);
+  const sideAccountAnnual = shiftAmount * rateNow;   // what must actually be invested
+
+  const rothFinal = shiftAmount * gross;
+  const traditionalSheltered = shiftAmount * gross * (1 - rateLater);
+  const traditionalSide = sideAccountAnnual * side.afterTaxValue;
+  const traditionalFinal = traditionalSheltered + traditionalSide;
+
+  // Traditional wins iff rateNow * dragFactor > rateLater. Stating it as a
+  // break-even rate makes the discount visible instead of leaving it inside a
+  // comparison of two big numbers.
+  const breakEvenRateLater = rateNow * dragFactor;
+
+  return {
+    years, growthRate, dividendYield, dividendTaxRate, capGainsTaxRate,
+    // The out-of-pocket figures the whole adjustment exists to expose.
+    outOfPocketRoth, outOfPocketTraditional,
+    outOfPocketDifference: outOfPocketRoth - outOfPocketTraditional,
+    sideAccountAnnual,
+    // Terminal after-tax value of one year's contribution, same cost either way.
+    rothFinal, traditionalFinal, traditionalSheltered, traditionalSide,
+    advantage: traditionalFinal - rothFinal,
+    dragFactor,
+    breakEvenRateLater,
+    favors: traditionalFinal > rothFinal ? 'traditional'
+          : (traditionalFinal < rothFinal ? 'roth' : 'neutral'),
+    // Whether accounting for the side account changed the answer the rate
+    // comparison alone would have given. This is the reason to show it at all.
+    flipsVerdict: (rateNow > rateLater) !== (traditionalFinal > rothFinal),
   };
 };
 
@@ -6975,10 +7070,47 @@ const switchDeferrals = (accounts, { to = 'roth', taxRate = 0, mode = 'equalTake
     taxableAdjustment = (to === 'roth' ? -1 : 1) * deferralDollars * rate;
   }
   if (taxableAdjustment !== 0) {
-    const brokerage = out.find(x => x && isBrokerageAccount(x.type) && (x.contribution || 0) > 0)
+    let brokerage = out.find(x => x && isBrokerageAccount(x.type) && (x.contribution || 0) > 0)
       || out.find(x => x && isBrokerageAccount(x.type));
+    // A plan with no taxable account used to drop the adjustment on the floor.
+    // In the traditional direction that is the whole comparison: the deduction
+    // was credited and the saving it produced was never asked to go anywhere,
+    // which flatters traditional by exactly the amount this mode exists to make
+    // it account for. The saving has to land somewhere, and a brokerage is
+    // where it lands — so if the plan has none, open one.
+    if (!brokerage && taxableAdjustment > 0) {
+      const donor = out.find(x => x && (x.cagr || 0) > 0) || {};
+      nextId += 1;
+      brokerage = {
+        id: nextId,
+        name: 'Taxable savings (tax saved by deferring)',
+        type: 'brokerage',
+        balance: 0,
+        contribution: 0,
+        contributionGrowth: 0,
+        // A touch below the deferral accounts: this money is taxed as it grows,
+        // and pretending otherwise is the error being corrected here.
+        cagr: Math.max(0, (donor.cagr || 0.07) - 0.01),
+        startAge: donor.startAge,
+        stopAge: donor.stopAge,
+        owner: donor.owner || 'joint',
+        contributor: 'me',
+        costBasisPercent: 1,
+      };
+      out.push(brokerage);
+    }
     if (brokerage) {
-      brokerage.contribution = Math.max(0, (brokerage.contribution || 0) + taxableAdjustment);
+      const before = brokerage.contribution || 0;
+      brokerage.contribution = Math.max(0, before + taxableAdjustment);
+      // A reduction larger than the taxable saving that exists cannot come out
+      // of a taxable account that isn't there. Recorded rather than absorbed:
+      // silently clamping would flatter the OTHER side by the remainder.
+      const applied = brokerage.contribution - before;
+      if (Math.abs(applied - taxableAdjustment) > 0.5) {
+        out._unfundedTaxableAdjustment = taxableAdjustment - applied;
+      }
+    } else {
+      out._unfundedTaxableAdjustment = taxableAdjustment;
     }
   }
   return out;
@@ -7131,7 +7263,16 @@ const deferralDecision = (ctx, opts2 = {}) => {
       taxRate: switchRate,
       note: mode === 'equalTakeHome'
         ? `Roth contributions are scaled to what the same take-home pay buys at your ${Math.round(switchRate * 1000) / 10}% marginal rate. Contributing the same NUMBER to a Roth would cost more paycheck, and comparing those two would flatter Roth by exactly the tax nobody paid.`
-        : `Contributions are held equal and the extra tax is funded by saving less in the taxable account. This is the right framing when you are already at the deferral limit — there, a Roth dollar shelters more than a traditional one, and that is a genuine advantage.`,
+        : `Contributions are held equal and the difference in tax runs through the taxable account — deferring puts the tax it saves INTO that account, and choosing Roth instead pays the tax by putting less in. Either way the paycheck is the same, and the saving compounds where it actually would: somewhere its dividends are taxed every year and its gains are taxed at sale. This is the right framing when you are already at the deferral limit, where a Roth dollar shelters more than a traditional one and that is a genuine advantage.`,
+      // The out-of-pocket figures the equal-contribution framing turns on: a
+      // Roth dollar costs a whole dollar of spendable pay, a deferred dollar
+      // costs less, and the gap is what has to be invested for the two to be
+      // the same decision. Stated in dollars because that is the form the
+      // choice actually takes on a payroll form.
+      annualDeferral: Math.round(firstYearDeferral.traditional + firstYearDeferral.roth),
+      outOfPocketRoth: Math.round(firstYearDeferral.traditional + firstYearDeferral.roth),
+      outOfPocketTraditional: Math.round((firstYearDeferral.traditional + firstYearDeferral.roth) * (1 - switchRate)),
+      sideAccountAnnual: Math.round((firstYearDeferral.traditional + firstYearDeferral.roth) * switchRate),
     },
     // When every variant runs out of money, the legacy figures are all zero and
     // the comparison is between shortfalls, not between outcomes. Say so — a
@@ -10160,7 +10301,7 @@ const describePlanPatch = (state, patch) => {
     // ── Form 1040 current-year return ─────────────────────────────────────
     computeTaxReturn, marginalRateOn,
     PAY_PERIODS_PER_YEAR, payPeriodsElapsed, projectPayrollYearEnd,
-    buildTaxSituation, compareTraditionalVsRoth, projectedWithdrawalRate,
+    buildTaxSituation, compareTraditionalVsRoth, equalCostDeferral, projectedWithdrawalRate,
     projectedWithdrawalCost,
     detailedCurrentYearDecision, sameCurrentYearBasis, taxFieldsFromReturn, earnedIncomeByOwner,
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,

@@ -10331,6 +10331,164 @@ section('P87 — the Tax Planning tab can hide its own sections');
   });
 }
 
+section('P88 — the deferral decision priced on equal out-of-pocket cost');
+{
+  // The rate comparison was right about what it measured and silent about what
+  // it left out. A $1,000 Roth deferral costs $1,000 of this year's spendable
+  // pay; a $1,000 traditional deferral costs less, because it also cuts the tax
+  // bill. Comparing them as equals credits the traditional side with money the
+  // saver was never asked to give up.
+  //
+  // Equal footing means the traditional saver invests the tax saving. That side
+  // account is TAXABLE — dividends taxed yearly, gains taxed at sale — and the
+  // friction is the entire content of the adjustment.
+  const pi = { myAge: 45, spouseAge: 45, filingStatus: 'married_joint',
+    myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 90,
+    myLifeExpectancy: 90, spouseLifeExpectancy: 90, inflationRate: 0.03,
+    state: 'Missouri', desiredRetirementIncome: 140000, expectedReturn: 0.07 };
+  const cy = { taxYear: 2026,
+    payroll: [{ id: 1, owner: 'me', asOfDate: '2026-12-31', payFrequency: 'biweekly',
+      ytd: { grossPay: 260000, preTax401kTraditional: 10000,
+             fedWithheld: 45000, stateWithheld: 11000 }, remainder: {} }],
+    k1s: [], estimatedPayments: { federal: [], state: [] },
+    priorYearReturn: { agi: 250000, totalTax: 55000 },
+    otherIncome: { taxableInterest: 2000, qualifiedDividends: 6000 },
+    adjustments: {}, deductions: { mode: 'auto' } };
+  const cmp = (later, o) => engine.compareTraditionalVsRoth(cy, pi, later, o);
+
+  // ── The out-of-pocket figures, which are the point ───────────────────────
+  {
+    const e = cmp(0.22).equalCost;
+    const r = cmp(0.22);
+    approx(e.outOfPocketRoth, 1000, 'a $1,000 Roth deferral costs a full $1,000 of spendable pay');
+    approx(e.outOfPocketTraditional, 1000 * (1 - r.marginalRateNow),
+      'the traditional one costs less by exactly this year\'s marginal rate');
+    approx(e.sideAccountAnnual, e.outOfPocketRoth - e.outOfPocketTraditional,
+      'and the difference is precisely what has to be invested for the comparison to hold');
+    gt(e.sideAccountAnnual, 0, 'which on this plan is real money');
+  }
+
+  // ── The limiting case that proves the model ──────────────────────────────
+  // With no dividends and no capital-gains tax the side account is frictionless,
+  // and the algebra must collapse back to "compare the two rates" EXACTLY. If
+  // this drifts, the adjustment has invented a difference rather than measured
+  // a real one.
+  {
+    const r = cmp(0.22, { dividendYield: 0, capGainsTaxRate: 0 });
+    approx(r.equalCost.dragFactor, 1, 'a frictionless side account concedes nothing');
+    approx(r.equalCost.breakEvenRateLater, r.marginalRateNow,
+      'so the break-even future rate is just this year\'s rate — the textbook rule');
+    // And the verdict must agree with the naive one on both sides of it.
+    eq(cmp(r.marginalRateNow - 0.05, { dividendYield: 0, capGainsTaxRate: 0 }).equalCost.favors,
+      'traditional', 'below it, traditional still wins');
+    eq(cmp(r.marginalRateNow + 0.05, { dividendYield: 0, capGainsTaxRate: 0 }).equalCost.favors,
+      'roth', 'above it, Roth still wins');
+  }
+
+  // ── With friction, the bar moves — and moves one way ─────────────────────
+  {
+    const r = cmp(0.22);
+    const e = r.equalCost;
+    lt(e.dragFactor, 1, 'a taxable side account concedes some of the return to tax');
+    lt(e.breakEvenRateLater, r.marginalRateNow,
+      'so traditional needs a LOWER future rate than the naive rule implies');
+    // The drag is measured from the plan, not assumed: this earner is over the
+    // NIIT threshold, so the dividend rate has to exceed the bare 15%.
+    gt(e.dividendTaxRate, 0.15,
+      'the measured dividend rate picks up NIIT and state, which a flat 15% would miss');
+  }
+
+  // ── The band where the two rules genuinely disagree ──────────────────────
+  // This is the reason to show the adjustment at all. Between the adjusted
+  // break-even and this year's rate, the simple comparison says traditional and
+  // the honest one says Roth.
+  {
+    const r = cmp(0.22);
+    const mid = (r.equalCost.breakEvenRateLater + r.marginalRateNow) / 2;
+    const inBand = cmp(mid);
+    eq(inBand.favors, 'traditional', 'the rate comparison alone recommends traditional here');
+    eq(inBand.equalCost.favors, 'roth', 'and on equal out-of-pocket cost, Roth is ahead');
+    ok(inBand.equalCost.flipsVerdict, 'the flip is reported rather than left for the reader to notice');
+
+    // Outside the band the two agree, or the flag would be meaningless.
+    ok(!cmp(r.equalCost.breakEvenRateLater - 0.05).equalCost.flipsVerdict,
+      'well below the break-even both rules say traditional');
+    ok(!cmp(r.marginalRateNow + 0.05).equalCost.flipsVerdict,
+      'well above this year\'s rate both say Roth');
+  }
+
+  // ── Drag compounds with the horizon ──────────────────────────────────────
+  // A longer hold means more years of taxed dividends, so the side account
+  // falls further behind and the break-even keeps dropping. Monotone, or the
+  // loop in taxableGrowthFactor is wrong.
+  {
+    const years = [5, 10, 20, 30, 40].map(y => cmp(0.22, { years: y }).equalCost);
+    for (let i = 1; i < years.length; i++) {
+      lt(years[i].dragFactor, years[i - 1].dragFactor,
+        `a ${[5,10,20,30,40][i]}-year hold concedes more than a ${[5,10,20,30,40][i-1]}-year one`);
+      lt(years[i].breakEvenRateLater, years[i - 1].breakEvenRateLater,
+        'and the break-even falls with it');
+    }
+    lt(years[0].dragFactor, 1, 'even five years costs something');
+  }
+
+  // ── The tax saving has to land somewhere ─────────────────────────────────
+  // The equal-contribution mode already routed the difference through a taxable
+  // account — but only if the plan HAD one. With no brokerage the adjustment was
+  // dropped on the floor, so the traditional arm kept its deduction and was
+  // never asked to invest it. That is exactly the bias the mode exists to
+  // remove, and it failed silently on the plans most likely to hit it: someone
+  // saving only in a 401(k).
+  {
+    const only401k = [{ id: 1, name: '401k', type: '401k', balance: 200000,
+      contributionMode: 'amount', contribution: 24000, cagr: 0.07,
+      startAge: 45, stopAge: 65, owner: 'me', contributor: 'me' }];
+    const rate = 0.32;
+    const out = engine.switchDeferrals(only401k, { to: 'traditional', taxRate: rate,
+      mode: 'equalContribution', deferralDollars: 24000 });
+    const brokerages = out.filter(a => a && /brokerage/.test(a.type));
+    eq(brokerages.length, 1, 'a plan with nowhere to put the saving gets somewhere to put it');
+    // Read defensively: when the account is missing, the point is a reported
+    // failure on the line above, not a crash three lines later that buries it.
+    const opened = brokerages[0] || {};
+    approx(opened.contribution || 0, 24000 * rate,
+      'and it receives exactly the tax the deferral saved');
+    lt(opened.cagr === undefined ? Infinity : opened.cagr, only401k[0].cagr,
+      'at a lower return than the sheltered account, because this money is taxed as it grows');
+
+    // With a brokerage already present the saving is added to it rather than a
+    // second one being created — the old behaviour, which was correct.
+    const withBrokerage = only401k.concat([{ id: 2, name: 'Brokerage', type: 'brokerage',
+      balance: 50000, contribution: 6000, cagr: 0.06, startAge: 45, stopAge: 65,
+      owner: 'joint', contributor: 'me', costBasisPercent: 0.6 }]);
+    const out2 = engine.switchDeferrals(withBrokerage, { to: 'traditional', taxRate: rate,
+      mode: 'equalContribution', deferralDollars: 24000 });
+    eq(out2.filter(a => a && /brokerage/.test(a.type)).length, 1, 'no duplicate account is created');
+    approx((out2.find(a => /brokerage/.test(a.type)) || {}).contribution || 0, 6000 + 24000 * rate,
+      'the saving is added to the account that already exists');
+
+    // The other direction cannot be funded by an account that is not there.
+    // Clamping to zero silently would flatter Roth by the remainder, so it is
+    // reported instead.
+    const toRoth = engine.switchDeferrals(only401k, { to: 'roth', taxRate: rate,
+      mode: 'equalContribution', deferralDollars: 24000 });
+    approx(toRoth._unfundedTaxableAdjustment, -24000 * rate,
+      'a reduction with no taxable savings to reduce is recorded, not absorbed');
+  }
+
+  // ── The terminal values reconcile ────────────────────────────────────────
+  // The two arms must describe the same money: traditional is the sheltered
+  // balance after tax PLUS the side account after tax, and nothing else.
+  {
+    const e = cmp(0.22).equalCost;
+    approx(e.traditionalFinal, e.traditionalSheltered + e.traditionalSide,
+      'the traditional arm is exactly its two pieces');
+    const gross = Math.pow(1 + e.growthRate, e.years);
+    approx(e.rothFinal, 1000 * gross, 'the Roth arm is the whole contribution, untaxed at the end');
+    approx(e.advantage, e.traditionalFinal - e.rothFinal, 'and the advantage is their difference');
+  }
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of

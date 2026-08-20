@@ -5781,6 +5781,43 @@ function DeferralDecisionPanel({ personalInfo, accounts, incomeStreams, assets, 
             </table>
 
             <p className="text-[11px] text-slate-500 mt-3">{result.neutrality.note}</p>
+            {/* What the choice costs the paycheck. A Roth dollar costs a whole
+                dollar of spendable pay; a deferred dollar costs less, and the
+                gap only counts as an advantage if it is actually invested. The
+                equal-contribution run does invest it — in a taxable account,
+                where it is taxed as it grows — so showing the three figures
+                makes the assumption checkable instead of implicit. */}
+            {result.neutrality.mode === 'equalContribution' && result.neutrality.annualDeferral > 0 && (
+              <div className="mt-3 flex flex-wrap gap-x-8 gap-y-2 text-sm border-t border-slate-700/50 pt-3">
+                <div>
+                  <div className="text-xs text-slate-500">Roth costs you</div>
+                  <div className="text-slate-200 font-semibold">
+                    {formatCurrency(result.neutrality.outOfPocketRoth)}/yr
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500">Deferring costs you</div>
+                  <div className="text-slate-200 font-semibold">
+                    {formatCurrency(result.neutrality.outOfPocketTraditional)}/yr
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500">Difference, invested taxably</div>
+                  <div className="text-emerald-400 font-semibold">
+                    {formatCurrency(result.neutrality.sideAccountAnnual)}/yr
+                  </div>
+                </div>
+                <p className="text-[11px] text-slate-500 basis-full">
+                  Same {formatCurrency(result.neutrality.annualDeferral)} contribution either way, so the same
+                  paycheck is given up either way — but only if the
+                  {' '}{formatCurrency(result.neutrality.sideAccountAnnual)} the deduction hands back is actually
+                  invested. That is what this run assumes, and it invests it in a taxable account, which pays tax
+                  on its dividends every year and capital-gains tax when it is sold. If you would spend that money
+                  instead, the honest comparison is the equal-take-home one above, where the Roth contribution is
+                  smaller rather than the difference being saved.
+                </p>
+              </div>
+            )}
             {result.anyFails && (
               <p className="text-xs text-amber-400/90 mt-2">
                 At least one version of this plan runs out of money, so these are being compared on shortfall
