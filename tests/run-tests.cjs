@@ -10489,6 +10489,128 @@ section('P88 — the deferral decision priced on equal out-of-pocket cost');
   }
 }
 
+section('P89 — retiring part-way through a year');
+{
+  // The convention is that salaries end at retirementAge − 1, so the retirement
+  // year has always been the first FULL year without pay. Right for someone who
+  // retires on 1 January; wrong for everyone else. A retirement MONTH names the
+  // month the paycheque stops, and the year then carries part salary, part
+  // pension, and a withdrawal need and tax bill that match neither a working
+  // year nor a retired one.
+  const base = {
+    myAge: 60, spouseAge: 60, myBirthYear: TODAY_YEAR - 60, spouseBirthYear: TODAY_YEAR - 60,
+    myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 90,
+    myLifeExpectancy: 90, spouseLifeExpectancy: 90, filingStatus: 'married_joint',
+    state: 'Missouri', inflationRate: 0.03, desiredRetirementIncome: 120000,
+    withdrawalPriority: ['pretax', 'brokerage', 'roth'], healthcareModel: 'none',
+  };
+  const accts = () => ([{ id: 1, name: '401k', type: '401k', balance: 2000000, contribution: 0,
+    contributionGrowth: 0, cagr: 0.06, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me' }]);
+  const streams = () => ([
+    { id: 1, name: 'Salary', type: 'earned_income', amount: 150000, startAge: 60, endAge: 64,
+      cola: 0.03, owner: 'me' },
+    { id: 2, name: 'Pension', type: 'pension', amount: 40000, startAge: 65, endAge: 95,
+      cola: 0.02, owner: 'me' },
+  ]);
+  const at65 = (month) => computeProjections(
+    month === null ? base : { ...base, myRetirementMonth: month },
+    accts(), streams(), [], [], []).find(r => r.myAge === 65);
+
+  // ── The guarantee that matters most ──────────────────────────────────────
+  // January is the no-op, and so is leaving the field unset. Not "close" —
+  // identical, value for value, across the whole projection. Anything else means
+  // a feature nobody switched on changed their plan.
+  {
+    const run = (pi) => JSON.stringify(computeProjections(pi, accts(), streams(), [], [], []));
+    eq(run({ ...base, myRetirementMonth: 1 }), run(base),
+      'setting January changes nothing at all');
+    eq(run({ ...base, myRetirementMonth: undefined }), run(base),
+      'and neither does an absent month');
+    eq(run({ ...base, spouseRetirementMonth: 7 }), run(base),
+      'a spouse month changes nothing when the spouse has no income of their own');
+  }
+
+  // ── Salary stops at the start of the month ───────────────────────────────
+  {
+    const jan = at65(1), jul = at65(7), dec = at65(12);
+    eq(Math.round(jan.earnedIncome), 0, 'retiring in January means no pay in the retirement year');
+    gt(jul.earnedIncome, 0, 'retiring in July means half a year of it');
+    // Six months of pay, measured against a full year of the same COLA'd salary.
+    const fullYear = 150000 * Math.pow(1.03, 5);
+    approx(jul.earnedIncome, fullYear * 6 / 12, 'exactly six twelfths, COLA and all');
+    approx(dec.earnedIncome, fullYear * 11 / 12, 'and December is eleven twelfths, not twelve');
+  }
+
+  // ── The pension picks up the same month ──────────────────────────────────
+  // The two fractions must sum to one: a hand-off that overlaps pays twice, and
+  // one that gaps leaves a month nobody funds.
+  {
+    [2, 5, 7, 9, 12].forEach(m => {
+      const r = at65(m);
+      const salaryShare = r.earnedIncome / (150000 * Math.pow(1.03, 5));
+      const pensionShare = r.pension / 40000;
+      approx(salaryShare + pensionShare, 1,
+        `at month ${m} the salary and the pension between them cover the whole year exactly once`);
+    });
+  }
+
+  // ── Which is the point: the portfolio covers only what is left ───────────
+  {
+    const jan = at65(1), jul = at65(7), dec = at65(12);
+    lt(jul.portfolioWithdrawal, jan.portfolioWithdrawal,
+      'working half the year means drawing less from the portfolio');
+    lt(dec.portfolioWithdrawal, jul.portfolioWithdrawal, 'and working most of it, less again');
+    // More earned income in the year means a bigger tax bill, not a smaller one
+    // — salary is ordinary income and it arrives on top of the pension.
+    gt(jul.federalTax, jan.federalTax, 'the first-year tax bill rises with the months worked');
+    gt(dec.federalTax, jul.federalTax, 'monotonically');
+  }
+
+  // ── Payroll taxes and deferrals follow the pay, without being told ───────
+  // Both derive from earned income, so they prorate for free — but "for free"
+  // is worth an assertion, because it is the kind of thing that silently stops
+  // being true.
+  {
+    const withPlan = [{ id: 1, name: '401k', type: '401k', balance: 2000000,
+      contributionMode: 'percent', employeePercent: 0.10, employerMatchPercent: 0.04,
+      cagr: 0.06, startAge: 60, stopAge: 66, owner: 'me', contributor: 'me' }];
+    const row = (m) => computeProjections({ ...base, myRetirementMonth: m },
+      withPlan, streams(), [], [], []).find(r => r.myAge === 65);
+    const jan = row(1), jul = row(7);
+    eq(Math.round(jan.ficaTax), 0, 'no pay in January means no FICA');
+    gt(jul.ficaTax, 0, 'half a year of pay means half a year of FICA');
+    approx((jul.perAccountContributions || {})[1], jul.earnedIncome * 0.14,
+      'and the percent-of-salary deferral follows the salary that was actually paid');
+  }
+
+  // ── Only the stream that ends the year before retirement is extended ─────
+  // A salary the user deliberately ended earlier stays ended; the month must not
+  // resurrect it.
+  {
+    const early = streams();
+    early[0].endAge = 62;              // stopped working three years before
+    const r = computeProjections({ ...base, myRetirementMonth: 7 },
+      accts(), early, [], [], []).find(x => x.myAge === 65);
+    eq(Math.round(r.earnedIncome), 0, 'a salary that ended at 62 is not revived by a retirement month');
+    const r62 = computeProjections({ ...base, myRetirementMonth: 7 },
+      accts(), early, [], [], []).find(x => x.myAge === 62);
+    approx(r62.earnedIncome, 150000 * Math.pow(1.03, 2),
+      'and its own final year is still paid in full');
+  }
+
+  // ── The fractions themselves ─────────────────────────────────────────────
+  {
+    eq(engine.workedFractionOfYear(1), 0, 'retiring at the start of January is no months worked');
+    eq(engine.workedFractionOfYear(13), 1, 'and a month past the end is a full year, clamped');
+    approx(engine.workedFractionOfYear(7), 0.5, 'July is half');
+    [1, 4, 7, 10, 12].forEach(m => approx(
+      engine.workedFractionOfYear(m) + engine.retiredFractionOfYear(m), 1,
+      `month ${m}: worked and retired always sum to one`));
+    eq(engine.retirementMonthOf({}, 'me'), 1, 'an unset month reads as January');
+    eq(engine.retirementMonthOf({ myRetirementMonth: 99 }, 'me'), 12, 'and nonsense is clamped');
+  }
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of

@@ -7497,6 +7497,63 @@ const normalizeContributionWindow = (accts, pi = {}) => {
   });
 };
 
+// ── RETIRING PART-WAY THROUGH A YEAR ─────────────────────────────────────────
+// The app's convention is that salaries end at retirementAge − 1, so the
+// retirement year is the first FULL year without pay. That is exactly right for
+// someone who retires on 1 January and wrong for everyone else. Retiring in July
+// means six months of salary, six months of pension, the FICA and the deferrals
+// that follow from the first, and a withdrawal need and tax bill in that year
+// that look like neither a working year nor a retired one.
+//
+// A retirement MONTH names the month the paycheque stops. Retiring at the start
+// of month M means M−1 months of pay and 13−M months retired; the two fractions
+// sum to 1 by construction, which is what keeps a mid-year pension hand-off from
+// double-paying or short-paying the year.
+//
+// Month 1 (January) is the no-op: zero months of pay in the retirement year and
+// a pension that runs the whole of it — precisely what the engine already did.
+// Every existing plan is therefore unchanged, and P89 asserts that rather than
+// asserting it in a comment.
+//
+// The salary stream is extended into the retirement year rather than the user
+// being asked to move its endAge: the convention above puts endAge at
+// retirementAge − 1, so a partial retirement year has nowhere to live until
+// something makes room for it. Only a stream that ends exactly the year before
+// retirement is extended — one the user deliberately ended earlier stays ended.
+const retirementMonthOf = (pi = {}, owner) => {
+  const m = owner === 'spouse' ? pi.spouseRetirementMonth : pi.myRetirementMonth;
+  return Number.isFinite(m) ? Math.min(12, Math.max(1, Math.round(m))) : 1;
+};
+const retirementAgeForOwner = (pi = {}, owner) =>
+  owner === 'spouse' ? (pi.spouseRetirementAge ?? 65) : (pi.myRetirementAge ?? 65);
+
+const workedFractionOfYear = (month) => Math.min(1, Math.max(0, ((month || 1) - 1) / 12));
+const retiredFractionOfYear = (month) => 1 - workedFractionOfYear(month);
+
+// What a stream is worth in a given year once a mid-year retirement is taken
+// into account: the multiplier to apply, and the end age to gate against.
+// A joint earned-income stream follows the PRIMARY's month — it is one stream
+// with one stop date, and splitting it by two different months would be
+// inventing a second job nobody described.
+const streamPartialYear = (stream, ownerAge, pi = {}) => {
+  const plain = { fraction: 1, endAge: stream.endAge };
+  if (!stream) return plain;
+  const owner = stream.owner === 'spouse' ? 'spouse' : 'me';
+  const month = retirementMonthOf(pi, owner);
+  if (month <= 1) return plain;
+  const retAge = retirementAgeForOwner(pi, owner);
+  if (stream.type === 'earned_income' && stream.endAge === retAge - 1) {
+    return {
+      endAge: retAge,
+      fraction: ownerAge === retAge ? workedFractionOfYear(month) : 1,
+    };
+  }
+  if (stream.type === 'pension' && stream.startAge === retAge && ownerAge === retAge) {
+    return { fraction: retiredFractionOfYear(month), endAge: stream.endAge };
+  }
+  return plain;
+};
+
 function computeProjections(pi, accts, streams, assetList, events = [], recurringExpensesList = [], currentYearArg, opts = {}) {
   // currentYear used to be captured from RetirementPlanner's closure. It's now an
   // explicit parameter (with a fallback) so this function can be moved to module
@@ -7828,9 +7885,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         return; // Skip all other income from deceased
       }
       
-      if (ownerAge >= stream.startAge && recipientAge <= stream.endAge) {
+      const partial = streamPartialYear(stream, ownerAge, pi);
+      if (ownerAge >= stream.startAge && recipientAge <= partial.endAge) {
         const colaYears = streamColaYears(stream, ownerAge, yearsFromNow);
-        const adjustedAmount = stream.amount * Math.pow(1 + (stream.cola || 0), colaYears);
+        const adjustedAmount = stream.amount * Math.pow(1 + (stream.cola || 0), colaYears)
+                             * partial.fraction;
 
         if (stream.type === 'earned_income') {
           earnedIncome += adjustedAmount;
@@ -10304,6 +10363,8 @@ const describePlanPatch = (state, patch) => {
     buildTaxSituation, compareTraditionalVsRoth, equalCostDeferral, projectedWithdrawalRate,
     projectedWithdrawalCost,
     detailedCurrentYearDecision, sameCurrentYearBasis, taxFieldsFromReturn, earnedIncomeByOwner,
+    retirementMonthOf, retirementAgeForOwner, workedFractionOfYear, retiredFractionOfYear,
+    streamPartialYear,
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
     SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,
     marginalCostOfNextDollar, survivorTaxComparison, survivorSSLoss,

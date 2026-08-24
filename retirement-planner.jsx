@@ -976,6 +976,19 @@ const AgeCell = ({ value, onChange, onValueChange, onCommit, className, ...props
 };
 
 
+// Retiring at the START of the named month: pick July and the retirement year
+// carries six months of pay and six of pension. January is the default and the
+// no-op — it is what the engine has always modelled, since the app's convention
+// already ends salaries at retirementAge − 1.
+const RETIREMENT_MONTHS = [
+  { value: 1, label: 'January (full year retired)' }, { value: 2, label: 'February' },
+  { value: 3, label: 'March' },   { value: 4, label: 'April' },
+  { value: 5, label: 'May' },     { value: 6, label: 'June' },
+  { value: 7, label: 'July' },    { value: 8, label: 'August' },
+  { value: 9, label: 'September' }, { value: 10, label: 'October' },
+  { value: 11, label: 'November' }, { value: 12, label: 'December' },
+];
+
 const GridSelect = ({ value, onChange, options, className, children, ...props }) => (
   <select value={value} onChange={onChange} className={className} {...props}>
     {children || options?.map(o => typeof o === 'string'
@@ -11098,10 +11111,28 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
                 />
               </div>
               <div>
+                <label className={compactLabelStyle}>My Retirement Month</label>
+                <GridSelect
+                  value={localInfo.myRetirementMonth || 1}
+                  onChange={e => handleChange('myRetirementMonth', Number(e.target.value) || 1)}
+                  options={RETIREMENT_MONTHS}
+                  className={compactInputStyle}
+                />
+              </div>
+              <div>
                 <label className={compactLabelStyle}>Spouse Retirement Age</label>
                 <AgeCell
                   value={localInfo.spouseRetirementAge}
                   onChange={e => handleChange('spouseRetirementAge', Number(e.target.value) || 0)}
+                  className={compactInputStyle}
+                />
+              </div>
+              <div>
+                <label className={compactLabelStyle}>Spouse Retirement Month</label>
+                <GridSelect
+                  value={localInfo.spouseRetirementMonth || 1}
+                  onChange={e => handleChange('spouseRetirementMonth', Number(e.target.value) || 1)}
+                  options={RETIREMENT_MONTHS}
                   className={compactInputStyle}
                 />
               </div>
@@ -11115,6 +11146,14 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
               </div>
             </div>
             <p className="text-xs text-slate-500 mt-2">Retirement age determines when portfolio withdrawals begin. Birth year determines RMD start age per SECURE 2.0 Act. Planning/Legacy Age sets the end of all projections (default 95).</p>
+            <p className="text-xs text-slate-500 mt-1">
+              The retirement <strong>month</strong> is the month the paycheck stops. Choose July and the
+              retirement year carries six months of salary — with the FICA and 401(k) deferrals that come with
+              it — plus six months of any pension that starts that year, and the portfolio only has to cover
+              what is left. That is usually the year with the least predictable tax bill, and the month is what
+              makes it predictable. January means fully retired for the whole year, which is what the plan
+              assumed before this field existed.
+            </p>
           </div>
           
           {/* Tax Settings Section */}
