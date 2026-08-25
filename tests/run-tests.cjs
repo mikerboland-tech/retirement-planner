@@ -10687,6 +10687,63 @@ section('P90 — moving a retirement age moves what is tied to it');
       'covering the salary, the contributions and the pension');
   }
 
+  // ── The Roth conversion window follows retirement ────────────────────────
+  // A conversion window that starts in the first year of retirement has to move
+  // with retirement, or a plan that retires five years later converts in years
+  // the saver is still drawing a full salary — the one thing the strategy
+  // exists to avoid, and a big enough factor to change the ranking of the whole
+  // plan.
+  {
+    const withConv = { ...pi, myBirthYear: TODAY_YEAR - 55, rothConversionBracket: '24%',
+                       rothConversionStartAge: 65, rothConversionEndAge: 72 };
+    const r = engine.planAtRetirementAge(withConv, [], [], { myRetirementAge: 70 });
+    eq(r.pi.rothConversionStartAge, 70, 'a window starting at retirement moves with it');
+    eq(r.pi.rothConversionEndAge, 72, 'while an end tied to RMDs, not retirement, stays put');
+    ok(r.moved.some(m => m.kind === 'conversion' && m.field === 'startAge'),
+      'and the move is reported like any other');
+
+    // An UNSET window already followed, because the default derives from the
+    // retirement age. Worth pinning so a future change to that default cannot
+    // quietly break it.
+    const unset = { ...pi, myBirthYear: TODAY_YEAR - 55, rothConversionBracket: '24%' };
+    const moved70 = engine.planAtRetirementAge(unset, [], [], { myRetirementAge: 70 });
+    eq(engine.getDefaultRothConversionWindow(moved70.pi).startAge, 70,
+      'an unset window follows retirement without being touched');
+
+    // A window the user deliberately started before retirement is theirs.
+    const early = { ...withConv, rothConversionStartAge: 60 };
+    eq(engine.planAtRetirementAge(early, [], [], { myRetirementAge: 70 }).pi.rothConversionStartAge, 60,
+      'a start the user placed early stays early');
+  }
+
+  // ── A window must never end before it begins ─────────────────────────────
+  // Retiring later can push the start past a fixed end. An inverted window
+  // converts nothing and says nothing about it, which is the worst of both.
+  {
+    const tight = { ...pi, myBirthYear: TODAY_YEAR - 55, rothConversionBracket: '24%',
+                    rothConversionStartAge: 65, rothConversionEndAge: 67 };
+    const r = engine.planAtRetirementAge(tight, [], [], { myRetirementAge: 70 });
+    eq(r.pi.rothConversionStartAge, 70, 'the start moves');
+    ok(r.pi.rothConversionEndAge >= r.pi.rothConversionStartAge,
+      'and the end is carried along rather than left behind it');
+    eq(r.pi.rothConversionEndAge, 72, 'keeping the window the same length');
+    eq(r.moved.filter(m => m.kind === 'conversion').length, 2, 'both moves are reported');
+  }
+
+  // ── Staged schedules move the same way ───────────────────────────────────
+  {
+    const stagedPi = { ...pi, rothConversionStages: [
+      { label: 'Before IRMAA', startAge: 65, endAge: 67, bracket: '24%' },
+      { label: 'IRMAA applies', startAge: 68, endAge: 72, irmaaTier: 1 },
+    ] };
+    const r = engine.planAtRetirementAge(stagedPi, [], [], { myRetirementAge: 67 });
+    eq(r.pi.rothConversionStages[0].startAge, 67, 'a stage starting at retirement moves');
+    eq(r.pi.rothConversionStages[0].endAge, 67, 'its own end is untouched unless it sat on the age too');
+    eq(r.pi.rothConversionStages[1].startAge, 68, 'a later stage the user placed is left alone');
+    // The schedule is still a schedule afterwards.
+    eq(engine.rothConversionModeOf(r.pi), 'staged', 'and it is still recognised as a plan');
+  }
+
   // ── Nothing to do is not an error ────────────────────────────────────────
   {
     const same = engine.planAtRetirementAge(pi, accts(), streams(), { myRetirementAge: 65 });

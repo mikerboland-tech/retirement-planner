@@ -12424,7 +12424,13 @@ function RetirementAgeExplorer({ personalInfo, projections, setPersonalInfo, set
       // want to watch, you would still be scrolling away from the slider.
       // Pinned, it stays under your hand at any scroll position — and at rest it
       // is an ordinary card, so it costs nothing when nobody is experimenting.
-      className={`${cardStyle}${target !== baseAge ? ' sticky top-2 z-30 shadow-2xl ring-1 ring-amber-500/40' : ''}`}
+      // Pinned, this panel sits ON TOP of the charts it is changing, so it wants
+      // to be see-through enough that the lines moving underneath stay readable
+      // through it. A heavier backdrop-blur carries the text at a much lower
+      // background alpha than the resting card uses.
+      className={target !== baseAge
+        ? 'sticky top-2 z-30 bg-slate-900/45 backdrop-blur-md border border-amber-500/40 rounded-xl p-5 shadow-2xl'
+        : cardStyle}
     >
       <div className="flex flex-wrap items-center gap-4 mb-4">
         <div className="flex-1 min-w-[260px]">
@@ -12494,20 +12500,28 @@ function RetirementAgeExplorer({ personalInfo, projections, setPersonalInfo, set
         <div className="mt-4 text-xs text-slate-400 border-t border-slate-700/50 pt-3">
           {scenario.moved.length > 0 ? (
             <>
-              <div className="text-slate-500 mb-1.5">Moved with it, so the years line up:</div>
-              <ul className="space-y-0.5">
-                {scenario.moved.map((m, i) => (
-                  <li key={i}>
-                    <span className="text-slate-300">{m.name}</span>
-                    <span className="text-slate-500"> — {m.field === 'endAge' ? 'last year' : m.field === 'startAge' ? 'starts' : 'contributions stop'} </span>
-                    <span className="text-slate-400">{m.from} → {m.to}</span>
-                  </li>
-                ))}
-              </ul>
-              <p className="text-slate-500 mt-2">
-                Social Security is deliberately not moved — a claim age is its own decision, and retiring at one
-                age while claiming at another is common. Anything you placed somewhere other than where the plan
-                puts it by default is left alone too.
+              {/* One flowing line, not one row per account. A plan with three
+                  accounts and a conversion window produced five stacked lines of
+                  small print in a panel that is pinned over the charts — the
+                  list is reassurance that the years line up, not something
+                  anyone reads top to bottom. */}
+              <span className="text-slate-500">Moved with it: </span>
+              {scenario.moved.map((m, i) => (
+                <span key={i} className="whitespace-nowrap">
+                  {i > 0 && <span className="text-slate-600"> · </span>}
+                  <span className="text-slate-300">{m.name}</span>
+                  <span className="text-slate-500">{' '}
+                    {m.kind === 'conversion' ? (m.field === 'startAge' ? 'start' : 'end')
+                      : m.field === 'endAge' ? 'last yr'
+                      : m.field === 'startAge' ? 'starts' : 'stop'}{' '}
+                  </span>
+                  <span className="text-slate-400">{m.from}→{m.to}</span>
+                </span>
+              ))}
+              {/* One line. Pinned over the charts, every extra line of small print
+                  is a line of chart the reader cannot see. */}
+              <p className="text-slate-500 mt-1.5">
+                Social Security and anything you dated yourself are left alone — a claim age is its own decision.
               </p>
             </>
           ) : (

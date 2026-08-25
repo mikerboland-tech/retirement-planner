@@ -7595,6 +7595,47 @@ const planAtRetirementAge = (pi = {}, accts = [], streams = [], target = {}) => 
     return st;
   });
 
+  // A conversion window that starts in the first year of retirement has to move
+  // with retirement, or the plan converts in years the saver is still working —
+  // at their full salary, which is the one thing the strategy exists to avoid.
+  // An UNSET window already follows, because getDefaultRothConversionWindow
+  // derives startAge from the retirement age; only an age someone set
+  // explicitly, or that Apply wrote in from the optimizer, was left behind.
+  const me = deltas.me;
+  if (me) {
+    const shiftAge = (v, label, field) => {
+      if (v !== me.from) return v;
+      const to = Math.max(0, v + me.delta);
+      moved.push({ kind: 'conversion', id: null, name: label, field, from: v, to });
+      return to;
+    };
+    const startBefore = nextPi.rothConversionStartAge;
+    if (startBefore > 0) {
+      nextPi.rothConversionStartAge = shiftAge(startBefore, 'Roth conversions', 'startAge');
+      // Retiring later can push the start past a fixed end — usually the year
+      // before RMDs, which does not move. A window that ends before it begins
+      // converts nothing and says nothing about it, so carry the end along and
+      // report that too rather than leaving an inverted window behind.
+      const end = nextPi.rothConversionEndAge;
+      if (end > 0 && nextPi.rothConversionStartAge > end) {
+        const to = nextPi.rothConversionStartAge + (end - startBefore);
+        moved.push({ kind: 'conversion', id: null, name: 'Roth conversions',
+                     field: 'endAge', from: end, to });
+        nextPi.rothConversionEndAge = to;
+      }
+    }
+    if (Array.isArray(nextPi.rothConversionStages) && nextPi.rothConversionStages.length) {
+      nextPi.rothConversionStages = nextPi.rothConversionStages.map((st, i) => {
+        if (!st) return st;
+        const label = st.label || `Conversion stage ${i + 1}`;
+        const out = { ...st };
+        if (st.startAge === me.from) out.startAge = shiftAge(st.startAge, label, 'startAge');
+        if (st.endAge === me.from) out.endAge = shiftAge(st.endAge, label, 'endAge');
+        return out;
+      });
+    }
+  }
+
   const nextAccts = (accts || []).map(a => {
     if (!a) return a;
     const d = deltas[ownerOf(a)];
