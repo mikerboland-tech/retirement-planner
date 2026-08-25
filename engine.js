@@ -7497,6 +7497,90 @@ const normalizeContributionWindow = (accts, pi = {}) => {
   });
 };
 
+// ── MOVING A RETIREMENT AGE MOVES EVERYTHING TIED TO IT ──────────────────────
+// A retirement age on its own is nearly inert: it decides when the withdrawal
+// solver switches on and when spending changes shape, and nothing else. The
+// figures that actually move a plan — how many years of salary are earned, how
+// many years of deferrals go in, when a pension commences — live on the income
+// streams and the accounts, each with its own age.
+//
+// So "retire two years later" is not one edit. Done as one edit it produces a
+// plan that retires at 67 while the salary still stops at 64 and the 401(k)
+// still stops taking money at 65: two years of neither working nor drawing,
+// which is not a scenario anyone meant to model. The answer looks precise and
+// describes nothing.
+//
+// This is the one place that rule lives. Only ages that sit exactly where the
+// convention puts them are moved — a salary ending at retirementAge − 1, an
+// account stopping at retirementAge, a pension commencing at retirementAge.
+// Anything the user placed deliberately somewhere else is theirs and is left
+// alone, and everything moved is reported so the caller can say what happened
+// rather than silently rewriting a plan.
+//
+// Social Security is never moved. A claim age is its own decision with its own
+// arithmetic, and people routinely retire at one age and claim at another.
+const planAtRetirementAge = (pi = {}, accts = [], streams = [], target = {}) => {
+  const moved = [];
+  const nextPi = { ...pi };
+  const deltas = {};
+
+  ['me', 'spouse'].forEach(owner => {
+    const key = owner === 'spouse' ? 'spouseRetirementAge' : 'myRetirementAge';
+    const from = pi[key];
+    const to = target[key];
+    if (!Number.isFinite(to) || !Number.isFinite(from) || to === from) return;
+    nextPi[key] = to;
+    deltas[owner] = { from, to, delta: to - from };
+  });
+
+  if (!Object.keys(deltas).length) {
+    return { pi: nextPi, accts: accts || [], streams: streams || [], moved };
+  }
+
+  const ownerOf = (row) => (row && row.owner === 'spouse') ? 'spouse' : 'me';
+
+  const nextStreams = (streams || []).map(st => {
+    if (!st) return st;
+    const d = deltas[ownerOf(st)];
+    if (!d) return st;
+    // A claim age is not a retirement date.
+    if (st.type === 'social_security') return st;
+    if (st.type === 'earned_income') {
+      // The convention is that salaries end at retirementAge − 1; some plans
+      // put it on the retirement age itself. Both are recognised, nothing else.
+      if (st.endAge === d.from - 1 || st.endAge === d.from) {
+        const endAge = Math.max(st.startAge, st.endAge + d.delta);
+        moved.push({ kind: 'stream', id: st.id, name: st.name, field: 'endAge',
+                     from: st.endAge, to: endAge });
+        return { ...st, endAge };
+      }
+      return st;
+    }
+    // A pension that commences at retirement follows retirement.
+    if (st.startAge === d.from) {
+      const startAge = Math.max(0, st.startAge + d.delta);
+      moved.push({ kind: 'stream', id: st.id, name: st.name, field: 'startAge',
+                   from: st.startAge, to: startAge });
+      return { ...st, startAge };
+    }
+    return st;
+  });
+
+  const nextAccts = (accts || []).map(a => {
+    if (!a) return a;
+    const d = deltas[ownerOf(a)];
+    if (!d) return a;
+    // stopAge is EXCLUSIVE, so it sits on the retirement age itself.
+    if (a.stopAge !== d.from) return a;
+    const stopAge = Math.max(a.startAge ?? 0, a.stopAge + d.delta);
+    moved.push({ kind: 'account', id: a.id, name: a.name, field: 'stopAge',
+                 from: a.stopAge, to: stopAge });
+    return { ...a, stopAge };
+  });
+
+  return { pi: nextPi, accts: nextAccts, streams: nextStreams, moved };
+};
+
 // ── RETIRING PART-WAY THROUGH A YEAR ─────────────────────────────────────────
 // The app's convention is that salaries end at retirementAge − 1, so the
 // retirement year is the first FULL year without pay. That is exactly right for
@@ -10364,6 +10448,7 @@ const describePlanPatch = (state, patch) => {
     projectedWithdrawalCost,
     detailedCurrentYearDecision, sameCurrentYearBasis, taxFieldsFromReturn, earnedIncomeByOwner,
     retirementMonthOf, retirementAgeForOwner, workedFractionOfYear, retiredFractionOfYear,
+    planAtRetirementAge,
     streamPartialYear,
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
     SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,

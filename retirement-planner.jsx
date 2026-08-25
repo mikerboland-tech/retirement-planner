@@ -46,6 +46,7 @@ const {
   computeTaxReturn, buildTaxSituation, compareTraditionalVsRoth,
   projectPayrollYearEnd, marginalRateOn, saltCapFor, projectedWithdrawalRate,
   detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling, IRMAA_TIER_LOOKBACK_YEARS, nextIRMAAThreshold,
+  planAtRetirementAge,
   irmaaLastFreeAge, irmaaChargedAtAge, MEDICARE_ELIGIBILITY_AGE,
   earnedIncomeByOwner, projectedWithdrawalCost,
   rothConversionIsPlanned, withoutRothConversions, withRothConversionTarget,
@@ -421,6 +422,7 @@ const SECTION_MANIFEST = {
     { id: 'retirementIncome', label: 'Retirement Income vs Spending', level: 'essential' },
     { id: 'cashFlow',         label: 'Annual Cash Flow',              level: 'standard' },
     { id: 'withdrawalRate',   label: 'Portfolio Withdrawal Rate',     level: 'standard' },
+    { id: 'retirementAge',    label: 'Retirement Age What-If',        level: 'standard' },
     { id: 'taxSummary',       label: 'Lifetime Tax Summary',          level: 'standard' },
     { id: 'safeSpending',     label: 'Safe Spending Capacity',        level: 'standard' },
     { id: 'coastFire',        label: 'Coast FIRE Indicator',          level: 'advanced' },
@@ -10059,39 +10061,14 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
       formatStep: (base, delta) => `Age ${base + delta}`,
       formatDelta: (delta) => `${delta > 0 ? '+' : ''}${delta} yr`,
       apply: (delta) => {
-        const newRetAge = personalInfo.myRetirementAge + delta;
-        const modifiedPI = { ...personalInfo, myRetirementAge: newRetAge };
-        
-        // Adjust earned income streams: shift endAge by the same delta
-        // Only adjust streams whose endAge currently aligns with retirement age
-        // (within 1 year), so we don't break intentionally early/late income
-        const modifiedStreams = incomeStreams.map(s => {
-          if (s.type === 'earned_income') {
-            const ownerRetAge = s.owner === 'spouse' 
-              ? personalInfo.spouseRetirementAge 
-              : personalInfo.myRetirementAge;
-            // If this stream's endAge is close to the owner's retirement age,
-            // shift it in lockstep (e.g., salary ending at 64 when retiring at 65)
-            if (Math.abs(s.endAge - (ownerRetAge - 1)) <= 1 || Math.abs(s.endAge - ownerRetAge) <= 1) {
-              return { ...s, endAge: s.endAge + (s.owner === 'me' ? delta : 0) };
-            }
-          }
-          return s;
-        });
-        
-        // Adjust account contribution stop ages similarly
-        const modifiedAccounts = accounts.map(a => {
-          const ownerRetAge = a.owner === 'spouse' 
-            ? personalInfo.spouseRetirementAge 
-            : personalInfo.myRetirementAge;
-          // If stopAge aligns with retirement age, shift it
-          if (Math.abs(a.stopAge - ownerRetAge) <= 1 && a.owner !== 'spouse') {
-            return { ...a, stopAge: a.stopAge + delta };
-          }
-          return a;
-        });
-        
-        return computeProjections(modifiedPI, modifiedAccounts, modifiedStreams, assets, oneTimeEvents, recurringExpenses);
+        // One rule for what moves with a retirement age, shared with the
+        // dashboard's slider. This used to be open-coded here with a ±1 year
+        // tolerance, which quietly caught streams the user had placed two years
+        // early and moved them anyway.
+        const shifted = planAtRetirementAge(personalInfo, accounts, incomeStreams,
+          { myRetirementAge: personalInfo.myRetirementAge + delta });
+        return computeProjections(shifted.pi, shifted.accts, shifted.streams,
+          assets, oneTimeEvents, recurringExpenses);
       }
     },
     {
@@ -12354,6 +12331,191 @@ function SavingsRateTooltip({ active, payload, label, baseRate, targetRate }) {
   );
 }
 
+// ============================================
+// RetirementAgeExplorer — drag the retirement age, watch the whole plan move.
+//
+// Retirement age is the single most consequential number in a plan and the one
+// people are least sure about. It was adjustable only by typing it into
+// Personal Info and reading the consequences off five other tabs — which is a
+// slow enough loop that nobody runs it more than once or twice.
+//
+// The reason a slider needs an engine function behind it is that a retirement
+// age on its own is nearly inert. Move it alone and the plan retires at 67
+// while the salary still stops at 64 and the 401(k) still stops taking money at
+// 65 — two years of neither working nor drawing. planAtRetirementAge moves the
+// stream and account ages that sit where the convention puts them, leaves the
+// ones the user placed deliberately, and reports what it touched, so this panel
+// can say what it changed instead of quietly rewriting the plan.
+//
+// One projection is a couple of milliseconds, so this re-runs the SAME
+// computeProjections the rest of the app uses rather than approximating.
+// Nothing here is written back until the reader asks for it.
+//
+// At module scope: defined inside DashboardTab it would be a new component
+// identity on every render, remounting and resetting the slider on every
+// keystroke elsewhere on the page.
+// ============================================
+function RetirementAgeExplorer({ accounts, assets, incomeStreams, oneTimeEvents, personalInfo,
+                                 projections, recurringExpenses, setPersonalInfo, setAccounts,
+                                 setIncomeStreams, detailLevel, sectionVisibility, setSectionVisibility }) {
+  const baseAge = personalInfo.myRetirementAge || 65;
+  const [age, setAge] = useState(null);            // null = follow the plan
+  const target = age === null ? baseAge : age;
+  // Re-anchor to the plan while the slider is untouched, so editing retirement
+  // age elsewhere does not leave this showing a stale comparison.
+  useEffect(() => { setAge(null); }, [baseAge]);
+
+  const minAge = Math.max((personalInfo.myAge || 0) + 1, 45);
+  const maxAge = Math.min(80, (personalInfo.legacyAge || 95) - 1);
+
+  const scenario = useMemo(() => {
+    if (target === baseAge) return null;
+    try {
+      const shifted = planAtRetirementAge(personalInfo, accounts, incomeStreams,
+        { myRetirementAge: target });
+      const proj = computeProjections(shifted.pi, shifted.accts, shifted.streams,
+        assets, oneTimeEvents, recurringExpenses);
+      return { proj, moved: shifted.moved, shifted };
+    } catch (e) { return { error: e.message }; }
+  }, [target, baseAge, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
+
+  // The four figures worth watching, each measured the same way on both plans.
+  const measure = (proj, retAge) => {
+    if (!proj || !proj.length) return null;
+    const last = proj[proj.length - 1];
+    const short = planShortfall(proj, { retirementAge: retAge });
+    return {
+      ending: last.totalPortfolio || 0,
+      atRetirement: (proj.find(p => p.myAge === retAge) || {}).totalPortfolio || 0,
+      // Every year, not just the retired ones. Measuring "tax in retirement"
+      // compares ages 65-95 against 70-95 — two different spans — and hides the
+      // five extra years of payroll and income tax that working longer costs,
+      // which is exactly the trade-off the slider exists to show.
+      lifetimeTax: proj.reduce((sum, p) => sum + (p.totalTax || 0), 0),
+      fails: !!short.fails,
+      depletedYear: short.depletedYear || null,
+    };
+  };
+  const now = measure(projections, baseAge);
+  const then = scenario && !scenario.error ? measure(scenario.proj, target) : null;
+
+  const delta = (a, b) => (b === null || a === null) ? null : b - a;
+  const arrow = (v, goodWhenUp = true) => {
+    if (v === null || Math.abs(v) < 1) return 'text-slate-500';
+    return (v > 0) === goodWhenUp ? 'text-emerald-400' : 'text-red-400';
+  };
+  const signed = (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + formatCurrency(Math.abs(v));
+
+  const applyToPlan = () => {
+    if (!scenario || scenario.error) return;
+    setPersonalInfo(prev => ({ ...prev, myRetirementAge: target }));
+    setAccounts(scenario.shifted.accts);
+    setIncomeStreams(scenario.shifted.streams);
+    setAge(null);
+  };
+
+  return (
+    <Section
+      tab="dashboard" id="retirementAge" level={detailLevel}
+      vis={sectionVisibility} setVis={setSectionVisibility}
+      title="What if you retired earlier — or later?"
+    >
+      <div className="flex flex-wrap items-center gap-4 mb-4">
+        <div className="flex-1 min-w-[260px]">
+          <input
+            type="range" min={minAge} max={maxAge} step={1} value={target}
+            onChange={e => setAge(Number(e.target.value))}
+            className="w-full accent-amber-500"
+            aria-label="Retirement age"
+          />
+          <div className="flex justify-between text-xs text-slate-500 mt-1">
+            <span>{minAge}</span>
+            <span className="text-slate-300">
+              Retire at <strong className="text-amber-400 text-base">{target}</strong>
+              {target !== baseAge && <span className="text-slate-500"> (plan says {baseAge})</span>}
+            </span>
+            <span>{maxAge}</span>
+          </div>
+        </div>
+        {target !== baseAge && (
+          <div className="flex gap-2">
+            <button className={buttonSecondary} onClick={() => setAge(null)}>Reset</button>
+            <button className={buttonPrimary} onClick={applyToPlan}>Use this</button>
+          </div>
+        )}
+      </div>
+
+      {scenario && scenario.error && (
+        <p className="text-sm text-red-400">Could not run that scenario: {scenario.error}</p>
+      )}
+
+      {now && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {[
+            ['Portfolio at retirement', now.atRetirement, then && then.atRetirement, true],
+            ['Ending portfolio', now.ending, then && then.ending, true],
+            ['Lifetime tax, all years', now.lifetimeTax, then && then.lifetimeTax, false],
+          ].map(([label, a, b, goodWhenUp]) => (
+            <div key={label} className="bg-slate-900/60 border border-slate-700/50 rounded-lg px-3 py-2">
+              <div className="text-xs text-slate-500">{label}</div>
+              <div className="text-slate-100 font-semibold">{formatCurrency(b === null || b === undefined ? a : b)}</div>
+              {b !== null && b !== undefined && (
+                <div className={`text-xs ${arrow(delta(a, b), goodWhenUp)}`}>{signed(delta(a, b))}</div>
+              )}
+            </div>
+          ))}
+          <div className="bg-slate-900/60 border border-slate-700/50 rounded-lg px-3 py-2">
+            <div className="text-xs text-slate-500">Money lasts</div>
+            <div className={`font-semibold ${(then || now).fails ? 'text-red-400' : 'text-emerald-400'}`}>
+              {(then || now).fails
+                ? `Runs out at ${(then || now).depletedYear || '—'}`
+                : 'Through the plan'}
+            </div>
+            {then && then.fails !== now.fails && (
+              <div className={`text-xs ${then.fails ? 'text-red-400' : 'text-emerald-400'}`}>
+                {then.fails ? 'was fine before' : 'fixes the shortfall'}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* The part that makes the number trustworthy: what else moved. A
+          retirement age that moves alone is not a scenario, and a reader who
+          cannot see the salary and the deferrals following it has no reason to
+          believe the figures above. */}
+      {scenario && !scenario.error && (
+        <div className="mt-4 text-xs text-slate-400 border-t border-slate-700/50 pt-3">
+          {scenario.moved.length > 0 ? (
+            <>
+              <div className="text-slate-500 mb-1.5">Moved with it, so the years line up:</div>
+              <ul className="space-y-0.5">
+                {scenario.moved.map((m, i) => (
+                  <li key={i}>
+                    <span className="text-slate-300">{m.name}</span>
+                    <span className="text-slate-500"> — {m.field === 'endAge' ? 'last year' : m.field === 'startAge' ? 'starts' : 'contributions stop'} </span>
+                    <span className="text-slate-400">{m.from} → {m.to}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="text-slate-500 mt-2">
+                Social Security is deliberately not moved — a claim age is its own decision, and retiring at one
+                age while claiming at another is common. Anything you placed somewhere other than where the plan
+                puts it by default is left alone too.
+              </p>
+            </>
+          ) : (
+            <p>
+              Nothing else in the plan is tied to your retirement age, so only the age itself moved. If your
+              salary or contributions should stop at a different age, set them on the Income and Accounts tabs.
+            </p>
+          )}
+        </div>
+      )}
+    </Section>
+  );
+}
+
 function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, personalInfo,
                               projections, recurringExpenses, currentEarnedIncome,
                               myContributions, savingsRate }) {
@@ -14099,7 +14261,7 @@ function LifestyleVsLegacy({ projections, personalInfo, accounts, incomeStreams,
 // ============================================
 // DashboardTab — Lifted to module scope
 // ============================================
-function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, detailLevel, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections, recurringExpenses, setActiveTab, sectionVisibility, setDashboardVisibility, setDetailLevel, setSectionVisibility, setShowDashboardSettings, showDashboardSettings, showTourOffer }) {
+function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, detailLevel, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections, recurringExpenses, setAccounts, setActiveTab, setDashboardVisibility, setDetailLevel, setIncomeStreams, setPersonalInfo, setSectionVisibility, setShowDashboardSettings, sectionVisibility, showDashboardSettings, showTourOffer }) {
   // Session-only: the banner should stop nagging once acknowledged, but must come
   // back next visit while real numbers are still missing.
   const [estimatesDismissed, setEstimatesDismissed] = useState(false);
@@ -14864,6 +15026,15 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
       })()}
       
       {/* Tax & QCD Summary Section */}
+      <RetirementAgeExplorer
+        accounts={accounts} assets={assets} incomeStreams={incomeStreams}
+        oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections}
+        recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo}
+        setAccounts={setAccounts} setIncomeStreams={setIncomeStreams}
+        detailLevel={detailLevel} sectionVisibility={sectionVisibility}
+        setSectionVisibility={setSectionVisibility}
+      />
+
       {visibilitySettings.taxSummary && (() => {
         const retirementYears = projections.filter(p => p.myAge >= retirementAge);
         const lifetimeFederalTax = retirementYears.reduce((sum, p) => sum + p.federalTax, 0);
@@ -19882,7 +20053,7 @@ function RetirementPlanner() {
         {/* Main Content */}
         <main className="flex-1 overflow-y-auto p-6">
           <div className="max-w-7xl mx-auto">
-            {activeTab === 'dashboard' && <DashboardTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
+            {activeTab === 'dashboard' && <DashboardTab setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
             {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
             {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}

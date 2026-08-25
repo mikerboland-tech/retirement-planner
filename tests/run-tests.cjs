@@ -10611,6 +10611,125 @@ section('P89 — retiring part-way through a year');
   }
 }
 
+section('P90 — moving a retirement age moves what is tied to it');
+{
+  // A retirement age on its own is nearly inert: it decides when the withdrawal
+  // solver switches on and when spending changes shape, and nothing else. The
+  // figures that move a plan live on the streams and accounts. So "retire two
+  // years later", done as a single edit, produces a plan that retires at 67
+  // while the salary still stops at 64 and the 401(k) still stops taking money
+  // at 65 — two years of neither working nor drawing, which is not a scenario
+  // anyone meant to model.
+  //
+  // The Sensitivity tab had a hand-rolled version of this coupling with a ±1
+  // year tolerance; the dashboard slider needed the same rule, and two copies
+  // of a rule is how this codebase has produced most of its bugs. One function,
+  // asserted here.
+  const pi = { myAge: 35, spouseAge: 33, myRetirementAge: 65, spouseRetirementAge: 65 };
+  const accts = () => ([
+    { id: 1, name: 'My 401(k)', type: '401k', startAge: 35, stopAge: 65, owner: 'me' },
+    { id: 2, name: 'Spouse 401(k)', type: '401k', startAge: 33, stopAge: 65, owner: 'spouse' },
+    { id: 3, name: 'Inheritance', type: 'brokerage', startAge: 35, stopAge: 50, owner: 'me' },
+  ]);
+  const streams = () => ([
+    { id: 1, name: 'My Salary', type: 'earned_income', startAge: 35, endAge: 64, owner: 'me' },
+    { id: 2, name: 'Spouse Salary', type: 'earned_income', startAge: 33, endAge: 64, owner: 'spouse' },
+    { id: 3, name: 'My Pension', type: 'pension', startAge: 65, endAge: 95, owner: 'me' },
+    { id: 4, name: 'My SS', type: 'social_security', startAge: 67, endAge: 95, owner: 'me' },
+    { id: 5, name: 'Consulting', type: 'earned_income', startAge: 35, endAge: 55, owner: 'me' },
+  ]);
+
+  // ── What moves ───────────────────────────────────────────────────────────
+  {
+    const r = engine.planAtRetirementAge(pi, accts(), streams(), { myRetirementAge: 67 });
+    eq(r.pi.myRetirementAge, 67, 'the age itself moves');
+    eq(r.streams.find(x => x.id === 1).endAge, 66, 'the salary follows it, staying a year short');
+    eq(r.accts.find(x => x.id === 1).stopAge, 67, 'so do the contributions, landing on the age itself');
+    eq(r.streams.find(x => x.id === 3).startAge, 67, 'and a pension that commenced at retirement');
+  }
+
+  // ── What deliberately does not ───────────────────────────────────────────
+  {
+    const r = engine.planAtRetirementAge(pi, accts(), streams(), { myRetirementAge: 67 });
+    eq(r.streams.find(x => x.id === 4).startAge, 67,
+      'Social Security does not move — a claim age is its own decision');
+    eq(r.streams.find(x => x.id === 5).endAge, 55,
+      'a stream the user ended somewhere of their own choosing is left alone');
+    eq(r.accts.find(x => x.id === 3).stopAge, 50, 'and so is an account that stops early');
+    eq(r.streams.find(x => x.id === 2).endAge, 64, "the spouse's salary is untouched by MY retirement age");
+    eq(r.accts.find(x => x.id === 2).stopAge, 65, 'as are their contributions');
+    eq(r.pi.spouseRetirementAge, 65, 'and their retirement age');
+  }
+
+  // ── Each spouse moves independently ──────────────────────────────────────
+  {
+    const r = engine.planAtRetirementAge(pi, accts(), streams(), { spouseRetirementAge: 62 });
+    eq(r.streams.find(x => x.id === 2).endAge, 61, "the spouse's salary follows THEIR age");
+    eq(r.accts.find(x => x.id === 2).stopAge, 62, 'and their contributions');
+    eq(r.streams.find(x => x.id === 1).endAge, 64, 'while mine stay put');
+    // Both at once.
+    const both = engine.planAtRetirementAge(pi, accts(), streams(),
+      { myRetirementAge: 68, spouseRetirementAge: 60 });
+    eq(both.streams.find(x => x.id === 1).endAge, 67, 'moving both moves both');
+    eq(both.streams.find(x => x.id === 2).endAge, 59, 'in their own directions');
+  }
+
+  // ── It says what it did ──────────────────────────────────────────────────
+  // A panel that silently rewrites a plan is not one a reader can trust, so the
+  // caller gets the list rather than having to diff two arrays.
+  {
+    const r = engine.planAtRetirementAge(pi, accts(), streams(), { myRetirementAge: 67 });
+    eq(r.moved.length, 3, 'three things moved, and three are reported');
+    ok(r.moved.every(m => m.name && m.field && Number.isFinite(m.from) && Number.isFinite(m.to)),
+      'each with a name, a field and both ages, which is what a sentence needs');
+    ok(r.moved.some(m => m.field === 'endAge') && r.moved.some(m => m.field === 'stopAge')
+       && r.moved.some(m => m.field === 'startAge'),
+      'covering the salary, the contributions and the pension');
+  }
+
+  // ── Nothing to do is not an error ────────────────────────────────────────
+  {
+    const same = engine.planAtRetirementAge(pi, accts(), streams(), { myRetirementAge: 65 });
+    eq(same.moved.length, 0, 'setting the age it already has moves nothing');
+    eq(JSON.stringify(same.streams), JSON.stringify(streams()), 'and rewrites nothing');
+    const none = engine.planAtRetirementAge(pi, accts(), streams(), {});
+    eq(none.moved.length, 0, 'nor does asking for no change at all');
+  }
+
+  // ── Retiring EARLIER, including past the point things would invert ───────
+  {
+    const r = engine.planAtRetirementAge(pi, accts(), streams(), { myRetirementAge: 40 });
+    eq(r.streams.find(x => x.id === 1).endAge, 39, 'an earlier retirement pulls the salary back');
+    const veryEarly = engine.planAtRetirementAge(pi, accts(), streams(), { myRetirementAge: 30 });
+    const salary = veryEarly.streams.find(x => x.id === 1);
+    ok(salary.endAge >= salary.startAge,
+      'and a salary is never pulled back past its own start, which would be a negative career');
+  }
+
+  // ── The whole point: the projection actually differs ─────────────────────
+  // Coupling that produced the same numbers would be decoration.
+  {
+    const fullPi = { ...pi, legacyAge: 90, myLifeExpectancy: 90, spouseLifeExpectancy: 90,
+      filingStatus: 'married_joint', state: 'Missouri', inflationRate: 0.03,
+      desiredRetirementIncome: 70000, withdrawalPriority: ['pretax', 'brokerage', 'roth'],
+      healthcareModel: 'none' };
+    const a = [{ id: 1, name: '401k', type: '401k', balance: 1600000, contributionMode: 'amount',
+      contribution: 20000, contributionGrowth: 0, cagr: 0.06, startAge: 35, stopAge: 65,
+      owner: 'me', contributor: 'me' }];
+    const st = [{ id: 1, name: 'Salary', type: 'earned_income', amount: 120000, startAge: 35,
+      endAge: 64, cola: 0.03, owner: 'me' }];
+    const bare = computeProjections({ ...fullPi, myRetirementAge: 70 }, a, st, [], [], []);
+    const coupled = engine.planAtRetirementAge(fullPi, a, st, { myRetirementAge: 70 });
+    const proper = computeProjections(coupled.pi, coupled.accts, coupled.streams, [], [], []);
+    const endOf = (p) => p[p.length - 1].totalPortfolio;
+    gt(endOf(proper), endOf(bare),
+      'moving the age alone leaves five years of neither working nor saving — the coupled plan is better off');
+    const at67 = (p) => (p.find(r => r.myAge === 67) || {}).earnedIncome || 0;
+    eq(at67(bare), 0, 'the uncoupled plan earns nothing at 67 despite retiring at 70');
+    gt(at67(proper), 0, 'the coupled one is still being paid, which is what retiring later means');
+  }
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of
