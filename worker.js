@@ -825,12 +825,18 @@ function runRothOptimizer(jobId, payload) {
     // an IRMAA-tier plan produced "fill to undefined" — the row was correct, its
     // name was not, and a wrong name on the row the user is looking for is worse
     // than no row.
+    // FOUR modes now. A staged schedule reached the final `else` and rendered
+    // "fill to undefined" — the same failure this comment was written about,
+    // one mode later. The label is built from the schedule itself rather than
+    // from a field a staged plan does not have.
     const mode = rothConversionModeOf(personalInfo);
     const amt = mode === 'fixed'
       ? '$' + Math.round(personalInfo.rothConversionAmount).toLocaleString() + '/yr'
       : mode === 'irmaa'
         ? 'stay in IRMAA tier ' + personalInfo.rothConversionIrmaaTier
-        : 'fill to ' + personalInfo.rothConversionBracket;
+        : mode === 'staged'
+          ? E.rothConversionModeLabel(personalInfo)
+          : 'fill to ' + personalInfo.rothConversionBracket;
     const w = E.getDefaultRothConversionWindow(personalInfo);
     const sAge = personalInfo.rothConversionStartAge > 0 ? personalInfo.rothConversionStartAge : w.startAge;
     const eAge = personalInfo.rothConversionEndAge > 0 ? personalInfo.rothConversionEndAge : w.endAge;

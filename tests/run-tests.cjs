@@ -10730,6 +10730,113 @@ section('P90 — moving a retirement age moves what is tied to it');
   }
 }
 
+section('P91 — a staged conversion schedule IS a conversion plan');
+{
+  // rothConversionModeOf knew three modes and stages were not one of them, so a
+  // plan whose only conversion setting was a schedule reported mode 'none' and
+  // rothConversionIsPlanned returned false — while conversionStagesOf, which
+  // consults an explicit schedule BEFORE any scalar mode, happily returned the
+  // stages and the projection converted $1.7M over eight years.
+  //
+  // The comment on rothConversionModeLabel describes this exact bug being fixed
+  // once already, for IRMAA-tier plans: "a report contradicting itself". Stages
+  // were added afterwards and reintroduced it one layer up, which is the whole
+  // argument for the predicate now being stated once instead of twice.
+  const staged = {
+    myAge: 62, spouseAge: 62, myBirthYear: TODAY_YEAR - 62, spouseBirthYear: TODAY_YEAR - 62,
+    myRetirementAge: 62, spouseRetirementAge: 62, legacyAge: 90,
+    myLifeExpectancy: 90, spouseLifeExpectancy: 90, filingStatus: 'married_joint',
+    state: 'Florida', inflationRate: 0.03, desiredRetirementIncome: 80000,
+    withdrawalPriority: ['pretax', 'brokerage', 'roth'], healthcareModel: 'none',
+    rothConversionStages: [
+      { label: 'Before IRMAA', startAge: 62, endAge: 64, bracket: '24%' },
+      { label: 'IRMAA applies', startAge: 65, endAge: 72, irmaaTier: 1 },
+    ],
+  };
+  const accts = () => ([
+    { id: 1, name: '401k', type: '401k', balance: 2500000, contribution: 0, contributionGrowth: 0,
+      cagr: 0.06, startAge: 62, stopAge: 62, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Roth', type: 'roth_ira', balance: 50000, contribution: 0, contributionGrowth: 0,
+      cagr: 0.06, startAge: 62, stopAge: 62, owner: 'me', contributor: 'me' },
+  ]);
+
+  // ── The contradiction, stated as an invariant ────────────────────────────
+  // Whatever else is true, a plan that converts must not report that it has no
+  // conversion planned. This is the assertion that would have caught it.
+  {
+    const proj = computeProjections(staged, accts(), [], [], [], []);
+    const converted = proj.reduce((sum, r) => sum + (r.rothConversion || 0), 0);
+    gt(converted, 0, 'the staged plan converts real money');
+    ok(engine.rothConversionIsPlanned(staged),
+      'and therefore reports that a conversion is planned — it did not, for eight years and $1.7M');
+    eq(engine.rothConversionModeOf(staged), 'staged', 'with a mode naming what it actually is');
+  }
+
+  // ── The label, which is where it surfaced last time ──────────────────────
+  {
+    const label = engine.rothConversionModeLabel(staged);
+    ok(!/none planned/i.test(label), 'a staged plan is not described as none planned');
+    ok(!/undefined/.test(label), 'nor as "fill to undefined", which is what the optimizer row said');
+    ok(/24%/.test(label) && /IRMAA tier 1/.test(label),
+      'it names both stages, because that is what the schedule is');
+  }
+
+  // ── An ineffective schedule is still no plan ─────────────────────────────
+  // Stages with no target do nothing, and must not flip the mode on. The same
+  // predicate decides this and which stages survive into conversionStagesOf —
+  // the point of factoring it out.
+  {
+    const empty = { ...staged, rothConversionStages: [{ label: 'x', startAge: 62, endAge: 70 }] };
+    eq(engine.rothConversionModeOf(empty), 'none', 'stages that name no target are not a plan');
+    eq(engine.conversionStagesOf(empty).length, 0, 'and do not survive into the schedule either');
+    ok(!engine.rothConversionIsPlanned(empty), 'so nothing downstream switches on');
+  }
+
+  // ── A scalar plan is unaffected ──────────────────────────────────────────
+  {
+    const fixed = { ...staged, rothConversionStages: null, rothConversionAmount: 50000 };
+    eq(engine.rothConversionModeOf(fixed), 'fixed', 'a fixed-amount plan still reads as fixed');
+    const bracket = { ...staged, rothConversionStages: null, rothConversionBracket: '22%' };
+    eq(engine.rothConversionModeOf(bracket), 'bracket', 'and a bracket plan as bracket');
+    const tier = { ...staged, rothConversionStages: null, rothConversionIrmaaTier: 1 };
+    eq(engine.rothConversionModeOf(tier), 'irmaa', 'and an IRMAA plan as irmaa');
+    eq(engine.rothConversionModeOf({ ...staged, rothConversionStages: null }), 'none',
+      'and a plan with nothing set as none');
+  }
+
+  // ── Clearing still clears ────────────────────────────────────────────────
+  // withoutRothConversions already knew about stages; now that the mode does
+  // too, the two have to agree.
+  {
+    const cleared = engine.withoutRothConversions(staged);
+    eq(engine.rothConversionModeOf(cleared), 'none', 'clearing a staged plan leaves no mode standing');
+    eq(engine.conversionStagesOf(cleared).length, 0, 'and no stages');
+    const proj = computeProjections(cleared, accts(), [], [], [], []);
+    eq(Math.round(proj.reduce((sum, r) => sum + (r.rothConversion || 0), 0)), 0,
+      'and converts nothing, which is what the optimizer baseline depends on');
+  }
+
+  // ── Round-tripping a staged target ───────────────────────────────────────
+  {
+    const target = engine.withRothConversionTarget(staged,
+      { stages: [{ startAge: 63, endAge: 66, bracket: '12%' }] });
+    eq(engine.rothConversionModeOf(target), 'staged', 'a staged target reads as staged');
+    eq(engine.conversionStagesOf(target).length, 1, 'carrying just the stage it was given');
+    eq(engine.conversionStagesOf(target)[0].bracket, '12%', 'and not the one it replaced');
+  }
+
+  // ── The arithmetic did not move ──────────────────────────────────────────
+  // This was a visibility bug, not a maths bug: the projection was always right.
+  // If the conversion total changed, the fix went further than it should have.
+  {
+    const proj = computeProjections(staged, accts(), [], [], [], []);
+    const years = proj.filter(r => (r.rothConversion || 0) > 0);
+    eq(years.length, 8, 'still eight converting years');
+    approx(years.reduce((s, r) => s + r.rothConversion, 0), 1721588,
+      'and still the same total — the numbers were never the problem');
+  }
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of

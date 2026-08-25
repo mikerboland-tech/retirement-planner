@@ -4875,8 +4875,29 @@ const NIIT_THRESHOLDS = {
 // The lesson is that a mode flag which can be absent is not safe to detect by
 // its absence. These live in the engine rather than the UI so the Web Worker —
 // which builds its own baselines and candidate strategies — shares them.
+// A stage does something only if it names a target. Stated once, because the
+// same predicate has to decide BOTH which stages survive into a schedule and
+// whether a schedule counts as a plan at all — and two copies of it is exactly
+// how a plan came to convert $1.7M while reporting that it converted nothing.
+const conversionStageIsEffective = (s) =>
+  !!s && ((s.amount || 0) > 0 || !!s.bracket || Number.isInteger(s.irmaaTier));
+
 const rothConversionModeOf = (pi) => {
   if (!pi) return 'none';
+  // Checked FIRST, and that order is the fix. conversionStagesOf consults an
+  // explicit schedule before any scalar mode, so a staged plan converts on its
+  // stages — and every gate keyed to this function has to agree with what the
+  // projection actually does. It did not: a schedule filling to 24% and then
+  // holding an IRMAA tier converted $1.7M over eight years while
+  // rothConversionIsPlanned returned false, which switched off the optimizer's
+  // current-plan row, the conversion roadmap, the deferral panel's early-
+  // conversion arm and every UI panel gated on it.
+  //
+  // The comment on rothConversionModeLabel below describes this same bug being
+  // fixed for IRMAA-tier plans — a report contradicting itself. Stages were
+  // added afterwards and reintroduced it one layer up.
+  if (Array.isArray(pi.rothConversionStages)
+      && pi.rothConversionStages.some(conversionStageIsEffective)) return 'staged';
   if (Number.isInteger(pi.rothConversionIrmaaTier)) return 'irmaa';
   if (pi.rothConversionBracket) return 'bracket';
   if ((pi.rothConversionAmount || 0) > 0) return 'fixed';
@@ -5003,6 +5024,14 @@ const rothConversionModeLabel = (pi, fmt = (v) => '$' + Math.round(v).toLocaleSt
     }
     case 'bracket': return `filling to the ${pi.rothConversionBracket} bracket`;
     case 'fixed':   return `${fmt(pi.rothConversionAmount || 0)}/yr`;
+    case 'staged': {
+      const st = conversionStagesOf(pi);
+      const one = (x) => x.bracket ? `${x.bracket} to age ${x.endAge}`
+        : Number.isInteger(x.irmaaTier) ? `IRMAA tier ${x.irmaaTier} to age ${x.endAge}`
+        : `${fmt(x.amount || 0)}/yr to age ${x.endAge}`;
+      return st.length ? `a ${st.length}-stage schedule — ${st.map(one).join(', then ')}`
+                       : 'a staged schedule';
+    }
     default:        return 'none planned';
   }
 };
@@ -5030,7 +5059,7 @@ const conversionStagesOf = (pi) => {
   const explicit = Array.isArray(pi.rothConversionStages) ? pi.rothConversionStages : null;
   if (explicit && explicit.length) {
     return explicit
-      .filter(s => s && (s.amount > 0 || s.bracket || Number.isInteger(s.irmaaTier)))
+      .filter(conversionStageIsEffective)
       .map((s, i) => ({
         index: i,
         label: s.label || `Stage ${i + 1}`,
@@ -10466,7 +10495,8 @@ const describePlanPatch = (state, patch) => {
     convertEverythingAnalysis, levelConversionToDrain, convertEverythingPI,
     qcdTaxSavings,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
-    conversionStagesOf, conversionStageAt, irmaaAwareConversionStages,
+    conversionStagesOf, conversionStageAt, conversionStageIsEffective,
+    irmaaAwareConversionStages,
     deferralDecision, convertWhileWorking, switchDeferrals,
     MEDICARE_ELIGIBILITY_AGE, irmaaLastFreeAge, irmaaChargedAtAge,
     withoutRothConversions, withRothConversionTarget,
