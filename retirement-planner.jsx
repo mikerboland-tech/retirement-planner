@@ -6526,7 +6526,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, detailLevel, inc
                         {m.irmaaReachable ? (
                           <span className="text-pink-400/90">age {m.setsIrmaaAtAge}</span>
                         ) : (
-                          <span className="text-emerald-400/80" title={`Income this year sets the surcharge at ${m.setsIrmaaAtAge}, which is before Medicare — it cannot cost you anything`}>
+                          <span className="text-emerald-400" title={`Income this year sets the surcharge at ${m.setsIrmaaAtAge}, which is before Medicare — it cannot cost you anything`}>
                             free
                           </span>
                         )}
@@ -6575,7 +6575,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, detailLevel, inc
               Ages shown are the ones where the decision is still open, not a five-year grid.{' '}
               <strong>&ldquo;Sets IRMAA at&rdquo;</strong> is the hinge: Medicare reads the MAGI you
               reported <em>two years earlier</em>, so income at {65 - (IRMAA_TIER_LOOKBACK_YEARS || 2) - 1} and
-              before is marked <span className="text-emerald-400/80">free</span> — it lands before Medicare
+              before is marked <span className="text-emerald-400">free</span> — it lands before Medicare
               and cannot cost a surcharge, however large. Age {65 - (IRMAA_TIER_LOOKBACK_YEARS || 2)} is the
               first year a withdrawal or conversion can, which makes it the single most consequential year
               on this table and the one a five-year grid always skipped.
@@ -12293,16 +12293,28 @@ function employerContribShare(account, amount) {
 // 26.8 protan / 32.4 tritan, normal-vision 31.8).
 // Read from the palette rather than pinned, or they stay dark in light mode —
 // which is exactly how a stray #d95926 turned up on a white card.
-const SR_BASE_COLOR = SERIES.socialSecurity;
-const SR_WHATIF_COLOR = SERIES.pension;
+// Functions, not constants, and that distinction is load-bearing.
+// applyThemeMode repaints THEME and SERIES IN PLACE, so every `THEME.x` read at
+// render time picks up the new mode — which is what makes ~130 call sites work
+// without rebinding. A module-scope const that captures the STRING out of them
+// does not: it freezes at whichever mode happened to be active when the module
+// first evaluated, and never changes again. These four were pinned that way, so
+// the savings-rate explorer kept its dark chart colours in light mode and its
+// two figures measured 3.16:1 against a white card, where 4.5 is required.
+//
+// The comment these replaced warned about exactly this ("read from the palette
+// rather than pinned, or they stay dark in light mode") — and then pinned the
+// result of reading it.
+const srBaseColor = () => SERIES.socialSecurity;
+const srWhatIfColor = () => SERIES.pension;
 // Same two hues, stepped so they clear 4.5:1 as text. The swatch and the chart
 // strokes above keep the series value — a fill only has to clear 3:1 — but a bold
 // figure tinted to match the line is text, and the series value fails that bar.
 // Plain names for the four destinations. "workplace" is the engine's word for
 // 401(k)/403(b)/457(b) — accurate, and not what anyone calls their own account.
 const SR_BUCKET_LABEL = { hsa: 'HSA', ira: 'IRA', workplace: '401(k)/403(b)', taxable: 'Brokerage' };
-const SR_BASE_INK = THEME.ink.socialSecurity;
-const SR_WHATIF_INK = THEME.ink.pension;
+const srBaseInk = () => THEME.ink.socialSecurity;
+const srWhatIfInk = () => THEME.ink.pension;
 
 function SavingsRateTooltip({ active, payload, label, baseRate, targetRate }) {
   if (!active || !payload || !payload.length) return null;
@@ -12313,12 +12325,12 @@ function SavingsRateTooltip({ active, payload, label, baseRate, targetRate }) {
     <div className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-xs shadow-xl">
       <div className="text-slate-300 font-semibold mb-1.5">Age {label} · {row.year}</div>
       <div className="flex items-center gap-2 mb-0.5">
-        <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: SR_WHATIF_COLOR }} />
+        <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: srWhatIfColor() }} />
         <span className="text-slate-400">At {targetRate.toFixed(1)}%</span>
         <span className="text-slate-100 font-semibold ml-auto">{formatCurrency(row.whatIf)}</span>
       </div>
       <div className="flex items-center gap-2">
-        <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: SR_BASE_COLOR }} />
+        <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: srBaseColor() }} />
         <span className="text-slate-400">At {baseRate.toFixed(1)}% (your plan)</span>
         <span className="text-slate-100 font-semibold ml-auto">{formatCurrency(row.current)}</span>
       </div>
@@ -12666,7 +12678,7 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
         <div className="flex items-center gap-4">
           <div>
             <div className="text-slate-500 text-xs mb-0.5">You'd save</div>
-            <div className="text-lg font-bold" style={{ color: SR_WHATIF_INK }}>
+            <div className="text-lg font-bold" style={{ color: srWhatIfInk() }}>
               {formatCurrency(scenario.targetDollars)}<span className="text-xs text-slate-500 font-normal">/yr</span>
             </div>
           </div>
@@ -12801,15 +12813,15 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
             )}
             <Line
               type="monotone" dataKey="current" name={`Your plan (${baseRate.toFixed(1)}%)`}
-              stroke={SR_BASE_COLOR} strokeWidth={2} strokeDasharray="5 4" dot={false}
+              stroke={srBaseColor()} strokeWidth={2} strokeDasharray="5 4" dot={false}
               isAnimationActive={false}
-              label={lastPointLabel('your plan', SR_BASE_INK, iBase)}
+              label={lastPointLabel('your plan', srBaseInk(), iBase)}
             />
             <Line
               type="monotone" dataKey="whatIf" name={`At ${targetRate.toFixed(1)}%`}
-              stroke={SR_WHATIF_COLOR} strokeWidth={2} dot={false}
+              stroke={srWhatIfColor()} strokeWidth={2} dot={false}
               isAnimationActive={false}
-              label={lastPointLabel(`${targetRate.toFixed(1)}%`, SR_WHATIF_INK, iAlt)}
+              label={lastPointLabel(`${targetRate.toFixed(1)}%`, srWhatIfInk(), iAlt)}
             />
           </LineChart>
         </ResponsiveContainer>
@@ -12848,7 +12860,7 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
           <div className="text-slate-500 text-xs mb-0.5">
             {up || !changed ? 'What each extra dollar becomes' : 'What each dollar skipped costs'}
           </div>
-          <div className="text-lg font-bold" style={{ color: changed && multiple ? SR_WHATIF_INK : undefined }}>
+          <div className="text-lg font-bold" style={{ color: changed && multiple ? srWhatIfInk() : undefined }}>
             {changed && multiple && multiple > 0 ? `$${multiple.toFixed(2)}` : '—'}
           </div>
           <div className="text-xs text-slate-500">by age {retAge}, after growth</div>

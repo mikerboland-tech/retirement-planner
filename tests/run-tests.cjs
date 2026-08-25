@@ -10837,6 +10837,86 @@ section('P91 — a staged conversion schedule IS a conversion plan');
   }
 }
 
+section('P92 — a colour pinned at module scope never changes mode again');
+{
+  // Found by auditing every tab in light mode rather than by reading the code.
+  // Four figures on the Accounts tab measured 3.16:1 against a white card where
+  // 4.5 is required, and the colours were #df7247 and #4d93e8 — the DARK ink
+  // values, in light mode.
+  //
+  // The mechanism is worth stating precisely, because the theme layer is built
+  // on it. applyThemeMode repaints THEME and SERIES IN PLACE: it mutates the
+  // objects rather than rebinding them, which is what lets ~130 call sites read
+  // `THEME.x` at render time and get the current mode with no plumbing. But a
+  // module-scope const that reads a STRING out of those objects copies it once,
+  // at module-evaluation time, and is frozen at whichever mode happened to be
+  // active then. The object stays live; the string does not.
+  //
+  // The comment on the four pinned values warned about this exact failure —
+  // "read from the palette rather than pinned, or they stay dark in light mode"
+  // — and then pinned the result of reading the palette.
+  const fs5 = require('fs');
+  const path5 = require('path');
+  const src = fs5.readFileSync(path5.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+
+  // A module-scope `const X = THEME.…` / `= SERIES.…` that is not a function.
+  // Capturing the top-level objects themselves is fine and intended — they are
+  // mutated in place — so a bare `const SERIES = THEME.series;` is allowed.
+  const offenders = [];
+  const re = /^const\s+([A-Za-z_$][\w$]*)\s*=\s*(THEME|SERIES)\.([\w.$]+)\s*;/gm;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    const [, name, root, path] = m;
+    if (root === 'THEME' && path === 'series') continue;   // the live object, by design
+    offenders.push(`${name} = ${root}.${path}`);
+  }
+  eq(offenders.length, 0,
+    `no colour is pinned at module scope — found: ${offenders.join(', ') || 'none'}`);
+
+  // And the replacements really are lazy: called at render time, so they see
+  // whatever mode is current.
+  ['srBaseColor', 'srWhatIfColor', 'srBaseInk', 'srWhatIfInk'].forEach(fn => {
+    ok(new RegExp(`const ${fn} = \\(\\) =>`).test(src),
+      `${fn} is a function, so it reads the palette when it is used`);
+    ok(new RegExp(`${fn}\\(\\)`).test(src), `and every call site invokes it`);
+  });
+
+  // The theme module itself must offer both modes for every value these read,
+  // or the lazy read just returns undefined in one of them.
+  const theme = require('../theme.js');
+  ['light', 'dark'].forEach(mode => {
+    const r = theme.resolve(mode);
+    ok(r.series && r.series.socialSecurity, `${mode}: the series colour exists`);
+    ok(r.ink && r.ink.socialSecurity, `${mode}: the text-safe ink exists`);
+    ok(r.series.pension && r.ink.pension, `${mode}: and both for the what-if slot`);
+  });
+
+  // The two modes must actually DIFFER for these, or the bug would have been
+  // invisible and the fix pointless.
+  {
+    const l = theme.resolve('light'), d = theme.resolve('dark');
+    ok(l.ink.socialSecurity !== d.ink.socialSecurity,
+      'the ink genuinely changes between modes, which is why pinning it broke');
+    ok(l.series.pension !== d.series.pension, 'as does the series colour');
+  }
+
+  // An opacity modifier on token-coloured TEXT defeats the contrast the token
+  // layer guarantees: emerald-400 is #047857 in light mode and clears 4.5:1 on
+  // white, but at /80 it composites down to 3.75 and fails. The two sites the
+  // audit caught were in the IRMAA card.
+  {
+    const srgb = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+    const lum = ([r, g, b]) => 0.2126 * srgb(r) + 0.7152 * srgb(g) + 0.0722 * srgb(b);
+    const hex = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+    const cr = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+    const emerald = theme.TW.emerald[400].light;
+    const white = [255, 255, 255];
+    gt(cr(hex(emerald), white), 4.5, 'emerald-400 clears 4.5:1 on white at full opacity');
+    const at80 = hex(emerald).map(c => c * 0.8 + 255 * 0.2);
+    lt(cr(at80, white), 4.5, 'and fails it at 80% — which is why the alpha came off');
+  }
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of
