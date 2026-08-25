@@ -418,11 +418,11 @@ const LEVEL_SHOWS = { essentials: 0, standard: 1, everything: 2 };
 const SECTION_MANIFEST = {
   dashboard: [
     { id: 'summaryCards',     label: 'Summary Cards',                 level: 'essential' },
+    { id: 'retirementAge',    label: 'Retirement Age What-If',        level: 'standard' },
     { id: 'netWorth',         label: 'Net Worth Projection',          level: 'essential' },
     { id: 'retirementIncome', label: 'Retirement Income vs Spending', level: 'essential' },
     { id: 'cashFlow',         label: 'Annual Cash Flow',              level: 'standard' },
     { id: 'withdrawalRate',   label: 'Portfolio Withdrawal Rate',     level: 'standard' },
-    { id: 'retirementAge',    label: 'Retirement Age What-If',        level: 'standard' },
     { id: 'taxSummary',       label: 'Lifetime Tax Summary',          level: 'standard' },
     { id: 'safeSpending',     label: 'Safe Spending Capacity',        level: 'standard' },
     { id: 'coastFire',        label: 'Coast FIRE Indicator',          level: 'advanced' },
@@ -12367,29 +12367,16 @@ function SavingsRateTooltip({ active, payload, label, baseRate, targetRate }) {
 // identity on every render, remounting and resetting the slider on every
 // keystroke elsewhere on the page.
 // ============================================
-function RetirementAgeExplorer({ accounts, assets, incomeStreams, oneTimeEvents, personalInfo,
-                                 projections, recurringExpenses, setPersonalInfo, setAccounts,
-                                 setIncomeStreams, detailLevel, sectionVisibility, setSectionVisibility }) {
-  const baseAge = personalInfo.myRetirementAge || 65;
-  const [age, setAge] = useState(null);            // null = follow the plan
-  const target = age === null ? baseAge : age;
-  // Re-anchor to the plan while the slider is untouched, so editing retirement
-  // age elsewhere does not leave this showing a stale comparison.
-  useEffect(() => { setAge(null); }, [baseAge]);
-
+// The slider's state and its scenario projection live in DashboardTab, not here.
+// They have to: the Net Worth and Income charts are siblings of this panel, and
+// showing a what-if on the tiles while the charts underneath still draw the
+// saved plan is worse than not showing it at all — two answers to one question
+// on one screen.
+function RetirementAgeExplorer({ personalInfo, projections, setPersonalInfo, setAccounts,
+                                 setIncomeStreams, detailLevel, sectionVisibility,
+                                 setSectionVisibility, baseAge, target, setAge, scenario }) {
   const minAge = Math.max((personalInfo.myAge || 0) + 1, 45);
   const maxAge = Math.min(80, (personalInfo.legacyAge || 95) - 1);
-
-  const scenario = useMemo(() => {
-    if (target === baseAge) return null;
-    try {
-      const shifted = planAtRetirementAge(personalInfo, accounts, incomeStreams,
-        { myRetirementAge: target });
-      const proj = computeProjections(shifted.pi, shifted.accts, shifted.streams,
-        assets, oneTimeEvents, recurringExpenses);
-      return { proj, moved: shifted.moved, shifted };
-    } catch (e) { return { error: e.message }; }
-  }, [target, baseAge, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
 
   // The four figures worth watching, each measured the same way on both plans.
   const measure = (proj, retAge) => {
@@ -12431,6 +12418,13 @@ function RetirementAgeExplorer({ accounts, assets, incomeStreams, oneTimeEvents,
       tab="dashboard" id="retirementAge" level={detailLevel}
       vis={sectionVisibility} setVis={setSectionVisibility}
       title="What if you retired earlier — or later?"
+      // Sticky ONLY while the slider is off the plan's own age. Moving the panel
+      // above the charts is not enough on its own: a control and two full-height
+      // charts do not fit in a laptop viewport together, so whichever chart you
+      // want to watch, you would still be scrolling away from the slider.
+      // Pinned, it stays under your hand at any scroll position — and at rest it
+      // is an ordinary card, so it costs nothing when nobody is experimenting.
+      className={`${cardStyle}${target !== baseAge ? ' sticky top-2 z-30 shadow-2xl ring-1 ring-amber-500/40' : ''}`}
     >
       <div className="flex flex-wrap items-center gap-4 mb-4">
         <div className="flex-1 min-w-[260px]">
@@ -14273,10 +14267,39 @@ function LifestyleVsLegacy({ projections, personalInfo, accounts, incomeStreams,
 // ============================================
 // DashboardTab — Lifted to module scope
 // ============================================
-function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, detailLevel, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections, recurringExpenses, setAccounts, setActiveTab, setDashboardVisibility, setDetailLevel, setIncomeStreams, setPersonalInfo, setSectionVisibility, setShowDashboardSettings, sectionVisibility, showDashboardSettings, showTourOffer }) {
+function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, detailLevel, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections: planProjections, recurringExpenses, setAccounts, setActiveTab, setDashboardVisibility, setDetailLevel, setIncomeStreams, setPersonalInfo, setSectionVisibility, setShowDashboardSettings, sectionVisibility, showDashboardSettings, showTourOffer }) {
   // Session-only: the banner should stop nagging once acknowledged, but must come
   // back next visit while real numbers are still missing.
   const [estimatesDismissed, setEstimatesDismissed] = useState(false);
+
+  // ── The retirement-age what-if ────────────────────────────────────────────
+  // Held at the top of the tab, and aliased over `projections`, so that while
+  // the slider is off the plan's own age EVERYTHING on this page describes the
+  // same scenario. Previewing only the charts would leave the summary cards
+  // answering the same question differently three inches higher up — two plans
+  // on one screen, which is worse than showing no preview at all.
+  const dashBaseRetAge = personalInfo.myRetirementAge || 65;
+  const [previewRetAge, setPreviewRetAge] = useState(null);   // null = follow the plan
+  const previewTarget = previewRetAge === null ? dashBaseRetAge : previewRetAge;
+  useEffect(() => { setPreviewRetAge(null); }, [dashBaseRetAge]);
+
+  const retAgeScenario = useMemo(() => {
+    if (previewTarget === dashBaseRetAge) return null;
+    try {
+      const shifted = planAtRetirementAge(personalInfo, accounts, incomeStreams,
+        { myRetirementAge: previewTarget });
+      const proj = computeProjections(shifted.pi, shifted.accts, shifted.streams,
+        assets, oneTimeEvents, recurringExpenses);
+      return { proj, moved: shifted.moved, shifted };
+    } catch (e) { return { error: e.message }; }
+  }, [previewTarget, dashBaseRetAge, personalInfo, accounts, incomeStreams, assets,
+      oneTimeEvents, recurringExpenses]);
+
+  const previewing = !!(retAgeScenario && !retAgeScenario.error);
+  // From here down, `projections` IS the scenario while one is on screen. The
+  // panel below is handed planProjections explicitly, because comparing the two
+  // is its entire job.
+  const projections = previewing ? retAgeScenario.proj : planProjections;
   const current = projections[0];
   
   // The dashboard's section guards stay as they are — `visibilitySettings.x &&`
@@ -14297,8 +14320,10 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
     setSectionVisibility(prev => ({ ...prev, dashboard: { ...(prev.dashboard || {}), [key]: !on } }));
   };
   
-  // Retirement age: always use personalInfo as source of truth
-  const retirementAge = personalInfo.myRetirementAge;
+  // Retirement age: the plan's, unless a what-if is on screen — otherwise every
+  // `myAge >= retirementAge` filter below slices the scenario at the OLD
+  // boundary and reports a mixture of the two plans.
+  const retirementAge = previewing ? previewTarget : personalInfo.myRetirementAge;
   const retirementProjection = projections.find(p => p.myAge === retirementAge);
   // Savings rate for dashboard card — read from unified engine (same as Accounts tab)
   const dashEarnedIncome = current?.earnedIncome || 0;
@@ -14333,6 +14358,14 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
   }, []);
   
   // Memoize filtered data to prevent recalculation on every render
+  // Charts drawing a what-if must say so. A reader who glances at the Net Worth
+  // curve after someone else moved the slider should not take it for the plan.
+  const previewBadge = previewing ? (
+    <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/40 whitespace-nowrap">
+      previewing retirement at {previewTarget}
+    </span>
+  ) : null;
+
   const netWorthData = useMemo(() => 
     projections.filter(p => p.myAge >= netWorthRange.start && p.myAge <= netWorthRange.end),
     [projections, netWorthRange.start, netWorthRange.end]
@@ -14518,12 +14551,26 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
       </div>
       )}
       
+      {/* Sits ABOVE the two charts it moves. It is a control, and a control you
+          have to scroll away from to see the effect of is one nobody drags
+          twice — the whole value of a slider over a number field is watching
+          the lines redraw while your hand is still on it. */}
+      <RetirementAgeExplorer
+        personalInfo={personalInfo} projections={planProjections}
+        setPersonalInfo={setPersonalInfo}
+        setAccounts={setAccounts} setIncomeStreams={setIncomeStreams}
+        detailLevel={detailLevel} sectionVisibility={sectionVisibility}
+        setSectionVisibility={setSectionVisibility}
+        baseAge={dashBaseRetAge} target={previewTarget} setAge={setPreviewRetAge}
+        scenario={retAgeScenario}
+      />
+
       {/* Net Worth Chart with Range Controls */}
       {visibilitySettings.netWorth && (
       <div className={cardStyle}>
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div className="flex items-center gap-2">
-            <h3 className="text-lg font-semibold text-slate-100">Net Worth Projection</h3>
+            <h3 className="text-lg font-semibold text-slate-100">Net Worth Projection</h3>{previewBadge}
             <InfoCard
               title="Net Worth Projection"
               isOpen={openInfoCard === 'netWorth'}
@@ -14633,7 +14680,7 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
       <div className={cardStyle}>
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div className="flex items-center gap-2">
-            <h3 className="text-lg font-semibold text-slate-100">Retirement Income vs Spending Needs</h3>
+            <h3 className="text-lg font-semibold text-slate-100">Retirement Income vs Spending Needs</h3>{previewBadge}
             <InfoCard
               title="Retirement Income vs Spending"
               isOpen={openInfoCard === 'retirementIncome'}
@@ -15038,15 +15085,6 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
       })()}
       
       {/* Tax & QCD Summary Section */}
-      <RetirementAgeExplorer
-        accounts={accounts} assets={assets} incomeStreams={incomeStreams}
-        oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections}
-        recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo}
-        setAccounts={setAccounts} setIncomeStreams={setIncomeStreams}
-        detailLevel={detailLevel} sectionVisibility={sectionVisibility}
-        setSectionVisibility={setSectionVisibility}
-      />
-
       {visibilitySettings.taxSummary && (() => {
         const retirementYears = projections.filter(p => p.myAge >= retirementAge);
         const lifetimeFederalTax = retirementYears.reduce((sum, p) => sum + p.federalTax, 0);
@@ -20063,7 +20101,15 @@ function RetirementPlanner() {
         </header>
         
         {/* Main Content */}
-        <main className="flex-1 overflow-y-auto p-6">
+        {/* No overflow-y-auto here. It was inert — the shell is min-h-screen, so
+            main is content-sized and its scrollHeight always equals its
+            clientHeight, meaning it never scrolled and the DOCUMENT did. But an
+            ancestor with overflow set still becomes the scrollport that
+            `position: sticky` resolves against, so every sticky descendant
+            silently anchored itself to a container that never moves and simply
+            scrolled away. Removing a property that did nothing is what makes
+            sticky work. */}
+        <main className="flex-1 p-6">
           <div className="max-w-7xl mx-auto">
             {activeTab === 'dashboard' && <DashboardTab setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
             {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
