@@ -10974,6 +10974,159 @@ section('P92 — a colour pinned at module scope never changes mode again');
   }
 }
 
+section('P93 — the Sandbox: several levers, one plan');
+{
+  // The Sandbox hands a reader six controls at once and has to answer with ONE
+  // scenario. That makes the ORDER the levers apply in part of the answer, not
+  // an implementation detail, and it makes "nothing touched" a property worth
+  // asserting rather than assuming.
+  const pi = { myAge: 55, spouseAge: 53, myBirthYear: TODAY_YEAR - 55, spouseBirthYear: TODAY_YEAR - 53,
+    myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 92,
+    myLifeExpectancy: 92, spouseLifeExpectancy: 92, filingStatus: 'married_joint',
+    state: 'Missouri', inflationRate: 0.03, desiredRetirementIncome: 110000,
+    withdrawalPriority: ['pretax', 'brokerage', 'roth'], healthcareModel: 'none',
+    rothConversionBracket: '24%', rothConversionStartAge: 65, rothConversionEndAge: 72 };
+  const accts = () => ([
+    { id: 1, name: 'My 401(k)', type: '401k', balance: 900000, contributionMode: 'percent',
+      employeePercent: 0.08, employerMatchPercent: 0.04, cagr: 0.07, startAge: 55, stopAge: 65,
+      owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Spouse 401(k)', type: '401k', balance: 400000, contributionMode: 'percent',
+      employeePercent: 0.06, employerMatchPercent: 0.03, cagr: 0.07, startAge: 53, stopAge: 65,
+      owner: 'spouse', contributor: 'me' },
+    { id: 4, name: 'Brokerage', type: 'brokerage', balance: 250000, contribution: 6000,
+      contributionGrowth: 0, cagr: 0.06, startAge: 55, stopAge: 65, owner: 'joint',
+      contributor: 'me', costBasisPercent: 0.5 },
+  ]);
+  const streams = () => ([
+    { id: 1, name: 'My Salary', type: 'earned_income', amount: 180000, startAge: 55, endAge: 64, cola: 0.03, owner: 'me' },
+    { id: 2, name: 'Spouse Salary', type: 'earned_income', amount: 95000, startAge: 53, endAge: 64, cola: 0.03, owner: 'spouse' },
+    { id: 3, name: 'My SS', type: 'social_security', amount: 46000, startAge: 67, endAge: 95, cola: 0.03, owner: 'me', pia: 3800 },
+    { id: 4, name: 'Spouse SS', type: 'social_security', amount: 30000, startAge: 67, endAge: 95, cola: 0.03, owner: 'spouse', pia: 2500 },
+  ]);
+  const base = () => ({ pi, accts: accts(), streams: streams() });
+  const endOf = (sc) => {
+    const p = computeProjections(sc.pi, sc.accts, sc.streams, [], [], []);
+    return p[p.length - 1].totalPortfolio;
+  };
+
+  // ── Nothing touched is the plan, exactly ─────────────────────────────────
+  // Every panel on the page reads this. A scenario engine that perturbs an
+  // untouched plan makes the whole tab a lie, so it is a byte comparison.
+  {
+    const b = base();
+    const sc = engine.sandboxScenario(b, {});
+    eq(JSON.stringify(sc.pi), JSON.stringify(b.pi), 'an untouched Sandbox returns the plan');
+    eq(JSON.stringify(sc.accts), JSON.stringify(b.accts), 'accounts included');
+    eq(JSON.stringify(sc.streams), JSON.stringify(b.streams), 'and streams');
+    eq(sc.moved.length, 0, 'with nothing reported as moved');
+  }
+
+  // ── Each spouse retires independently ────────────────────────────────────
+  {
+    const mine = engine.sandboxScenario(base(), { myRetirementAge: 60 });
+    eq(mine.streams.find(x => x.id === 1).endAge, 59, 'my salary follows my retirement age');
+    eq(mine.streams.find(x => x.id === 2).endAge, 64, "and my spouse's does not");
+    eq(mine.accts.find(x => x.id === 1).stopAge, 60, 'my contributions stop with me');
+    eq(mine.accts.find(x => x.id === 2).stopAge, 65, "theirs keep going");
+
+    const theirs = engine.sandboxScenario(base(), { spouseRetirementAge: 60 });
+    eq(theirs.streams.find(x => x.id === 2).endAge, 59, 'and the mirror holds');
+    eq(theirs.streams.find(x => x.id === 1).endAge, 64, 'with mine untouched');
+
+    const both = engine.sandboxScenario(base(), { myRetirementAge: 70, spouseRetirementAge: 62 });
+    eq(both.streams.find(x => x.id === 1).endAge, 69, 'both can move at once');
+    eq(both.streams.find(x => x.id === 2).endAge, 61, 'in opposite directions');
+  }
+
+  // ── The conversion window still follows retirement ───────────────────────
+  // The behaviour asked for on the dashboard slider, kept here.
+  {
+    const sc = engine.sandboxScenario(base(), { myRetirementAge: 70 });
+    eq(sc.pi.rothConversionStartAge, 70, 'a window starting at retirement moves with it');
+  }
+
+  // ── Claiming is repriced, not just re-dated ──────────────────────────────
+  // Moving the date without repricing the cheque would show delaying as pure
+  // loss: the years without income and none of the larger benefit that buys.
+  {
+    const early = engine.sandboxScenario(base(), { claimAges: { me: 62 } });
+    const late = engine.sandboxScenario(base(), { claimAges: { me: 70 } });
+    const amt = (sc) => sc.streams.find(x => x.id === 3).amount;
+    lt(amt(early), 46000, 'claiming at 62 pays less than claiming at FRA');
+    gt(amt(late), 46000, 'and claiming at 70 pays more');
+    approx(amt(early) / 46000, 0.70, 'roughly 70% at 62');
+    approx(amt(late) / 46000, 1.24, 'and roughly 124% at 70');
+    eq(early.streams.find(x => x.id === 3).startAge, 62, 'the date moves too');
+    eq(early.streams.find(x => x.id === 4).startAge, 67, "and a spouse's claim is untouched");
+  }
+
+  // ── Retirement and claiming are NOT chained ──────────────────────────────
+  // Retiring at 62 and claiming at 70 is one of the most consequential
+  // combinations in retirement planning. A tool that moved one with the other
+  // could not express it.
+  {
+    const sc = engine.sandboxScenario(base(), {
+      myRetirementAge: 62, spouseRetirementAge: 62, claimAges: { me: 70, spouse: 70 } });
+    eq(sc.streams.find(x => x.id === 1).endAge, 61, 'work stops at 61');
+    eq(sc.streams.find(x => x.id === 3).startAge, 70, 'and the benefit starts at 70');
+    // And retiring alone must not drag the claim age with it.
+    const retOnly = engine.sandboxScenario(base(), { myRetirementAge: 62 });
+    eq(retOnly.streams.find(x => x.id === 3).startAge, 67,
+      'retiring early on its own leaves the claim age exactly where it was');
+  }
+
+  // ── Spending and the conversion switch ───────────────────────────────────
+  {
+    const spend = engine.sandboxScenario(base(), { desiredRetirementIncome: 150000 });
+    eq(spend.pi.desiredRetirementIncome, 150000, 'spending is set');
+    lt(endOf(spend), endOf(engine.sandboxScenario(base(), {})), 'and spending more leaves less');
+
+    const off = engine.sandboxScenario(base(), { rothConversions: false });
+    ok(!engine.rothConversionIsPlanned(off.pi), 'conversions switch off');
+    const p = computeProjections(off.pi, off.accts, off.streams, [], [], []);
+    eq(Math.round(p.reduce((s, r) => s + (r.rothConversion || 0), 0)), 0, 'and nothing converts');
+    // Explicitly ON is the plan's own setting, not a second strategy.
+    const on = engine.sandboxScenario(base(), { rothConversions: true });
+    eq(on.pi.rothConversionBracket, '24%', 'switching on leaves the plan\'s own strategy in place');
+  }
+
+  // ── Order is part of the answer ──────────────────────────────────────────
+  // The savings rate fills against the salary years, and those move when
+  // retirement moves. Applying savings BEFORE the retirement shift would fill a
+  // different number of years than the reader is looking at.
+  {
+    const sc = engine.sandboxScenario(base(), {
+      myRetirementAge: 70,
+      savings: { targetDollars: 60000, currentPersonal: 20000 } });
+    eq(sc.pi.myRetirementAge, 70, 'the retirement age applied');
+    eq(sc.streams.find(x => x.id === 1).endAge, 69, 'the salary moved with it');
+    // The extra saving lands in accounts whose stop age has ALREADY been moved,
+    // so it is contributed across the longer working life.
+    eq(sc.accts.find(x => x.id === 1).stopAge, 70,
+      'and the account taking the extra saving runs to the new retirement age');
+    gt(sc.moved.filter(m => m.field === 'contribution').length, 0, 'the placements are reported');
+  }
+
+  // ── Everything at once still produces one coherent plan ──────────────────
+  {
+    const sc = engine.sandboxScenario(base(), {
+      myRetirementAge: 68, spouseRetirementAge: 62,
+      claimAges: { me: 70, spouse: 65 },
+      savings: { targetDollars: 55000, currentPersonal: 20000 },
+      desiredRetirementIncome: 130000, rothConversions: false });
+    eq(sc.pi.myRetirementAge, 68, 'my age');
+    eq(sc.pi.spouseRetirementAge, 62, 'their age');
+    eq(sc.streams.find(x => x.id === 3).startAge, 70, 'my claim');
+    eq(sc.streams.find(x => x.id === 4).startAge, 65, 'their claim');
+    eq(sc.pi.desiredRetirementIncome, 130000, 'the spending');
+    ok(!engine.rothConversionIsPlanned(sc.pi), 'and the switch');
+    const proj = computeProjections(sc.pi, sc.accts, sc.streams, [], [], []);
+    gt(proj.length, 0, 'and the whole thing still projects');
+    ok(proj.every(r => Number.isFinite(r.totalPortfolio)),
+      'with a finite balance in every year — no NaN leaking out of six stacked changes');
+  }
+}
+
 section('P77 — one balance, two currencies: the sensitivity tab and the dashboard must reconcile');
 {
   // Reported from the live app: the Sensitivity tab showed a portfolio at 90 of

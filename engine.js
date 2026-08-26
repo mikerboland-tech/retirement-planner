@@ -7526,6 +7526,121 @@ const normalizeContributionWindow = (accts, pi = {}) => {
   });
 };
 
+// ── ONE SCENARIO FROM A PANEL OF CONTROLS ────────────────────────────────────
+// The Sandbox hands a reader several levers at once and has to answer with ONE
+// plan, which means the order the levers are applied in is part of the answer
+// rather than an implementation detail:
+//
+//   Retirement ages go first. They move the last salary year, the contribution
+//   stop ages and a conversion window that starts at retirement — so everything
+//   after this measures against the working life the reader just chose, not the
+//   one they started with.
+//
+//   Claim ages next, repriced from PIA. Independent of retirement on purpose:
+//   retiring at 62 and claiming at 70 is one of the most consequential
+//   combinations in retirement planning, and a tool that chained them together
+//   could not express it.
+//
+//   The savings rate after both, because the salary years it fills against have
+//   just moved. A target set while working to 65 means something different once
+//   the plan works to 70, and using the pre-shift figure would quietly fill a
+//   different number of years than the reader is looking at.
+//
+//   Spending and the conversion switch last: neither depends on the others, and
+//   clearing conversions has to happen after the retirement shift, or the shift
+//   would carefully move a window that is about to be deleted.
+//
+// Every lever is optional. An absent one means "leave the plan alone", so a
+// Sandbox with nothing touched returns the plan unchanged — asserted, not
+// assumed, because a scenario engine that quietly perturbs an untouched plan
+// makes every panel on the page a lie.
+const sandboxScenario = (base = {}, controls = {}) => {
+  let pi = { ...(base.pi || {}) };
+  let accts = Array.isArray(base.accts) ? base.accts : [];
+  let streams = Array.isArray(base.streams) ? base.streams : [];
+  const moved = [];
+
+  const target = {};
+  if (Number.isFinite(controls.myRetirementAge)) target.myRetirementAge = controls.myRetirementAge;
+  if (Number.isFinite(controls.spouseRetirementAge)) target.spouseRetirementAge = controls.spouseRetirementAge;
+  if (Object.keys(target).length) {
+    const r = planAtRetirementAge(pi, accts, streams, target);
+    pi = r.pi; accts = r.accts; streams = r.streams;
+    moved.push(...r.moved);
+  }
+
+  const claims = controls.claimAges || {};
+  if (Number.isFinite(claims.me) || Number.isFinite(claims.spouse)) {
+    const before = streams;
+    streams = streamsAtClaimAges(streams, pi, claims);
+    streams.forEach((st, i) => {
+      const was = before[i];
+      if (st !== was && was && st.startAge !== was.startAge) {
+        moved.push({ kind: 'stream', id: st.id, name: st.name, field: 'startAge',
+                     from: was.startAge, to: st.startAge });
+      }
+    });
+  }
+
+  const sav = controls.savings;
+  if (sav && Number.isFinite(sav.targetDollars) && Number.isFinite(sav.currentPersonal)) {
+    // Salaries come from the streams as they now stand, so a retirement age the
+    // reader just moved is already reflected in what there is to save out of.
+    const salaries = earnedIncomeByOwner(streams);
+    const planned = savingsTargetPlan(accts, {
+      currentPersonal: sav.currentPersonal, targetDollars: sav.targetDollars,
+      pi, salaries, order: sav.order || SAVINGS_FILL_ORDER });
+    accts = planned.accounts;
+    (planned.placements || []).forEach(pl => {
+      moved.push({ kind: 'account', id: pl.id, name: pl.name, field: 'contribution',
+                   from: null, to: null, added: pl.added });
+    });
+    if (planned.unplaced > 0.5) {
+      moved.push({ kind: 'note', name: 'Unplaced savings', field: 'unplaced',
+                   from: null, to: Math.round(planned.unplaced) });
+    }
+  }
+
+  if (Number.isFinite(controls.desiredRetirementIncome)) {
+    pi = { ...pi, desiredRetirementIncome: Math.max(0, controls.desiredRetirementIncome) };
+  }
+
+  if (controls.rothConversions === false) pi = withoutRothConversions(pi);
+
+  return { pi, accts, streams, moved };
+};
+
+// ── CLAIMING SOCIAL SECURITY AT A DIFFERENT AGE ──────────────────────────────
+// Changing a claim age is not just moving a start date. The benefit itself
+// changes: claiming at 62 pays roughly 70% of the full amount and claiming at 70
+// pays about 124%, and a slider that moved the date without repricing the cheque
+// would show delayed claiming as pure loss — the years without income, none of
+// the larger benefit that buys.
+//
+// The PIA is the invariant. A stream that carries one uses it; a stream that
+// does not has one inferred by inverting the benefit it already quotes at the
+// age it already starts, which is exactly what the Social Security tab does.
+// Stated here once so a caller changing a claim age cannot get it wrong.
+const streamsAtClaimAges = (streams, pi = {}, claims = {}) => {
+  if (!Array.isArray(streams)) return [];
+  const birthYearOf = (owner) => owner === 'spouse'
+    ? (pi.spouseBirthYear || (BASE_TAX_YEAR - (pi.spouseAge || 0)))
+    : (pi.myBirthYear || (BASE_TAX_YEAR - (pi.myAge || 0)));
+  return streams.map(st => {
+    if (!st || st.type !== 'social_security') return st;
+    const owner = st.owner === 'spouse' ? 'spouse' : 'me';
+    const claimAge = claims[owner];
+    if (!Number.isFinite(claimAge) || claimAge === st.startAge) return st;
+    const birthYear = birthYearOf(owner);
+    // Monthly, because that is the unit both SSA and calculateSSBenefit use;
+    // the stream stores an annual figure.
+    const pia = st.pia > 0 ? st.pia
+      : inferPiaFromBenefit((st.amount || 0) / 12, st.startAge, birthYear);
+    const monthly = calculateSSBenefit(pia, claimAge, birthYear);
+    return { ...st, startAge: claimAge, amount: monthly * 12, pia };
+  });
+};
+
 // ── MOVING A RETIREMENT AGE MOVES EVERYTHING TIED TO IT ──────────────────────
 // A retirement age on its own is nearly inert: it decides when the withdrawal
 // solver switches on and when spending changes shape, and nothing else. The
@@ -10518,7 +10633,7 @@ const describePlanPatch = (state, patch) => {
     projectedWithdrawalCost,
     detailedCurrentYearDecision, sameCurrentYearBasis, taxFieldsFromReturn, earnedIncomeByOwner,
     retirementMonthOf, retirementAgeForOwner, workedFractionOfYear, retiredFractionOfYear,
-    planAtRetirementAge,
+    planAtRetirementAge, streamsAtClaimAges, sandboxScenario,
     streamPartialYear,
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
     SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,

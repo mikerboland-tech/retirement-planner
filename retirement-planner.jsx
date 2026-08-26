@@ -46,7 +46,7 @@ const {
   computeTaxReturn, buildTaxSituation, compareTraditionalVsRoth,
   projectPayrollYearEnd, marginalRateOn, saltCapFor, projectedWithdrawalRate,
   detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling, IRMAA_TIER_LOOKBACK_YEARS, nextIRMAAThreshold,
-  planAtRetirementAge,
+  planAtRetirementAge, streamsAtClaimAges, sandboxScenario,
   irmaaLastFreeAge, irmaaChargedAtAge, MEDICARE_ELIGIBILITY_AGE,
   earnedIncomeByOwner, projectedWithdrawalCost,
   rothConversionIsPlanned, withoutRothConversions, withRothConversionTarget,
@@ -14281,6 +14281,440 @@ function LifestyleVsLegacy({ projections, personalInfo, accounts, incomeStreams,
 // ============================================
 // DashboardTab — Lifted to module scope
 // ============================================
+// ============================================
+// SANDBOX — the reader's own dashboard, with the levers attached
+//
+// The default Dashboard answers "am I on track" and is deliberately opinionated
+// about what it shows. This tab answers a different question: "what happens if".
+// It does not replace the Dashboard and does not write to the plan — every
+// control here is a what-if until the reader says otherwise.
+//
+// Two halves. A row of controls, each of which follows the plan until it is
+// touched, and a set of panels the reader chooses from a catalogue. One
+// scenario feeds every panel on the page, because a page where the chart and
+// the tiles answer the same question differently is worse than no page.
+//
+// The engine composes the controls (sandboxScenario) so the ORDER they apply in
+// is one rule in one place rather than an accident of which handler ran last.
+// ============================================
+const SANDBOX_PANELS = [
+  { id: 'kpis',        label: 'Headline numbers',            level: 'essential' },
+  { id: 'netWorth',    label: 'Portfolio & net worth',       level: 'essential' },
+  { id: 'income',      label: 'Income vs spending',          level: 'essential' },
+  { id: 'balances',    label: 'Balances by tax treatment',   level: 'standard' },
+  { id: 'taxes',       label: 'Tax by year',                 level: 'standard' },
+  { id: 'withdrawal',  label: 'Withdrawal rate',             level: 'standard' },
+  { id: 'conversions', label: 'Roth conversions by year',    level: 'standard' },
+  { id: 'changes',     label: 'What the controls changed',   level: 'standard' },
+];
+const DEFAULT_SANDBOX_PANELS = ['kpis', 'netWorth', 'income'];
+
+function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalInfo,
+                      projections, recurringExpenses, sandboxConfig, setSandboxConfig }) {
+  const R = window.Recharts || {};
+  const { ComposedChart, LineChart, BarChart, Line, Bar, Area, XAxis, YAxis,
+          CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } = R;
+
+  const cfg = sandboxConfig || {};
+  const controls = cfg.controls || {};
+  const panels = Array.isArray(cfg.panels) ? cfg.panels : DEFAULT_SANDBOX_PANELS;
+  const setControl = (k, v) => setSandboxConfig(prev => ({
+    ...(prev || {}), controls: { ...((prev || {}).controls || {}), [k]: v },
+    panels: Array.isArray((prev || {}).panels) ? prev.panels : DEFAULT_SANDBOX_PANELS }));
+  const togglePanel = (id) => setSandboxConfig(prev => {
+    const cur = Array.isArray((prev || {}).panels) ? prev.panels : DEFAULT_SANDBOX_PANELS;
+    return { ...(prev || {}), controls: (prev || {}).controls || {},
+             panels: cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id] };
+  });
+
+  const married = personalInfo.filingStatus === 'married_joint'
+                || personalInfo.filingStatus === 'married_separate';
+
+  // What the plan says, so every control can show what it is departing from.
+  const planMyRet = personalInfo.myRetirementAge || 65;
+  const planSpRet = personalInfo.spouseRetirementAge || 65;
+  const ssStream = (owner) => (incomeStreams || []).find(
+    s => s.type === 'social_security' && (owner === 'spouse' ? s.owner === 'spouse' : s.owner !== 'spouse'));
+  const planClaimMe = (ssStream('me') || {}).startAge || 67;
+  const planClaimSp = (ssStream('spouse') || {}).startAge || 67;
+  const planSpend = personalInfo.desiredRetirementIncome || 0;
+
+  // The plan's own savings rate, measured the way the Accounts tab measures it:
+  // the employee's share of this year's contributions over household earned
+  // income, both read from the projection so contribution growth is included.
+  const baseRow = (projections || []).find(p => p.myAge === personalInfo.myAge) || (projections || [])[0];
+  const baseEarned = (baseRow && baseRow.earnedIncome) || 0;
+  const basePersonal = useMemo(() => {
+    const per = (baseRow && baseRow.perAccountContributions) || {};
+    return (accounts || []).reduce((sum, a) => sum + myContribShare(a, per[a.id] || 0), 0);
+  }, [accounts, baseRow]);
+  const planSavingsRate = baseEarned > 0 ? (basePersonal / baseEarned) * 100 : 0;
+
+  const val = (k, fallback) => (controls[k] === undefined || controls[k] === null) ? fallback : controls[k];
+  const myRet = val('myRetirementAge', planMyRet);
+  const spRet = val('spouseRetirementAge', planSpRet);
+  const claimMe = val('claimMe', planClaimMe);
+  const claimSp = val('claimSpouse', planClaimSp);
+  const savingsRate = val('savingsRate', planSavingsRate);
+  const spend = val('spending', planSpend);
+  const rothOn = controls.rothOn === undefined || controls.rothOn === null
+    ? rothConversionIsPlanned(personalInfo) : controls.rothOn;
+
+  const touched = myRet !== planMyRet || spRet !== planSpRet
+    || claimMe !== planClaimMe || claimSp !== planClaimSp
+    || Math.abs(savingsRate - planSavingsRate) > 0.05 || spend !== planSpend
+    || rothOn !== rothConversionIsPlanned(personalInfo);
+
+  const scenario = useMemo(() => {
+    if (!touched) return null;
+    try {
+      const sc = sandboxScenario({ pi: personalInfo, accts: accounts, streams: incomeStreams }, {
+        myRetirementAge: myRet !== planMyRet ? myRet : undefined,
+        spouseRetirementAge: married && spRet !== planSpRet ? spRet : undefined,
+        claimAges: { me: claimMe !== planClaimMe ? claimMe : undefined,
+                     spouse: married && claimSp !== planClaimSp ? claimSp : undefined },
+        savings: Math.abs(savingsRate - planSavingsRate) > 0.05 && baseEarned > 0
+          ? { targetDollars: (savingsRate / 100) * baseEarned, currentPersonal: basePersonal }
+          : undefined,
+        desiredRetirementIncome: spend !== planSpend ? spend : undefined,
+        rothConversions: rothOn === rothConversionIsPlanned(personalInfo) ? undefined : rothOn,
+      });
+      const proj = computeProjections(sc.pi, sc.accts, sc.streams, assets, oneTimeEvents, recurringExpenses);
+      return { ...sc, proj };
+    } catch (e) { return { error: e.message }; }
+  }, [touched, myRet, spRet, claimMe, claimSp, savingsRate, spend, rothOn, married,
+      personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
+      planMyRet, planSpRet, planClaimMe, planClaimSp, planSpend, planSavingsRate,
+      baseEarned, basePersonal]);
+
+  const live = (scenario && !scenario.error) ? scenario.proj : projections;
+  const liveRetAge = (scenario && !scenario.error) ? (scenario.pi.myRetirementAge || planMyRet) : planMyRet;
+  const previewing = live !== projections;
+
+  const resetAll = () => setSandboxConfig(prev => ({ ...(prev || {}), controls: {} }));
+
+  // ── measurements, taken the same way on both plans so a delta means something
+  const measure = (proj, retAge) => {
+    if (!proj || !proj.length) return null;
+    const last = proj[proj.length - 1];
+    const short = planShortfall(proj, { retirementAge: retAge });
+    return {
+      atRetirement: (proj.find(p => p.myAge === retAge) || {}).totalPortfolio || 0,
+      ending: last.totalPortfolio || 0,
+      lifetimeTax: proj.reduce((s, p) => s + (p.totalTax || 0), 0),
+      conversions: proj.reduce((s, p) => s + (p.rothConversion || 0), 0),
+      fails: !!short.fails, depletedYear: short.depletedYear || null,
+    };
+  };
+  const nowM = measure(projections, planMyRet);
+  const thenM = previewing ? measure(live, liveRetAge) : null;
+
+  const chartData = useMemo(() => live.map(p => ({
+    age: p.myAge,
+    portfolio: Math.round(p.totalPortfolio || 0),
+    netWorth: Math.round(p.totalNetWorth || p.totalPortfolio || 0),
+    preTax: Math.round(p.preTaxBalance || 0),
+    roth: Math.round(p.rothBalance || 0),
+    brokerage: Math.round(p.brokerageBalance || 0),
+    spending: Math.round(p.desiredIncome || 0),
+    guaranteed: Math.round(p.totalGuaranteedIncome || 0),
+    earned: Math.round(p.earnedIncome || 0),
+    withdrawal: Math.round(p.portfolioWithdrawal || 0),
+    federal: Math.round(p.federalTax || 0),
+    state: Math.round(p.stateTax || 0),
+    fica: Math.round(p.ficaTax || 0),
+    conversion: Math.round(p.rothConversion || 0),
+    wdRate: (p.totalPortfolio > 0 && p.myAge >= liveRetAge)
+      ? +(((p.portfolioWithdrawal || 0) / p.totalPortfolio) * 100).toFixed(2) : null,
+  })), [live, liveRetAge]);
+
+  const money = (v) => formatCurrency(v);
+  const axisMoney = (v) => `$${Math.round(v / 1000)}K`;
+  const tip = { contentStyle: { background: THEME.surface, border: `1px solid ${THEME.grid}`,
+                                borderRadius: 8, fontSize: 12, color: THEME.inkPrimary } };
+
+  const Slider = ({ label, value, onChange, min, max, step = 1, planValue, format, suffix }) => (
+    <div className="min-w-[220px] flex-1">
+      <div className="flex items-baseline justify-between gap-2">
+        <label className="text-xs text-slate-400">{label}</label>
+        <span className="text-sm font-semibold text-amber-400">
+          {format ? format(value) : value}{suffix || ''}
+        </span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value}
+             onChange={e => onChange(Number(e.target.value))}
+             aria-label={label} className="w-full accent-amber-500" />
+      <div className="text-[11px] text-slate-500">
+        plan: {format ? format(planValue) : planValue}{suffix || ''}
+        {value !== planValue && <span className="text-amber-500/80"> · changed</span>}
+      </div>
+    </div>
+  );
+
+  const panelOn = (id) => panels.includes(id);
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-xl font-semibold text-slate-100 mb-2">Sandbox</h3>
+        <p className="text-slate-400 text-sm">
+          Your own page, with the levers attached. Nothing here changes your plan — every control
+          follows it until you move it, and everything on the page then describes the same what-if.
+          The Dashboard stays as it is.
+        </p>
+      </div>
+
+      {/* ── The controls ───────────────────────────────────────────────── */}
+      <div className={`${cardStyle} sticky top-2 z-30 ${previewing ? 'bg-slate-900/45 backdrop-blur-md border-amber-500/40' : ''}`}>
+        <div className="flex items-center justify-between mb-3">
+          <h4 className="text-lg font-semibold text-slate-100">Controls</h4>
+          <div className="flex items-center gap-2">
+            {previewing && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/40">what-if</span>}
+            {touched && <button className={buttonSecondary} onClick={resetAll}>Reset all</button>}
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-x-6 gap-y-4">
+          <Slider label={married ? 'My retirement age' : 'Retirement age'} value={myRet}
+                  onChange={v => setControl('myRetirementAge', v)}
+                  min={Math.max(45, (personalInfo.myAge || 0) + 1)} max={80} planValue={planMyRet} />
+          {married && (
+            <Slider label="Spouse retirement age" value={spRet}
+                    onChange={v => setControl('spouseRetirementAge', v)}
+                    min={Math.max(45, (personalInfo.spouseAge || 0) + 1)} max={80} planValue={planSpRet} />
+          )}
+          <Slider label={married ? 'My SS claim age' : 'SS claim age'} value={claimMe}
+                  onChange={v => setControl('claimMe', v)} min={62} max={70} planValue={planClaimMe} />
+          {married && (
+            <Slider label="Spouse SS claim age" value={claimSp}
+                    onChange={v => setControl('claimSpouse', v)} min={62} max={70} planValue={planClaimSp} />
+          )}
+          <Slider label="Savings rate while working" value={+savingsRate.toFixed(1)}
+                  onChange={v => setControl('savingsRate', v)} min={0} max={60} step={0.5}
+                  planValue={+planSavingsRate.toFixed(1)} suffix="%" />
+          <Slider label="Spending in retirement (after tax)" value={spend}
+                  onChange={v => setControl('spending', v)} min={0}
+                  max={Math.max(300000, Math.round((planSpend || 100000) * 2))} step={2500}
+                  planValue={planSpend} format={money} />
+          <div className="min-w-[200px]">
+            <label className="text-xs text-slate-400 block mb-1.5">Roth conversions</label>
+            <button
+              onClick={() => setControl('rothOn', !rothOn)}
+              className={`px-3 py-1.5 rounded-lg border text-sm transition-colors ${
+                rothOn ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
+                       : 'bg-slate-700/50 border-slate-600 text-slate-400'}`}
+            >
+              {rothOn ? 'On' : 'Off'}
+            </button>
+            <div className="text-[11px] text-slate-500 mt-1">
+              plan: {rothConversionIsPlanned(personalInfo) ? 'on' : 'off'}
+              {!rothConversionIsPlanned(personalInfo) && rothOn && (
+                <span className="text-amber-500/80"> · set one up on Tax Planning first</span>
+              )}
+            </div>
+          </div>
+        </div>
+        {scenario && scenario.error && (
+          <p className="text-sm text-red-400 mt-3">Could not run that scenario: {scenario.error}</p>
+        )}
+      </div>
+
+      {/* ── Panel picker ───────────────────────────────────────────────── */}
+      <div className={cardStyle}>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-slate-400 mr-1">Show:</span>
+          {SANDBOX_PANELS.map(p => (
+            <button key={p.id} onClick={() => togglePanel(p.id)}
+              className={`px-3 py-1 rounded-lg border text-xs transition-colors ${
+                panelOn(p.id) ? 'bg-amber-500/15 border-amber-500/50 text-amber-300'
+                              : 'bg-slate-800/60 border-slate-700 text-slate-400 hover:text-slate-200'}`}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Panels ─────────────────────────────────────────────────────── */}
+      {panelOn('kpis') && nowM && (
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+          {[['Portfolio at retirement', nowM.atRetirement, thenM && thenM.atRetirement, true],
+            ['Ending portfolio', nowM.ending, thenM && thenM.ending, true],
+            ['Lifetime tax, all years', nowM.lifetimeTax, thenM && thenM.lifetimeTax, false],
+            ['Converted to Roth', nowM.conversions, thenM && thenM.conversions, null]].map(([label, a, b, up]) => {
+            const d = (b === null || b === undefined) ? null : b - a;
+            const cls = d === null || Math.abs(d) < 1 || up === null ? 'text-slate-500'
+              : ((d > 0) === up ? 'text-emerald-400' : 'text-red-400');
+            return (
+              <div key={label} className={cardStyle}>
+                <div className="text-xs text-slate-500">{label}</div>
+                <div className="text-slate-100 font-bold text-lg">{money(b === null || b === undefined ? a : b)}</div>
+                {d !== null && <div className={`text-xs ${cls}`}>{d > 0 ? '+' : d < 0 ? '−' : ''}{money(Math.abs(d))}</div>}
+              </div>
+            );
+          })}
+          <div className={cardStyle}>
+            <div className="text-xs text-slate-500">Money lasts</div>
+            <div className={`font-bold text-lg ${(thenM || nowM).fails ? 'text-red-400' : 'text-emerald-400'}`}>
+              {(thenM || nowM).fails ? `Runs out ${(thenM || nowM).depletedYear || ''}` : 'Through the plan'}
+            </div>
+            {thenM && thenM.fails !== nowM.fails && (
+              <div className={`text-xs ${thenM.fails ? 'text-red-400' : 'text-emerald-400'}`}>
+                {thenM.fails ? 'was fine before' : 'fixes the shortfall'}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {panelOn('netWorth') && ResponsiveContainer && (
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-100 mb-3">Portfolio &amp; net worth</h4>
+          <ResponsiveContainer width="100%" height={300}>
+            <ComposedChart data={chartData}>
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="age" stroke={THEME.axis} tick={{ fontSize: 11 }} />
+              <YAxis tickFormatter={axisMoney} stroke={THEME.axis} tick={{ fontSize: 11 }} />
+              <Tooltip {...tip} formatter={(v) => money(v)} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <ReferenceLine x={liveRetAge} stroke={THEME.reference} strokeDasharray="5 5"
+                             label={{ value: 'Retire', fill: THEME.inkSecondary, fontSize: 11 }} />
+              <Area type="monotone" dataKey="netWorth" name="Net worth" stroke={THEME.categorical[2]}
+                    fill={THEME.categorical[2]} fillOpacity={0.12} />
+              <Line type="monotone" dataKey="portfolio" name="Portfolio" stroke={THEME.categorical[0]}
+                    strokeWidth={2} dot={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {panelOn('income') && ResponsiveContainer && (
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-100 mb-3">Income vs spending</h4>
+          <ResponsiveContainer width="100%" height={300}>
+            <ComposedChart data={chartData}>
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="age" stroke={THEME.axis} tick={{ fontSize: 11 }} />
+              <YAxis tickFormatter={axisMoney} stroke={THEME.axis} tick={{ fontSize: 11 }} />
+              <Tooltip {...tip} formatter={(v) => money(v)} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Bar dataKey="earned" name="Earned" stackId="i" fill={SERIES.earnedIncome} />
+              <Bar dataKey="guaranteed" name="Guaranteed" stackId="i" fill={SERIES.socialSecurity} />
+              <Bar dataKey="withdrawal" name="Portfolio draw" stackId="i" fill={SERIES.withdrawalVoluntary} />
+              <Line type="monotone" dataKey="spending" name="Desired spending" stroke={THEME.lines.target}
+                    strokeWidth={2} dot={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {panelOn('balances') && ResponsiveContainer && (
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-100 mb-3">Balances by tax treatment</h4>
+          <ResponsiveContainer width="100%" height={280}>
+            <ComposedChart data={chartData}>
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="age" stroke={THEME.axis} tick={{ fontSize: 11 }} />
+              <YAxis tickFormatter={axisMoney} stroke={THEME.axis} tick={{ fontSize: 11 }} />
+              <Tooltip {...tip} formatter={(v) => money(v)} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Bar dataKey="preTax" name="Pre-tax" stackId="b" fill={SERIES.preTax} />
+              <Bar dataKey="roth" name="Roth" stackId="b" fill={SERIES.roth} />
+              <Bar dataKey="brokerage" name="Brokerage" stackId="b" fill={SERIES.brokerage} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {panelOn('taxes') && ResponsiveContainer && (
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-100 mb-3">Tax by year</h4>
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={chartData}>
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="age" stroke={THEME.axis} tick={{ fontSize: 11 }} />
+              <YAxis tickFormatter={axisMoney} stroke={THEME.axis} tick={{ fontSize: 11 }} />
+              <Tooltip {...tip} formatter={(v) => money(v)} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Bar dataKey="federal" name="Federal" stackId="t" fill={THEME.categorical[1]} />
+              <Bar dataKey="state" name="State" stackId="t" fill={THEME.categorical[3]} />
+              <Bar dataKey="fica" name="FICA" stackId="t" fill={THEME.categorical[6]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {panelOn('withdrawal') && ResponsiveContainer && (
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-100 mb-3">Withdrawal rate</h4>
+          <ResponsiveContainer width="100%" height={240}>
+            <LineChart data={chartData.filter(d => d.wdRate !== null)}>
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="age" stroke={THEME.axis} tick={{ fontSize: 11 }} />
+              <YAxis tickFormatter={(v) => `${v}%`} stroke={THEME.axis} tick={{ fontSize: 11 }} />
+              <Tooltip {...tip} formatter={(v) => `${v}%`} />
+              <ReferenceLine y={4} stroke={THEME.reference} strokeDasharray="4 4"
+                             label={{ value: '4%', fill: THEME.inkSecondary, fontSize: 11 }} />
+              <Line type="monotone" dataKey="wdRate" name="Withdrawal rate" stroke={THEME.ink.withdrawalVoluntary}
+                    strokeWidth={2} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {panelOn('conversions') && ResponsiveContainer && (
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-100 mb-3">Roth conversions by year</h4>
+          {chartData.some(d => d.conversion > 0) ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <BarChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+                <XAxis dataKey="age" stroke={THEME.axis} tick={{ fontSize: 11 }} />
+                <YAxis tickFormatter={axisMoney} stroke={THEME.axis} tick={{ fontSize: 11 }} />
+                <Tooltip {...tip} formatter={(v) => money(v)} />
+                <Bar dataKey="conversion" name="Converted" fill={SERIES.rothConversion} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <p className="text-sm text-slate-400">
+              This scenario converts nothing. {rothOn
+                ? 'Set a conversion strategy on the Tax Planning tab and it will appear here.'
+                : 'Conversions are switched off above.'}
+            </p>
+          )}
+        </div>
+      )}
+
+      {panelOn('changes') && (
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-100 mb-2">What the controls changed</h4>
+          {!previewing ? (
+            <p className="text-sm text-slate-400">Nothing yet — every control is following your plan.</p>
+          ) : scenario.moved.length === 0 ? (
+            <p className="text-sm text-slate-400">
+              The controls you moved change the plan's numbers without moving any dates.
+            </p>
+          ) : (
+            <p className="text-xs text-slate-400 leading-relaxed">
+              {scenario.moved.filter(m => m.field !== 'contribution').map((m, i) => (
+                <span key={i} className="whitespace-nowrap">
+                  {i > 0 && <span className="text-slate-600"> · </span>}
+                  <span className="text-slate-300">{m.name}</span>
+                  <span className="text-slate-500">{' '}{m.field === 'endAge' ? 'last yr'
+                    : m.field === 'startAge' ? 'starts' : m.field === 'stopAge' ? 'stop' : m.field}{' '}</span>
+                  <span className="text-slate-400">{m.from}→{m.to}</span>
+                </span>
+              ))}
+            </p>
+          )}
+          <p className="text-[11px] text-slate-500 mt-2">
+            Social Security claim ages move only when you move them — retiring at one age and claiming at
+            another is a real and often good choice, so the two are never chained together here.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, detailLevel, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections: planProjections, recurringExpenses, setAccounts, setActiveTab, setDashboardVisibility, setDetailLevel, setIncomeStreams, setPersonalInfo, setSectionVisibility, setShowDashboardSettings, sectionVisibility, showDashboardSettings, showTourOffer }) {
   // Session-only: the banner should stop nagging once acknowledged, but must come
   // back next visit while real numbers are still missing.
@@ -19517,6 +19951,12 @@ function RetirementPlanner() {
   // sections are added rather than a frozen snapshot of an old manifest.
   const [sectionVisibility, setSectionVisibility] = useState(() => savedData?.sectionVisibility || {});
   const [detailLevel, setDetailLevel] = useState(() => savedData?.detailLevel || 'standard');
+  // The Sandbox's own configuration: which panels the reader picked and where
+  // they left the controls. Persisted like any other plan preference so a page
+  // someone built for themselves is still there next visit.
+  const [sandboxConfig, setSandboxConfig] = useState(() =>
+    savedData?.sandboxConfig || { panels: DEFAULT_SANDBOX_PANELS, controls: {} });
+
   const [dashboardVisibility, setDashboardVisibility] = useState(() => {
     return savedData?.dashboardVisibility || DEFAULT_DASHBOARD_VISIBILITY;
   });
@@ -19594,7 +20034,7 @@ function RetirementPlanner() {
   // Auto-save to localStorage with debouncing to prevent excessive saves
   useEffect(() => {
     const saveTimer = setTimeout(() => {
-      const data = { personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, sectionVisibility, detailLevel, scenarios, currentYear: currentYearData, lastSaved: new Date().toISOString() };
+      const data = { personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, sectionVisibility, detailLevel, scenarios, currentYear: currentYearData, sandboxConfig, lastSaved: new Date().toISOString() };
       const result = saveToStorage(data);
       if (result.ok) {
         setSaveStatus('Saved');
@@ -19614,7 +20054,7 @@ function RetirementPlanner() {
       clearTimeout(saveTimer);
       clearTimeout(clearTimer);
     };
-  }, [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, sectionVisibility, detailLevel, scenarios, currentYearData]);
+  }, [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, sectionVisibility, detailLevel, scenarios, currentYearData, sandboxConfig]);
   
   // Export data as JSON file
   const handleExport = () => {
@@ -19626,6 +20066,7 @@ function RetirementPlanner() {
       oneTimeEvents,
       recurringExpenses,
       dashboardVisibility,
+      sandboxConfig,
       sectionVisibility,
       detailLevel,
       scenarios,
@@ -19717,6 +20158,7 @@ function RetirementPlanner() {
         // fields here so re-import doesn't fail and the data isn't lost (it's still in
         // the JSON file the user has on disk).
         setDashboardVisibility(data.dashboardVisibility || DEFAULT_DASHBOARD_VISIBILITY);
+        setSandboxConfig(data.sandboxConfig || { panels: DEFAULT_SANDBOX_PANELS, controls: {} });
         setSectionVisibility(data.sectionVisibility || {});
         setDetailLevel(data.detailLevel || 'standard');
         if (data.scenarios) setScenarios(data.scenarios);
@@ -19751,6 +20193,7 @@ function RetirementPlanner() {
     setOneTimeEvents([]);
     setRecurringExpenses(DEFAULT_RECURRING_EXPENSES);
     setDashboardVisibility(DEFAULT_DASHBOARD_VISIBILITY);
+    setSandboxConfig({ panels: DEFAULT_SANDBOX_PANELS, controls: {} });
     setScenarios([]);
     setCurrentYearData(DEFAULT_CURRENT_YEAR);
     setActiveScenarioId(null); // scenarios are gone; don't keep pointing at one
@@ -19907,6 +20350,7 @@ function RetirementPlanner() {
       label: 'TOOLS',
       icon: '🔧',
       items: [
+        { id: 'sandbox', label: 'Sandbox', icon: '🎛️' },
         { id: 'scenarios', label: 'Scenarios', icon: '🔀' },
         { id: 'assistant', label: 'AI Assistant', icon: '💬' },
         { id: 'faq', label: 'Assumptions', icon: '❓' }
@@ -20131,6 +20575,7 @@ function RetirementPlanner() {
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
             {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={projections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
             {activeTab === 'socialsecurity' && <SocialSecurityTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
+            {activeTab === 'sandbox' && <SandboxTab accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
             {activeTab === 'scenarios' && <ScenarioComparisonTab activeScenarioId={activeScenarioId} assets={assets} computeProjections={computeProjections} createScenario={createScenario} deleteScenario={deleteScenario} loadScenario={loadScenario} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} scenarios={scenarios} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'currentyear' && <CurrentYearTab currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
