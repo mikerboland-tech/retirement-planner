@@ -7607,7 +7607,30 @@ const sandboxScenario = (base = {}, controls = {}) => {
 
   if (controls.rothConversions === false) pi = withoutRothConversions(pi);
 
-  return { pi, accts, streams, moved };
+  // Survivor modelling is a property of the PLAN — it decides whether the
+  // projection runs a death at all — so it belongs on pi. It is inert unless
+  // the plan is married filing jointly, which the caller is told rather than
+  // left to discover from a switch that does nothing.
+  if (typeof controls.survivorModel === 'boolean') {
+    pi = { ...pi, survivorModelEnabled: controls.survivorModel };
+  }
+
+  // These two are projection OPTIONS, not plan facts. Guardrails are a rule
+  // about how spending reacts to a bad year, and QCDs are switched off to price
+  // what the strategy is worth rather than to change the plan's giving. Both are
+  // returned as opts so the caller passes them to computeProjections — putting
+  // them on pi would make them look like something the plan had been edited to
+  // say.
+  const opts = {};
+  if (controls.spendingGuardrails === true) {
+    opts.spendingRule = {
+      bandPct: Number.isFinite(controls.guardrailBandPct) ? controls.guardrailBandPct : 0.20,
+      adjustPct: Number.isFinite(controls.guardrailAdjustPct) ? controls.guardrailAdjustPct : 0.10,
+    };
+  }
+  if (controls.qcd === false) opts.disableQCD = true;
+
+  return { pi, accts, streams, opts, moved };
 };
 
 // ── CLAIMING SOCIAL SECURITY AT A DIFFERENT AGE ──────────────────────────────

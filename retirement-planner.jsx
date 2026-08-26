@@ -14359,11 +14359,19 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
   const spend = val('spending', planSpend);
   const rothOn = controls.rothOn === undefined || controls.rothOn === null
     ? rothConversionIsPlanned(personalInfo) : controls.rothOn;
+  const planSurvivor = !!personalInfo.survivorModelEnabled;
+  const survivorOn = controls.survivorOn === undefined || controls.survivorOn === null
+    ? planSurvivor : controls.survivorOn;
+  const guardrailsOn = controls.guardrailsOn === undefined || controls.guardrailsOn === null
+    ? false : controls.guardrailsOn;   // not a plan setting; off is the plan
+  const givingPct = personalInfo.charitableGivingPercent || 0;
+  const qcdOn = controls.qcdOn === undefined || controls.qcdOn === null ? true : controls.qcdOn;
 
   const touched = myRet !== planMyRet || spRet !== planSpRet
     || claimMe !== planClaimMe || claimSp !== planClaimSp
     || Math.abs(savingsRate - planSavingsRate) > 0.05 || spend !== planSpend
-    || rothOn !== rothConversionIsPlanned(personalInfo);
+    || rothOn !== rothConversionIsPlanned(personalInfo)
+    || survivorOn !== planSurvivor || guardrailsOn || !qcdOn;
 
   const scenario = useMemo(() => {
     if (!touched) return null;
@@ -14378,11 +14386,19 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
           : undefined,
         desiredRetirementIncome: spend !== planSpend ? spend : undefined,
         rothConversions: rothOn === rothConversionIsPlanned(personalInfo) ? undefined : rothOn,
+        survivorModel: married && survivorOn !== planSurvivor ? survivorOn : undefined,
+        spendingGuardrails: guardrailsOn ? true : undefined,
+        qcd: qcdOn ? undefined : false,
       });
-      const proj = computeProjections(sc.pi, sc.accts, sc.streams, assets, oneTimeEvents, recurringExpenses);
+      // sc.opts carries the guardrail rule and the QCD switch: those are
+      // projection options, not plan facts, and the engine keeps them apart so
+      // neither looks like something the plan was edited to say.
+      const proj = computeProjections(sc.pi, sc.accts, sc.streams, assets, oneTimeEvents,
+        recurringExpenses, undefined, sc.opts);
       return { ...sc, proj };
     } catch (e) { return { error: e.message }; }
   }, [touched, myRet, spRet, claimMe, claimSp, savingsRate, spend, rothOn, married,
+      survivorOn, guardrailsOn, qcdOn, planSurvivor,
       personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
       planMyRet, planSpRet, planClaimMe, planClaimSp, planSpend, planSavingsRate,
       baseEarned, basePersonal]);
@@ -14451,6 +14467,29 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
     </div>
   );
 
+  // One switch, used five times. Each says what the plan itself is set to, and
+  // when a switch cannot bite — survivor modelling on a single filer, QCDs with
+  // no charitable giving set — it says so instead of sitting there inert.
+  const Switch = ({ label, on, onChange, planLabel, note, disabled }) => (
+    <div className="min-w-[170px]">
+      <label className="text-xs text-slate-400 block mb-1.5">{label}</label>
+      <button
+        onClick={() => !disabled && onChange(!on)}
+        disabled={disabled}
+        className={`px-3 py-1.5 rounded-lg border text-sm transition-colors ${
+          disabled ? 'bg-slate-800/40 border-slate-700 text-slate-600 cursor-not-allowed'
+            : on ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
+                 : 'bg-slate-700/50 border-slate-600 text-slate-400'}`}
+      >
+        {on ? 'On' : 'Off'}
+      </button>
+      <div className="text-[11px] text-slate-500 mt-1">
+        {planLabel}
+        {note && <span className="text-amber-500/80"> · {note}</span>}
+      </div>
+    </div>
+  );
+
   const panelOn = (id) => panels.includes(id);
 
   return (
@@ -14495,23 +14534,29 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
                   onChange={v => setControl('spending', v)} min={0}
                   max={Math.max(300000, Math.round((planSpend || 100000) * 2))} step={2500}
                   planValue={planSpend} format={money} />
-          <div className="min-w-[200px]">
-            <label className="text-xs text-slate-400 block mb-1.5">Roth conversions</label>
-            <button
-              onClick={() => setControl('rothOn', !rothOn)}
-              className={`px-3 py-1.5 rounded-lg border text-sm transition-colors ${
-                rothOn ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
-                       : 'bg-slate-700/50 border-slate-600 text-slate-400'}`}
-            >
-              {rothOn ? 'On' : 'Off'}
-            </button>
-            <div className="text-[11px] text-slate-500 mt-1">
-              plan: {rothConversionIsPlanned(personalInfo) ? 'on' : 'off'}
-              {!rothConversionIsPlanned(personalInfo) && rothOn && (
-                <span className="text-amber-500/80"> · set one up on Tax Planning first</span>
-              )}
-            </div>
-          </div>
+          <Switch
+            label="Roth conversions" on={rothOn} onChange={v => setControl('rothOn', v)}
+            planLabel={`plan: ${rothConversionIsPlanned(personalInfo) ? 'on' : 'off'}`}
+            note={!rothConversionIsPlanned(personalInfo) && rothOn
+              ? 'set a strategy on Tax Planning first' : null} />
+
+          <Switch
+            label="Survivor modelling" on={married && survivorOn}
+            onChange={v => setControl('survivorOn', v)} disabled={!married}
+            planLabel={married ? `plan: ${planSurvivor ? 'on' : 'off'}` : 'single filer'}
+            note={married ? null : 'nothing to model'} />
+
+          <Switch
+            label="Spending guardrails" on={guardrailsOn}
+            onChange={v => setControl('guardrailsOn', v)}
+            planLabel="plan: off"
+            note={guardrailsOn ? 'cuts 10% after a bad year, raises it after a good one' : null} />
+
+          <Switch
+            label="Qualified charitable distributions" on={givingPct > 0 && qcdOn}
+            onChange={v => setControl('qcdOn', v)} disabled={!(givingPct > 0)}
+            planLabel={givingPct > 0 ? `giving ${givingPct}% of spending` : 'no charitable giving set'}
+            note={givingPct > 0 ? null : 'set a % on Personal Info'} />
         </div>
         {scenario && scenario.error && (
           <p className="text-sm text-red-400 mt-3">Could not run that scenario: {scenario.error}</p>
@@ -14547,7 +14592,12 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
               <div key={label} className={cardStyle}>
                 <div className="text-xs text-slate-500">{label}</div>
                 <div className="text-slate-100 font-bold text-lg">{money(b === null || b === undefined ? a : b)}</div>
-                {d !== null && <div className={`text-xs ${cls}`}>{d > 0 ? '+' : d < 0 ? '−' : ''}{money(Math.abs(d))}</div>}
+                {/* A delta of nothing is not information — an unchanged figure
+                    should look unchanged, not carry a "$0" that reads at a
+                    glance like a real result. */}
+                {d !== null && Math.abs(d) >= 1 && (
+                  <div className={`text-xs ${cls}`}>{d > 0 ? '+' : '−'}{money(Math.abs(d))}</div>
+                )}
               </div>
             );
           })}

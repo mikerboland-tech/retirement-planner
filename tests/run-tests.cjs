@@ -11107,6 +11107,54 @@ section('P93 — the Sandbox: several levers, one plan');
     gt(sc.moved.filter(m => m.field === 'contribution').length, 0, 'the placements are reported');
   }
 
+  // ── The three dip switches ───────────────────────────────────────────────
+  // Survivor modelling is a PLAN fact — it decides whether a death is projected
+  // at all — so it belongs on pi. Guardrails and the QCD switch are projection
+  // OPTIONS: one is a rule about how spending reacts to a bad year, the other
+  // prices what a strategy is worth. Putting either on pi would make it look
+  // like something the plan had been edited to say, so the engine keeps them
+  // apart and hands the caller an opts object.
+  {
+    const plain = engine.sandboxScenario(base(), {});
+    eq(Object.keys(plain.opts).length, 0, 'no switch means no options');
+
+    const surv = engine.sandboxScenario(base(), { survivorModel: true });
+    eq(surv.pi.survivorModelEnabled, true, 'survivor modelling lands on the plan');
+    eq(Object.keys(surv.opts).length, 0, 'and not in the options');
+
+    const guard = engine.sandboxScenario(base(), { spendingGuardrails: true });
+    ok(guard.opts.spendingRule, 'guardrails land in the options');
+    approx(guard.opts.spendingRule.bandPct, 0.20, 'with a default band');
+    approx(guard.opts.spendingRule.adjustPct, 0.10, 'and a default adjustment');
+    eq(guard.pi.survivorModelEnabled, base().pi.survivorModelEnabled,
+      'and touch nothing on the plan');
+
+    const noQcd = engine.sandboxScenario(base(), { qcd: false });
+    eq(noQcd.opts.disableQCD, true, 'switching QCDs off lands in the options');
+    eq(engine.sandboxScenario(base(), { qcd: true }).opts.disableQCD, undefined,
+      'and leaving them on adds nothing — on is the plan');
+  }
+
+  // ── Each switch actually changes the projection ──────────────────────────
+  // A switch that composes correctly and changes nothing is decoration.
+  {
+    const giving = { ...pi, charitableGivingPercent: 8, myRetirementAge: 62,
+                     spouseRetirementAge: 62, myLifeExpectancy: 88 };
+    const b2 = () => ({ pi: giving, accts: accts(), streams: streams() });
+    const run = (c) => {
+      const sc = engine.sandboxScenario(b2(), c);
+      const p = computeProjections(sc.pi, sc.accts, sc.streams, [], [], [], undefined, sc.opts);
+      return { end: p[p.length - 1].totalPortfolio,
+               tax: p.reduce((s, r) => s + (r.totalTax || 0), 0) };
+    };
+    const plain = run({});
+    ok(run({ survivorModel: true }).end !== plain.end, 'survivor modelling moves the outcome');
+    ok(run({ spendingGuardrails: true }).end !== plain.end, 'so do guardrails');
+    // Switching QCDs off must cost tax — that is the entire point of a QCD.
+    gt(run({ qcd: false }).tax, plain.tax,
+      'and turning QCDs off raises lifetime tax, which is what makes them worth having');
+  }
+
   // ── Everything at once still produces one coherent plan ──────────────────
   {
     const sc = engine.sandboxScenario(base(), {
