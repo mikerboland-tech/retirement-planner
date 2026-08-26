@@ -14409,6 +14409,14 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
 
   const resetAll = () => setSandboxConfig(prev => ({ ...(prev || {}), controls: {} }));
 
+  // The shared charts take a badge node, which is how the Dashboard marks a
+  // preview. Here it marks the same thing for the same reason.
+  const whatIfBadge = (
+    <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/40 whitespace-nowrap">
+      what-if
+    </span>
+  );
+
   // ── measurements, taken the same way on both plans so a delta means something
   const measure = (proj, retAge) => {
     if (!proj || !proj.length) return null;
@@ -14615,45 +14623,14 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
         </div>
       )}
 
-      {panelOn('netWorth') && ResponsiveContainer && (
-        <div className={cardStyle}>
-          <h4 className="text-lg font-semibold text-slate-100 mb-3">Portfolio &amp; net worth</h4>
-          <ResponsiveContainer width="100%" height={300}>
-            <ComposedChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
-              <XAxis dataKey="age" stroke={THEME.axis} tick={{ fontSize: 11 }} />
-              <YAxis tickFormatter={axisMoney} stroke={THEME.axis} tick={{ fontSize: 11 }} />
-              <Tooltip {...tip} formatter={(v) => money(v)} />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
-              <ReferenceLine x={liveRetAge} stroke={THEME.reference} strokeDasharray="5 5"
-                             label={{ value: 'Retire', fill: THEME.inkSecondary, fontSize: 11 }} />
-              <Area type="monotone" dataKey="netWorth" name="Net worth" stroke={THEME.categorical[2]}
-                    fill={THEME.categorical[2]} fillOpacity={0.12} />
-              <Line type="monotone" dataKey="portfolio" name="Portfolio" stroke={THEME.categorical[0]}
-                    strokeWidth={2} dot={false} />
-            </ComposedChart>
-          </ResponsiveContainer>
-        </div>
+      {panelOn('netWorth') && (
+        <NetWorthProjectionChart data={live} personalInfo={personalInfo}
+          retirementAge={liveRetAge} badge={previewing ? whatIfBadge : null} />
       )}
 
-      {panelOn('income') && ResponsiveContainer && (
-        <div className={cardStyle}>
-          <h4 className="text-lg font-semibold text-slate-100 mb-3">Income vs spending</h4>
-          <ResponsiveContainer width="100%" height={300}>
-            <ComposedChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
-              <XAxis dataKey="age" stroke={THEME.axis} tick={{ fontSize: 11 }} />
-              <YAxis tickFormatter={axisMoney} stroke={THEME.axis} tick={{ fontSize: 11 }} />
-              <Tooltip {...tip} formatter={(v) => money(v)} />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
-              <Bar dataKey="earned" name="Earned" stackId="i" fill={SERIES.earnedIncome} />
-              <Bar dataKey="guaranteed" name="Guaranteed" stackId="i" fill={SERIES.socialSecurity} />
-              <Bar dataKey="withdrawal" name="Portfolio draw" stackId="i" fill={SERIES.withdrawalVoluntary} />
-              <Line type="monotone" dataKey="spending" name="Desired spending" stroke={THEME.lines.target}
-                    strokeWidth={2} dot={false} />
-            </ComposedChart>
-          </ResponsiveContainer>
-        </div>
+      {panelOn('income') && (
+        <IncomeVsSpendingChart data={live} personalInfo={personalInfo}
+          retirementAge={liveRetAge} badge={previewing ? whatIfBadge : null} />
       )}
 
       {panelOn('balances') && ResponsiveContainer && (
@@ -14765,6 +14742,287 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
   );
 }
 
+// ── THE DASHBOARD'S TWO BIG CHARTS, AS COMPONENTS ────────────────────────────
+// These were written inline inside DashboardTab, which is why the Sandbox
+// originally grew its own thinner versions of the same two pictures rather than
+// showing these. Two charts answering one question is the bug this codebase
+// keeps producing; a second DRAWING of one is the same mistake in another form.
+//
+// Extracted verbatim — same series, same annotations, same explanatory text —
+// and now given a projections array rather than reading a closure. Each owns
+// its own age range and info-card state, so two of them on two tabs do not
+// fight over one. `onHide` is optional: the Dashboard passes its section
+// toggle, the Sandbox has its own picker and passes nothing.
+function NetWorthProjectionChart({ data, personalInfo, retirementAge, badge, onHide }) {
+  const [range, setRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || MAX_AGE });
+  const [infoOpen, setInfoOpen] = useState(false);
+  const rows = useMemo(
+    () => (data || []).filter(p => p.myAge >= range.start && p.myAge <= range.end),
+    [data, range.start, range.end]);
+  return (
+      <div className={cardStyle}>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <div className="flex items-center gap-2">
+            <h3 className="text-lg font-semibold text-slate-100">Net Worth Projection</h3>{badge}
+            <InfoCard
+              title="Net Worth Projection"
+              isOpen={infoOpen}
+              onToggle={() => setInfoOpen(v => !v)}
+              sections={[
+                {
+                  heading: 'What This Shows',
+                  body: `This chart projects your total net worth from today through age ${personalInfo.legacyAge || 95}, broken down by the type of money you hold. The stacked colored areas show how your wealth is distributed, while the cyan line traces your combined total.`
+                },
+                {
+                  heading: 'The Colored Layers',
+                  items: [
+                    { color: SERIES.preTax, label: 'Pre-Tax', desc: '401(k), Traditional IRA, 403(b), 457(b). Contributions reduced your taxable income, but every dollar withdrawn in retirement will be taxed as ordinary income. This is typically your largest bucket during accumulation.' },
+                    { color: SERIES.roth, label: 'Roth', desc: 'Roth IRA, Roth 401(k), etc. You paid tax on contributions upfront, so withdrawals in retirement are completely tax-free. This layer growing large is very favorable for retirement flexibility.' },
+                    { color: SERIES.brokerage, label: 'Brokerage', desc: 'Taxable investment accounts and HSAs. Withdrawals may generate capital gains taxes, but there are no age restrictions or required minimum distributions (except HSAs are tax-free for medical expenses).' },
+                    { color: SERIES.nonLiquid, label: 'Non-Liquid Assets', desc: 'Real estate, vehicles, business equity — things with value but not easily converted to spending cash. Shown net of any remaining mortgages or debt.' }
+                  ]
+                },
+                {
+                  heading: 'The Lines & Markers',
+                  items: [
+                    { color: '#22d3ee', label: 'Cyan Line — Total Net Worth', desc: 'The sum of all four layers. This is your complete financial picture at each age.' },
+                    { color: '#ef4444', label: 'Red Dashed Line — Retirement Age', desc: 'Marks when you plan to stop working. Expect the curve to shift from growing (contributions + returns) to declining (withdrawals for living expenses).' }
+                  ]
+                },
+                {
+                  heading: 'How to Read It',
+                  body: `Before retirement the chart should climb as contributions and market returns build wealth. After retirement it typically descends as you draw down savings. A chart that stays above zero through age ${personalInfo.legacyAge || 95} suggests your plan is sustainable. If the total drops to zero before age ${personalInfo.legacyAge || 95}, you may need to save more, delay retirement, or reduce spending.`,
+                  tip: 'Use the age range buttons above the chart to zoom into specific periods. "To Retire" focuses on the accumulation phase, "Retire-85" focuses on the critical early drawdown years when sequence-of-returns risk is highest.'
+                },
+                {
+                  heading: 'What\'s NOT Included',
+                  body: 'All values are shown in future (nominal) dollars — they include inflation, so the numbers look larger than today\'s purchasing power. Taxes are accounted for in withdrawals but not shown as a separate deduction on the chart. The projection uses your fixed expected return rates (CAGR) for each account — real markets will be more volatile (see Monte Carlo for stress-testing).'
+                }
+              ]}
+            />
+              {onHide && (
+                <button onClick={onHide} className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors">Hide</button>
+              )}
+          </div>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-slate-400">Age:</span>
+            <input
+              type="number"
+              value={range.start}
+              onChange={e => setRange(prev => ({ ...prev, start: Math.max(personalInfo.myAge, Number(e.target.value)) }))}
+              className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
+            />
+            <span className="text-slate-500">to</span>
+            <input
+              type="number"
+              value={range.end}
+              onChange={e => setRange(prev => ({ ...prev, end: Math.min(personalInfo.legacyAge || MAX_AGE, Number(e.target.value)) }))}
+              className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
+            />
+            <div className="flex gap-1 ml-2">
+              <button 
+                onClick={() => setRange({ start: personalInfo.myAge, end: retirementAge + 5 })}
+                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
+              >
+                To Retire
+              </button>
+              <button 
+                onClick={() => setRange({ start: retirementAge, end: 85 })}
+                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
+              >
+                Retire-85
+              </button>
+              <button 
+                onClick={() => setRange({ start: personalInfo.myAge, end: personalInfo.legacyAge || MAX_AGE })}
+                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
+              >
+                All
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="h-72">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={rows}>
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="myAge" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
+              <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1e6).toFixed(1)}M`} />
+              <Tooltip contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} formatter={v => formatCurrency(v)} labelFormatter={l => `Age ${l}`} />
+              <Legend formatter={legendInk} />
+              {/* A 1px surface-coloured stroke between stacked bands: the gap is
+                  what lets a reader see the boundary without relying on the two
+                  fills being far enough apart on their own. */}
+              <Area type="monotone" dataKey="preTaxBalance" stackId="1" fill={SERIES.preTax} stroke={SERIES.preTax} strokeWidth={1.5} fillOpacity={0.72} name="Pre-Tax" />
+              <Area type="monotone" dataKey="rothBalance" stackId="1" fill={SERIES.roth} stroke={SERIES.roth} strokeWidth={1.5} fillOpacity={0.72} name="Roth" />
+              <Area type="monotone" dataKey="brokerageBalance" stackId="1" fill={SERIES.brokerage} stroke={SERIES.brokerage} strokeWidth={1.5} fillOpacity={0.72} name="Brokerage" />
+              <Area type="monotone" dataKey="netAssetValue" stackId="1" fill={SERIES.nonLiquid} stroke={SERIES.nonLiquid} strokeWidth={1.5} fillOpacity={0.72} name="Non-Liquid Assets" />
+              <Line type="monotone" dataKey="totalNetWorth" stroke={THEME.inkPrimary} strokeWidth={2} dot={false} name="Total Net Worth" />
+              <ReferenceLine x={retirementAge} stroke={THEME.reference} strokeDasharray="5 5" />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+  );
+}
+
+function IncomeVsSpendingChart({ data, personalInfo, retirementAge, badge, onHide }) {
+  const [range, setRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || MAX_AGE });
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [showConversions, setShowConversions] = useState(true);
+  const rows = useMemo(
+    () => (data || []).filter(p => p.myAge >= range.start && p.myAge <= range.end),
+    [data, range.start, range.end]);
+  const planHasConversions = useMemo(
+    () => (data || []).some(p => (p.rothConversion || 0) > 0), [data]);
+  return (
+      <div className={cardStyle}>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <div className="flex items-center gap-2">
+            <h3 className="text-lg font-semibold text-slate-100">Retirement Income vs Spending Needs</h3>{badge}
+            <InfoCard
+              title="Retirement Income vs Spending"
+              isOpen={infoOpen}
+              onToggle={() => setInfoOpen(v => !v)}
+              sections={[
+                {
+                  heading: 'What This Shows',
+                  body: 'This chart answers the fundamental retirement question: will your income cover your spending? The stacked bars represent your total gross income from all sources at each age, while the lines show what you want to spend, what you actually take home after taxes, and how much goes to taxes.'
+                },
+                {
+                  heading: 'The Income Bars (Stacked)',
+                  body: 'Each colored bar segment is a different source of income. They stack on top of each other so the total bar height equals your total gross income for that year.',
+                  items: [
+                    { color: SERIES.earnedIncome, label: 'Earned Income', desc: 'Salary, wages, or business income while you\'re still working. This typically drops to zero at your retirement age.' },
+                    { color: SERIES.socialSecurity, label: 'Social Security', desc: 'Your monthly Social Security benefit, shown annually. Starts at your claiming age (usually 62–70). Delaying increases the amount.' },
+                    { color: SERIES.pension, label: 'Pension', desc: 'Any defined-benefit pension income. Starts at the age you specified in your income streams.' },
+                    { color: SERIES.otherIncome, label: 'Other Income', desc: 'Rental income, annuities, part-time work, or any other income streams you\'ve entered.' },
+                    { color: SERIES.withdrawalVoluntary, label: 'Portfolio Withdrawal', desc: 'Money pulled from your retirement accounts (401k, IRA, Roth, brokerage) to cover the gap between your guaranteed income and your spending needs. This is the piece the planner calculates for you.' },
+                    { color: SERIES.rothConversion, label: 'Roth Conversion (translucent)', desc: 'Only shown when your plan includes Roth conversions. This is an account TRANSFER (pre-tax → Roth), not spendable income — that\'s why it\'s drawn translucent with a dashed outline, unlike the solid income segments. It\'s taxed as ordinary income in the year it happens, which is what drives the tax spike in conversion years. Use the checkbox above the chart to hide it if a large conversion dominates the scale.' }
+                  ]
+                },
+                {
+                  heading: 'The Lines',
+                  items: [
+                    { color: THEME.lines.target, label: 'Bright Solid — Desired Spending', desc: 'The annual income you said you need in retirement (from Personal Info), adjusted upward each year for inflation. If Spending Phases are enabled, this line also steps down at your go-go and slow-go boundary ages. This is your spending target.' },
+                    { color: THEME.lines.netAfterTax, label: 'Green Dashed — Net Income After Tax', desc: 'What you actually take home after federal and state taxes. This is the number that matters — it needs to meet or exceed the red line for your plan to work.' },
+                    { color: THEME.lines.taxBurden, label: 'Amber Dotted — Total Tax', desc: 'Your combined federal + state + FICA payroll tax burden. The gap between the top of the bars and the green dashed line.' }
+                  ]
+                },
+                {
+                  heading: 'How to Read It',
+                  body: 'The key relationship is between the green dashed line (net income) and the red solid line (desired spending). When green is above red, you\'re in good shape — you have more income than you need. When they\'re close together, your plan is tight. If the bars shrink below the red line, your portfolio can\'t fully cover your spending. One important exception: in Roth conversion years, the green net-income line dips (sometimes below the red line) because the conversion tax is being prepaid that year. That\'s a deliberate transfer of tax from your future to your present — not a spending shortfall. The pink translucent segment marks those years.',
+                  tip: 'Watch for the "income gap" in early retirement — the years between when earned income stops and when Social Security begins. This is often when portfolio withdrawals are heaviest and sequence-of-returns risk is greatest. Use "First 10yr Ret" to zoom in on this critical period.'
+                },
+                {
+                  heading: 'Key Concepts',
+                  items: [
+                    { icon: '📊', label: 'Gross vs Net', desc: 'The bars show gross (pre-tax) income. You can\'t spend all of it — taxes take a portion. The green dashed line shows what\'s actually available to spend.' },
+                    { icon: '📈', label: 'Inflation Effect', desc: 'Notice the red line climbs over time — that\'s inflation increasing your spending needs. Your income sources with COLA adjustments (like Social Security) help keep pace.' },
+                    { icon: '💰', label: 'Portfolio Withdrawal', desc: 'The gold bar is calculated to bridge the gap between your other income and your spending target, accounting for taxes on the withdrawal itself. Larger gold bars mean heavier reliance on savings.' },
+                    { icon: '🏛️', label: 'QCD Savings', desc: 'If you\'ve set a charitable giving percentage in Personal Info, Qualified Charitable Distributions can reduce your tax burden, which shows up as a higher green line (more net income) for the same gross income.' }
+                  ]
+                }
+              ]}
+            />
+              {onHide && (
+                <button onClick={onHide} className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors">Hide</button>
+              )}
+          </div>
+          <div className="flex items-center gap-2 text-sm">
+            {planHasConversions && (
+              <label className="flex items-center gap-1.5 mr-2 text-slate-400 cursor-pointer select-none" title="Roth conversions are account transfers, not spendable income — shown as a distinct translucent segment so the tax spike in conversion years is explained. Uncheck if a large conversion dominates the chart scale.">
+                <input
+                  type="checkbox"
+                  checked={showConversions}
+                  onChange={e => setShowConversions(e.target.checked)}
+                  className="accent-pink-500"
+                />
+                <span>Roth conversions</span>
+              </label>
+            )}
+            <span className="text-slate-400">Age:</span>
+            <input
+              type="number"
+              value={range.start}
+              onChange={e => setRange(prev => ({ ...prev, start: Math.max(personalInfo.myAge, Number(e.target.value)) }))}
+              className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
+            />
+            <span className="text-slate-500">to</span>
+            <input
+              type="number"
+              value={range.end}
+              onChange={e => setRange(prev => ({ ...prev, end: Math.min(personalInfo.legacyAge || 95, Number(e.target.value)) }))}
+              className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
+            />
+            <div className="flex gap-1 ml-2">
+              <button 
+                onClick={() => setRange({ start: personalInfo.myAge, end: retirementAge + 5 })}
+                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
+              >
+                To Retire
+              </button>
+              <button 
+                onClick={() => setRange({ start: retirementAge, end: retirementAge + 10 })}
+                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
+              >
+                First 10yr Ret
+              </button>
+              <button 
+                onClick={() => setRange({ start: personalInfo.myAge, end: personalInfo.legacyAge || 95 })}
+                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
+              >
+                All
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="h-72">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={rows}>
+              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+              <XAxis dataKey="myAge" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
+              <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
+              <Tooltip contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} formatter={v => formatCurrency(v)} labelFormatter={l => `Age ${l}`} />
+              <Legend formatter={legendInk} />
+              <Bar dataKey="earnedIncome" stackId="income" fill={SERIES.earnedIncome} name="Earned Income" />
+              <Bar dataKey="socialSecurity" stackId="income" fill={SERIES.socialSecurity} name="Social Security" />
+              <Bar dataKey="pension" stackId="income" fill={SERIES.pension} name="Pension" />
+              <Bar dataKey="otherIncome" stackId="income" fill={SERIES.otherIncome} name="Other Income" />
+              <Bar dataKey="portfolioWithdrawal" stackId="income" fill={SERIES.withdrawalVoluntary} name="Portfolio Withdrawal" />
+              {/* The conversion-tax draw is a REAL withdrawal (it pays the conversion's
+                  tax bill), so it stacks as solid income; it flows straight out again
+                  via the tax line. */}
+              <Bar dataKey="conversionTaxWithdrawal" stackId="income" fill={SERIES.conversionTaxDraw} name="Conversion Tax Draw" />
+              {/* Roth conversions ride on top of the stack but are styled translucent
+                  with a dashed outline: they are account TRANSFERS (pre-tax → Roth),
+                  not spendable income, so they must read as "different in kind" from
+                  the solid income segments. Their presence explains why the tax line
+                  spikes in conversion years. */}
+              {planHasConversions && showConversions && (
+                <Bar dataKey="rothConversion" stackId="income" fill={SERIES.rothConversion} fillOpacity={0.3} stroke={SERIES.rothConversion} strokeDasharray="4 2" name="Roth Conversion (transfer)" />
+              )}
+              <Line type="monotone" dataKey="desiredIncome" stroke={THEME.lines.target} strokeWidth={3} dot={false} name="Desired Spending" />
+              <Line type="monotone" dataKey="netIncome" stroke={THEME.lines.netAfterTax} strokeWidth={2} dot={false} name="Net Income (after tax)" strokeDasharray="5 5" />
+              <Line type="monotone" dataKey="totalTax" stroke={THEME.lines.taxBurden} strokeWidth={2} dot={false} name="Total Tax" strokeDasharray="2 3" />
+              <ReferenceLine x={retirementAge} stroke={THEME.reference} strokeDasharray="5 5" />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+        <p className="text-xs text-slate-500 mt-2">
+          Bars show gross income sources. <span style={{ color: THEME.lines.target }}>Bright solid line</span> = desired spending.
+          <span style={{ color: THEME.lines.netAfterTax }} className="ml-1">Green dashed line</span> = net income after taxes (affected by QCD savings).
+          <span style={{ color: THEME.lines.taxBurden }} className="ml-1">Amber dotted line</span> = total tax burden.
+          {planHasConversions && showConversions && (
+            <span style={{ color: SERIES.rothConversion }} className="ml-1">Translucent outlined segment</span>
+          )}
+          {planHasConversions && showConversions && (
+            <span> = Roth conversion — an account transfer, not spendable income. Its tax is prepaid in that year, which is why the green line dips during the conversion window.</span>
+          )}
+        </p>
+      </div>
+  );
+}
+
 function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, detailLevel, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections: planProjections, recurringExpenses, setAccounts, setActiveTab, setDashboardVisibility, setDetailLevel, setIncomeStreams, setPersonalInfo, setSectionVisibility, setShowDashboardSettings, sectionVisibility, showDashboardSettings, showTourOffer }) {
   // Session-only: the banner should stop nagging once acknowledged, but must come
   // back next visit while real numbers are still missing.
@@ -14839,15 +15097,13 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
   const dashAfterTaxSavingsRate = dashAfterTaxIncome > 0 ? (dashMyContributions / dashAfterTaxIncome) * 100 : null;
   const isPreRetirement = current?.earnedIncome > 0;
   
-  const [netWorthRange, setNetWorthRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || MAX_AGE });
-  const [incomeRange, setIncomeRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || MAX_AGE });
+  // The two big charts own their own age range now — see the components above.
   const [sankeyAge, setSankeyAge] = useState(retirementAge);
   // Roth conversion overlay on the Income vs Spending chart. Only offered when
   // the plan actually executes conversions; defaults ON so the tax-line spike and
   // net-income dip in conversion years are self-explanatory. The checkbox exists
   // because a large bracket-fill conversion can dominate the y-axis scale.
-  const planHasConversions = useMemo(() => projections.some(p => (p.rothConversion || 0) > 0), [projections]);
-  const [showConversionsOnIncomeChart, setShowConversionsOnIncomeChart] = useState(true);
+
   
   // Info card open/close state — tracks which section's info card is visible
   const [openInfoCard, setOpenInfoCard] = useState(null);
@@ -14864,15 +15120,6 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
     </span>
   ) : null;
 
-  const netWorthData = useMemo(() => 
-    projections.filter(p => p.myAge >= netWorthRange.start && p.myAge <= netWorthRange.end),
-    [projections, netWorthRange.start, netWorthRange.end]
-  );
-  
-  const incomeData = useMemo(() => 
-    projections.filter(p => p.myAge >= incomeRange.start && p.myAge <= incomeRange.end),
-    [projections, incomeRange.start, incomeRange.end]
-  );
   
   // Values the Guided Setup filled from a benchmark rather than from the user.
   // Surfaced here because the Dashboard is where someone judges their plan — the
@@ -15063,267 +15310,16 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
         scenario={retAgeScenario}
       />
 
-      {/* Net Worth Chart with Range Controls */}
       {visibilitySettings.netWorth && (
-      <div className={cardStyle}>
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-          <div className="flex items-center gap-2">
-            <h3 className="text-lg font-semibold text-slate-100">Net Worth Projection</h3>{previewBadge}
-            <InfoCard
-              title="Net Worth Projection"
-              isOpen={openInfoCard === 'netWorth'}
-              onToggle={() => toggleInfoCard('netWorth')}
-              sections={[
-                {
-                  heading: 'What This Shows',
-                  body: `This chart projects your total net worth from today through age ${personalInfo.legacyAge || 95}, broken down by the type of money you hold. The stacked colored areas show how your wealth is distributed, while the cyan line traces your combined total.`
-                },
-                {
-                  heading: 'The Colored Layers',
-                  items: [
-                    { color: SERIES.preTax, label: 'Pre-Tax', desc: '401(k), Traditional IRA, 403(b), 457(b). Contributions reduced your taxable income, but every dollar withdrawn in retirement will be taxed as ordinary income. This is typically your largest bucket during accumulation.' },
-                    { color: SERIES.roth, label: 'Roth', desc: 'Roth IRA, Roth 401(k), etc. You paid tax on contributions upfront, so withdrawals in retirement are completely tax-free. This layer growing large is very favorable for retirement flexibility.' },
-                    { color: SERIES.brokerage, label: 'Brokerage', desc: 'Taxable investment accounts and HSAs. Withdrawals may generate capital gains taxes, but there are no age restrictions or required minimum distributions (except HSAs are tax-free for medical expenses).' },
-                    { color: SERIES.nonLiquid, label: 'Non-Liquid Assets', desc: 'Real estate, vehicles, business equity — things with value but not easily converted to spending cash. Shown net of any remaining mortgages or debt.' }
-                  ]
-                },
-                {
-                  heading: 'The Lines & Markers',
-                  items: [
-                    { color: '#22d3ee', label: 'Cyan Line — Total Net Worth', desc: 'The sum of all four layers. This is your complete financial picture at each age.' },
-                    { color: '#ef4444', label: 'Red Dashed Line — Retirement Age', desc: 'Marks when you plan to stop working. Expect the curve to shift from growing (contributions + returns) to declining (withdrawals for living expenses).' }
-                  ]
-                },
-                {
-                  heading: 'How to Read It',
-                  body: `Before retirement the chart should climb as contributions and market returns build wealth. After retirement it typically descends as you draw down savings. A chart that stays above zero through age ${personalInfo.legacyAge || 95} suggests your plan is sustainable. If the total drops to zero before age ${personalInfo.legacyAge || 95}, you may need to save more, delay retirement, or reduce spending.`,
-                  tip: 'Use the age range buttons above the chart to zoom into specific periods. "To Retire" focuses on the accumulation phase, "Retire-85" focuses on the critical early drawdown years when sequence-of-returns risk is highest.'
-                },
-                {
-                  heading: 'What\'s NOT Included',
-                  body: 'All values are shown in future (nominal) dollars — they include inflation, so the numbers look larger than today\'s purchasing power. Taxes are accounted for in withdrawals but not shown as a separate deduction on the chart. The projection uses your fixed expected return rates (CAGR) for each account — real markets will be more volatile (see Monte Carlo for stress-testing).'
-                }
-              ]}
-            />
-            <button
-              onClick={() => toggleVisibility('netWorth')}
-              className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors"
-              title="Hide this section"
-            >
-              Hide
-            </button>
-          </div>
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-slate-400">Age:</span>
-            <input
-              type="number"
-              value={netWorthRange.start}
-              onChange={e => setNetWorthRange(prev => ({ ...prev, start: Math.max(personalInfo.myAge, Number(e.target.value)) }))}
-              className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
-            />
-            <span className="text-slate-500">to</span>
-            <input
-              type="number"
-              value={netWorthRange.end}
-              onChange={e => setNetWorthRange(prev => ({ ...prev, end: Math.min(personalInfo.legacyAge || MAX_AGE, Number(e.target.value)) }))}
-              className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
-            />
-            <div className="flex gap-1 ml-2">
-              <button 
-                onClick={() => setNetWorthRange({ start: personalInfo.myAge, end: retirementAge + 5 })}
-                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
-              >
-                To Retire
-              </button>
-              <button 
-                onClick={() => setNetWorthRange({ start: retirementAge, end: 85 })}
-                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
-              >
-                Retire-85
-              </button>
-              <button 
-                onClick={() => setNetWorthRange({ start: personalInfo.myAge, end: personalInfo.legacyAge || MAX_AGE })}
-                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
-              >
-                All
-              </button>
-            </div>
-          </div>
-        </div>
-        <div className="h-72">
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={netWorthData}>
-              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
-              <XAxis dataKey="myAge" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
-              <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1e6).toFixed(1)}M`} />
-              <Tooltip contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} formatter={v => formatCurrency(v)} labelFormatter={l => `Age ${l}`} />
-              <Legend formatter={legendInk} />
-              {/* A 1px surface-coloured stroke between stacked bands: the gap is
-                  what lets a reader see the boundary without relying on the two
-                  fills being far enough apart on their own. */}
-              <Area type="monotone" dataKey="preTaxBalance" stackId="1" fill={SERIES.preTax} stroke={SERIES.preTax} strokeWidth={1.5} fillOpacity={0.72} name="Pre-Tax" />
-              <Area type="monotone" dataKey="rothBalance" stackId="1" fill={SERIES.roth} stroke={SERIES.roth} strokeWidth={1.5} fillOpacity={0.72} name="Roth" />
-              <Area type="monotone" dataKey="brokerageBalance" stackId="1" fill={SERIES.brokerage} stroke={SERIES.brokerage} strokeWidth={1.5} fillOpacity={0.72} name="Brokerage" />
-              <Area type="monotone" dataKey="netAssetValue" stackId="1" fill={SERIES.nonLiquid} stroke={SERIES.nonLiquid} strokeWidth={1.5} fillOpacity={0.72} name="Non-Liquid Assets" />
-              <Line type="monotone" dataKey="totalNetWorth" stroke={THEME.inkPrimary} strokeWidth={2} dot={false} name="Total Net Worth" />
-              <ReferenceLine x={retirementAge} stroke={THEME.reference} strokeDasharray="5 5" />
-            </ComposedChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
+        <NetWorthProjectionChart data={projections} personalInfo={personalInfo}
+          retirementAge={retirementAge} badge={previewBadge}
+          onHide={() => toggleVisibility('netWorth')} />
       )}
-      
-      {/* Income vs Spending Chart with Range Controls */}
+
       {visibilitySettings.retirementIncome && (
-      <div className={cardStyle}>
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-          <div className="flex items-center gap-2">
-            <h3 className="text-lg font-semibold text-slate-100">Retirement Income vs Spending Needs</h3>{previewBadge}
-            <InfoCard
-              title="Retirement Income vs Spending"
-              isOpen={openInfoCard === 'retirementIncome'}
-              onToggle={() => toggleInfoCard('retirementIncome')}
-              sections={[
-                {
-                  heading: 'What This Shows',
-                  body: 'This chart answers the fundamental retirement question: will your income cover your spending? The stacked bars represent your total gross income from all sources at each age, while the lines show what you want to spend, what you actually take home after taxes, and how much goes to taxes.'
-                },
-                {
-                  heading: 'The Income Bars (Stacked)',
-                  body: 'Each colored bar segment is a different source of income. They stack on top of each other so the total bar height equals your total gross income for that year.',
-                  items: [
-                    { color: SERIES.earnedIncome, label: 'Earned Income', desc: 'Salary, wages, or business income while you\'re still working. This typically drops to zero at your retirement age.' },
-                    { color: SERIES.socialSecurity, label: 'Social Security', desc: 'Your monthly Social Security benefit, shown annually. Starts at your claiming age (usually 62–70). Delaying increases the amount.' },
-                    { color: SERIES.pension, label: 'Pension', desc: 'Any defined-benefit pension income. Starts at the age you specified in your income streams.' },
-                    { color: SERIES.otherIncome, label: 'Other Income', desc: 'Rental income, annuities, part-time work, or any other income streams you\'ve entered.' },
-                    { color: SERIES.withdrawalVoluntary, label: 'Portfolio Withdrawal', desc: 'Money pulled from your retirement accounts (401k, IRA, Roth, brokerage) to cover the gap between your guaranteed income and your spending needs. This is the piece the planner calculates for you.' },
-                    { color: SERIES.rothConversion, label: 'Roth Conversion (translucent)', desc: 'Only shown when your plan includes Roth conversions. This is an account TRANSFER (pre-tax → Roth), not spendable income — that\'s why it\'s drawn translucent with a dashed outline, unlike the solid income segments. It\'s taxed as ordinary income in the year it happens, which is what drives the tax spike in conversion years. Use the checkbox above the chart to hide it if a large conversion dominates the scale.' }
-                  ]
-                },
-                {
-                  heading: 'The Lines',
-                  items: [
-                    { color: THEME.lines.target, label: 'Bright Solid — Desired Spending', desc: 'The annual income you said you need in retirement (from Personal Info), adjusted upward each year for inflation. If Spending Phases are enabled, this line also steps down at your go-go and slow-go boundary ages. This is your spending target.' },
-                    { color: THEME.lines.netAfterTax, label: 'Green Dashed — Net Income After Tax', desc: 'What you actually take home after federal and state taxes. This is the number that matters — it needs to meet or exceed the red line for your plan to work.' },
-                    { color: THEME.lines.taxBurden, label: 'Amber Dotted — Total Tax', desc: 'Your combined federal + state + FICA payroll tax burden. The gap between the top of the bars and the green dashed line.' }
-                  ]
-                },
-                {
-                  heading: 'How to Read It',
-                  body: 'The key relationship is between the green dashed line (net income) and the red solid line (desired spending). When green is above red, you\'re in good shape — you have more income than you need. When they\'re close together, your plan is tight. If the bars shrink below the red line, your portfolio can\'t fully cover your spending. One important exception: in Roth conversion years, the green net-income line dips (sometimes below the red line) because the conversion tax is being prepaid that year. That\'s a deliberate transfer of tax from your future to your present — not a spending shortfall. The pink translucent segment marks those years.',
-                  tip: 'Watch for the "income gap" in early retirement — the years between when earned income stops and when Social Security begins. This is often when portfolio withdrawals are heaviest and sequence-of-returns risk is greatest. Use "First 10yr Ret" to zoom in on this critical period.'
-                },
-                {
-                  heading: 'Key Concepts',
-                  items: [
-                    { icon: '📊', label: 'Gross vs Net', desc: 'The bars show gross (pre-tax) income. You can\'t spend all of it — taxes take a portion. The green dashed line shows what\'s actually available to spend.' },
-                    { icon: '📈', label: 'Inflation Effect', desc: 'Notice the red line climbs over time — that\'s inflation increasing your spending needs. Your income sources with COLA adjustments (like Social Security) help keep pace.' },
-                    { icon: '💰', label: 'Portfolio Withdrawal', desc: 'The gold bar is calculated to bridge the gap between your other income and your spending target, accounting for taxes on the withdrawal itself. Larger gold bars mean heavier reliance on savings.' },
-                    { icon: '🏛️', label: 'QCD Savings', desc: 'If you\'ve set a charitable giving percentage in Personal Info, Qualified Charitable Distributions can reduce your tax burden, which shows up as a higher green line (more net income) for the same gross income.' }
-                  ]
-                }
-              ]}
-            />
-            <button
-              onClick={() => toggleVisibility('retirementIncome')}
-              className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors"
-              title="Hide this section"
-            >
-              Hide
-            </button>
-          </div>
-          <div className="flex items-center gap-2 text-sm">
-            {planHasConversions && (
-              <label className="flex items-center gap-1.5 mr-2 text-slate-400 cursor-pointer select-none" title="Roth conversions are account transfers, not spendable income — shown as a distinct translucent segment so the tax spike in conversion years is explained. Uncheck if a large conversion dominates the chart scale.">
-                <input
-                  type="checkbox"
-                  checked={showConversionsOnIncomeChart}
-                  onChange={e => setShowConversionsOnIncomeChart(e.target.checked)}
-                  className="accent-pink-500"
-                />
-                <span>Roth conversions</span>
-              </label>
-            )}
-            <span className="text-slate-400">Age:</span>
-            <input
-              type="number"
-              value={incomeRange.start}
-              onChange={e => setIncomeRange(prev => ({ ...prev, start: Math.max(personalInfo.myAge, Number(e.target.value)) }))}
-              className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
-            />
-            <span className="text-slate-500">to</span>
-            <input
-              type="number"
-              value={incomeRange.end}
-              onChange={e => setIncomeRange(prev => ({ ...prev, end: Math.min(personalInfo.legacyAge || 95, Number(e.target.value)) }))}
-              className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
-            />
-            <div className="flex gap-1 ml-2">
-              <button 
-                onClick={() => setIncomeRange({ start: personalInfo.myAge, end: retirementAge + 5 })}
-                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
-              >
-                To Retire
-              </button>
-              <button 
-                onClick={() => setIncomeRange({ start: retirementAge, end: retirementAge + 10 })}
-                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
-              >
-                First 10yr Ret
-              </button>
-              <button 
-                onClick={() => setIncomeRange({ start: personalInfo.myAge, end: personalInfo.legacyAge || 95 })}
-                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
-              >
-                All
-              </button>
-            </div>
-          </div>
-        </div>
-        <div className="h-72">
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={incomeData}>
-              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
-              <XAxis dataKey="myAge" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
-              <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
-              <Tooltip contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} formatter={v => formatCurrency(v)} labelFormatter={l => `Age ${l}`} />
-              <Legend formatter={legendInk} />
-              <Bar dataKey="earnedIncome" stackId="income" fill={SERIES.earnedIncome} name="Earned Income" />
-              <Bar dataKey="socialSecurity" stackId="income" fill={SERIES.socialSecurity} name="Social Security" />
-              <Bar dataKey="pension" stackId="income" fill={SERIES.pension} name="Pension" />
-              <Bar dataKey="otherIncome" stackId="income" fill={SERIES.otherIncome} name="Other Income" />
-              <Bar dataKey="portfolioWithdrawal" stackId="income" fill={SERIES.withdrawalVoluntary} name="Portfolio Withdrawal" />
-              {/* The conversion-tax draw is a REAL withdrawal (it pays the conversion's
-                  tax bill), so it stacks as solid income; it flows straight out again
-                  via the tax line. */}
-              <Bar dataKey="conversionTaxWithdrawal" stackId="income" fill={SERIES.conversionTaxDraw} name="Conversion Tax Draw" />
-              {/* Roth conversions ride on top of the stack but are styled translucent
-                  with a dashed outline: they are account TRANSFERS (pre-tax → Roth),
-                  not spendable income, so they must read as "different in kind" from
-                  the solid income segments. Their presence explains why the tax line
-                  spikes in conversion years. */}
-              {planHasConversions && showConversionsOnIncomeChart && (
-                <Bar dataKey="rothConversion" stackId="income" fill={SERIES.rothConversion} fillOpacity={0.3} stroke={SERIES.rothConversion} strokeDasharray="4 2" name="Roth Conversion (transfer)" />
-              )}
-              <Line type="monotone" dataKey="desiredIncome" stroke={THEME.lines.target} strokeWidth={3} dot={false} name="Desired Spending" />
-              <Line type="monotone" dataKey="netIncome" stroke={THEME.lines.netAfterTax} strokeWidth={2} dot={false} name="Net Income (after tax)" strokeDasharray="5 5" />
-              <Line type="monotone" dataKey="totalTax" stroke={THEME.lines.taxBurden} strokeWidth={2} dot={false} name="Total Tax" strokeDasharray="2 3" />
-              <ReferenceLine x={retirementAge} stroke={THEME.reference} strokeDasharray="5 5" />
-            </ComposedChart>
-          </ResponsiveContainer>
-        </div>
-        <p className="text-xs text-slate-500 mt-2">
-          Bars show gross income sources. <span style={{ color: THEME.lines.target }}>Bright solid line</span> = desired spending.
-          <span style={{ color: THEME.lines.netAfterTax }} className="ml-1">Green dashed line</span> = net income after taxes (affected by QCD savings).
-          <span style={{ color: THEME.lines.taxBurden }} className="ml-1">Amber dotted line</span> = total tax burden.
-          {planHasConversions && showConversionsOnIncomeChart && (
-            <span style={{ color: SERIES.rothConversion }} className="ml-1">Translucent outlined segment</span>
-          )}
-          {planHasConversions && showConversionsOnIncomeChart && (
-            <span> = Roth conversion — an account transfer, not spendable income. Its tax is prepaid in that year, which is why the green line dips during the conversion window.</span>
-          )}
-        </p>
-      </div>
+        <IncomeVsSpendingChart data={projections} personalInfo={personalInfo}
+          retirementAge={retirementAge} badge={previewBadge}
+          onHide={() => toggleVisibility('retirementIncome')} />
       )}
       
       {/* Portfolio Stress / Withdrawal Rate Section */}
