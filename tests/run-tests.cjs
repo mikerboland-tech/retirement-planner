@@ -11442,6 +11442,65 @@ section('P75 — one rule for whose salary it is');
   }
 }
 
+section('P94 — no component is defined inside another component');
+
+{
+  // A component defined inside another component's body is a NEW component type
+  // on every render of the parent. React cannot match it to the previous tree,
+  // so it unmounts and remounts the whole subtree — throwing away DOM state that
+  // lives in the node rather than in React: focus, text selection, and pointer
+  // capture.
+  //
+  // That last one is what made this worth a test. The Sandbox's retirement-age
+  // and spending sliders were built this way. Dragging one moved it exactly one
+  // step: the value changed, the <input type="range"> was destroyed and rebuilt,
+  // the browser lost the thumb's pointer capture with it, and the drag ended.
+  // You had to release and grab the dot again for every single year. The
+  // savings-rate slider next to it felt fine for one reason only — its component
+  // sits at module scope.
+  //
+  // Three comments already in the .jsx record earlier versions of this same bug,
+  // and the wizard's AccountCard was a fourth (there, it cost keyboard focus).
+  // Reading the diff will not catch the fifth. This will.
+  const fs5 = require('fs');
+  const path5 = require('path');
+  const src = fs5.readFileSync(path5.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+
+  // An indented `const Name = (` is a definition inside some enclosing function.
+  // Capitalised AND rendered as <Name means React treats it as a component type,
+  // which is exactly the combination that remounts. Lower-cased helpers that
+  // return JSX are called as plain functions ({estimateRow(...)}), produce no
+  // element type, and are deliberately not flagged.
+  const inner = [];
+  src.split('\n').forEach((line, i) => {
+    const m = line.match(/^[ \t]+const ([A-Z][A-Za-z0-9_]*)\s*=\s*\(/);
+    if (m && new RegExp('<' + m[1] + '[\\s/>]').test(src)) inner.push({ name: m[1], line: i + 1 });
+  });
+  eq(inner.length, 0,
+    'no capitalised component is defined inside another component and then rendered'
+    + (inner.length ? ': ' + inner.map(c => `${c.name} (line ${c.line})`).join(', ') : ''));
+
+  // And the two the Sandbox actually drags are where they need to be.
+  ['SandboxSlider', 'SandboxSwitch'].forEach(name => {
+    const decl = src.indexOf('\nconst ' + name + ' = ');
+    gt(decl, 0, `${name} is declared at module scope, so a drag survives the value changing`);
+    const tabStart = src.indexOf('function SandboxTab(');
+    ok(decl < tabStart, `${name} is declared before SandboxTab rather than inside it`);
+  });
+
+  // The savings-rate explorer is on the Sandbox's catalogue, using the same
+  // component the Accounts tab renders rather than a second copy of it.
+  const reg = src.slice(src.indexOf('const PANEL_REGISTRY = ['));
+  const regEnd = reg.indexOf('\n];');
+  const registry = reg.slice(0, regEnd);
+  ok(registry.indexOf("id: 'savingsRate'") > 0,
+    'the savings-rate explorer is in the panel registry, so the Sandbox can show it');
+  ok(registry.indexOf('<SavingsRateExplorer') > 0,
+    'and it is the same component, not a reimplementation');
+  eq((src.match(/function SavingsRateExplorer\(/g) || []).length, 1,
+    'there is exactly one SavingsRateExplorer in the file');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

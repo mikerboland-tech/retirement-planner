@@ -12145,7 +12145,7 @@ function RetirementAgeExplorer({ personalInfo, projections, setPersonalInfo, set
 
 function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, personalInfo,
                               projections, recurringExpenses, currentEarnedIncome,
-                              myContributions, savingsRate }) {
+                              myContributions, savingsRate, badge, onHide }) {
   const [target, setTarget] = useState(null);   // null = follow the plan's own rate
   const [infoOpen, setInfoOpen] = useState(false);
   // Which bucket the next saved dollar fills. A parameter, not a constant:
@@ -12255,14 +12255,24 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
             }]}
           />
         </div>
-        {changed && (
-          <button
-            onClick={() => setTarget(null)}
-            className="text-xs px-2.5 py-1 rounded-full border border-slate-600 text-slate-400 hover:text-slate-200 hover:border-slate-500 transition-colors"
-          >
-            Reset to {baseRate.toFixed(1)}%
-          </button>
-        )}
+        <div className="flex items-center gap-2 shrink-0">
+          {badge}
+          {changed && (
+            <button
+              onClick={() => setTarget(null)}
+              className="text-xs px-2.5 py-1 rounded-full border border-slate-600 text-slate-400 hover:text-slate-200 hover:border-slate-500 transition-colors"
+            >
+              Reset to {baseRate.toFixed(1)}%
+            </button>
+          )}
+          {onHide && (
+            <button onClick={onHide}
+              className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors"
+              title="Hide this panel — turn it back on from the picker at the top">
+              Hide
+            </button>
+          )}
+        </div>
       </div>
       <p className="text-xs text-slate-500 mb-4">
         Your plan saves {baseRate.toFixed(1)}% of {formatCurrency(currentEarnedIncome)}. Drag to see what a
@@ -13915,6 +13925,74 @@ const SANDBOX_EXTRA_PANELS = [
 ];
 const DEFAULT_SANDBOX_PANELS = ['kpis', 'netWorth', 'retirementIncome'];
 
+// These two live at module scope, and that is the whole reason the sliders drag
+// smoothly. Defined inside SandboxTab they were a NEW component type on every
+// render, so React unmounted and remounted the <input type="range"> the instant
+// its value changed — the browser dropped the thumb's pointer capture with it,
+// and a drag moved exactly one step before dying. You had to release and grab
+// the dot again for each year. SavingsRateExplorer's slider never had the
+// problem because that component sits at module scope, which is also the fix
+// three earlier comments in this file already record for remount bugs.
+// A slider AND a number field for the same value. A slider is good for sweeping
+// and bad for landing on a figure someone already has in mind — "retire at 67",
+// "spend exactly $118,000" — so both drive the same control. The box clamps to
+// the slider's own range, because a value outside it would move the thumb off
+// the end and leave the two disagreeing about what the control says.
+const SandboxSlider = ({ label, value, onChange, min, max, step = 1, planValue, format, suffix }) => {
+  const commit = (raw) => {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return;
+    onChange(Math.min(max, Math.max(min, n)));
+  };
+  return (
+    <div className="min-w-[230px] flex-1">
+      <div className="flex items-baseline justify-between gap-2">
+        <label className="text-xs text-slate-400">{label}</label>
+        <div className="flex items-center gap-1.5">
+          <input
+            type="number" min={min} max={max} step={step} value={value}
+            onChange={e => commit(e.target.value)}
+            aria-label={`${label} (value)`}
+            className="w-24 bg-slate-800 border border-slate-600 rounded px-2 py-0.5 text-sm
+                       text-amber-400 font-semibold text-right focus:border-amber-500 focus:outline-none"
+          />
+          {suffix && <span className="text-sm font-semibold text-amber-400">{suffix}</span>}
+        </div>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value}
+             onChange={e => onChange(Number(e.target.value))}
+             aria-label={label} className="w-full accent-amber-500" />
+      <div className="text-[11px] text-slate-500">
+        plan: {format ? format(planValue) : planValue}{suffix || ''}
+        {value !== planValue && <span className="text-amber-500/80"> · changed</span>}
+      </div>
+    </div>
+  );
+};
+
+// One switch, used five times. Each says what the plan itself is set to, and
+// when a switch cannot bite — survivor modelling on a single filer, QCDs with
+// no charitable giving set — it says so instead of sitting there inert.
+const SandboxSwitch = ({ label, on, onChange, planLabel, note, disabled }) => (
+  <div className="min-w-[170px]">
+    <label className="text-xs text-slate-400 block mb-1.5">{label}</label>
+    <button
+      onClick={() => !disabled && onChange(!on)}
+      disabled={disabled}
+      className={`px-3 py-1.5 rounded-lg border text-sm transition-colors ${
+        disabled ? 'bg-slate-800/40 border-slate-700 text-slate-600 cursor-not-allowed'
+          : on ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
+               : 'bg-slate-700/50 border-slate-600 text-slate-400'}`}
+    >
+      {on ? 'On' : 'Off'}
+    </button>
+    <div className="text-[11px] text-slate-500 mt-1">
+      {planLabel}
+      {note && <span className="text-amber-500/80"> · {note}</span>}
+    </div>
+  </div>
+);
+
 function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalInfo,
                       projections, recurringExpenses, sandboxConfig, setSandboxConfig }) {
   const R = window.Recharts || {};
@@ -14075,66 +14153,6 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
   const tip = { contentStyle: { background: THEME.surface, border: `1px solid ${THEME.grid}`,
                                 borderRadius: 8, fontSize: 12, color: THEME.inkPrimary } };
 
-  // A slider AND a number field for the same value. A slider is good for sweeping
-  // and bad for landing on a figure someone already has in mind — "retire at 67",
-  // "spend exactly $118,000" — so both drive the same control. The box clamps to
-  // the slider's own range, because a value outside it would move the thumb off
-  // the end and leave the two disagreeing about what the control says.
-  const Slider = ({ label, value, onChange, min, max, step = 1, planValue, format, suffix }) => {
-    const commit = (raw) => {
-      const n = Number(raw);
-      if (!Number.isFinite(n)) return;
-      onChange(Math.min(max, Math.max(min, n)));
-    };
-    return (
-      <div className="min-w-[230px] flex-1">
-        <div className="flex items-baseline justify-between gap-2">
-          <label className="text-xs text-slate-400">{label}</label>
-          <div className="flex items-center gap-1.5">
-            <input
-              type="number" min={min} max={max} step={step} value={value}
-              onChange={e => commit(e.target.value)}
-              aria-label={`${label} (value)`}
-              className="w-24 bg-slate-800 border border-slate-600 rounded px-2 py-0.5 text-sm
-                         text-amber-400 font-semibold text-right focus:border-amber-500 focus:outline-none"
-            />
-            {suffix && <span className="text-sm font-semibold text-amber-400">{suffix}</span>}
-          </div>
-        </div>
-        <input type="range" min={min} max={max} step={step} value={value}
-               onChange={e => onChange(Number(e.target.value))}
-               aria-label={label} className="w-full accent-amber-500" />
-        <div className="text-[11px] text-slate-500">
-          plan: {format ? format(planValue) : planValue}{suffix || ''}
-          {value !== planValue && <span className="text-amber-500/80"> · changed</span>}
-        </div>
-      </div>
-    );
-  };
-
-  // One switch, used five times. Each says what the plan itself is set to, and
-  // when a switch cannot bite — survivor modelling on a single filer, QCDs with
-  // no charitable giving set — it says so instead of sitting there inert.
-  const Switch = ({ label, on, onChange, planLabel, note, disabled }) => (
-    <div className="min-w-[170px]">
-      <label className="text-xs text-slate-400 block mb-1.5">{label}</label>
-      <button
-        onClick={() => !disabled && onChange(!on)}
-        disabled={disabled}
-        className={`px-3 py-1.5 rounded-lg border text-sm transition-colors ${
-          disabled ? 'bg-slate-800/40 border-slate-700 text-slate-600 cursor-not-allowed'
-            : on ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
-                 : 'bg-slate-700/50 border-slate-600 text-slate-400'}`}
-      >
-        {on ? 'On' : 'Off'}
-      </button>
-      <div className="text-[11px] text-slate-500 mt-1">
-        {planLabel}
-        {note && <span className="text-amber-500/80"> · {note}</span>}
-      </div>
-    </div>
-  );
-
   const panelOn = (id) => panels.includes(id);
 
   return (
@@ -14158,46 +14176,46 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
           </div>
         </div>
         <div className="flex flex-wrap gap-x-6 gap-y-4">
-          <Slider label={married ? 'My retirement age' : 'Retirement age'} value={myRet}
+          <SandboxSlider label={married ? 'My retirement age' : 'Retirement age'} value={myRet}
                   onChange={v => setControl('myRetirementAge', v)}
                   min={Math.max(45, (personalInfo.myAge || 0) + 1)} max={80} planValue={planMyRet} />
           {married && (
-            <Slider label="Spouse retirement age" value={spRet}
+            <SandboxSlider label="Spouse retirement age" value={spRet}
                     onChange={v => setControl('spouseRetirementAge', v)}
                     min={Math.max(45, (personalInfo.spouseAge || 0) + 1)} max={80} planValue={planSpRet} />
           )}
-          <Slider label={married ? 'My SS claim age' : 'SS claim age'} value={claimMe}
+          <SandboxSlider label={married ? 'My SS claim age' : 'SS claim age'} value={claimMe}
                   onChange={v => setControl('claimMe', v)} min={62} max={70} planValue={planClaimMe} />
           {married && (
-            <Slider label="Spouse SS claim age" value={claimSp}
+            <SandboxSlider label="Spouse SS claim age" value={claimSp}
                     onChange={v => setControl('claimSpouse', v)} min={62} max={70} planValue={planClaimSp} />
           )}
-          <Slider label="Savings rate while working" value={+savingsRate.toFixed(1)}
+          <SandboxSlider label="Savings rate while working" value={+savingsRate.toFixed(1)}
                   onChange={v => setControl('savingsRate', v)} min={0} max={60} step={0.5}
                   planValue={+planSavingsRate.toFixed(1)} suffix="%" />
-          <Slider label="Spending in retirement (after tax)" value={spend}
+          <SandboxSlider label="Spending in retirement (after tax)" value={spend}
                   onChange={v => setControl('spending', v)} min={0}
                   max={Math.max(300000, Math.round((planSpend || 100000) * 2))} step={2500}
                   planValue={planSpend} format={money} />
-          <Switch
+          <SandboxSwitch
             label="Roth conversions" on={rothOn} onChange={v => setControl('rothOn', v)}
             planLabel={`plan: ${rothConversionIsPlanned(personalInfo) ? 'on' : 'off'}`}
             note={!rothConversionIsPlanned(personalInfo) && rothOn
               ? 'set a strategy on Tax Planning first' : null} />
 
-          <Switch
+          <SandboxSwitch
             label="Survivor modelling" on={married && survivorOn}
             onChange={v => setControl('survivorOn', v)} disabled={!married}
             planLabel={married ? `plan: ${planSurvivor ? 'on' : 'off'}` : 'single filer'}
             note={married ? null : 'nothing to model'} />
 
-          <Switch
+          <SandboxSwitch
             label="Spending guardrails" on={guardrailsOn}
             onChange={v => setControl('guardrailsOn', v)}
             planLabel="plan: off"
             note={guardrailsOn ? 'cuts 10% after a bad year, raises it after a good one' : null} />
 
-          <Switch
+          <SandboxSwitch
             label="Qualified charitable distributions" on={givingPct > 0 && qcdOn}
             onChange={v => setControl('qcdOn', v)} disabled={!(givingPct > 0)}
             planLabel={givingPct > 0 ? `giving ${givingPct}% of spending` : 'no charitable giving set'}
@@ -15521,6 +15539,19 @@ const PANEL_REGISTRY = [
       toggleVisibility={onHide || (() => {})} /> },
   { id: 'cashFlow',         label: 'Annual cash flow',
     render: (ctx, badge, onHide) => <CashFlowPanel ctx={ctx} badge={badge} onHide={onHide} /> },
+
+  // From the Accounts tab. It carries its own slider, which explores from
+  // whatever plan the host handed it — so on the Sandbox it starts from the
+  // scenario the controls compose, not from the saved plan. It returns null
+  // when there is no earned income to take a percentage of.
+  { id: 'savingsRate',      label: 'What if you saved more?',
+    render: (ctx, badge, onHide) => <SavingsRateExplorer accounts={ctx.accounts}
+      assets={ctx.assets} incomeStreams={ctx.incomeStreams} oneTimeEvents={ctx.oneTimeEvents}
+      personalInfo={ctx.personalInfo} projections={ctx.projections}
+      recurringExpenses={ctx.recurringExpenses}
+      currentEarnedIncome={ctx.current?.earnedIncome || 0}
+      myContributions={ctx.dashMyContributions} savingsRate={ctx.dashSavingsRate}
+      badge={badge} onHide={onHide} /> },
 
   // From the Tax Planning tab. Same components that tab renders, so a change to
   // one lands in both places.
@@ -19346,6 +19377,25 @@ function GuidedTour({ onFinish }) {
 // remounts it — which reset the wizard to step 0 whenever anything re-rendered
 // the app while it was open. It captures nothing from the parent; everything
 // it needs already arrives as props.
+const cardBtn = (active) => `p-4 rounded-xl border-2 text-left transition-all cursor-pointer ${active ? 'border-amber-500 bg-amber-500/10' : 'border-slate-700 bg-slate-800/50 hover:border-slate-500'}`;
+
+// Keyboard-accessible selectable account card (Enter/Space toggles). At module
+// scope for the same reason as the Sandbox controls: defined inside the wizard
+// it was a fresh component type per render, so every keystroke anywhere in the
+// step remounted these cards and a keyboard user lost focus the moment they
+// pressed Space on one.
+const AccountCard = ({active, onToggle, title, desc}) => (
+  <div role="button" tabIndex={0} aria-pressed={active}
+    onClick={onToggle}
+    onKeyDown={e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();onToggle();}}}
+    className={`${cardBtn(active)} focus:outline-none focus:ring-2 focus:ring-amber-500/50`}>
+    <div className="flex items-center gap-3">
+      <input type="checkbox" checked={active} readOnly tabIndex={-1} className="w-4 h-4 rounded border-slate-600 text-amber-500 pointer-events-none" />
+      <div><div className="text-sm font-medium text-slate-200">{title}</div>{desc&&<div className="text-xs text-slate-500">{desc}</div>}</div>
+    </div>
+  </div>
+);
+
 function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
   const [step, setStep] = useState(0);
   const yr = new Date().getFullYear();
@@ -19674,7 +19724,6 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
   };
 
   const inputStyle = "w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-slate-100 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all";
-  const cardBtn = (active) => `p-4 rounded-xl border-2 text-left transition-all cursor-pointer ${active ? 'border-amber-500 bg-amber-500/10' : 'border-slate-700 bg-slate-800/50 hover:border-slate-500'}`;
   const dollarInput = (value, onChange, placeholder) => (<div className="relative"><span className="absolute left-3 top-2.5 text-slate-500">$</span><input type="text" inputMode="numeric" value={num(value)>0?num(value).toLocaleString():''} onChange={e=>onChange(e.target.value.replace(/[^0-9]/g,''))} placeholder={placeholder} className={`${inputStyle} pl-7`} /></div>);
 
   // ── "WHY WE ASK" ──────────────────────────────────────────────────────────
@@ -19761,19 +19810,6 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
       </button>
     );
   };
-
-  // Keyboard-accessible selectable account card (Enter/Space toggles).
-  const AccountCard = ({active, onToggle, title, desc}) => (
-    <div role="button" tabIndex={0} aria-pressed={active}
-      onClick={onToggle}
-      onKeyDown={e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();onToggle();}}}
-      className={`${cardBtn(active)} focus:outline-none focus:ring-2 focus:ring-amber-500/50`}>
-      <div className="flex items-center gap-3">
-        <input type="checkbox" checked={active} readOnly tabIndex={-1} className="w-4 h-4 rounded border-slate-600 text-amber-500 pointer-events-none" />
-        <div><div className="text-sm font-medium text-slate-200">{title}</div>{desc&&<div className="text-xs text-slate-500">{desc}</div>}</div>
-      </div>
-    </div>
-  );
 
   // Employer-match input with a $ / % of-salary toggle. In % mode the match
   // becomes a percent-of-salary account (scales with the owner's salary COLA).
