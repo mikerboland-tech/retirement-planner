@@ -14020,23 +14020,42 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
   const tip = { contentStyle: { background: THEME.surface, border: `1px solid ${THEME.grid}`,
                                 borderRadius: 8, fontSize: 12, color: THEME.inkPrimary } };
 
-  const Slider = ({ label, value, onChange, min, max, step = 1, planValue, format, suffix }) => (
-    <div className="min-w-[220px] flex-1">
-      <div className="flex items-baseline justify-between gap-2">
-        <label className="text-xs text-slate-400">{label}</label>
-        <span className="text-sm font-semibold text-amber-400">
-          {format ? format(value) : value}{suffix || ''}
-        </span>
+  // A slider AND a number field for the same value. A slider is good for sweeping
+  // and bad for landing on a figure someone already has in mind — "retire at 67",
+  // "spend exactly $118,000" — so both drive the same control. The box clamps to
+  // the slider's own range, because a value outside it would move the thumb off
+  // the end and leave the two disagreeing about what the control says.
+  const Slider = ({ label, value, onChange, min, max, step = 1, planValue, format, suffix }) => {
+    const commit = (raw) => {
+      const n = Number(raw);
+      if (!Number.isFinite(n)) return;
+      onChange(Math.min(max, Math.max(min, n)));
+    };
+    return (
+      <div className="min-w-[230px] flex-1">
+        <div className="flex items-baseline justify-between gap-2">
+          <label className="text-xs text-slate-400">{label}</label>
+          <div className="flex items-center gap-1.5">
+            <input
+              type="number" min={min} max={max} step={step} value={value}
+              onChange={e => commit(e.target.value)}
+              aria-label={`${label} (value)`}
+              className="w-24 bg-slate-800 border border-slate-600 rounded px-2 py-0.5 text-sm
+                         text-amber-400 font-semibold text-right focus:border-amber-500 focus:outline-none"
+            />
+            {suffix && <span className="text-sm font-semibold text-amber-400">{suffix}</span>}
+          </div>
+        </div>
+        <input type="range" min={min} max={max} step={step} value={value}
+               onChange={e => onChange(Number(e.target.value))}
+               aria-label={label} className="w-full accent-amber-500" />
+        <div className="text-[11px] text-slate-500">
+          plan: {format ? format(planValue) : planValue}{suffix || ''}
+          {value !== planValue && <span className="text-amber-500/80"> · changed</span>}
+        </div>
       </div>
-      <input type="range" min={min} max={max} step={step} value={value}
-             onChange={e => onChange(Number(e.target.value))}
-             aria-label={label} className="w-full accent-amber-500" />
-      <div className="text-[11px] text-slate-500">
-        plan: {format ? format(planValue) : planValue}{suffix || ''}
-        {value !== planValue && <span className="text-amber-500/80"> · changed</span>}
-      </div>
-    </div>
-  );
+    );
+  };
 
   // One switch, used five times. Each says what the plan itself is set to, and
   // when a switch cannot bite — survivor modelling on a single filer, QCDs with
@@ -14138,6 +14157,8 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
       <div className={cardStyle}>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm text-slate-400 mr-1">Show:</span>
+          {/* This row is also where a panel comes BACK. Hiding one from its own
+              header unticks it here rather than losing it. */}
           {[...PANEL_REGISTRY.map(e => ({ id: e.id, label: e.label })), ...SANDBOX_EXTRA_PANELS].map(p => (
             <button key={p.id} onClick={() => togglePanel(p.id)}
               className={`px-3 py-1 rounded-lg border text-xs transition-colors ${
@@ -14151,6 +14172,14 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
 
       {/* ── Panels ─────────────────────────────────────────────────────── */}
       {panelOn('kpis') && nowM && (
+        <div>
+          <div className="flex justify-end mb-1">
+            <button onClick={() => togglePanel('kpis')}
+              className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors"
+              title="Hide these — turn them back on from the picker above">
+              Hide
+            </button>
+          </div>
         <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
           {[['Portfolio at retirement', nowM.atRetirement, thenM && thenM.atRetirement, true],
             ['Ending portfolio', nowM.ending, thenM && thenM.ending, true],
@@ -14184,6 +14213,7 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
             )}
           </div>
         </div>
+        </div>
       )}
 
       {/* Everything the app can draw, drawn by the app's own components. A
@@ -14196,8 +14226,7 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
       ))}
 
       {panelOn('balances') && ResponsiveContainer && (
-        <div className={cardStyle}>
-          <h4 className="text-lg font-semibold text-slate-100 mb-3">Balances by tax treatment</h4>
+        <PanelCard title="Balances by tax treatment" onHide={() => togglePanel('balances')}>
           <ResponsiveContainer width="100%" height={280}>
             <ComposedChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -14210,12 +14239,11 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
               <Bar dataKey="brokerage" name="Brokerage" stackId="b" fill={SERIES.brokerage} />
             </ComposedChart>
           </ResponsiveContainer>
-        </div>
+        </PanelCard>
       )}
 
       {panelOn('conversions') && ResponsiveContainer && (
-        <div className={cardStyle}>
-          <h4 className="text-lg font-semibold text-slate-100 mb-3">Roth conversions by year</h4>
+        <PanelCard title="Roth conversions by year" onHide={() => togglePanel('conversions')}>
           {chartData.some(d => d.conversion > 0) ? (
             <ResponsiveContainer width="100%" height={240}>
               <BarChart data={chartData}>
@@ -14233,12 +14261,11 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
                 : 'Conversions are switched off above.'}
             </p>
           )}
-        </div>
+        </PanelCard>
       )}
 
       {panelOn('changes') && (
-        <div className={cardStyle}>
-          <h4 className="text-lg font-semibold text-slate-100 mb-2">What the controls changed</h4>
+        <PanelCard title="What the controls changed" onHide={() => togglePanel('changes')}>
           {!previewing ? (
             <p className="text-sm text-slate-400">Nothing yet — every control is following your plan.</p>
           ) : scenario.moved.length === 0 ? (
@@ -14262,7 +14289,7 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
             Social Security claim ages move only when you move them — retiring at one age and claiming at
             another is a real and often good choice, so the two are never chained together here.
           </p>
-        </div>
+        </PanelCard>
       )}
     </div>
   );
@@ -15391,6 +15418,26 @@ const buildPanelCtx = ({ projections, personalInfo, accounts, assets, incomeStre
 // Every panel the app can draw, in one place. `render` adapts each component's
 // own props from the shared ctx, so the registry can put any panel on any page
 // without the panels having to agree on a signature they never needed.
+// Every panel the registry renders gets its header from here, which is how a
+// Hide button stops being something each entry has to remember. The bug this
+// fixes was exactly that: two entries stubbed toggleVisibility to a no-op, so
+// their Hide buttons rendered and did nothing, and three more had no Hide at all.
+const PanelCard = ({ title, onHide, children }) => (
+  <div className={cardStyle}>
+    <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+      {title ? <h4 className="text-lg font-semibold text-slate-100">{title}</h4> : <span />}
+      {onHide && (
+        <button onClick={onHide}
+          className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors shrink-0"
+          title="Hide this panel — turn it back on from the picker at the top">
+          Hide
+        </button>
+      )}
+    </div>
+    {children}
+  </div>
+);
+
 const PANEL_REGISTRY = [
   { id: 'summaryCards',     label: 'Headline summary cards',
     render: (ctx, badge, onHide) => <SummaryCardsPanel ctx={ctx} badge={badge} onHide={onHide} /> },
@@ -15407,39 +15454,36 @@ const PANEL_REGISTRY = [
   { id: 'safeSpending',     label: 'Safe spending capacity',
     render: (ctx, badge, onHide) => <SafeSpendingPanel ctx={ctx} badge={badge} onHide={onHide} /> },
   { id: 'coastFire',        label: 'Coast FIRE progress',
-    render: (ctx) => <CoastFireSection accounts={ctx.accounts} personalInfo={ctx.personalInfo}
+    render: (ctx, badge, onHide) => <CoastFireSection accounts={ctx.accounts} personalInfo={ctx.personalInfo}
       projections={ctx.projections} openInfoCard={null} toggleInfoCard={() => {}}
-      toggleVisibility={() => {}} retirementProjection={ctx.retirementProjection} /> },
+      toggleVisibility={onHide || (() => {})} retirementProjection={ctx.retirementProjection} /> },
   { id: 'lifestyleLegacy',  label: 'Lifestyle vs legacy',
-    render: (ctx) => <LifestyleVsLegacy accounts={ctx.accounts} assets={ctx.assets}
+    render: (ctx, badge, onHide) => <LifestyleVsLegacy accounts={ctx.accounts} assets={ctx.assets}
       computeProjections={ctx.computeProjections} incomeStreams={ctx.incomeStreams}
       oneTimeEvents={ctx.oneTimeEvents} personalInfo={ctx.personalInfo}
       projections={ctx.projections} recurringExpenses={ctx.recurringExpenses}
       retirementAge={ctx.retirementAge} openInfoCard={null} toggleInfoCard={() => {}}
-      toggleVisibility={() => {}} /> },
+      toggleVisibility={onHide || (() => {})} /> },
   { id: 'cashFlow',         label: 'Annual cash flow',
     render: (ctx, badge, onHide) => <CashFlowPanel ctx={ctx} badge={badge} onHide={onHide} /> },
 
   // From the Tax Planning tab. Same components that tab renders, so a change to
   // one lands in both places.
   { id: 'tp_conversionYears', label: 'Roth conversion opportunity by year',
-    render: (ctx) => (
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-100 mb-3">Roth Conversion Opportunity by Year</h4>
+    render: (ctx, badge, onHide) => (
+      <PanelCard title="Roth Conversion Opportunity by Year" onHide={onHide}>
         <ConversionOpportunityPanel ctx={ctx} />
-      </div>) },
+      </PanelCard>) },
   { id: 'tp_marginalIrmaa',   label: 'Marginal tax impact & IRMAA',
-    render: (ctx) => (
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-100 mb-1">Marginal Tax Impact &amp; IRMAA</h4>
+    render: (ctx, badge, onHide) => (
+      <PanelCard title="Marginal Tax Impact &amp; IRMAA" onHide={onHide}>
         <MarginalIrmaaPanel ctx={ctx} />
-      </div>) },
+      </PanelCard>) },
   { id: 'tp_charitable',      label: 'What your charitable giving saves',
-    render: (ctx) => (
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-100 mb-3">What Your Charitable Giving Saves</h4>
+    render: (ctx, badge, onHide) => (
+      <PanelCard title="What Your Charitable Giving Saves" onHide={onHide}>
         <CharitableGivingPanel ctx={ctx} />
-      </div>) },
+      </PanelCard>) },
 ];
 
 // The per-year bracket / conversion-room table the Tax Planning panels read.
