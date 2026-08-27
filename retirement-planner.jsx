@@ -433,10 +433,18 @@ const SECTION_MANIFEST = {
   // dashboard would otherwise have been the one section on the tab with no way
   // to put it away.
   taxplanning: [
+    { id: 'bracketSummary',  label: 'Bracket summary cards',              level: 'essential' },
+    { id: 'bracketChart',    label: 'Income vs. Tax Bracket Thresholds',  level: 'essential' },
     { id: 'conversionYears', label: 'Roth Conversion Opportunity by Year', level: 'essential' },
     { id: 'marginalIrmaa',   label: 'Marginal Tax Impact & IRMAA',         level: 'standard' },
     { id: 'acaSubsidy',      label: 'Roth Conversions vs. ACA Subsidy',    level: 'advanced' },
     { id: 'charitable',      label: 'What Your Charitable Giving Saves',   level: 'advanced' },
+    { id: 'breakpoints',     label: 'Income thresholds table',            level: 'advanced' },
+    { id: 'yearSnapshot',    label: 'Tax Year Snapshot',                  level: 'standard' },
+    { id: 'optimizer',       label: 'Roth Conversion Optimizer',          level: 'advanced' },
+    { id: 'deferralDecision',label: 'Traditional or Roth while working',  level: 'advanced' },
+    { id: 'conversionFunding',label: 'Who pays the conversion tax',       level: 'advanced' },
+    { id: 'simulator',       label: 'Roth Conversion Simulator',          level: 'standard' },
   ],
   montecarlo: [
     { id: 'method',        label: 'Simulation Method',            level: 'standard' },
@@ -1099,6 +1107,29 @@ const Section = ({ tab, id, title, vis, level, setVis, actions, children, classN
             Hide
           </button>
         )}
+      </div>
+      {children}
+    </div>
+  );
+};
+
+// Some panels draw their own card and their own heading — the conversion
+// simulator, the optimizer, the year snapshot. Wrapping those in <Section> would
+// print the title twice, which is a mistake this file has already made once. So
+// this supplies only what they lack: a hide control and a manifest entry. Same
+// visibility store, same restore path through SectionControls, no second title.
+const HideableBlock = ({ tab, id, level, vis, setVis, children }) => {
+  if (!sectionIsVisible(vis, level, tab, id)) return null;
+  return (
+    <div>
+      <div className="flex justify-end">
+        <button
+          onClick={() => setVis(prev => ({ ...prev, [tab]: { ...(prev[tab] || {}), [id]: false } }))}
+          className="text-xs text-slate-500 hover:text-slate-300 px-2 py-0.5 rounded hover:bg-slate-700/50 transition-colors"
+          title="Hide this — restore it from Sections at the top of the tab"
+        >
+          Hide
+        </button>
       </div>
       {children}
     </div>
@@ -6060,109 +6091,115 @@ function TaxPlanningTab({ accounts, assets, computeProjections, detailLevel, inc
                        level={detailLevel} setLevel={setDetailLevel} />
       
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className={cardStyle}>
-          <div className="text-slate-400 text-sm mb-1">Current Tax Bracket</div>
-          <div className="text-2xl font-bold text-amber-400">{currentYearData?.currentBracket || 'N/A'}</div>
-          <div className="text-slate-500 text-xs mt-1">Age {personalInfo.myAge}</div>
-        </div>
-        <div className={cardStyle}>
-          <div className="text-slate-400 text-sm mb-1">Room to Fill 22% Bracket</div>
-          <div className="text-2xl font-bold text-emerald-400">{formatCurrency(currentYearData?.roomTo22 || 0)}</div>
-          <div className="text-slate-500 text-xs mt-1">Potential Roth conversion space this year</div>
-        </div>
-        <div className={cardStyle}>
-          <div className="text-slate-400 text-sm mb-1">At Retirement (Age {retirementAge})</div>
-          <div className="text-2xl font-bold text-sky-400">{retirementYearData?.currentBracket || 'N/A'} bracket</div>
-          <div className="text-slate-500 text-xs mt-1">Room to 22%: {formatCurrency(retirementYearData?.roomTo22 || 0)}</div>
-        </div>
-      </div>
-      
-      {/* Chart */}
-      <div className={cardStyle}>
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-          <h4 className="text-lg font-semibold text-slate-100">Income vs. Tax Bracket Thresholds</h4>
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-slate-400">Age:</span>
-            <input
-              type="number"
-              value={ageRange.start}
-              onChange={e => setAgeRange(prev => ({ ...prev, start: Math.max(personalInfo.myAge, Number(e.target.value)) }))}
-              className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
-            />
-            <span className="text-slate-500">to</span>
-            <input
-              type="number"
-              value={ageRange.end}
-              onChange={e => setAgeRange(prev => ({ ...prev, end: Math.min(personalInfo.legacyAge || 95, Number(e.target.value)) }))}
-              className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
-            />
-            <div className="flex gap-1 ml-2">
-              <button 
-                onClick={() => setAgeRange({ start: retirementAge, end: Math.min(retirementAge + 15, personalInfo.legacyAge || 95) })}
-                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
-              >
-                Early Retirement
-              </button>
-              <button 
-                onClick={() => setAgeRange({ start: personalInfo.myAge, end: personalInfo.legacyAge || 95 })}
-                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
-              >
-                All Years
-              </button>
-            </div>
+      <HideableBlock tab="taxplanning" id="bracketSummary" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className={cardStyle}>
+            <div className="text-slate-400 text-sm mb-1">Current Tax Bracket</div>
+            <div className="text-2xl font-bold text-amber-400">{currentYearData?.currentBracket || 'N/A'}</div>
+            <div className="text-slate-500 text-xs mt-1">Age {personalInfo.myAge}</div>
+          </div>
+          <div className={cardStyle}>
+            <div className="text-slate-400 text-sm mb-1">Room to Fill 22% Bracket</div>
+            <div className="text-2xl font-bold text-emerald-400">{formatCurrency(currentYearData?.roomTo22 || 0)}</div>
+            <div className="text-slate-500 text-xs mt-1">Potential Roth conversion space this year</div>
+          </div>
+          <div className={cardStyle}>
+            <div className="text-slate-400 text-sm mb-1">At Retirement (Age {retirementAge})</div>
+            <div className="text-2xl font-bold text-sky-400">{retirementYearData?.currentBracket || 'N/A'} bracket</div>
+            <div className="text-slate-500 text-xs mt-1">Room to 22%: {formatCurrency(retirementYearData?.roomTo22 || 0)}</div>
           </div>
         </div>
-        <div className="h-96">
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={taxPlanningData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
-              <XAxis dataKey="myAge" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
-              <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
-              <Tooltip 
-                contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} 
-                formatter={(v, name) => [formatCurrency(v), name]}
-                labelFormatter={l => `Age ${l}`}
+      </HideableBlock>
+      
+      {/* Chart */}
+      <HideableBlock tab="taxplanning" id="bracketChart" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <div className={cardStyle}>
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+            <h4 className="text-lg font-semibold text-slate-100">Income vs. Tax Bracket Thresholds</h4>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-slate-400">Age:</span>
+              <input
+                type="number"
+                value={ageRange.start}
+                onChange={e => setAgeRange(prev => ({ ...prev, start: Math.max(personalInfo.myAge, Number(e.target.value)) }))}
+                className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
               />
-              <Legend formatter={legendInk} />
+              <span className="text-slate-500">to</span>
+              <input
+                type="number"
+                value={ageRange.end}
+                onChange={e => setAgeRange(prev => ({ ...prev, end: Math.min(personalInfo.legacyAge || 95, Number(e.target.value)) }))}
+                className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-slate-100 text-center"
+              />
+              <div className="flex gap-1 ml-2">
+                <button 
+                  onClick={() => setAgeRange({ start: retirementAge, end: Math.min(retirementAge + 15, personalInfo.legacyAge || 95) })}
+                  className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
+                >
+                  Early Retirement
+                </button>
+                <button 
+                  onClick={() => setAgeRange({ start: personalInfo.myAge, end: personalInfo.legacyAge || 95 })}
+                  className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300"
+                >
+                  All Years
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="h-96">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={taxPlanningData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+                <XAxis dataKey="myAge" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
+                <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} 
+                  formatter={(v, name) => [formatCurrency(v), name]}
+                  labelFormatter={l => `Age ${l}`}
+                />
+                <Legend formatter={legendInk} />
               
-              {/* Stacked income bars */}
-              <Bar dataKey="earnedIncome" stackId="income" fill={SERIES.earnedIncome} name="Earned Income" />
-              <Bar dataKey="socialSecurity" stackId="income" fill={SERIES.socialSecurity} name="Social Security (85%)" />
-              <Bar dataKey="pension" stackId="income" fill={SERIES.pension} name="Pension" />
-              <Bar dataKey="otherIncome" stackId="income" fill={SERIES.otherIncome} name="Other Income" />
-              <Bar dataKey="voluntaryWithdrawal" stackId="income" fill={SERIES.withdrawalVoluntary} name="Portfolio Withdrawal (voluntary)" />
-              <Bar dataKey="rmd" stackId="income" fill={SERIES.rmd} name="RMD (mandatory)" />
-              <Bar dataKey="plannedConversion" stackId="income" fill={SERIES.rothConversion} name="Planned Roth Conv." />
-              <Bar dataKey="conversionTaxWithdrawal" stackId="income" fill={SERIES.conversionTaxDraw} name="Conversion Tax Draw" />
+                {/* Stacked income bars */}
+                <Bar dataKey="earnedIncome" stackId="income" fill={SERIES.earnedIncome} name="Earned Income" />
+                <Bar dataKey="socialSecurity" stackId="income" fill={SERIES.socialSecurity} name="Social Security (85%)" />
+                <Bar dataKey="pension" stackId="income" fill={SERIES.pension} name="Pension" />
+                <Bar dataKey="otherIncome" stackId="income" fill={SERIES.otherIncome} name="Other Income" />
+                <Bar dataKey="voluntaryWithdrawal" stackId="income" fill={SERIES.withdrawalVoluntary} name="Portfolio Withdrawal (voluntary)" />
+                <Bar dataKey="rmd" stackId="income" fill={SERIES.rmd} name="RMD (mandatory)" />
+                <Bar dataKey="plannedConversion" stackId="income" fill={SERIES.rothConversion} name="Planned Roth Conv." />
+                <Bar dataKey="conversionTaxWithdrawal" stackId="income" fill={SERIES.conversionTaxDraw} name="Conversion Tax Draw" />
               
-              {/* Tax bracket threshold lines */}
-              {(() => {
-                const iLast = (taxPlanningData || []).length - 1;
-                return [
-                  { key: 'bracket12', pct: '12%', slot: 0, dash: '2 4' },
-                  { key: 'bracket22', pct: '22%', slot: 1, dash: '7 4' },
-                  { key: 'bracket24', pct: '24%', slot: 2, dash: '14 4' },
-                  { key: 'bracket32', pct: '32%', slot: 3, dash: '22 4' },
-                ].map(b => (
-                  <Line
-                    key={b.key} type="monotone" dataKey={b.key}
-                    stroke={THEME.bracket[b.slot]} strokeWidth={2} dot={false}
-                    name={`Top of ${b.pct} Bracket`} strokeDasharray={b.dash}
-                    label={lastPointLabel(b.pct, THEME.inkSecondary, iLast)}
-                  />
-                ));
-              })()}
+                {/* Tax bracket threshold lines */}
+                {(() => {
+                  const iLast = (taxPlanningData || []).length - 1;
+                  return [
+                    { key: 'bracket12', pct: '12%', slot: 0, dash: '2 4' },
+                    { key: 'bracket22', pct: '22%', slot: 1, dash: '7 4' },
+                    { key: 'bracket24', pct: '24%', slot: 2, dash: '14 4' },
+                    { key: 'bracket32', pct: '32%', slot: 3, dash: '22 4' },
+                  ].map(b => (
+                    <Line
+                      key={b.key} type="monotone" dataKey={b.key}
+                      stroke={THEME.bracket[b.slot]} strokeWidth={2} dot={false}
+                      name={`Top of ${b.pct} Bracket`} strokeDasharray={b.dash}
+                      label={lastPointLabel(b.pct, THEME.inkSecondary, iLast)}
+                    />
+                  ));
+                })()}
               
-              {/* Retirement reference line */}
-              <ReferenceLine x={retirementAge} stroke={THEME.bracket[3]} strokeDasharray="3 3" label={{ value: 'Retirement', position: 'top', fill: THEME.bracket[3], fontSize: 12 }} />
-            </ComposedChart>
-          </ResponsiveContainer>
+                {/* Retirement reference line */}
+                <ReferenceLine x={retirementAge} stroke={THEME.bracket[3]} strokeDasharray="3 3" label={{ value: 'Retirement', position: 'top', fill: THEME.bracket[3], fontSize: 12 }} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+          <p className="text-xs text-slate-500 mt-2">
+            * Bracket thresholds shown are gross income levels (before standard deduction). The gap between your income bars and the bracket lines represents potential Roth conversion space.
+          </p>
         </div>
-        <p className="text-xs text-slate-500 mt-2">
-          * Bracket thresholds shown are gross income levels (before standard deduction). The gap between your income bars and the bracket lines represents potential Roth conversion space.
-        </p>
-      </div>
+      </HideableBlock>
       
       {/* Detailed Table */}
       <Section
@@ -6256,8 +6293,11 @@ function TaxPlanningTab({ accounts, assets, computeProjections, detailLevel, inc
         );
       })()}
 
-      {/* Tax Year Snapshot */}
-      <TaxBreakpointsTable projections={projections} personalInfo={personalInfo} />
+      {/* Income thresholds table */}
+      <HideableBlock tab="taxplanning" id="breakpoints" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <TaxBreakpointsTable projections={projections} personalInfo={personalInfo} />
+      </HideableBlock>
 
       {qcdSavings && qcdSavings.totalQcd > 0 && (
         <Section
@@ -6269,56 +6309,71 @@ function TaxPlanningTab({ accounts, assets, computeProjections, detailLevel, inc
         </Section>
       )}
 
-      <TaxYearSnapshot
-        projections={projections}
-        personalInfo={personalInfo}
-        qcdSavings={qcdSavings}
-      />
+      <HideableBlock tab="taxplanning" id="yearSnapshot" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <TaxYearSnapshot
+          projections={projections}
+          personalInfo={personalInfo}
+          qcdSavings={qcdSavings}
+        />
+      </HideableBlock>
       
       {/* Roth Conversion Optimizer — goal-based strategy sweep (worker) */}
-      <RothConversionOptimizer
-        personalInfo={personalInfo}
-        accounts={accounts}
-        incomeStreams={incomeStreams}
-        assets={assets}
-        oneTimeEvents={oneTimeEvents}
-        recurringExpenses={recurringExpenses}
-        setPersonalInfo={setPersonalInfo}
-      />
+      <HideableBlock tab="taxplanning" id="optimizer" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <RothConversionOptimizer
+          personalInfo={personalInfo}
+          accounts={accounts}
+          incomeStreams={incomeStreams}
+          assets={assets}
+          oneTimeEvents={oneTimeEvents}
+          recurringExpenses={recurringExpenses}
+          setPersonalInfo={setPersonalInfo}
+        />
+      </HideableBlock>
 
       {/* The accumulation-years decision, ahead of the retirement-years ones. */}
-      <DeferralDecisionPanel
-        accounts={accounts}
-        assets={assets}
-        incomeStreams={incomeStreams}
-        oneTimeEvents={oneTimeEvents}
-        personalInfo={personalInfo}
-        recurringExpenses={recurringExpenses}
-      />
+      <HideableBlock tab="taxplanning" id="deferralDecision" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <DeferralDecisionPanel
+          accounts={accounts}
+          assets={assets}
+          incomeStreams={incomeStreams}
+          oneTimeEvents={oneTimeEvents}
+          personalInfo={personalInfo}
+          recurringExpenses={recurringExpenses}
+        />
+      </HideableBlock>
 
       {/* Who pays the conversion tax — and what the taxable dollars cost. */}
-      <ConversionFundingPanel
-        accounts={accounts}
-        assets={assets}
-        incomeStreams={incomeStreams}
-        oneTimeEvents={oneTimeEvents}
-        personalInfo={personalInfo}
-        recurringExpenses={recurringExpenses}
-      />
+      <HideableBlock tab="taxplanning" id="conversionFunding" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <ConversionFundingPanel
+          accounts={accounts}
+          assets={assets}
+          incomeStreams={incomeStreams}
+          oneTimeEvents={oneTimeEvents}
+          personalInfo={personalInfo}
+          recurringExpenses={recurringExpenses}
+        />
+      </HideableBlock>
 
       {/* Roth Conversion Simulator */}
-      <RothConversionSimulator
-        projections={projections}
-        personalInfo={personalInfo}
-        accounts={accounts}
-        incomeStreams={incomeStreams}
-        assets={assets}
-        oneTimeEvents={oneTimeEvents}
-        recurringExpenses={recurringExpenses}
-        retirementAge={retirementAge}
-        computeProjections={computeProjections}
-        setPersonalInfo={setPersonalInfo}
-      />
+      <HideableBlock tab="taxplanning" id="simulator" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <RothConversionSimulator
+          projections={projections}
+          personalInfo={personalInfo}
+          accounts={accounts}
+          incomeStreams={incomeStreams}
+          assets={assets}
+          oneTimeEvents={oneTimeEvents}
+          recurringExpenses={recurringExpenses}
+          retirementAge={retirementAge}
+          computeProjections={computeProjections}
+          setPersonalInfo={setPersonalInfo}
+        />
+      </HideableBlock>
     </div>
   );
 }

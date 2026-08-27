@@ -9322,21 +9322,29 @@ section('P78 — the section manifest and the JSX cannot drift apart');
   // Every <Section> rendered in the JSX is declared, and every declaration is
   // rendered. Either direction failing is the exact bug the manifest exists to
   // prevent.
+  //
+  // Two components gate a section: <Section>, which draws the card and the
+  // title, and <HideableBlock>, which draws neither because the panel inside it
+  // already does. Both read the same visibility store through sectionIsVisible,
+  // so for this test they are the same thing and are collected together.
   const rendered = {};
-  const re = /<Section\s+tab="([a-z]+)"\s+id="([A-Za-z0-9_]+)"/g;
   let m;
-  while ((m = re.exec(src)) !== null) {
-    (rendered[m[1]] = rendered[m[1]] || new Set()).add(m[2]);
-  }
+  [/<Section\s+tab="([a-z]+)"\s+id="([A-Za-z0-9_]+)"/g,
+   /<HideableBlock\s+tab="([a-z]+)"\s+id="([A-Za-z0-9_]+)"/g].forEach(re => {
+    while ((m = re.exec(src)) !== null) {
+      (rendered[m[1]] = rendered[m[1]] || new Set()).add(m[2]);
+    }
+  });
   Object.entries(rendered).forEach(([tab, ids]) => {
-    ok(manifest[tab], `the JSX renders <Section tab="${tab}"> and the manifest knows that tab`);
+    ok(manifest[tab], `the JSX gates a section on tab="${tab}" and the manifest knows that tab`);
     ids.forEach(id => {
       ok((manifest[tab] || []).some(e => e.id === id),
-        `<Section tab="${tab}" id="${id}"> is declared in the manifest, so it can be toggled`);
+        `the gated section tab="${tab}" id="${id}" is declared in the manifest, so it can be toggled`);
     });
   });
   // The dashboard keeps its `visibilitySettings.x &&` guards rather than
-  // <Section>, so it is checked against those instead.
+  // <Section>, so it is checked against those instead. Everything else must be
+  // wrapped in <Section> or <HideableBlock>.
   Object.entries(manifest).forEach(([tab, entries]) => {
     entries.forEach(e => {
       const viaSection = rendered[tab] && rendered[tab].has(e.id);
@@ -10310,25 +10318,43 @@ section('P87 — the Tax Planning tab can hide its own sections');
   // Brace-aware tag extraction: a title like title={<>💰 Context</>} contains a
   // '>' that a naive [^>]* would stop at, truncating the tag before level= and
   // reporting a false failure on sections that are perfectly fine.
+  //
+  // <HideableBlock> takes the same prop for the same reason and is checked the
+  // same way — it is the no-title sibling of <Section>, not a different rule.
   const sectionTags = [];
-  for (let i = src.indexOf('<Section'); i >= 0; i = src.indexOf('<Section', i + 1)) {
-    if (/[A-Za-z]/.test(src[i + 8] || '')) continue;   // skip <SectionControls>
-    let depth = 0;
-    for (let j = i; j < src.length; j++) {
-      const ch = src[j];
-      if (ch === '{') depth++;
-      else if (ch === '}') depth--;
-      else if (ch === '>' && depth === 0) { sectionTags.push(src.slice(i, j + 1)); break; }
+  ['<Section', '<HideableBlock'].forEach(tagName => {
+    for (let i = src.indexOf(tagName); i >= 0; i = src.indexOf(tagName, i + 1)) {
+      // skip <SectionControls>, and the `const HideableBlock =` declaration
+      if (/[A-Za-z]/.test(src[i + tagName.length] || '')) continue;
+      let depth = 0;
+      for (let j = i; j < src.length; j++) {
+        const ch = src[j];
+        if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+        else if (ch === '>' && depth === 0) {
+          const tag = src.slice(i, j + 1);
+          // Prose mentions the components by name; only a real element carries tab=.
+          if (tag.indexOf('tab="') > 0) sectionTags.push(tag);
+          break;
+        }
+      }
     }
-  }
-  gt(sectionTags.length, 4, 'there are <Section> tags to check');
+  });
+  gt(sectionTags.length, 4, 'there are section tags to check');
   sectionTags.forEach(tag => {
+    const name = tag.slice(1).split(/\s/)[0];
     const id = (tag.match(/id="([A-Za-z0-9_]+)"/) || [])[1] || '(unknown)';
     const lvl = tag.match(/level=\{([^}]*)\}/);
-    ok(lvl, `<Section id="${id}"> passes level as an expression, not a literal tier`);
+    ok(lvl, `<${name} id="${id}"> passes level as an expression, not a literal tier`);
     if (lvl) eq(lvl[1].trim(), 'detailLevel',
-      `<Section id="${id}"> passes the reader's current detail level`);
+      `<${name} id="${id}"> passes the reader's current detail level`);
   });
+
+  // Every un-Sectioned card on this tab now has a Hide. The count is asserted so
+  // that adding a panel to the tab without a manifest entry shows up here rather
+  // than as a card the user cannot put away.
+  gt(manifest.taxplanning.length, 11,
+    'every card on the Tax Planning tab is declared, including the ones that draw their own title');
 }
 
 section('P88 — the deferral decision priced on equal out-of-pocket cost');
