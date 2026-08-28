@@ -11651,6 +11651,114 @@ section('P96 — the tables read the palette, not a hand-picked hue');
     'and no purple survives in it — that was Roth’s colour and it was wrong');
 }
 
+section('P97 — today’s dollars is a display transform, and only money moves');
+
+{
+  // Every dollar in the app was nominal, and the Monte Carlo percentiles were
+  // not — which is how a 95th percentile ended up looking worse than the
+  // straight-line plan. The fix is one basis the reader chooses. The risk in it
+  // is deflating something that is not money: a 7% return shown as 4.2%, or a
+  // guardrail multiplier of 0.9 shown as 0.55, would be silently wrong and
+  // nothing downstream would catch it. Hence a whitelist, and hence this pack.
+  const sc = baseScenario({ rothConversionBracket: '22%', rothConversionStartAge: 66, rothConversionEndAge: 72 });
+  const nom = computeProjections(sc.pi, sc.accts, sc.streams, [], [], []);
+  const infl = sc.pi.inflationRate;
+  const real = engine.deflateProjections(nom, { inflationRate: infl, baseYear: nom[0].year });
+
+  eq(real.length, nom.length, 'restating does not add or drop a year');
+  ok(nom[5].displayBasis === undefined, 'the nominal rows are left untouched — the transform is pure');
+  eq(real[5].displayBasis, 'real', 'and the restated rows say which basis they are on');
+
+  // Year 0 is the base year: nothing to convert.
+  eq(real[0].totalPortfolio, nom[0].totalPortfolio,
+    'the first year is the same in both bases, because it IS today');
+
+  // A later year moves by exactly the plan’s own deflator, not by an approximation.
+  {
+    const k = 25;
+    const d = Math.pow(1 + infl, nom[k].year - nom[0].year);
+    gt(d, 1.5, 'twenty-five years of inflation is a big enough factor to be worth showing');
+    approx(real[k].totalPortfolio, nom[k].totalPortfolio / d,
+      'a balance is divided by the deflator for its own year', 1e-9);
+    approx(real[k].federalTax, nom[k].federalTax / d,
+      'so is the tax on it', 1e-9);
+    approx(real[k].desiredIncome, nom[k].desiredIncome / d,
+      'and the spending target');
+    approx(real[k].realDeflator, d, 'the row carries the factor it was divided by', 1e-9);
+    // Spending is set in today's dollars and inflated by the engine, so in the
+    // real basis it should come back FLAT — the sharpest single check that the
+    // transform is the inverse of what the engine did.
+    approx(real[k].desiredIncome, real[0].desiredIncome,
+      'a spending target set in today’s dollars reads flat across the plan once restated', 0.02);
+  }
+
+  // ── the things that must NOT move ────────────────────────────────────────
+  const UNCHANGED = ['myAge', 'spouseAge', 'year', 'yearsFromNow', 'marketReturn',
+                     'weightedCAGR', 'guardrailMultiplier', 'acaFplPercent',
+                     // headcounts of people aged 65+, used for the additional
+                     // standard deduction — a count, not an amount
+                     'age65Count', 'age65OnReturn'];
+  UNCHANGED.forEach(f => {
+    const differs = nom.some((r, i) => typeof r[f] === 'number' && r[f] !== real[i][f]);
+    ok(!differs, `${f} is not money and is left alone`);
+  });
+  // Filing status, survivor flags and the like are not numbers at all.
+  ['filingStatus', 'effectiveFilingStatus', 'primaryAlive', 'spouseAlive'].forEach(f => {
+    const differs = nom.some((r, i) => r[f] !== real[i][f]);
+    ok(!differs, `${f} survives the transform unchanged`);
+  });
+
+  // A rate DERIVED from two restated figures must be identical in both bases —
+  // that is the real proof the transform is consistent rather than piecemeal.
+  {
+    const k = 22;
+    const rateNom = nom[k].totalTax / Math.max(1, nom[k].totalIncome);
+    const rateReal = real[k].totalTax / Math.max(1, real[k].totalIncome);
+    approx(rateReal, rateNom,
+      'an effective tax rate is the same number in either basis, because both sides moved together', 1e-9);
+    const wdNom = nom[k].portfolioWithdrawal / Math.max(1, nom[k].totalPortfolio);
+    const wdReal = real[k].portfolioWithdrawal / Math.max(1, real[k].totalPortfolio);
+    approx(wdReal, wdNom, 'so is a withdrawal rate', 1e-9);
+  }
+
+  // Per-account maps carry money as their VALUES and must follow.
+  {
+    const k = 10;
+    const d = Math.pow(1 + infl, nom[k].year - nom[0].year);
+    const ids = Object.keys(nom[k].perAccountBalances || {});
+    gt(ids.length, 0, 'there are per-account balances to check');
+    ids.forEach(id => {
+      approx(real[k].perAccountBalances[id], nom[k].perAccountBalances[id] / d,
+        `per-account balance ${id} is restated with the rest`, 1e-9);
+    });
+    // and the parts still sum to the whole in the new basis
+    const sum = ids.reduce((t, id) => t + real[k].perAccountBalances[id], 0);
+    approx(sum, real[k].totalPortfolio,
+      'the restated per-account balances still add up to the restated total', 0.001);
+  }
+
+  // Zero inflation is the identity, which is the cheapest possible sanity check
+  // and would catch an off-by-one in the exponent.
+  {
+    const flat = engine.deflateProjections(nom, { inflationRate: 0, baseYear: nom[0].year });
+    const same = nom.every((r, i) => Math.abs(r.totalPortfolio - flat[i].totalPortfolio) < 1e-6);
+    ok(same, 'with zero inflation the two bases are the same numbers');
+  }
+
+  // The whitelist has to actually cover the row. Any numeric field the engine
+  // reports that is not listed and not deliberately excluded is a field that
+  // will silently fail to convert.
+  {
+    const KNOWN_NON_MONEY = new Set([...UNCHANGED, 'realDeflator', 'rothConversionStage']);
+    const listed = new Set(engine.REAL_DOLLAR_FIELDS);
+    const missed = Object.keys(nom[20]).filter(k =>
+      typeof nom[20][k] === 'number' && !listed.has(k) && !KNOWN_NON_MONEY.has(k));
+    eq(missed.length, 0,
+      'every numeric field on a projection row is either restated or named as non-money'
+      + (missed.length ? ': ' + missed.join(', ') : ''));
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

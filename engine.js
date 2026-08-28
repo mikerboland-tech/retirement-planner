@@ -3089,6 +3089,86 @@ const balancedRothScore = ({ base, stressed, baseProj, stressedProj, pi,
 // (SECURE Act: non-spouse heirs must drain inherited IRAs within 10 years, at
 // their own marginal rates). Roth and brokerage pass at face value (brokerage
 // basis steps up at death; embedded-gain nuance is ignored).
+// ── TODAY'S DOLLARS ──────────────────────────────────────────────────────────
+// The projection is computed in NOMINAL (future) dollars, and it has to be:
+// tax brackets, IRMAA tiers, contribution limits and the standard deduction are
+// all nominal figures indexed year by year, and a real-dollar engine would have
+// to un-index every one of them to apply the law. So the conversion is a
+// DISPLAY transform over finished rows, never a change to the computation.
+//
+// The field list is a whitelist rather than "everything except". A rate or a
+// count deflated by mistake is silently wrong — a 7% return shown as 4.2%, a
+// guardrail multiplier of 0.9 shown as 0.55 — and nothing downstream would
+// catch it. Adding a money field to the engine and forgetting it here shows up
+// as a figure that did not move, which is the safe direction to fail in.
+const REAL_DOLLAR_FIELDS = [
+  'assetDebt', 'assetSaleExcludedGain', 'assetSaleProceeds', 'assetSaleTaxableGain',
+  'assetValue', 'brokerageBalance', 'brokerageDividends', 'brokerageWithdrawals',
+  'capitalGainsTax', 'charitableGiving', 'contributionsPaused', 'conversionTaxWithdrawal',
+  'desiredIncome', 'earlyWithdrawalPenalty', 'earnedIncome', 'engineFederalTax',
+  'engineStateTax', 'excessRMD', 'federalDeduction', 'federalOrdinaryTax', 'federalTax',
+  'ficaTax', 'healthcareExpense', 'healthcareLTC', 'healthcareMedicare', 'healthcarePre65',
+  'hsaNonQualifiedWithdrawals', 'hsaPenalty', 'hsaQualifiedBudget', 'hsaQualifiedWithdrawals',
+  'irmaaSurcharge', 'magi', 'netAssetValue', 'netIncome', 'niitTax', 'nonSSIncome',
+  'oneTimeExpense', 'oneTimeIncome', 'otherIncome', 'penalizedWithdrawals', 'pension',
+  'portfolioWithdrawal', 'preTaxBalance', 'preTaxDeduction', 'preTaxWithdrawals', 'qcd',
+  'realizedCapitalGains', 'recurringExpenses', 'rmd', 'rothBalance', 'rothConversion',
+  'rothConversionLimit', 'rothWithdrawals', 'socialSecurity', 'ssEarningsTestReduction',
+  'stateTax', 'stateTaxableIncome', 'taxableIncome', 'taxableSS', 'totalGuaranteedIncome',
+  'totalIncome', 'totalNetWorth', 'totalPortfolio', 'totalTax', 'unfundedShortfall',
+  'acaGrossPremium', 'acaNetPremium', 'acaSubsidy',
+];
+// Objects whose VALUES are money and whose keys are ids or category names.
+const REAL_DOLLAR_MAPS = ['perAccountBalances', 'perAccountContributions', 'recurringExpensesByCategory'];
+
+// Deliberately NOT deflated, and each for a reason worth stating: marketReturn
+// and weightedCAGR are rates; guardrailMultiplier is a ratio; acaFplPercent is a
+// percentage of a threshold that indexes on its own schedule; myAge, spouseAge,
+// year, yearsFromNow, age65Count and age65OnReturn are counts or dates, not
+// money at all. The test pack asserts this list is exhaustive against a real
+// projection row, so a money field added to the engine and forgotten here fails
+// the build rather than quietly refusing to convert.
+
+// Purchasing power of one dollar in `year`, expressed in the dollars of
+// `baseYear`. Uses the plan's own single inflation assumption — the same one the
+// engine spends the money at — so a figure divided by this is directly
+// comparable to a figure the reader can price today.
+const realDeflator = (year, baseYear, inflationRate) =>
+  Math.pow(1 + (inflationRate || 0), (year || 0) - (baseYear || 0));
+
+// Map a finished projection into today's dollars. Pure: returns new rows and
+// leaves the input untouched, so a caller can hold both bases at once and a
+// comparison between them stays honest.
+const deflateProjections = (proj, { inflationRate = 0.03, baseYear } = {}) => {
+  if (!proj || !proj.length) return proj;
+  const base = Number.isFinite(baseYear) ? baseYear : (proj[0].year || 0);
+  return proj.map(row => {
+    const d = realDeflator(row.year, base, inflationRate);
+    if (!(d > 0) || d === 1) return { ...row, displayBasis: 'real', realDeflator: d || 1 };
+    const out = { ...row, displayBasis: 'real', realDeflator: d };
+    REAL_DOLLAR_FIELDS.forEach(k => {
+      if (typeof out[k] === 'number') out[k] = out[k] / d;
+    });
+    REAL_DOLLAR_MAPS.forEach(k => {
+      const m = out[k];
+      if (m && typeof m === 'object') {
+        const copy = {};
+        Object.keys(m).forEach(id => {
+          copy[id] = typeof m[id] === 'number' ? m[id] / d : m[id];
+        });
+        out[k] = copy;
+      }
+    });
+    // One-time events carry their own amounts and are read by the table.
+    if (Array.isArray(out.oneTimeEvents)) {
+      out.oneTimeEvents = out.oneTimeEvents.map(e => (
+        e && typeof e.amount === 'number' ? { ...e, amount: e.amount / d } : e
+      ));
+    }
+    return out;
+  });
+};
+
 // What the estate is actually WORTH to whoever receives it.
 //
 // The headline "Legacy at 95" is totalNetWorth, which counts a pre-tax dollar
@@ -10793,6 +10873,7 @@ const describePlanPatch = (state, patch) => {
     ACA_APPLICABLE_PCT_2026, ACA_BENCHMARK_PREMIUM_2026,
     getACAApplicablePercentage, calculateACAPremiumCredit,
     getSpendingPhaseMultiplier, scoreRothStrategy, afterTaxLegacyValue, rowAtOrLast,
+    deflateProjections, realDeflator, REAL_DOLLAR_FIELDS,
     reindexSSForInflation, compareClaimingScenarios,
     conversionCostComponents, conversionCostAudit, topMarginalBracket,
     SEQUENCE_RISK_RETURNS, SEQUENCE_RISK_YEARS, sequenceRiskOverrides,

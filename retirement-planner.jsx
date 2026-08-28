@@ -55,6 +55,7 @@ const {
   conversionStagesOf, irmaaAwareConversionStages, conversionFundingCost,
   deferralDecision, convertWhileWorking,
   survivorTaxComparison, survivorSSLoss, scoreRothStrategy, afterTaxLegacyValue,
+  deflateProjections,
   planShortfall, breakingPoint, accountsAtSavingsTarget,
   savingsTargetPlan, SAVINGS_FILL_ORDER, savingsBucketOf,
   splitBothContributors, breakEvenTaxRate, conversionFundingComparison,
@@ -80,20 +81,25 @@ const initialThemeMode = (() => {
 // plan and NOT in the export: it depends on the monitor in front of you, so a
 // 34" desktop should not be setting the width on the laptop you open the same
 // plan on. Same reasoning, and the same storage shape, as the theme.
-const CONTENT_WIDTHS = [
-  { id: 'comfortable', label: 'Comfortable', px: '80rem',  note: 'the original column — easiest to read' },
-  { id: 'wide',        label: 'Wide',        px: '110rem', note: 'more columns visible before a table scrolls' },
-  { id: 'full',        label: 'Full width',  px: 'none',   note: 'use the whole window' },
-];
+//
+// A continuous pixel figure rather than the three presets this started as. Three
+// buckets cannot serve both a laptop and a 30" panel — the gap between "wide"
+// and "the whole window" is most of the useful range on a large monitor, and
+// there is no reason to make someone pick a bucket when the thing they want is
+// a number. WIDTH_MAX doubles as "no cap": at the top of the range the max-width
+// comes off entirely so the layout fills the window at any resolution.
+const WIDTH_MIN = 1024;
+const WIDTH_MAX = 3200;
 const WIDTH_STORAGE_KEY = 'retirement_planner_width';
 const initialContentWidth = (() => {
   try {
-    const v = localStorage.getItem(WIDTH_STORAGE_KEY);
-    return CONTENT_WIDTHS.some(w => w.id === v) ? v : 'comfortable';
-  } catch (e) { return 'comfortable'; }
+    const v = Number(localStorage.getItem(WIDTH_STORAGE_KEY));
+    if (Number.isFinite(v) && v >= WIDTH_MIN && v <= WIDTH_MAX) return v;
+  } catch (e) { /* storage unavailable */ }
+  return 1280;
 })();
-const contentWidthPx = (id) =>
-  (CONTENT_WIDTHS.find(w => w.id === id) || CONTENT_WIDTHS[0]).px;
+const contentWidthCss = (px) => (px >= WIDTH_MAX ? 'none' : `${px}px`);
+const contentWidthLabel = (px) => (px >= WIDTH_MAX ? 'Full width' : `${px}px`);
 
 const THEME = PlannerTheme.resolve(initialThemeMode);
 const SERIES = THEME.series;
@@ -598,6 +604,7 @@ const DEFAULT_PERSONAL_INFO = {
   // account type and retirement age; they need no toggle.)
   sepp72tEnabled: false,
   heirTaxRate: 0.25,             // Heirs' assumed ordinary rate on inherited PRE-TAX dollars (SECURE Act 10-year drain) — used by the Roth optimizer's after-tax legacy score
+  displayBasis: 'nominal',       // 'nominal' = future dollars as the engine computes them; 'real' = the same plan restated in today's purchasing power
   legacyAge: 95,                 // Planning horizon / legacy target age
   // Spending phases (go-go / slow-go / no-go): staged multipliers on base
   // retirement spending. Disabled by default — flat spending is the classic
@@ -1151,6 +1158,48 @@ const HideableBlock = ({ tab, id, level, vis, setVis, children }) => {
         </button>
       </div>
       {children}
+    </div>
+  );
+};
+
+// A tab that cannot follow the global basis has to say so, in the place the
+// figures are. Silently opting out is how a reader ends up comparing today's
+// dollars on one tab with future dollars on the next and concluding the tool is
+// broken — which is exactly what happened with the Monte Carlo percentiles.
+const BasisNote = ({ pi, reason }) => {
+  if (pi.displayBasis !== 'real') return null;
+  return (
+    <div className="text-xs text-amber-300/90 bg-amber-500/5 border border-amber-500/25 rounded-lg px-3 py-2">
+      ⓘ You have the app set to <strong>today's dollars</strong>, but the figures on this tab are in
+      <strong> future dollars</strong>. {reason}
+    </div>
+  );
+};
+
+// One switch for the yardstick every money figure on the page is quoted in.
+// Small, and next to the section controls rather than buried in a settings
+// panel, because the answer to "is that $3M real money?" has to be visible at
+// the same moment the $3M is.
+const BasisToggle = ({ pi, setPersonalInfo, className = '' }) => {
+  const real = pi.displayBasis === 'real';
+  return (
+    <div className={`flex items-center gap-2 text-xs ${className}`}>
+      <span className="text-slate-500">Amounts in</span>
+      <div className="flex items-center bg-slate-800 rounded-lg p-0.5 border border-slate-700 gap-0.5">
+        {[['nominal', 'Future $'], ['real', "Today's $"]].map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setPersonalInfo(prev => ({ ...prev, displayBasis: id }))}
+            className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
+              (id === 'real') === real ? 'bg-slate-600 text-slate-100' : 'text-slate-400 hover:text-slate-200'}`}
+            title={id === 'real'
+              ? `The same plan restated in today's purchasing power, at ${(((pi.inflationRate ?? 0.03) * 100)).toFixed(1)}% inflation`
+              : 'The actual number of dollars in that future year, inflation included'}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 };
@@ -2262,7 +2311,7 @@ function AssetsTab({ assetTypes, assets, setAssets, setEditingAsset, setShowAsse
         </div>
         <p className="text-xs text-slate-500 mb-4">Click any value to edit · Tab between fields · Click Save when done</p>
         <div className="overflow-x-auto">
-          <table className="w-auto">
+          <table className="w-full min-w-max">
             <thead>
               <tr className="border-b border-slate-700">
                 <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Asset Name</th>
@@ -2458,7 +2507,7 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
           {dirtyIncomes && <button onClick={saveIncomeChanges} className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-sm font-medium transition-colors">💾 Save Changes</button>}
         </div>
         <div className="overflow-x-auto">
-          <table className="w-auto">
+          <table className="w-full min-w-max">
             <thead>
               <tr className="border-b border-slate-700">
                 <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Name</th>
@@ -5124,6 +5173,9 @@ function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, pro
 
   return (
     <div className="space-y-6">
+      <BasisNote pi={personalInfo} reason={
+        'A tax return is a nominal document for one specific year — every line on it is the dollar figure ' +
+        'the IRS wants, not a purchasing-power equivalent.'} />
       {/* ── Header ─────────────────────────────────────────────────────── */}
       <div className={cardStyle}>
         <div className="flex items-start justify-between gap-4 mb-2">
@@ -6108,6 +6160,11 @@ function TaxPlanningTab({ accounts, assets, computeProjections, detailLevel, inc
 
       <SectionControls tab="taxplanning" vis={sectionVisibility} setVis={setSectionVisibility}
                        level={detailLevel} setLevel={setDetailLevel} />
+      <BasisNote pi={personalInfo} reason={
+        'Every figure here is compared against a tax threshold — bracket edges, the standard deduction, ' +
+        'IRMAA tiers — and those are nominal amounts the IRS indexes year by year. Restating the income ' +
+        'and not the threshold would be wrong; restating both would relabel the 22% bracket as something ' +
+        'it is not.'} />
       
       {/* Summary Cards */}
       <HideableBlock tab="taxplanning" id="bracketSummary" level={detailLevel}
@@ -6426,7 +6483,11 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
   // Nominal vs today's dollars. Each sim draws its own inflation path, so pooled
   // nominal percentiles mix currencies; the worker also returns each sim deflated
   // by its own path. Default to today's dollars — it is the figure users can judge.
-  const [showRealDollars, setShowRealDollars] = useState(true);
+  // Its own toggle rather than the global one, and deliberately: each simulation
+  // draws its OWN inflation path, so these percentiles are deflated per sim
+  // rather than by the plan's single assumption. It starts wherever the app is
+  // set so the two agree by default, and can still be flipped here.
+  const [showRealDollars, setShowRealDollars] = useState(personalInfo.displayBasis !== 'nominal');
   const [simError, setSimError] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
   
@@ -10828,6 +10889,18 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
                   className={compactInputStyle}
                 />
               </div>
+              <div>
+                <label className={compactLabelStyle}>Show amounts in</label>
+                <GridSelect
+                  value={localInfo.displayBasis || 'nominal'}
+                  onChange={e => handleChange('displayBasis', e.target.value)}
+                  options={[
+                    { value: 'nominal', label: 'Future dollars' },
+                    { value: 'real',    label: "Today's dollars" },
+                  ]}
+                  className={compactInputStyle}
+                />
+              </div>
               {/* This rate already existed on the plan and already drove the Roth
                   optimizer's ranking — it was just only editable from inside that
                   one panel, so a plan-wide assumption looked like a setting that
@@ -10844,6 +10917,16 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
               </div>
             </div>
             <p className="text-xs text-slate-500 mt-2">Retirement age determines when portfolio withdrawals begin. Birth year determines RMD start age per SECURE 2.0 Act. Planning/Legacy Age sets the end of all projections (default 95).</p>
+            <p className="text-xs text-slate-500 mt-1">
+              <strong>Show amounts in</strong> chooses the yardstick, not the plan. <em>Future dollars</em> is
+              what the engine computes — the actual number of dollars in the account in that year, inflation
+              included. <em>Today's dollars</em> restates the same plan in current purchasing power, so
+              $3M forty years out reads as what it would buy now. Nothing about the projection changes:
+              contributions, taxes, RMDs and IRMAA are all computed on nominal figures because that is how the
+              law indexes them, and only the displayed amounts are converted, at your inflation rate of{' '}
+              {(((localInfo.inflationRate ?? 0.03) * 100)).toFixed(1)}%. Tax Planning, Current Year and Monte
+              Carlo keep their own basis, and say so on the page.
+            </p>
             <p className="text-xs text-slate-500 mt-1">
               <strong>Heirs' tax rate</strong> is the ordinary rate whoever inherits your pre-tax accounts is
               assumed to pay. Under the SECURE Act a non-spouse beneficiary has ten years to drain an
@@ -12778,7 +12861,7 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
           {dirty && <button onClick={saveChanges} className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-sm font-medium transition-colors">💾 Save Changes</button>}
         </div>
         <div className="overflow-x-auto">
-          <table className="w-auto">
+          <table className="w-full min-w-max">
             <thead>
               <tr className="border-b border-slate-700">
                 <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Account</th>
@@ -16435,7 +16518,12 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
           `visibilitySettings.x &&` guards that had to agree with it by hand. Both
           now come from SECTION_MANIFEST. */}
       <div className={cardStyle}>
-        <SectionControls tab="dashboard" vis={sectionVisibility} setVis={setSectionVisibility} level={detailLevel} setLevel={setDetailLevel} />
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex-1 min-w-[260px]">
+            <SectionControls tab="dashboard" vis={sectionVisibility} setVis={setSectionVisibility} level={detailLevel} setLevel={setDetailLevel} />
+          </div>
+          <BasisToggle pi={personalInfo} setPersonalInfo={setPersonalInfo} />
+        </div>
       </div>
 
       {/* Compact Summary Row */}
@@ -20451,11 +20539,11 @@ function RetirementPlanner() {
     setThemeMode(next);
   };
   const [contentWidth, setContentWidth] = useState(initialContentWidth);
-  const cycleContentWidth = () => {
-    const i = CONTENT_WIDTHS.findIndex(w => w.id === contentWidth);
-    const next = CONTENT_WIDTHS[(i + 1) % CONTENT_WIDTHS.length].id;
-    setContentWidth(next);
-    try { localStorage.setItem(WIDTH_STORAGE_KEY, next); } catch (e) { /* storage off — the choice still holds for this session */ }
+  const [widthOpen, setWidthOpen] = useState(false);
+  const changeContentWidth = (px) => {
+    const v = Math.min(WIDTH_MAX, Math.max(WIDTH_MIN, Math.round(px) || WIDTH_MIN));
+    setContentWidth(v);
+    try { localStorage.setItem(WIDTH_STORAGE_KEY, String(v)); } catch (e) { /* storage off — the choice still holds for this session */ }
   };
   const [currentYear] = useState(new Date().getFullYear());
   const [saveStatus, setSaveStatus] = useState('');
@@ -20818,7 +20906,48 @@ function RetirementPlanner() {
     return computeProjections(personalInfo, accounts, incomeStreams, assets, oneTimeEvents,
       recurringExpenses, undefined, { currentYearReturn });
   }, [accounts, incomeStreams, assets, personalInfo, oneTimeEvents, recurringExpenses, currentYear, currentYearReturn]);
-  
+
+  // ── Today's dollars ──────────────────────────────────────────────────────
+  // The engine computes in nominal dollars and must: brackets, IRMAA tiers and
+  // contribution limits are all nominal figures indexed year by year. So the
+  // basis is a display transform applied once, here, over finished rows — and
+  // the tabs that show plain money figures are handed the restated copy while
+  // the engine, the solver and every threshold comparison keep the real thing.
+  //
+  // Tax Planning and Current Year deliberately keep the nominal rows. A bracket
+  // table compares income against inflation-indexed thresholds; restating one
+  // side and not the other would be wrong, and restating both would relabel the
+  // 22% bracket as something it is not. A 1040 is a nominal document for one
+  // year. Both say so on the page rather than silently opting out.
+  const realBasis = personalInfo.displayBasis === 'real';
+  const displayProjections = useMemo(() => (
+    realBasis
+      ? deflateProjections(projections, {
+          inflationRate: personalInfo.inflationRate,
+          baseYear: projections[0] ? projections[0].year : currentYear,
+        })
+      : projections
+  ), [realBasis, projections, personalInfo.inflationRate, currentYear]);
+
+  // Panels that re-run the engine themselves (the savings-rate explorer, the
+  // lifestyle/legacy comparison, the retirement-age preview) must land on the
+  // same basis as the page around them, or one card on the Dashboard would be
+  // quoting future dollars next to five quoting today's. Wrapping the function
+  // they are handed does that once instead of at every call site.
+  const displayComputeProjections = useMemo(() => {
+    if (!realBasis) return computeProjections;
+    return (...args) => {
+      const out = computeProjections(...args);
+      return deflateProjections(out, {
+        inflationRate: personalInfo.inflationRate,
+        baseYear: out && out[0] ? out[0].year : currentYear,
+      });
+    };
+  }, [realBasis, personalInfo.inflationRate, currentYear]);
+
+  const setDisplayBasis = (basis) =>
+    setPersonalInfo(prev => ({ ...prev, displayBasis: basis === 'real' ? 'real' : 'nominal' }));
+
   // Input validation helper
   const validateAccount = (account) => {
     if (!account.name?.trim()) return 'Account name is required';
@@ -21081,13 +21210,42 @@ function RetirementPlanner() {
             {!sidebarCollapsed && <span>{themeMode === 'dark' ? 'Light mode' : 'Dark mode'}</span>}
           </button>
           <button
-            onClick={cycleContentWidth}
+            onClick={() => setWidthOpen(o => !o)}
             className="mt-1 w-full flex items-center justify-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 py-1.5 rounded hover:bg-slate-700/50 transition-colors"
-            title={`Content width: ${(CONTENT_WIDTHS.find(w => w.id === contentWidth) || CONTENT_WIDTHS[0]).label} — ${(CONTENT_WIDTHS.find(w => w.id === contentWidth) || CONTENT_WIDTHS[0]).note}. Click to change.`}
+            title="How wide the content column may get. Saved for this browser only — it depends on the screen, not on the plan."
           >
             <span>↔</span>
-            {!sidebarCollapsed && <span>{(CONTENT_WIDTHS.find(w => w.id === contentWidth) || CONTENT_WIDTHS[0]).label}</span>}
+            {!sidebarCollapsed && <span>{contentWidthLabel(contentWidth)}</span>}
           </button>
+          {widthOpen && !sidebarCollapsed && (
+            <div className="mt-1 px-1 pb-1">
+              <input
+                type="range" min={WIDTH_MIN} max={WIDTH_MAX} step={16}
+                value={contentWidth}
+                onChange={e => changeContentWidth(Number(e.target.value))}
+                className="w-full accent-amber-500"
+                aria-label="Content width"
+              />
+              <div className="flex items-center justify-between gap-1 mt-1">
+                <span className="text-[10px] text-slate-600">{WIDTH_MIN}</span>
+                <input
+                  type="number" min={WIDTH_MIN} max={WIDTH_MAX} step={16}
+                  value={contentWidth}
+                  onChange={e => changeContentWidth(Number(e.target.value))}
+                  aria-label="Content width (pixels)"
+                  className="w-16 bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-[11px] text-slate-200 text-center"
+                />
+                <span className="text-[10px] text-slate-600">full</span>
+              </div>
+              <button
+                onClick={() => changeContentWidth(typeof window !== 'undefined' ? window.innerWidth : WIDTH_MAX)}
+                className="mt-1 w-full text-[10px] text-slate-500 hover:text-slate-300 underline decoration-dotted"
+                title="Set the cap to this window's current width"
+              >
+                fit this window
+              </button>
+            </div>
+          )}
         </div>
         
         {/* Navigation */}
@@ -21170,18 +21328,18 @@ function RetirementPlanner() {
             scrolled away. Removing a property that did nothing is what makes
             sticky work. */}
         <main className="flex-1 p-6">
-          <div className="mx-auto w-full" style={{ maxWidth: contentWidthPx(contentWidth) }}>
-            {activeTab === 'dashboard' && <DashboardTab setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
+          <div className="mx-auto w-full" style={{ maxWidth: contentWidthCss(contentWidth) }}>
+            {activeTab === 'dashboard' && <DashboardTab setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
             {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
-            {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
+            {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
-            {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={projections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
+            {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={displayProjections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
             {activeTab === 'socialsecurity' && <SocialSecurityTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
-            {activeTab === 'sandbox' && <SandboxTab accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
+            {activeTab === 'sandbox' && <SandboxTab accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
             {activeTab === 'scenarios' && <ScenarioComparisonTab activeScenarioId={activeScenarioId} assets={assets} computeProjections={computeProjections} createScenario={createScenario} deleteScenario={deleteScenario} loadScenario={loadScenario} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} scenarios={scenarios} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'currentyear' && <CurrentYearTab currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
-            {activeTab === 'withdrawal' && <WithdrawalStrategiesTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={projections} />}
+            {activeTab === 'withdrawal' && <WithdrawalStrategiesTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={displayProjections} />}
             {activeTab === 'montecarlo' && <MonteCarloTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'stresstest' && <StressTestTab accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'sensitivity' && <SensitivityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
