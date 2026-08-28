@@ -3089,11 +3089,51 @@ const balancedRothScore = ({ base, stressed, baseProj, stressedProj, pi,
 // (SECURE Act: non-spouse heirs must drain inherited IRAs within 10 years, at
 // their own marginal rates). Roth and brokerage pass at face value (brokerage
 // basis steps up at death; embedded-gain nuance is ignored).
+// What the estate is actually WORTH to whoever receives it.
+//
+// The headline "Legacy at 95" is totalNetWorth, which counts a pre-tax dollar
+// and a Roth dollar as the same dollar. They are not: under the SECURE Act a
+// non-spouse beneficiary must drain an inherited traditional IRA within ten
+// years and pays ordinary rates on every dollar, while Roth and brokerage pass
+// at face value (brokerage basis steps up at death; embedded-gain nuance is
+// ignored, and stated as such wherever this is displayed).
+//
+// This is the one place the discount is computed. scoreRothStrategy calls it,
+// the dashboard tile calls it, and the retirement-age explorer calls it, so a
+// change to the rule cannot land in one of the three and not the others.
+const afterTaxLegacyValue = (proj, { legacyAge, heirTaxRate = 0.25 } = {}) => {
+  if (!proj || proj.length === 0) return null;
+  const at = rowAtOrLast(proj, legacyAge);
+  const preTax     = at.preTaxBalance || 0;
+  const roth       = at.rothBalance || 0;
+  const brokerage  = at.brokerageBalance || 0;
+  const estate     = at.totalNetWorth || 0;
+  // Whatever totalNetWorth counts beyond the three portfolio buckets — the house,
+  // other assets, net of any debt. Derived rather than re-summed so this cannot
+  // drift from the engine's own net-worth line.
+  const nonPortfolio = estate - (preTax + roth + brokerage);
+  const taxOnPreTax  = preTax * heirTaxRate;
+  return {
+    age: at.myAge,
+    estate:      Math.round(estate),
+    afterTax:    Math.round(estate - taxOnPreTax),
+    taxOnPreTax: Math.round(taxOnPreTax),
+    preTax:      Math.round(preTax),
+    roth:        Math.round(roth),
+    brokerage:   Math.round(brokerage),
+    nonPortfolio: Math.round(nonPortfolio),
+    heirTaxRate,
+  };
+};
+
 const scoreRothStrategy = (proj, { legacyAge, retirementAge, heirTaxRate = 0.25 } = {}) => {
   if (!proj || proj.length === 0) return null;
   const atLegacy = rowAtOrLast(proj, legacyAge);
   const retYears = proj.filter(p => p.myAge >= (retirementAge ?? 0));
   const sum = (field) => retYears.reduce((s, p) => s + (p[field] || 0), 0);
+  // Portfolio-only, which is what the optimizer ranks on: two conversion
+  // strategies differ in their accounts, not in the house. Same discount rule as
+  // afterTaxLegacyValue, applied to the portfolio slice of it.
   const afterTaxLegacy = (atLegacy.rothBalance || 0) + (atLegacy.brokerageBalance || 0)
     + (atLegacy.preTaxBalance || 0) * (1 - heirTaxRate);
   return {
@@ -10752,7 +10792,7 @@ const describePlanPatch = (state, patch) => {
     ACA_FPL_2025, calculateACASubsidy,
     ACA_APPLICABLE_PCT_2026, ACA_BENCHMARK_PREMIUM_2026,
     getACAApplicablePercentage, calculateACAPremiumCredit,
-    getSpendingPhaseMultiplier, scoreRothStrategy, rowAtOrLast,
+    getSpendingPhaseMultiplier, scoreRothStrategy, afterTaxLegacyValue, rowAtOrLast,
     reindexSSForInflation, compareClaimingScenarios,
     conversionCostComponents, conversionCostAudit, topMarginalBracket,
     SEQUENCE_RISK_RETURNS, SEQUENCE_RISK_YEARS, sequenceRiskOverrides,

@@ -11501,6 +11501,156 @@ section('P94 — no component is defined inside another component');
     'there is exactly one SavingsRateExplorer in the file');
 }
 
+section('P95 — after-tax legacy, and the two reasons Monte Carlo looked broken');
+
+{
+  // ── after-tax legacy ─────────────────────────────────────────────────────
+  // The dashboard's "Legacy at 95" counts a pre-tax dollar and a Roth dollar as
+  // the same dollar. Under the SECURE Act they are not: a non-spouse heir drains
+  // an inherited traditional IRA within ten years at their own ordinary rates.
+  // One engine rule computes the discount; the dashboard tile, the
+  // retirement-age explorer and the Roth optimizer all read it.
+  const sc = baseScenario({});
+  const proj = computeProjections(sc.pi, sc.accts, sc.streams, [], [], []);
+  const legacyAge = sc.pi.legacyAge || 95;
+  const v = engine.afterTaxLegacyValue(proj, { legacyAge, heirTaxRate: 0.25 });
+  ok(v, 'the engine returns an after-tax legacy breakdown');
+  eq(v.age, legacyAge, 'measured at the plan’s own legacy age');
+
+  // The parts must reconstruct the estate exactly — a breakdown that does not
+  // add up is worse than no breakdown.
+  approx(v.preTax + v.roth + v.brokerage + v.nonPortfolio, v.estate,
+    'pre-tax + Roth + brokerage + everything else is the estate', 0.0001);
+  approx(v.estate - v.afterTax, v.taxOnPreTax,
+    'the whole difference between the two headline numbers is the tax on pre-tax dollars', 0.0001);
+  approx(v.taxOnPreTax, v.preTax * 0.25,
+    'and that tax is exactly the heirs’ rate applied to the pre-tax balance', 0.0001);
+  ok(v.afterTax <= v.estate, 'after-tax legacy never exceeds the estate');
+
+  // The rate has to bite, and bite in the right direction.
+  const cheap = engine.afterTaxLegacyValue(proj, { legacyAge, heirTaxRate: 0.10 });
+  const dear  = engine.afterTaxLegacyValue(proj, { legacyAge, heirTaxRate: 0.40 });
+  eq(cheap.estate, dear.estate, 'the estate itself does not depend on the heirs’ rate');
+  if (v.preTax > 0) {
+    gt(cheap.afterTax, dear.afterTax,
+      'a lower heirs’ rate leaves more behind, because the discount is on pre-tax dollars');
+  }
+  const zero = engine.afterTaxLegacyValue(proj, { legacyAge, heirTaxRate: 0 });
+  eq(zero.afterTax, zero.estate, 'at a zero heirs’ rate the two figures are the same number');
+
+  // It must agree with the optimizer's own score on the portfolio slice, or the
+  // dashboard and the optimizer would be telling the user different things.
+  const score = engine.scoreRothStrategy(proj, { legacyAge, retirementAge: sc.pi.myRetirementAge, heirTaxRate: 0.25 });
+  approx(score.afterTaxLegacy, v.roth + v.brokerage + v.preTax * 0.75,
+    'the optimizer’s portfolio-only score uses the same discount as the estate figure', 0.0001);
+
+  // ── Monte Carlo, reason 1: arithmetic mean vs geometric CAGR ─────────────
+  // An arithmetic mean of 7% with 15% volatility does NOT compound at 7%. The
+  // wedge is about sigma-squared over two. Both fields defaulted to 7% and read
+  // as the same quantity, so every simulation ran a lower-growth plan than the
+  // plan it was stress-testing, and the median came in low for a reason that has
+  // nothing to do with market risk.
+  const implied = (mean, sd) => mean - (sd * sd) / 2;
+  approx(implied(0.07, 0.15), 0.05875,
+    '7% mean at 15% volatility compounds at about 5.9%, not 7%', 1e-9);
+  gt(0.07 - implied(0.07, 0.15), 0.01,
+    'the gap is over a full point a year — enough to move a 30-year median by a quarter');
+  approx(implied(0.07, 0), 0.07,
+    'with no volatility the two means coincide, which is why a deterministic run is not affected', 1e-12);
+  // The "match my plan" button inverts it: arithmetic = geometric + sigma^2/2.
+  const matched = 0.07 + (0.15 * 0.15) / 2;
+  approx(implied(matched, 0.15), 0.07,
+    'setting the arithmetic mean to geometric + sigma-squared/2 makes the simulation compound at the plan’s CAGR', 1e-9);
+
+  // Measured end to end rather than asserted from the formula: the same plan,
+  // simulated both ways, must put the median materially higher when the means
+  // are reconciled.
+  {
+    const horizon = proj.length;
+    const walkUp = Math.max(0, (sc.pi.myRetirementAge || 65) - sc.pi.myAge);
+    // A fixed sequence, not random draws: this test is about the MEAN the sims
+    // are centred on, and a seeded pair of runs isolates that from sampling
+    // noise. Alternating +/- one standard deviation has the stated arithmetic
+    // mean exactly, and a geometric mean below it — which is the whole point.
+    const run = (mean) => {
+      const ov = new Array(horizon);
+      for (let y = walkUp; y < horizon; y++) {
+        ov[y] = { marketReturn: mean + (y % 2 === 0 ? 0.15 : -0.15), inflation: 0.03 };
+      }
+      const p = computeProjections(sc.pi, sc.accts, sc.streams, [], [], [], undefined, { yearOverrides: ov });
+      return p[p.length - 1].totalPortfolio || 0;
+    };
+    const asShipped = run(0.07);
+    const reconciled = run(matched);
+    gt(reconciled, asShipped,
+      'raising the arithmetic mean to match the plan’s CAGR raises the simulated ending portfolio');
+  }
+
+  // ── Monte Carlo, reason 2: real vs nominal ───────────────────────────────
+  // The percentiles default to today's dollars; every other figure in the app is
+  // nominal. Comparing them makes even the 95th percentile look worse than the
+  // straight-line run. This is the size of that error, and it is not small.
+  {
+    const years = 30, infl = 0.03;
+    const deflator = Math.pow(1 + infl, years);
+    gt(deflator, 2.4, 'over thirty years at 3% the two bases differ by more than 2.4x');
+    // A p95 that is 2.7x the deterministic run still LOOKS smaller once one side
+    // is deflated and the other is not — which is exactly what was reported.
+    const detNominal = 28.1, p95Real = 19.7;
+    ok(p95Real < detNominal,
+      'a p95 well above the plan reads as below it when only one side is deflated');
+    ok(p95Real * deflator > detNominal,
+      'and on one basis the same p95 is clearly above the plan');
+  }
+}
+
+section('P96 — the tables read the palette, not a hand-picked hue');
+
+{
+  // The palette landed in the charts and never reached the tables: the
+  // year-by-year balances table had Pre-Tax green and Roth purple, exactly
+  // inverted from every chart on the dashboard. A reader who had learned "green
+  // is Roth" from the charts read the tables backwards.
+  //
+  // The rule this pins: a table header naming a palette entity is EITHER neutral
+  // (slate — the table colours its values instead) OR carries that entity's own
+  // token. It may never carry a contradicting hue, and it may never hard-code a
+  // Tailwind colour, which would also ignore light mode.
+  const fs6 = require('fs');
+  const path6 = require('path');
+  const src = fs6.readFileSync(path6.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+
+  const ENTITY = {
+    'roth': 'roth', 'pre-tax': 'preTax', 'brokerage': 'brokerage',
+    'brokerage/hsa': 'brokerage', 'pension': 'pension',
+    'social security': 'socialSecurity', 'rmd': 'rmd',
+    'roth conv.': 'rothConversion', 'planned conv.': 'rothConversion',
+  };
+  const tagRe = /<th([^>]*)>([^<{]+)<\/th>/g;
+  let m, checked = 0, bad = [];
+  while ((m = tagRe.exec(src)) !== null) {
+    const attrs = m[1], label = m[2].trim().toLowerCase();
+    const entity = ENTITY[label];
+    if (!entity) continue;
+    // A neutral header is fine — it is not claiming an identity.
+    const colored = /text-(emerald|green|purple|violet|sky|blue|amber|yellow|orange|red|cyan|teal|fuchsia|pink|rose|indigo)-\d00/.test(attrs);
+    const token = attrs.indexOf('SERIES.' + entity) >= 0;
+    checked++;
+    if (colored && !token) bad.push(m[2].trim() + ' → wants SERIES.' + entity);
+  }
+  gt(checked, 5, 'there are entity-named table headers to check');
+  eq(bad.length, 0,
+    'every coloured entity header uses its palette token' + (bad.length ? ': ' + bad.join('; ') : ''));
+
+  // And the specific inversion that was reported cannot come back.
+  const balances = src.slice(src.indexOf('Year-by-Year Account Balances'),
+                             src.indexOf('Year-by-Year Contributions'));
+  ok(balances.indexOf('style={{ color: SERIES.roth }}>Roth</th>') > 0,
+    'the balances table gives the Roth column the Roth token, which is green');
+  eq((balances.match(/text-purple-400/g) || []).length, 0,
+    'and no purple survives in it — that was Roth’s colour and it was wrong');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

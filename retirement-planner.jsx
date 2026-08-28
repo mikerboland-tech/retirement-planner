@@ -54,7 +54,7 @@ const {
   taxBreakpoints, marginalCostOfNextDollar,
   conversionStagesOf, irmaaAwareConversionStages, conversionFundingCost,
   deferralDecision, convertWhileWorking,
-  survivorTaxComparison, survivorSSLoss, scoreRothStrategy,
+  survivorTaxComparison, survivorSSLoss, scoreRothStrategy, afterTaxLegacyValue,
   planShortfall, breakingPoint, accountsAtSavingsTarget,
   savingsTargetPlan, SAVINGS_FILL_ORDER, savingsBucketOf,
   splitBothContributors, breakEvenTaxRate, conversionFundingComparison,
@@ -76,6 +76,25 @@ const initialThemeMode = (() => {
   try { return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'; }
   catch (e) { return 'dark'; }
 })();
+// How wide the content column is allowed to get. Deliberately NOT part of the
+// plan and NOT in the export: it depends on the monitor in front of you, so a
+// 34" desktop should not be setting the width on the laptop you open the same
+// plan on. Same reasoning, and the same storage shape, as the theme.
+const CONTENT_WIDTHS = [
+  { id: 'comfortable', label: 'Comfortable', px: '80rem',  note: 'the original column — easiest to read' },
+  { id: 'wide',        label: 'Wide',        px: '110rem', note: 'more columns visible before a table scrolls' },
+  { id: 'full',        label: 'Full width',  px: 'none',   note: 'use the whole window' },
+];
+const WIDTH_STORAGE_KEY = 'retirement_planner_width';
+const initialContentWidth = (() => {
+  try {
+    const v = localStorage.getItem(WIDTH_STORAGE_KEY);
+    return CONTENT_WIDTHS.some(w => w.id === v) ? v : 'comfortable';
+  } catch (e) { return 'comfortable'; }
+})();
+const contentWidthPx = (id) =>
+  (CONTENT_WIDTHS.find(w => w.id === id) || CONTENT_WIDTHS[0]).px;
+
 const THEME = PlannerTheme.resolve(initialThemeMode);
 const SERIES = THEME.series;
 
@@ -2580,7 +2599,7 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
               <th className="text-right py-3 px-2 text-slate-400 font-medium">Portfolio Draw</th>
               <th className="text-right py-3 px-2 text-slate-400 font-medium">RMD</th>
               <th className="text-right py-3 px-2 text-emerald-400 font-medium">QCD</th>
-              <th className="text-right py-3 px-2 text-purple-400 font-medium">Roth Conv.</th>
+              <th className="text-right py-3 px-2 font-medium" style={{ color: SERIES.rothConversion }}>Roth Conv.</th>
               <th className="text-right py-3 px-2 text-amber-400 font-medium">Taxable Income</th>
               <th className="text-right py-3 px-2 text-amber-400 font-medium">MAGI</th>
               <th className="text-right py-3 px-2 text-slate-400 font-medium">Federal Tax</th>
@@ -2608,13 +2627,13 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
                   {row.recurringExpenses > 0 && <div className="text-xs text-cyan-400" title="Recurring expenses">+{formatCurrency(row.recurringExpenses)} RE</div>}
                   {row.oneTimeExpense > 0 && <div className="text-xs text-red-400">+{formatCurrency(row.oneTimeExpense)}</div>}
                 </td>
-                <td className="py-2 px-2 text-right text-blue-400">
+                <td className="py-2 px-2 text-right" style={{ color: SERIES.socialSecurity }}>
                   {formatCurrency(row.socialSecurity)}
                   {row.ssEarningsTestReduction > 0 && <div className="text-xs text-red-400" title="SS reduced by earnings test">-{formatCurrency(row.ssEarningsTestReduction)} ET</div>}
                 </td>
-                <td className="py-2 px-2 text-right text-purple-400">{formatCurrency(row.pension)}</td>
-                <td className="py-2 px-2 text-right text-cyan-400">{formatCurrency(row.otherIncome)}</td>
-                <td className="py-2 px-2 text-right text-yellow-400">
+                <td className="py-2 px-2 text-right" style={{ color: SERIES.pension }}>{formatCurrency(row.pension)}</td>
+                <td className="py-2 px-2 text-right" style={{ color: SERIES.otherIncome }}>{formatCurrency(row.otherIncome)}</td>
+                <td className="py-2 px-2 text-right" style={{ color: SERIES.withdrawalVoluntary }}>
                   {formatCurrency(row.portfolioWithdrawal)}
                   {row.contributionsPaused > 0 && (
                     <div className="text-xs text-sky-300" title="Saving paused this year to pay for an expense dated before retirement">
@@ -2627,9 +2646,9 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
                     </div>
                   )}
                 </td>
-                <td className="py-2 px-2 text-right text-orange-400">{row.rmd > 0 ? formatCurrency(row.rmd) : '—'}</td>
+                <td className="py-2 px-2 text-right" style={{ color: SERIES.rmd }}>{row.rmd > 0 ? formatCurrency(row.rmd) : '—'}</td>
                 <td className="py-2 px-2 text-right text-emerald-400 font-medium">{row.qcd > 0 ? formatCurrency(row.qcd) : '—'}</td>
-                <td className="py-2 px-2 text-right text-purple-400 font-medium">{row.rothConversion > 0 ? formatCurrency(row.rothConversion) : '—'}</td>
+                <td className="py-2 px-2 text-right font-medium" style={{ color: SERIES.rothConversion }}>{row.rothConversion > 0 ? formatCurrency(row.rothConversion) : '—'}</td>
                 <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.taxableIncome)}</td>
                 <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.magi)}</td>
                 <td className="py-2 px-2 text-right text-red-400">
@@ -2819,22 +2838,22 @@ function TaxYearSnapshot({ projections, personalInfo, qcdSavings }) {
           {p.earnedIncome > 0 && (
             <div className="bg-slate-800/50 rounded px-3 py-2">
               <div className="text-slate-500">Earned Income</div>
-              <div className="text-green-400 font-semibold">{formatCurrency(p.earnedIncome)}</div>
+              <div className="font-semibold" style={{ color: SERIES.earnedIncome }}>{formatCurrency(p.earnedIncome)}</div>
             </div>
           )}
           <div className="bg-slate-800/50 rounded px-3 py-2">
             <div className="text-slate-500">Social Security</div>
-            <div className="text-blue-400 font-semibold">{formatCurrency(p.socialSecurity)}</div>
+            <div className="font-semibold" style={{ color: SERIES.socialSecurity }}>{formatCurrency(p.socialSecurity)}</div>
           </div>
           {p.pension > 0 && (
             <div className="bg-slate-800/50 rounded px-3 py-2">
               <div className="text-slate-500">Pension</div>
-              <div className="text-purple-400 font-semibold">{formatCurrency(p.pension)}</div>
+              <div className="font-semibold" style={{ color: SERIES.pension }}>{formatCurrency(p.pension)}</div>
             </div>
           )}
           <div className="bg-slate-800/50 rounded px-3 py-2">
             <div className="text-slate-500">Portfolio Withdrawal</div>
-            <div className="text-amber-400 font-semibold">{formatCurrency(p.portfolioWithdrawal)}</div>
+            <div className="font-semibold" style={{ color: SERIES.withdrawalVoluntary }}>{formatCurrency(p.portfolioWithdrawal)}</div>
           </div>
           {(p.qcd || 0) > 0 && (
             <div className="bg-slate-800/50 rounded px-3 py-2">
@@ -2845,7 +2864,7 @@ function TaxYearSnapshot({ projections, personalInfo, qcdSavings }) {
           {rothConversion > 0 && (
             <div className="bg-purple-900/30 rounded px-3 py-2 border border-purple-700/40">
               <div className="text-slate-500">Roth Conversion</div>
-              <div className="text-purple-400 font-semibold">{formatCurrency(rothConversion)}</div>
+              <div className="font-semibold" style={{ color: SERIES.rothConversion }}>{formatCurrency(rothConversion)}</div>
             </div>
           )}
           <div className="bg-slate-800/50 rounded px-3 py-2 border border-slate-600">
@@ -6417,6 +6436,45 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
   // Get projected portfolio balance at simulation start age
   const startProjection = projections.find(p => p.myAge === simSettings.startAge);
   const startingPortfolio = startProjection?.totalPortfolio || 0;
+
+  // ── The two things that made the median look broken ──────────────────────
+  //
+  // 1. UNITS. simSettings.meanReturn is the arithmetic mean of the yearly draws.
+  //    Account cagr is a geometric mean — what the money compounds at. For a
+  //    lognormal-ish process geometric ≈ arithmetic − σ²/2, so 7% mean with 15%
+  //    volatility compounds at ~5.9%. Both fields default to 7% and read as the
+  //    same quantity, so the simulation ran a materially poorer plan than the
+  //    plan, and the median came in low for a reason that had nothing to do with
+  //    market risk. Measured on a synthetic 45-year plan: median $23.2M against
+  //    a deterministic $28.1M, and the gap closes when the means are reconciled.
+  //
+  // 2. BASIS. The percentiles default to today's dollars — correct, because each
+  //    sim draws its own inflation path and pooling nominal results mixes
+  //    currencies. But every other figure in the app is nominal, so comparing
+  //    them makes even the 95th percentile look worse than the straight-line
+  //    run. deterministicEnd is the plan's own ending portfolio put on WHICHEVER
+  //    basis is currently on screen, so the comparison is like for like.
+  const impliedCagr = simSettings.meanReturn - (simSettings.stdDev * simSettings.stdDev) / 2;
+  // Balance-weighted, because a 4% brokerage next to a 7% 401(k) is not a 5.5%
+  // plan — it is a 7% plan with a rounding error attached.
+  const planCagr = (() => {
+    let bal = 0, weighted = 0;
+    (accounts || []).forEach(a => {
+      const b = Math.max(0, a.balance || 0);
+      bal += b; weighted += b * (a.cagr || 0);
+    });
+    return bal > 0 ? weighted / bal : null;
+  })();
+  const deterministicEnd = (() => {
+    const last = projections.find(p => p.myAge === endAge) || projections[projections.length - 1];
+    if (!last) return null;
+    const nominal = last.totalPortfolio || 0;
+    if (!(showRealDollars && simResults && simResults.real)) return nominal;
+    // Deflate by the PLAN's own inflation assumption over the same span the
+    // simulations cover, which is what the sims' own deflators average to.
+    const years = Math.max(0, (last.myAge || 0) - (personalInfo.myAge || 0));
+    return nominal / Math.pow(1 + (personalInfo.inflationRate || 0.03), years);
+  })();
   
   const [simProgress, setSimProgress] = useState(0);
   
@@ -6662,6 +6720,30 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
               onChange={e => setSimSettings({...simSettings, meanReturn: Number(e.target.value) / 100})}
               className="w-full bg-slate-800 border border-slate-600 rounded px-3 py-2 text-slate-100"
             />
+            {/* The single most misleading number on this tab, until now. This
+                field is an ARITHMETIC mean — the average of the yearly draws.
+                Your accounts are set with a CAGR, which is a GEOMETRIC mean —
+                what the money actually compounds at. Volatility drives a wedge
+                between them of roughly sigma-squared over two, so 7% here with
+                15% volatility compounds at about 5.9%, and the simulation was
+                quietly modelling a lower-growth plan than the plan itself. */}
+            <div className="text-[11px] text-slate-500 mt-1 leading-snug">
+              compounds at ≈<span className="text-amber-400 font-semibold">{(impliedCagr * 100).toFixed(1)}%</span>/yr
+              {planCagr !== null && (
+                <> · your accounts say <span className="text-slate-300">{(planCagr * 100).toFixed(1)}%</span></>
+              )}
+            </div>
+            {planCagr !== null && Math.abs(impliedCagr - planCagr) > 0.002 && (
+              <button
+                onClick={() => setSimSettings(prev => ({
+                  ...prev, meanReturn: Math.round((planCagr + (prev.stdDev * prev.stdDev) / 2) * 10000) / 10000,
+                }))}
+                className="mt-1 text-[11px] text-amber-400 hover:text-amber-300 underline decoration-dotted"
+                title="Set the arithmetic mean so the simulation compounds at the same rate your accounts do"
+              >
+                match my plan ({(planCagr * 100).toFixed(1)}%)
+              </button>
+            )}
           </div>
           <div>
             <label className="block text-sm text-slate-400 mb-1">Volatility/Std Dev (%)</label>
@@ -6862,7 +6944,25 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
               <div className="text-2xl font-bold text-amber-400">
                 {formatCurrency(showRealDollars && simResults.real ? simResults.real.percentile50 : simResults.percentile50)}
               </div>
-              <div className="text-sm text-slate-500">at age {endAge}</div>
+              <div className="text-sm text-slate-500">
+                at age {endAge}{showRealDollars && simResults.real ? " · today's dollars" : ' · future dollars'}
+              </div>
+              {/* The comparison every reader makes anyway, made for them on a
+                  basis that holds. Reading this median against the dashboard's
+                  ending portfolio compares today's dollars with future ones —
+                  over thirty years at 3% that is a 2.4x gap and nothing to do
+                  with market risk. */}
+              {deterministicEnd !== null && (
+                <div className="mt-2 pt-2 border-t border-slate-700/50 text-xs">
+                  <div className="text-slate-500">your plan, same basis</div>
+                  <div className="text-slate-300 font-semibold">{formatCurrency(deterministicEnd)}</div>
+                  <div className="text-slate-500">
+                    median is {deterministicEnd > 0
+                      ? `${(((showRealDollars && simResults.real ? simResults.real.percentile50 : simResults.percentile50) / deterministicEnd - 1) * 100).toFixed(0)}%`
+                      : '—'} vs the straight-line run
+                  </div>
+                </div>
+              )}
             </div>
             <div className={cardStyle}>
               <div className="text-slate-400 text-sm mb-1">Avg Failure Age</div>
@@ -10728,8 +10828,30 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
                   className={compactInputStyle}
                 />
               </div>
+              {/* This rate already existed on the plan and already drove the Roth
+                  optimizer's ranking — it was just only editable from inside that
+                  one panel, so a plan-wide assumption looked like a setting that
+                  belonged to a single tool. It is now here, where the rest of the
+                  plan-wide assumptions live, and every after-tax legacy figure in
+                  the app reads this one number. */}
+              <div>
+                <label className={compactLabelStyle}>Heirs' tax rate (%)</label>
+                <PercentCell
+                  value={localInfo.heirTaxRate ?? 0.25}
+                  onValueChange={v => handleChange('heirTaxRate', Math.min(0.6, Math.max(0, v || 0)))}
+                  className={compactInputStyle}
+                />
+              </div>
             </div>
             <p className="text-xs text-slate-500 mt-2">Retirement age determines when portfolio withdrawals begin. Birth year determines RMD start age per SECURE 2.0 Act. Planning/Legacy Age sets the end of all projections (default 95).</p>
+            <p className="text-xs text-slate-500 mt-1">
+              <strong>Heirs' tax rate</strong> is the ordinary rate whoever inherits your pre-tax accounts is
+              assumed to pay. Under the SECURE Act a non-spouse beneficiary has ten years to drain an
+              inherited traditional IRA, at their own rates — so a pre-tax dollar is not worth a Roth dollar
+              to them. Every "after-tax legacy" figure in the app discounts pre-tax balances by this rate;
+              Roth and brokerage pass at face value (brokerage basis steps up at death). It does not change
+              any tax you pay while alive.
+            </p>
             <p className="text-xs text-slate-500 mt-1">
               The retirement <strong>month</strong> is the month the paycheck stops. Choose July and the
               retirement year carries six months of salary — with the FICA and 401(k) deferrals that come with
@@ -11998,6 +12120,15 @@ function RetirementAgeExplorer({ personalInfo, projections, setPersonalInfo, set
       // five extra years of payroll and income tax that working longer costs,
       // which is exactly the trade-off the slider exists to show.
       lifetimeTax: proj.reduce((sum, p) => sum + (p.totalTax || 0), 0),
+      // The estate net of what the heirs owe on inherited pre-tax dollars. This
+      // is the figure that can move the OPPOSITE way to the ending portfolio:
+      // retiring earlier opens a longer conversion window, which spends the
+      // portfolio down and still leaves more behind because the dollars left are
+      // Roth dollars. Same engine rule as the dashboard tile.
+      afterTaxLegacy: (afterTaxLegacyValue(proj, {
+        legacyAge: personalInfo.legacyAge || 95,
+        heirTaxRate: personalInfo.heirTaxRate ?? 0.25,
+      }) || {}).afterTax || 0,
       fails: !!short.fails,
       depletedYear: short.depletedYear || null,
     };
@@ -12069,10 +12200,12 @@ function RetirementAgeExplorer({ personalInfo, projections, setPersonalInfo, set
       )}
 
       {now && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
           {[
             ['Portfolio at retirement', now.atRetirement, then && then.atRetirement, true],
             ['Ending portfolio', now.ending, then && then.ending, true],
+            [`After-tax legacy (heirs at ${Math.round((personalInfo.heirTaxRate ?? 0.25) * 100)}%)`,
+             now.afterTaxLegacy, then && then.afterTaxLegacy, true],
             ['Lifetime tax, all years', now.lifetimeTax, then && then.lifetimeTax, false],
           ].map(([label, a, b, goodWhenUp]) => (
             <div key={label} className="bg-slate-900/60 border border-slate-700/50 rounded-lg px-3 py-2">
@@ -13011,11 +13144,11 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
                   <tr className="border-b border-slate-700">
                     <th className="text-left py-2 px-2 text-slate-400 font-medium">Year</th>
                     <th className="text-center py-2 px-2 text-slate-400 font-medium">Age</th>
-                    <th className="text-right py-2 px-2 text-emerald-400 font-medium">Pre-Tax</th>
-                    <th className="text-right py-2 px-2 text-purple-400 font-medium">Roth</th>
-                    <th className="text-right py-2 px-2 text-sky-400 font-medium">Brokerage</th>
+                    <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.preTax }}>Pre-Tax</th>
+                    <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.roth }}>Roth</th>
+                    <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.brokerage }}>Brokerage</th>
                     <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
-                    <th className="text-right py-2 px-2 text-red-400 font-medium">RMD</th>
+                    <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.rmd }}>RMD</th>
                     <th className="text-right py-2 px-2 text-orange-400 font-medium">Withdrawal</th>
                     <th className="text-right py-2 px-2 text-cyan-400 font-medium">Excess → Brok</th>
                   </tr>
@@ -13031,11 +13164,12 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
                       >
                         <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
                         <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
-                        <td className="py-1.5 px-2 text-right text-emerald-400 font-mono">{formatCurrency(p.preTaxBalance)}</td>
-                        <td className="py-1.5 px-2 text-right text-purple-400 font-mono">{formatCurrency(p.rothBalance)}</td>
-                        <td className="py-1.5 px-2 text-right text-sky-400 font-mono">{formatCurrency(p.brokerageBalance)}</td>
+                        <td className="py-1.5 px-2 text-right font-mono" style={{ color: SERIES.preTax }}>{formatCurrency(p.preTaxBalance)}</td>
+                        <td className="py-1.5 px-2 text-right font-mono" style={{ color: SERIES.roth }}>{formatCurrency(p.rothBalance)}</td>
+                        <td className="py-1.5 px-2 text-right font-mono" style={{ color: SERIES.brokerage }}>{formatCurrency(p.brokerageBalance)}</td>
                         <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">{formatCurrency(p.totalPortfolio)}</td>
-                        <td className={`py-1.5 px-2 text-right font-mono ${hasRMD ? 'text-red-400' : 'text-slate-500'}`}>
+                        <td className="py-1.5 px-2 text-right font-mono"
+                            style={{ color: hasRMD ? SERIES.rmd : THEME.inkMuted }}>
                           {hasRMD ? formatCurrency(p.rmd) : '—'}
                         </td>
                         <td className={`py-1.5 px-2 text-right font-mono ${p.portfolioWithdrawal > 0 ? 'text-orange-400' : 'text-slate-500'}`}>
@@ -13052,19 +13186,19 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
             </div>
             <div className="mt-4 flex flex-wrap gap-4 text-xs">
               <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded bg-emerald-400"></div>
+                <div className="w-3 h-3 rounded" style={{ background: SERIES.preTax }}></div>
                 <span className="text-slate-400">Pre-Tax (401k, Trad IRA, 457b)</span>
               </div>
               <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded bg-purple-400"></div>
+                <div className="w-3 h-3 rounded" style={{ background: SERIES.roth }}></div>
                 <span className="text-slate-400">Roth Accounts</span>
               </div>
               <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded bg-sky-400"></div>
+                <div className="w-3 h-3 rounded" style={{ background: SERIES.brokerage }}></div>
                 <span className="text-slate-400">Brokerage</span>
               </div>
               <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded bg-red-400"></div>
+                <div className="w-3 h-3 rounded" style={{ background: SERIES.rmd }}></div>
                 <span className="text-slate-400">Required Minimum Distribution</span>
               </div>
               <div className="flex items-center gap-2">
@@ -13234,9 +13368,9 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
                       <tr className="border-b border-slate-700">
                         <th className="text-left py-2 px-2 text-slate-400 font-medium">Year</th>
                         <th className="text-center py-2 px-2 text-slate-400 font-medium">Age</th>
-                        <th className="text-right py-2 px-2 text-emerald-400 font-medium">Pre-Tax</th>
-                        <th className="text-right py-2 px-2 text-purple-400 font-medium">Roth</th>
-                        <th className="text-right py-2 px-2 text-sky-400 font-medium">Brokerage/HSA</th>
+                        <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.preTax }}>Pre-Tax</th>
+                        <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.roth }}>Roth</th>
+                        <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.brokerage }}>Brokerage/HSA</th>
                         <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
                         <th className="text-right py-2 px-2 text-amber-400 font-medium">Gross %</th>
                         <th className="text-right py-2 px-2 text-emerald-400 font-medium">Net %</th>
@@ -13265,13 +13399,16 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
                           <tr key={p.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${total === 0 ? 'opacity-40' : ''}`}>
                             <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
                             <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
-                            <td className={`py-1.5 px-2 text-right font-mono ${preTaxC > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
+                            <td className="py-1.5 px-2 text-right font-mono"
+                                style={{ color: preTaxC > 0 ? SERIES.preTax : THEME.inkMuted }}>
                               {preTaxC > 0 ? formatCurrency(preTaxC) : '—'}
                             </td>
-                            <td className={`py-1.5 px-2 text-right font-mono ${rothC > 0 ? 'text-purple-400' : 'text-slate-500'}`}>
+                            <td className="py-1.5 px-2 text-right font-mono"
+                                style={{ color: rothC > 0 ? SERIES.roth : THEME.inkMuted }}>
                               {rothC > 0 ? formatCurrency(rothC) : '—'}
                             </td>
-                            <td className={`py-1.5 px-2 text-right font-mono ${brokerageC > 0 ? 'text-sky-400' : 'text-slate-500'}`}>
+                            <td className="py-1.5 px-2 text-right font-mono"
+                                style={{ color: brokerageC > 0 ? SERIES.brokerage : THEME.inkMuted }}>
                               {brokerageC > 0 ? formatCurrency(brokerageC) : '—'}
                             </td>
                             <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">
@@ -14671,6 +14808,12 @@ function SummaryCardsPanel({ ctx, badge, onHide }) {
   // The Dashboard passes its section toggle; the Sandbox passes one that unticks
   // the panel in its own picker. Either way Hide means the same thing.
   const toggleVisibility = () => { if (onHide) onHide(); };
+  // One rule, in the engine: the estate value and what it is worth after the
+  // heirs' tax on inherited pre-tax dollars.
+  const legacy = afterTaxLegacyValue(projections, {
+    legacyAge: personalInfo.legacyAge || 95,
+    heirTaxRate: personalInfo.heirTaxRate ?? 0.25,
+  });
 return (
       <div>
         <div className="flex items-center gap-2 mb-2">
@@ -14741,8 +14884,21 @@ return (
         </div>
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           <div className="text-slate-500 text-xs mb-0.5">Legacy at {personalInfo.legacyAge || 95}</div>
-          <div className="text-xl font-bold text-slate-100">{formatCurrency(projections.find(p => p.myAge === (personalInfo.legacyAge || 95))?.totalNetWorth)}</div>
+          <div className="text-xl font-bold text-slate-100">{formatCurrency(legacy?.estate)}</div>
           <div className="text-xs text-slate-500">Total estate value</div>
+          {/* The headline counts a pre-tax dollar and a Roth dollar as the same
+              dollar. They are not, and the gap between these two lines is the
+              whole argument for converting: an earlier retirement that opens a
+              conversion window can lower the top number and raise this one. */}
+          {legacy && (
+            <div className="mt-1.5 pt-1.5 border-t border-slate-700/50">
+              <div className="text-base font-bold" style={{ color: SERIES.roth }}>{formatCurrency(legacy.afterTax)}</div>
+              <div className="text-xs text-slate-500">
+                after tax · heirs at {Math.round(legacy.heirTaxRate * 100)}%
+                {legacy.taxOnPreTax > 0 && <> · −{formatCurrency(legacy.taxOnPreTax)}</>}
+              </div>
+            </div>
+          )}
         </div>
         {isPreRetirement && dashSavingsRate !== null && (
           <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
@@ -15986,10 +16142,10 @@ function ConversionOpportunityPanel({ ctx }) {
                 <th className="text-left py-2 px-2 text-slate-400">Age</th>
                 <th className="text-left py-2 px-2 text-slate-400">Year</th>
                 <th className="text-right py-2 px-2 text-slate-400">Gross Income</th>
-                <th className="text-right py-2 px-2 text-orange-400">RMD</th>
+                <th className="text-right py-2 px-2" style={{ color: SERIES.rmd }}>RMD</th>
                 <th className="text-right py-2 px-2 text-slate-400">Std Deduction</th>
                 <th className="text-right py-2 px-2 text-slate-400">Taxable Income</th>
-                <th className="text-right py-2 px-2 text-purple-400">Planned Conv.</th>
+                <th className="text-right py-2 px-2" style={{ color: SERIES.rothConversion }}>Planned Conv.</th>
                 <th className="text-center py-2 px-2 text-slate-400">Bracket</th>
                 <th className="text-right py-2 px-2 text-slate-400">Room to 22%</th>
                 <th className="text-right py-2 px-2 text-slate-400">Room to 24%</th>
@@ -16005,10 +16161,10 @@ function ConversionOpportunityPanel({ ctx }) {
                   <td className="py-2 px-2 text-slate-100 font-medium">{row.myAge}</td>
                   <td className="py-2 px-2 text-slate-300">{row.year}</td>
                   <td className="py-2 px-2 text-right text-slate-300">{formatCurrency(row.grossIncome)}</td>
-                  <td className="py-2 px-2 text-right text-orange-400">{row.rmd > 0 ? formatCurrency(row.rmd) : '—'}</td>
+                  <td className="py-2 px-2 text-right" style={{ color: SERIES.rmd }}>{row.rmd > 0 ? formatCurrency(row.rmd) : '—'}</td>
                   <td className="py-2 px-2 text-right text-slate-500">{formatCurrency(row.standardDeduction)}</td>
                   <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.taxableIncome)}</td>
-                  <td className="py-2 px-2 text-right text-purple-400 font-medium">
+                  <td className="py-2 px-2 text-right font-medium" style={{ color: SERIES.rothConversion }}>
                     {row.plannedConversion > 0 ? formatCurrency(row.plannedConversion) : '—'}
                   </td>
                   <td className="py-2 px-2 text-center">
@@ -20294,6 +20450,13 @@ function RetirementPlanner() {
     applyThemeMode(next);
     setThemeMode(next);
   };
+  const [contentWidth, setContentWidth] = useState(initialContentWidth);
+  const cycleContentWidth = () => {
+    const i = CONTENT_WIDTHS.findIndex(w => w.id === contentWidth);
+    const next = CONTENT_WIDTHS[(i + 1) % CONTENT_WIDTHS.length].id;
+    setContentWidth(next);
+    try { localStorage.setItem(WIDTH_STORAGE_KEY, next); } catch (e) { /* storage off — the choice still holds for this session */ }
+  };
   const [currentYear] = useState(new Date().getFullYear());
   const [saveStatus, setSaveStatus] = useState('');
   const [showImportExport, setShowImportExport] = useState(false);
@@ -20917,6 +21080,14 @@ function RetirementPlanner() {
             <span>{themeMode === 'dark' ? '☀️' : '🌙'}</span>
             {!sidebarCollapsed && <span>{themeMode === 'dark' ? 'Light mode' : 'Dark mode'}</span>}
           </button>
+          <button
+            onClick={cycleContentWidth}
+            className="mt-1 w-full flex items-center justify-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 py-1.5 rounded hover:bg-slate-700/50 transition-colors"
+            title={`Content width: ${(CONTENT_WIDTHS.find(w => w.id === contentWidth) || CONTENT_WIDTHS[0]).label} — ${(CONTENT_WIDTHS.find(w => w.id === contentWidth) || CONTENT_WIDTHS[0]).note}. Click to change.`}
+          >
+            <span>↔</span>
+            {!sidebarCollapsed && <span>{(CONTENT_WIDTHS.find(w => w.id === contentWidth) || CONTENT_WIDTHS[0]).label}</span>}
+          </button>
         </div>
         
         {/* Navigation */}
@@ -20999,7 +21170,7 @@ function RetirementPlanner() {
             scrolled away. Removing a property that did nothing is what makes
             sticky work. */}
         <main className="flex-1 p-6">
-          <div className="max-w-7xl mx-auto">
+          <div className="mx-auto w-full" style={{ maxWidth: contentWidthPx(contentWidth) }}>
             {activeTab === 'dashboard' && <DashboardTab setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
             {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
             {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
