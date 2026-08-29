@@ -1162,6 +1162,44 @@ const HideableBlock = ({ tab, id, level, vis, setVis, children }) => {
   );
 };
 
+// Reports print on white with inline styles, so they get their own banner rather
+// than the app-themed ones — and unlike the tabs, a report ALWAYS states its
+// basis, in both directions. A tab has a toggle on screen saying which yardstick
+// is in force; a printed page handed to a spouse or an advisor has nothing, and
+// "$9.1M at 95" means two very different things depending on an answer the page
+// does not otherwise give.
+const ReportBasisLine = ({ pi, follows }) => {
+  const real = pi.displayBasis === 'real';
+  const shown = follows ? real : false;
+  return (
+    <p style={{ fontSize: 12, color: shown || !follows ? '#475569' : '#475569',
+                margin: '6px 0 0', fontStyle: 'italic' }}>
+      {shown
+        ? `All amounts in TODAY'S dollars — this plan restated at ${(((pi.inflationRate ?? 0.03) * 100)).toFixed(1)}% inflation.`
+        : `All amounts in FUTURE dollars — the actual dollar figures in each year, inflation included.`}
+      {!follows && real
+        ? " This report always uses future dollars, because every figure on it is measured against a tax threshold the IRS indexes in those same dollars."
+        : ''}
+    </p>
+  );
+};
+
+// The counterpart to BasisNote, for surfaces that DO follow the setting. It
+// prints only in the real basis: "future dollars" is the engine's own output and
+// what every planning tool means by default, so labelling it everywhere would be
+// noise. "Today's dollars" is the unusual reading and has to announce itself —
+// especially on a report, which is a document someone may read away from the app
+// with no toggle in sight to tell them which yardstick they are holding.
+const BasisLabel = ({ pi, className = '' }) => {
+  if (pi.displayBasis !== 'real') return null;
+  return (
+    <div className={`text-xs text-slate-500 ${className}`}>
+      All amounts in <strong className="text-slate-400">today's dollars</strong> — the same plan restated at{' '}
+      {(((pi.inflationRate ?? 0.03) * 100)).toFixed(1)}% inflation, not future dollar counts.
+    </div>
+  );
+};
+
 // A tab that cannot follow the global basis has to say so, in the place the
 // figures are. Silently opting out is how a reader ends up comparing today's
 // dollars on one tab with future dollars on the next and concluding the tool is
@@ -1366,7 +1404,7 @@ On judgment: this is the user's money and their decision. Make the routine calls
 
 Do not give tax or investment advice as though you were their advisor, and do not claim certainty the projection does not have. The numbers in the plan came from the user; the projected consequences come from the app's engine, not from you — never state a projected outcome you have not been given.`;
 
-function AiAssistantTab({ plan, projections, onApply }) {
+function AiAssistantTab({ computeProjections, plan, projections, onApply }) {
   const [apiKey, setApiKey] = useState(loadAiKey);
   const [keyDraft, setKeyDraft] = useState('');
   const [messages, setMessages] = useState([]);      // API-shaped conversation
@@ -2445,6 +2483,7 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
   
   return (
     <div className="space-y-6">
+      <BasisLabel pi={personalInfo} />
       <div className="flex justify-between items-center">
         <h3 className="text-xl font-semibold text-slate-100">Income Streams</h3>
         <div className="flex items-center gap-2">
@@ -6612,6 +6651,10 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
         <p className="text-slate-400 text-sm">Stress-test your retirement plan against thousands of randomized market scenarios based on historical volatility patterns.</p>
       </div>
 
+      <BasisNote pi={personalInfo} reason={
+        'This tab has its own switch, just below, because each simulation draws its OWN inflation path — ' +
+        'deflating these percentiles by the plan\u2019s single assumption would be less accurate, not more. ' +
+        'It starts where you set the app.'} />
       <SectionControls tab="montecarlo" vis={sectionVisibility} setVis={setSectionVisibility} level={detailLevel} setLevel={setDetailLevel} />
       
       {/* Method Selector */}
@@ -7411,6 +7454,7 @@ function ScenarioComparisonTab({ activeScenarioId, assets, computeProjections, c
   
   return (
     <div className="space-y-6">
+      <BasisLabel pi={personalInfo} />
       <div>
         <h3 className="text-xl font-semibold text-slate-100 mb-2">Scenario Comparison</h3>
         <p className="text-slate-400 text-sm">Create and compare multiple "what-if" scenarios.</p>
@@ -7534,7 +7578,7 @@ function ScenarioComparisonTab({ activeScenarioId, assets, computeProjections, c
 // ============================================
 // StressTestTab — Lifted to module scope
 // ============================================
-function StressTestTab({ accounts, assets, currentYear, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses }) {
+function StressTestTab({ accounts, assets, computeProjections, currentYear, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses }) {
   const retirementAge = personalInfo.myRetirementAge;
   const endAge = personalInfo.legacyAge || 95;
   const retirementProjection = projections.find(p => p.myAge === retirementAge);
@@ -7714,6 +7758,7 @@ function StressTestTab({ accounts, assets, currentYear, incomeStreams, oneTimeEv
   
   return (
     <div className="space-y-6">
+      <BasisLabel pi={personalInfo} />
       <div>
         <h3 className="text-xl font-semibold text-slate-100 mb-2">Sequence-of-Returns Stress Test</h3>
         <p className="text-slate-400 text-sm">
@@ -8354,6 +8399,7 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
   
   return (
     <div className="space-y-6">
+      <BasisLabel pi={personalInfo} />
       <div>
         <h3 className="text-xl font-semibold text-slate-100 mb-2">Withdrawal Strategy Comparison</h3>
         <p className="text-slate-400 text-sm">
@@ -8976,6 +9022,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, currentYearRe
 
   return (
     <div className="space-y-6">
+      <BasisLabel pi={personalInfo} />
       <div>
         <h3 className="text-xl font-semibold text-slate-100 mb-2">Social Security Claiming Strategy Optimizer</h3>
         <p className="text-slate-400 text-sm">Compare benefits at different claiming ages and find your optimal strategy based on life expectancy.</p>
@@ -10112,6 +10159,7 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
   
   return (
     <div className="space-y-6">
+      <BasisLabel pi={personalInfo} />
       <div>
         <h3 className="text-xl font-semibold text-slate-100 mb-2">Sensitivity Analysis</h3>
         <p className="text-slate-400 text-sm">
@@ -12359,8 +12407,8 @@ function RetirementAgeExplorer({ personalInfo, projections, setPersonalInfo, set
   );
 }
 
-function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, personalInfo,
-                              projections, recurringExpenses, currentEarnedIncome,
+function SavingsRateExplorer({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents,
+                              personalInfo, projections, recurringExpenses, currentEarnedIncome,
                               myContributions, savingsRate, badge, onHide }) {
   const [target, setTarget] = useState(null);   // null = follow the plan's own rate
   const [infoOpen, setInfoOpen] = useState(false);
@@ -12719,7 +12767,7 @@ function SavingsRateExplorer({ accounts, assets, incomeStreams, oneTimeEvents, p
 // ============================================
 // AccountsTab — Lifted to module scope
 // ============================================
-function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setAccounts, setEditingAccount, setShowAccountModal }) {
+function AccountsTab({ accountTypes, accounts, assets, computeProjections, contributorTypes, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setAccounts, setEditingAccount, setShowAccountModal }) {
   const [acctInfoOpen, setAcctInfoOpen] = useState(null);
   const [showIndividualAccounts, setShowIndividualAccounts] = useState(false);
   const [showIndividualContribs, setShowIndividualContribs] = useState(false);
@@ -12789,6 +12837,7 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
   
   return (
     <div className="space-y-6">
+      <BasisLabel pi={personalInfo} />
       {limitBreaches.length > 0 && (
         <div className="p-4 bg-red-500/5 border border-red-500/40 rounded-xl space-y-2">
           <div className="text-sm font-semibold text-red-300">
@@ -13069,6 +13118,7 @@ function AccountsTab({ accountTypes, accounts, assets, contributorTypes, incomeS
       <SavingsRateExplorer
         accounts={localAccounts}
         assets={assets}
+        computeProjections={computeProjections}
         incomeStreams={incomeStreams}
         oneTimeEvents={oneTimeEvents}
         personalInfo={personalInfo}
@@ -14213,8 +14263,8 @@ const SandboxSwitch = ({ label, on, onChange, planLabel, note, disabled }) => (
   </div>
 );
 
-function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalInfo,
-                      projections, recurringExpenses, sandboxConfig, setSandboxConfig }) {
+function SandboxTab({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents,
+                      personalInfo, projections, recurringExpenses, sandboxConfig, setSandboxConfig }) {
   const R = window.Recharts || {};
   const { ComposedChart, LineChart, BarChart, Line, Bar, Area, XAxis, YAxis,
           CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } = R;
@@ -14377,6 +14427,7 @@ function SandboxTab({ accounts, assets, incomeStreams, oneTimeEvents, personalIn
 
   return (
     <div className="space-y-6">
+      <BasisLabel pi={personalInfo} />
       <div>
         <h3 className="text-xl font-semibold text-slate-100 mb-2">Sandbox</h3>
         <p className="text-slate-400 text-sm">
@@ -15785,7 +15836,8 @@ const PANEL_REGISTRY = [
   // when there is no earned income to take a percentage of.
   { id: 'savingsRate',      label: 'What if you saved more?',
     render: (ctx, badge, onHide) => <SavingsRateExplorer accounts={ctx.accounts}
-      assets={ctx.assets} incomeStreams={ctx.incomeStreams} oneTimeEvents={ctx.oneTimeEvents}
+      assets={ctx.assets} computeProjections={ctx.computeProjections}
+      incomeStreams={ctx.incomeStreams} oneTimeEvents={ctx.oneTimeEvents}
       personalInfo={ctx.personalInfo} projections={ctx.projections}
       recurringExpenses={ctx.recurringExpenses}
       currentEarnedIncome={ctx.current?.earnedIncome || 0}
@@ -17563,6 +17615,7 @@ function NextYearReport({ projections, personalInfo, accounts, incomeStreams, on
           <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>
             Retirement action plan for {currentYear} &nbsp;·&nbsp; Prepared {preparedOn}
           </p>
+          <ReportBasisLine pi={pi} follows={true} />
         </div>
 
         {actions.length === 0 ? (
@@ -17685,6 +17738,7 @@ function PlanSummaryReport({ projections, personalInfo, accounts, incomeStreams,
         <div style={{ borderBottom: '2px solid #0f172a', paddingBottom: 12, marginBottom: 16 }}>
           <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0 }}>Retirement Plan Summary</h1>
           <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>Prepared {preparedOn}</p>
+          <ReportBasisLine pi={pi} follows={true} />
         </div>
 
         <h2 style={h2}>Plan Profile</h2>
@@ -17905,6 +17959,7 @@ function SurvivorTaxReport({ projections, personalInfo, incomeStreams, onClose }
           <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>
             What filing single costs the spouse left behind &nbsp;·&nbsp; Prepared {preparedOn}
           </p>
+          <ReportBasisLine pi={pi} follows={false} />
         </div>
 
         {rows.length === 0 ? (
@@ -18175,7 +18230,7 @@ const CONVERSION_LIMIT_COPY = {
   none:     { label: 'No strategy',         tone: 'muted',   detail: 'No Roth conversion strategy is configured.' },
 };
 
-function RothRoadmapReport({ projections, personalInfo, accounts, incomeStreams, assets,
+function RothRoadmapReport({ computeProjections, projections, personalInfo, accounts, incomeStreams, assets,
                              oneTimeEvents, recurringExpenses, onClose }) {
   const pi = personalInfo;
   const preparedOn = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
@@ -18383,6 +18438,7 @@ function RothRoadmapReport({ projections, personalInfo, accounts, incomeStreams,
           <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>
             Year by year, what to convert and what stops it &nbsp;·&nbsp; Prepared {preparedOn}
           </p>
+          <ReportBasisLine pi={pi} follows={false} />
         </div>
 
         {!planned ? (
@@ -19021,6 +19077,7 @@ function BreakingPointReport({ projections, personalInfo, accounts, incomeStream
           <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>
             Where this plan gives way, and how much room is left &nbsp;·&nbsp; Prepared {preparedOn}
           </p>
+          <ReportBasisLine pi={pi} follows={true} />
         </div>
 
         <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.6, margin: '0 0 4px' }}>
@@ -20945,9 +21002,6 @@ function RetirementPlanner() {
     };
   }, [realBasis, personalInfo.inflationRate, currentYear]);
 
-  const setDisplayBasis = (basis) =>
-    setPersonalInfo(prev => ({ ...prev, displayBasis: basis === 'real' ? 'real' : 'nominal' }));
-
   // Input validation helper
   const validateAccount = (account) => {
     if (!account.name?.trim()) return 'Account name is required';
@@ -21331,19 +21385,19 @@ function RetirementPlanner() {
           <div className="mx-auto w-full" style={{ maxWidth: contentWidthCss(contentWidth) }}>
             {activeTab === 'dashboard' && <DashboardTab setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
             {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
-            {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
+            {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
             {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={displayProjections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
-            {activeTab === 'socialsecurity' && <SocialSecurityTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
-            {activeTab === 'sandbox' && <SandboxTab accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
-            {activeTab === 'scenarios' && <ScenarioComparisonTab activeScenarioId={activeScenarioId} assets={assets} computeProjections={computeProjections} createScenario={createScenario} deleteScenario={deleteScenario} loadScenario={loadScenario} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} scenarios={scenarios} />}
+            {activeTab === 'socialsecurity' && <SocialSecurityTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
+            {activeTab === 'sandbox' && <SandboxTab accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
+            {activeTab === 'scenarios' && <ScenarioComparisonTab activeScenarioId={activeScenarioId} assets={assets} computeProjections={displayComputeProjections} createScenario={createScenario} deleteScenario={deleteScenario} loadScenario={loadScenario} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} scenarios={scenarios} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'currentyear' && <CurrentYearTab currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'withdrawal' && <WithdrawalStrategiesTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={displayProjections} />}
             {activeTab === 'montecarlo' && <MonteCarloTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
-            {activeTab === 'stresstest' && <StressTestTab accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
-            {activeTab === 'sensitivity' && <SensitivityTab accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
-            {activeTab === 'assistant' && <AiAssistantTab onApply={applyAiPlan} plan={livePlan} projections={projections} />}
+            {activeTab === 'stresstest' && <StressTestTab accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} computeProjections={displayComputeProjections} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'sensitivity' && <SensitivityTab accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'assistant' && <AiAssistantTab computeProjections={displayComputeProjections} onApply={applyAiPlan} plan={livePlan} projections={displayProjections} />}
             {activeTab === 'faq' && <FAQTab />}
           </div>
         </main>
@@ -21442,7 +21496,7 @@ function RetirementPlanner() {
       )}
       {showReport === 'next12' && (
         <NextYearReport
-          projections={projections}
+          projections={displayProjections}
           personalInfo={personalInfo}
           accounts={accounts}
           incomeStreams={incomeStreams}
@@ -21451,7 +21505,7 @@ function RetirementPlanner() {
       )}
       {showReport === 'breaks' && (
         <BreakingPointReport
-          projections={projections}
+          projections={displayProjections}
           personalInfo={personalInfo}
           accounts={accounts}
           incomeStreams={incomeStreams}
@@ -21463,6 +21517,7 @@ function RetirementPlanner() {
       )}
       {showReport === 'roadmap' && (
         <RothRoadmapReport
+          computeProjections={computeProjections}
           projections={projections}
           personalInfo={personalInfo}
           accounts={accounts}
@@ -21483,7 +21538,7 @@ function RetirementPlanner() {
       )}
       {showReport === 'summary' && (
         <PlanSummaryReport
-          projections={projections}
+          projections={displayProjections}
           personalInfo={personalInfo}
           accounts={accounts}
           incomeStreams={incomeStreams}

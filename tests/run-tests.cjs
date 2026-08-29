@@ -11759,6 +11759,161 @@ section('P97 — today’s dollars is a display transform, and only money moves'
   }
 }
 
+section('P98 — no surface shows money in a basis it never declared');
+
+{
+  // v2.9.0 shipped the today's-dollars setting and wired six tabs to it. It did
+  // not wire Social Security, Sensitivity, Scenarios, Stress Test or any of the
+  // five reports — 59+ money figures quoting a basis the reader did not choose,
+  // with nothing on the page saying so. That is the exact confusion the setting
+  // was built to remove, reintroduced in a smaller shape, and no test noticed.
+  //
+  // Worse, two components reached past their prop to the module-level
+  // computeProjections, so the wrapper that applies the basis never reached
+  // them: the savings-rate explorer plotted a restated baseline against a
+  // nominal what-if ON THE SAME AXES, and the Sandbox changed basis the moment
+  // a control was touched.
+  //
+  // The rule, and the reason this is a source-text test: a cross-cutting display
+  // setting is not done when the author remembers every surface — it is done
+  // when forgetting one fails the build.
+  const fs7 = require('fs');
+  const path7 = require('path');
+  const src = fs7.readFileSync(path7.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+
+  // ── 1. Nobody but the shell may call the raw engine ──────────────────────
+  // Everyone else takes it as a prop, which is what lets one wrapper put the
+  // whole app on one basis.
+  const lines = src.split('\n');
+  const fnStarts = [];
+  lines.forEach((line, i) => {
+    const m = line.match(/^function ([A-Za-z][A-Za-z0-9]*)\(/);
+    if (m) fnStarts.push({ name: m[1], line: i });
+  });
+  // The PARAMETER LIST only — brace-matched from the opening `(`, not a fixed
+  // window of lines. A three-line window swept up the `const { … } = ctx`
+  // destructure on the line below and reported five panels as taking an engine
+  // prop they do not take.
+  const signatureOf = (f) => {
+    const start = src.indexOf('function ' + f.name + '(');
+    if (start < 0) return '';
+    let depth = 0;
+    for (let i = start; i < src.length; i++) {
+      const ch = src[i];
+      if (ch === '(') depth++;
+      else if (ch === ')') { depth--; if (depth === 0) return src.slice(start, i + 1); }
+    }
+    return '';
+  };
+  const takesEngine = (f) => /[({,]\s*computeProjections\s*[,}]/.test(signatureOf(f));
+  const offenders = [];
+  fnStarts.forEach((f, k) => {
+    const end = k + 1 < fnStarts.length ? fnStarts[k + 1].line : lines.length;
+    const body = lines.slice(f.line, end).join('\n');
+    const calls = (body.match(/(?<![.\w])computeProjections\s*\(/g) || []).length;
+    if (calls > 0 && !takesEngine(f)) offenders.push(f.name);
+  });
+  // RetirementPlanner IS the shell: it owns the raw engine and hands out the
+  // wrapped one. Everything else must take the prop.
+  const unexpected = offenders.filter(n => n !== 'RetirementPlanner');
+  eq(unexpected.length, 0,
+    'only the app shell calls the engine directly; every other component takes it as a prop'
+    + (unexpected.length ? ': ' + unexpected.join(', ') : ''));
+
+  // ── 1b. And every render of them actually passes it ─────────────────────
+  // Making the prop required is only half of it. Declaring `computeProjections`
+  // on SavingsRateExplorer without updating the one place AccountsTab renders it
+  // took the whole Accounts tab down with "Something went wrong" — a runtime
+  // failure the declaration check above cannot see, because the declaration was
+  // perfectly correct. Found in the browser, which is where this kind of thing
+  // always gets found; this is the cheaper way.
+  {
+    const NEEDS = fnStarts.filter(takesEngine).map(f => f.name);
+    gt(NEEDS.length, 5, 'several components take the engine as a prop');
+    const missing = [];
+    NEEDS.forEach(name => {
+      // every JSX element for this component, wherever it is rendered
+      const re = new RegExp('<' + name + '(\\s[^>]*?)?/?>', 'gs');
+      let m;
+      while ((m = re.exec(src)) !== null) {
+        const attrs = m[1] || '';
+        if (attrs.indexOf('computeProjections=') < 0) {
+          missing.push(name + ' at char ' + m.index);
+        }
+      }
+    });
+    eq(missing.length, 0,
+      'every render of a component that needs the engine is given one'
+      + (missing.length ? ': ' + missing.join(', ') : ''));
+  }
+
+  // ── 2. Every tab is routed, and routed deliberately ──────────────────────
+  // Each entry is a decision someone made on purpose: 'real' follows the
+  // setting, 'nominal' opts out and must carry a BasisNote saying why.
+  const EXPECTED = {
+    dashboard: 'real', accounts: 'real', income: 'real', socialsecurity: 'real',
+    sandbox: 'real', scenarios: 'real', withdrawal: 'real', stresstest: 'real',
+    sensitivity: 'real', assistant: 'real',
+    taxplanning: 'nominal', currentyear: 'nominal', montecarlo: 'nominal',
+  };
+  Object.entries(EXPECTED).forEach(([tab, want]) => {
+    const re = new RegExp("activeTab === '" + tab + "' && <[A-Za-z]+[^>]*", 'g');
+    const m = src.match(re);
+    ok(m && m.length, `the ${tab} tab is rendered where the test can see it`);
+    if (!m) return;
+    const el = m[0];
+    const usesDisplay = el.indexOf('projections={displayProjections}') >= 0
+                     || el.indexOf('computeProjections={displayComputeProjections}') >= 0;
+    const usesRaw = /(?<!display)[pP]rojections=\{projections\}/.test(el);
+    if (want === 'real') {
+      ok(usesDisplay && !usesRaw,
+        `${tab} follows the reader's chosen basis`);
+    } else {
+      ok(!usesDisplay, `${tab} deliberately keeps nominal figures`);
+    }
+  });
+
+  // ── 3. A tab that opts out must SAY it opts out ──────────────────────────
+  const OPT_OUT_COMPONENTS = {
+    TaxPlanningTab: 'taxplanning', CurrentYearTab: 'currentyear', MonteCarloTab: 'montecarlo',
+  };
+  Object.keys(OPT_OUT_COMPONENTS).forEach(fn => {
+    const k = fnStarts.findIndex(f => f.name === fn);
+    ok(k >= 0, `${fn} exists`);
+    if (k < 0) return;
+    const end = k + 1 < fnStarts.length ? fnStarts[k + 1].line : lines.length;
+    const body = lines.slice(fnStarts[k].line, end).join('\n');
+    ok(body.indexOf('<BasisNote') >= 0,
+      `${fn} keeps future dollars and tells the reader so, rather than opting out silently`);
+  });
+
+  // ── 4. Every report states its basis, in both directions ────────────────
+  // A tab has a toggle on screen. A printed page handed to a spouse has
+  // nothing, so it always says which yardstick it is using.
+  ['NextYearReport', 'PlanSummaryReport', 'SurvivorTaxReport',
+   'RothRoadmapReport', 'BreakingPointReport'].forEach(fn => {
+    const k = fnStarts.findIndex(f => f.name === fn);
+    ok(k >= 0, `${fn} exists`);
+    if (k < 0) return;
+    const end = k + 1 < fnStarts.length ? fnStarts[k + 1].line : lines.length;
+    const body = lines.slice(fnStarts[k].line, end).join('\n');
+    ok(body.indexOf('<ReportBasisLine') >= 0,
+      `${fn} prints which dollars it is quoting — it may be read with no app in front of the reader`);
+  });
+  // And the three that follow are actually handed the restated rows.
+  ['NextYearReport', 'PlanSummaryReport', 'BreakingPointReport'].forEach(fn => {
+    const at = src.indexOf('<' + fn + '\n');
+    gt(at, 0, `${fn} is rendered`);
+    const block = src.slice(at, at + 500);
+    ok(block.indexOf('projections={displayProjections}') > 0,
+      `${fn} is given the restated projection, matching the line it prints`);
+  });
+
+  // ── 5. The dead setter from v2.9.0 is gone ──────────────────────────────
+  eq((src.match(/const setDisplayBasis =/g) || []).length, 0,
+    'the unused basis setter added in v2.9.0 has been removed rather than left to rot');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
