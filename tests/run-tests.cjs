@@ -11914,6 +11914,134 @@ section('P98 — no surface shows money in a basis it never declared');
     'the unused basis setter added in v2.9.0 has been removed rather than left to rot');
 }
 
+section('P99 — survivor modelling on by default, and honest about what that moves');
+
+{
+  const fs9 = require('fs');
+  const path9 = require('path');
+  const src = fs9.readFileSync(path9.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+
+  // ── the default ──────────────────────────────────────────────────────────
+  const dStart = src.indexOf('const DEFAULT_PERSONAL_INFO = {');
+  gt(dStart, 0, 'the personal-info defaults are where the test expects them');
+  const dBlock = src.slice(dStart, src.indexOf('\n};', dStart));
+  ok(/survivorModelEnabled:\s*true/.test(dBlock),
+    'a new married plan models the first death rather than running two people to the planning age');
+
+  // ── it is inert for a single filer, which is why the migration skips them ──
+  {
+    const sc = baseScenario({ filingStatus: 'single' });
+    const off = computeProjections({ ...sc.pi, survivorModelEnabled: false }, sc.accts, sc.streams, [], [], []);
+    const on  = computeProjections({ ...sc.pi, survivorModelEnabled: true  }, sc.accts, sc.streams, [], [], []);
+    eq(on.length, off.length, 'a single filer’s horizon does not move');
+    const same = off.every((r, i) => Math.abs((r.totalTax || 0) - (on[i].totalTax || 0)) < 0.01);
+    ok(same, 'and neither does a single filer’s tax — the flag is gated on married_joint');
+  }
+
+  // ── what it actually does to a married plan, measured on ONE horizon ──────
+  // The first cut of this measurement compared 43 rows against 40 and reported
+  // a $1.5M tax saving that was mostly three missing years. Both spans are
+  // stated explicitly here so that cannot recur.
+  {
+    const pi = { myAge: 55, spouseAge: 53, myRetirementAge: 65, spouseRetirementAge: 65,
+      filingStatus: 'married_joint', state: 'CA', inflationRate: 0.03, desiredIncome: 120000,
+      legacyAge: 95, myLifeExpectancy: 88, spouseLifeExpectancy: 92,
+      mySSBenefit: 42000, spouseSSBenefit: 22000, mySSClaimAge: 67, spouseSSClaimAge: 67 };
+    const accts = [{ id: 1, name: '401k', type: '401k', balance: 1400000, contribution: 25000,
+      contributionGrowth: 0.03, cagr: 0.07, startAge: 55, stopAge: 65, owner: 'me', contributor: 'me' }];
+    const streams = [{ id: 1, type: 'earned_income', owner: 'me', amount: 200000,
+      startAge: 55, endAge: 64, growthRate: 0.03 }];
+    const run = (on) => computeProjections({ ...pi, survivorModelEnabled: on }, accts, streams, [], [], []);
+    const off = run(false), on = run(true);
+
+    // While BOTH are alive the two plans must be identical. If they are not, the
+    // flag is leaking into years it has no business touching.
+    const span = (p, a, b) => p.filter(r => r.myAge >= a && r.myAge <= b);
+    const taxIn = (p) => p.reduce((s, r) => s + (r.totalTax || 0), 0);
+    const bothAlive = [65, pi.myLifeExpectancy - 1];
+    eq(span(off, ...bothAlive).length, span(on, ...bothAlive).length,
+      'the same number of years while both spouses are alive');
+    approx(taxIn(span(on, ...bothAlive)), taxIn(span(off, ...bothAlive)),
+      'and identical tax in them — survivor modelling touches nothing before the first death', 1e-9);
+
+    // After the first death the survivor files single.
+    const after = span(on, pi.myLifeExpectancy + 1, pi.myLifeExpectancy + 3);
+    gt(after.length, 0, 'there are years after the first death to inspect');
+    eq(after[0].effectiveFilingStatus, 'single',
+      'the survivor files single — the widow’s-year trap the plan used to hide');
+    const afterOff = span(off, pi.myLifeExpectancy + 1, pi.myLifeExpectancy + 3);
+    ok(afterOff[0].effectiveFilingStatus !== 'single',
+      'with it off those same years were still filing jointly, years after a death');
+  }
+
+  // ── the horizon moves, in BOTH directions ────────────────────────────────
+  // This is why the change cannot be silent. It is not a refinement of the same
+  // plan; it can add or remove years from the end of it.
+  {
+    // TWO rules decide where a plan ends, and they are not the same rule.
+    // getPlanningHorizonYears only ever EXTENDS — it is a Math.max over the
+    // planning age and the life expectancies. The SHORTENING comes from
+    // computeProjections, which stops the year both spouses have died. Quoting
+    // the first where the second applies is how the notice ended up promising a
+    // horizon change that the projection would not make; the fix is to measure
+    // the projection itself, and this is the test that forced it.
+    const accts = [{ id: 1, name: '401k', type: '401k', balance: 900000, contribution: 0,
+      cagr: 0.06, startAge: 55, stopAge: 65, owner: 'me', contributor: 'me' }];
+    const streams = [{ id: 1, type: 'earned_income', owner: 'me', amount: 150000,
+      startAge: 55, endAge: 64, growthRate: 0.03 }];
+    const endAge = (le, sle, legacyAge, on) => {
+      const pi = { myAge: 55, spouseAge: 53, myRetirementAge: 65, spouseRetirementAge: 65,
+        filingStatus: 'married_joint', state: 'TX', inflationRate: 0.03, desiredIncome: 90000,
+        legacyAge, myLifeExpectancy: le, spouseLifeExpectancy: sle, survivorModelEnabled: on,
+        mySSBenefit: 30000, spouseSSBenefit: 20000, mySSClaimAge: 67, spouseSSClaimAge: 67 };
+      const p = computeProjections(pi, accts, streams, [], [], []);
+      return p[p.length - 1].myAge;
+    };
+    ok(endAge(85, 86, 95, true) < endAge(85, 86, 95, false),
+      'short life expectancies SHORTEN the plan — it stops once both have died');
+    ok(endAge(97, 99, 95, true) > endAge(97, 99, 95, false),
+      'long ones lengthen it, because the horizon covers the survivor');
+    eq(endAge(95, 95, 95, true), endAge(95, 95, 95, false),
+      'and life expectancies at the planning age leave it where it was');
+
+    // The horizon helper on its own can only grow. Stated so nobody reaches for
+    // it again to answer "where does this plan end".
+    const H = (le, sle, on) => 55 + engine.getPlanningHorizonYears({
+      myAge: 55, spouseAge: 53, filingStatus: 'married_joint', legacyAge: 95,
+      myLifeExpectancy: le, spouseLifeExpectancy: sle, survivorModelEnabled: on });
+    ok(H(85, 86, true) === H(85, 86, false),
+      'getPlanningHorizonYears never shrinks a plan — it is a floor, not the answer');
+  }
+
+  // ── the migration tells the user, rather than editing quietly ────────────
+  {
+    ok(/const SCHEMA_VERSION = 6;/.test(src), 'the schema version was bumped for the change');
+    const mStart = src.indexOf('const migrations = {');
+    const mBlock = src.slice(mStart, src.indexOf('\n};', mStart));
+    ok(mBlock.indexOf('  6: (data) =>') > 0, 'there is a v5 → v6 migration');
+    ok(mBlock.indexOf('survivorModelNotice') > 0,
+      'which records a notice — the plan is not edited behind the reader’s back');
+    ok(src.indexOf('survivorNotice && (()') > 0, 'and the app renders that notice');
+    // The notice quotes the horizon from the ENGINE's rule, not a second copy.
+    const nStart = src.indexOf('survivorNotice && (()');
+    const nBlock = src.slice(nStart, nStart + 3000);
+    ok(nBlock.indexOf('computeProjections(') > 0,
+      'the ages it quotes are measured from the projection itself');
+    ok(!/const endAge = \(pi\) => \(pi\.myAge \|\| 0\) \+ getPlanningHorizonYears/.test(src),
+      'and NOT from the horizon helper, which is a floor and would have reported no change '
+      + 'in exactly the case where the plan gets shorter');
+  }
+
+  // ── and the tile stops lying about which age it is showing ──────────────
+  {
+    const t = src.indexOf('text-slate-500 text-xs mb-0.5">Legacy at {');
+    gt(t, 0, 'the legacy tile is where the test expects it');
+    const line = src.slice(t, src.indexOf('\n', t));
+    ok(line.indexOf('legacy ? legacy.age') > 0,
+      'the tile prints the age it MEASURED — with survivor modelling on, the plan may end before the planning age');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

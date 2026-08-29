@@ -378,7 +378,7 @@ const STORAGE_KEY = 'retirement_planner_data';
 //     payments, prior-year return). Bumped rather than defaulted because this is
 //     a whole new top-level key: an older build round-tripping a v3 export would
 //     drop it silently, and the user would not find out until a tax number moved.
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 // Migrations run in order from the saved version up to SCHEMA_VERSION. Each is
 // a pure (data) => data. Absent entries are skipped, so a version that only adds
@@ -412,6 +412,42 @@ const migrations = {
       if (v !== DEFAULT_DASHBOARD_VISIBILITY[k]) dash[k] = v;
     });
     return { ...data, sectionVisibility: Object.keys(dash).length ? { dashboard: dash } : {} };
+  },
+  // v5 → v6: survivor modelling defaults ON for married plans.
+  //
+  // This is NOT a silent improvement, which is why it records a notice instead
+  // of just flipping the flag. Turning it on does three things at once, and only
+  // the first is obviously "more conservative":
+  //
+  //   1. the survivor files SINGLE — narrower brackets, one standard deduction
+  //   2. spending drops to survivorSpendingFactor (0.75) and one Social Security
+  //      cheque stops, which pulls taxable withdrawals DOWN
+  //   3. the horizon becomes the later of the two life expectancies rather than
+  //      legacyAge, so the projection can END EARLIER OR LATER
+  //
+  // Measured on a synthetic couple: with life expectancies of 85 and 86 against
+  // a planning age of 95, the plan stops at 88 instead of 97 — nine years of
+  // rows, and the headline "Legacy at 95", simply gone. Nobody should discover
+  // that by noticing their dashboard changed.
+  //
+  // Single filers are unaffected: the engine gates every survivor behaviour on
+  // married_joint, so the flag is inert and no notice is raised.
+  6: (data) => {
+    const pi = data.personalInfo || {};
+    const married = pi.filingStatus === 'married_joint';
+    if (!married || pi.survivorModelEnabled) {
+      return { ...data, personalInfo: { ...pi, survivorModelEnabled: pi.survivorModelEnabled ?? married } };
+    }
+    return {
+      ...data,
+      personalInfo: { ...pi, survivorModelEnabled: true },
+      survivorModelNotice: {
+        legacyAge: pi.legacyAge || 95,
+        myAge: pi.myAge, spouseAge: pi.spouseAge,
+        myLifeExpectancy: pi.myLifeExpectancy, spouseLifeExpectancy: pi.spouseLifeExpectancy,
+        spendingFactor: pi.survivorSpendingFactor ?? 0.75,
+      },
+    };
   },
 };
 
@@ -618,7 +654,13 @@ const DEFAULT_PERSONAL_INFO = {
   // Survivor modeling: when enabled, models the financial impact of a spouse dying
   // before the planning horizon ends. Changes filing status, stops income streams,
   // and applies SS survivor benefit rules.
-  survivorModelEnabled: false,
+  // On by default. A married plan that ignores the first death is not a neutral
+  // simplification — it keeps two Social Security cheques and the joint brackets
+  // running for years after one of them has stopped, which is the single largest
+  // structural error a couple's plan can carry. It is a switch rather than a
+  // constant because it genuinely moves the horizon (see migration 6), and
+  // because a user who wants the simpler view should be able to have it.
+  survivorModelEnabled: true,
   survivorSpendingFactor: 0.75,  // Surviving spouse spends this fraction of the couple's target income
   myLifeExpectancy: 85,          // Expected age at death (primary)
   spouseLifeExpectancy: 87,      // Expected age at death (spouse)
@@ -15017,7 +15059,11 @@ return (
           <div className="text-xs text-slate-500">SS + Pension + Other</div>
         </div>
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
-          <div className="text-slate-500 text-xs mb-0.5">Legacy at {personalInfo.legacyAge || 95}</div>
+          {/* The age MEASURED, not the age requested. With survivor modelling on
+              the plan ends when both spouses have died, which can be before the
+              planning age — and a tile headed "Legacy at 95" showing the balance
+              at 88 is simply a wrong label. */}
+          <div className="text-slate-500 text-xs mb-0.5">Legacy at {legacy ? legacy.age : (personalInfo.legacyAge || 95)}</div>
           <div className="text-xl font-bold text-slate-100">{formatCurrency(legacy?.estate)}</div>
           <div className="text-xs text-slate-500">Total estate value</div>
           {/* The headline counts a pre-tax dollar and a Roth dollar as the same
@@ -20622,6 +20668,7 @@ function RetirementPlanner() {
   // purpose: it lives only in this session, and the migration itself has already
   // been written, so it cannot fire twice.
   const [splitNotice, setSplitNotice] = useState(() => (savedData && savedData.contributorSplitNotice) || null);
+  const [survivorNotice, setSurvivorNotice] = useState(() => (savedData && savedData.survivorModelNotice) || null);
 
   // The tour never launches itself. Finishing a nine-step wizard and then being
   // handed a nine-step tour is eighteen screens before you ever see your own
@@ -21447,6 +21494,63 @@ function RetirementPlanner() {
           handleReset={handleReset}
         />
       )}
+      {survivorNotice && (() => {
+        // Say what moved in THIS plan, not what the feature does in general. The
+        // horizon comes from the engine's own rule rather than a second copy of
+        // it, so the figure quoted here is the figure the projection will use.
+        const n = survivorNotice;
+        // Where a plan ENDS is decided by two different rules, and only one of
+        // them is getPlanningHorizonYears — that helper is a floor and can only
+        // extend. The shortening comes from computeProjections stopping the year
+        // both spouses have died. Quoting the helper here would have promised a
+        // horizon change the projection does not make (and, in the shortening
+        // case, stayed silent about the one it does), so the figures below are
+        // measured from the projection itself. Two extra engine runs, once, only
+        // while this notice is on screen.
+        const endOf = (on) => {
+          try {
+            const p = computeProjections({ ...personalInfo, survivorModelEnabled: on },
+              accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
+            return p.length ? p[p.length - 1].myAge : null;
+          } catch (e) { return null; }
+        };
+        const was = endOf(false), now = endOf(true);
+        return (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <div className={`${cardStyle} max-w-xl w-full`}>
+              <h3 className="text-xl font-bold text-slate-100 mb-3">Your plan now models the first death</h3>
+              <p className="text-sm text-slate-300 leading-relaxed mb-3">
+                Survivor modelling used to be off by default, so this plan ran both of you to age{' '}
+                {n.legacyAge} with two Social Security cheques and joint tax brackets the whole way —
+                including years after one of you would have died. It is on now. Three things change, and
+                they do not all point the same way:
+              </p>
+              <ul className="text-sm text-slate-300 space-y-1.5 mb-3 list-disc pl-5">
+                <li>The survivor files <strong>single</strong> — narrower brackets and one standard
+                    deduction on much the same income. This is the widow&rsquo;s-year trap, and it raises tax.</li>
+                <li>Spending drops to <strong>{Math.round((n.spendingFactor || 0.75) * 100)}%</strong> and the
+                    smaller Social Security benefit stops, which pulls taxable withdrawals down.</li>
+                <li>The plan now ends when <em>both</em> of you have died rather than at your
+                    planning age
+                    {Number.isFinite(was) && Number.isFinite(now) && was !== now ? (
+                      <> — it runs to <strong className="text-amber-400">age {now}</strong> now instead of
+                        age {was}, {now < was ? `${was - now} years shorter` : `${now - was} years longer`}</>
+                    ) : ' — which for your ages leaves the last year where it was'}.</li>
+              </ul>
+              <p className="text-xs text-slate-500 leading-relaxed mb-4">
+                Nothing about your accounts, contributions or balances was edited. If you would rather see
+                the simpler view, <strong className="text-slate-400">Personal Info → Survivor Modeling</strong>{' '}
+                turns it back off — and the life-expectancy fields next to it are what set the horizon above,
+                so they are worth a look either way.
+              </p>
+              <div className="flex justify-end">
+                <button onClick={() => setSurvivorNotice(null)} className={buttonPrimary}>Got it</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {splitNotice && splitNotice.length > 0 && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className={`${cardStyle} max-w-xl w-full`}>
