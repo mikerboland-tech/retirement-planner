@@ -888,6 +888,75 @@ function saveToStorage(data) {
   }
 };
 
+// ── LOCAL SNAPSHOT HISTORY ───────────────────────────────────────────────────
+// The whole plan lived in one localStorage key with nothing behind it. A bad
+// import, a mis-clicked Reset, or a scenario loaded over unsaved work took forty
+// years of assumptions with it and there was no way back. This is a small ring
+// of recent copies under a SEPARATE key, so a corrupt or overwritten primary is
+// recoverable from inside the app.
+//
+// What it does NOT protect against, stated plainly because the distinction
+// matters: clearing site data, a browser reset, or a new machine takes both keys.
+// Only an export survives that, which is what the reminder below is for.
+//
+// A measured plan is ~4 KB, so ten copies is a rounding error against the ~5 MB
+// origin budget. The byte cap is belt and braces for a plan with many scenarios.
+const SNAPSHOT_KEY = 'retirement_planner_snapshots';
+// When this browser last wrote an export. Its own key, deliberately: it is a
+// fact about this device, not about the plan, so it must not ride along in the
+// exported file — importing one would otherwise reset the clock to whenever that
+// file happened to be written.
+const LAST_EXPORT_KEY = 'retirement_planner_last_export';
+const EXPORT_NUDGE_DAYS = 30;
+const MAX_SNAPSHOTS = 10;
+const SNAPSHOT_MIN_GAP_MS = 30 * 60 * 1000;   // routine copies, at most one per half hour
+const SNAPSHOT_BUDGET_BYTES = 1_500_000;
+
+function readSnapshots() {
+  try {
+    const raw = localStorage.getItem(SNAPSHOT_KEY);
+    if (!raw) return [];
+    const list = JSON.parse(raw);
+    return Array.isArray(list) ? list : [];
+  } catch (e) { return []; }
+}
+
+// `reason` is 'auto' for the routine copy and a short phrase for the ones taken
+// deliberately before something destructive. Those are the valuable ones, so
+// trimming always evicts routine copies first — a "before reset" snapshot must
+// not be pushed out by half an hour of ordinary editing.
+function writeSnapshot(data, reason = 'auto') {
+  try {
+    const list = readSnapshots();
+    const now = Date.now();
+    const body = JSON.stringify({ ...data, schemaVersion: SCHEMA_VERSION });
+    if (reason === 'auto') {
+      const newest = list[0];
+      if (newest && now - newest.at < SNAPSHOT_MIN_GAP_MS) return false;
+      // Nothing changed since the last copy: another identical row would push a
+      // genuinely different one out of the ring for no gain.
+      if (newest && newest.body === body) return false;
+    }
+    list.unshift({ at: now, reason, body });
+    const trim = () => {
+      // routine copies first, oldest of them
+      for (let i = list.length - 1; i > 0; i--) {
+        if (list[i].reason === 'auto') return list.splice(i, 1);
+      }
+      return list.splice(list.length - 1, 1);
+    };
+    while (list.length > MAX_SNAPSHOTS) trim();
+    while (list.length > 1 && list.reduce((n, x) => n + x.body.length, 0) > SNAPSHOT_BUDGET_BYTES) trim();
+    localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(list));
+    return true;
+  } catch (e) {
+    // A snapshot must NEVER break the real save. Quota, private mode, anything:
+    // drop the history rather than the plan.
+    try { localStorage.removeItem(SNAPSHOT_KEY); } catch (e2) { /* nothing left to try */ }
+    return false;
+  }
+}
+
 // ============================================
 // Spreadsheet-style Input Components
 // These solve: select-on-focus, raw editing of formatted values,
@@ -20669,6 +20738,8 @@ function RetirementPlanner() {
   // been written, so it cannot fire twice.
   const [splitNotice, setSplitNotice] = useState(() => (savedData && savedData.contributorSplitNotice) || null);
   const [survivorNotice, setSurvivorNotice] = useState(() => (savedData && savedData.survivorModelNotice) || null);
+  const [showSnapshots, setShowSnapshots] = useState(false);
+  const [snapshots, setSnapshots] = useState([]);
 
   // The tour never launches itself. Finishing a nine-step wizard and then being
   // handed a nine-step tour is eighteen screens before you ever see your own
@@ -20688,6 +20759,29 @@ function RetirementPlanner() {
   // brand-new user was greeted with "Update Your Plan — walk through with
   // current data", offering to revise a plan they had never made.
   const [hasSavedPlan, setHasSavedPlan] = useState(() => !!savedData);
+
+  // The snapshot ring covers a bad edit. It does not cover a cleared browser or a
+  // new laptop, and nothing in the app had ever asked for the one thing that
+  // does. Shown once per session, dismissible, and never on a plan that is still
+  // the sample data — nagging someone to back up a plan they have not written yet
+  // teaches them to ignore the banner.
+  const [exportNudge, setExportNudge] = useState(false);
+  useEffect(() => {
+    if (!hasSavedPlan) return;
+    let last = 0;
+    try {
+      last = Number(localStorage.getItem(LAST_EXPORT_KEY)) || 0;
+      if (!last) {
+        // No clock yet. Start it now rather than treating "never exported" as
+        // "overdue" — otherwise the banner appears the moment someone finishes
+        // the wizard, which is the fastest way to teach them to ignore it. The
+        // ask comes thirty days into actually using the thing.
+        localStorage.setItem(LAST_EXPORT_KEY, String(Date.now()));
+        return;
+      }
+    } catch (e) { return; }
+    if ((Date.now() - last) / 86400000 >= EXPORT_NUDGE_DAYS) setExportNudge(true);
+  }, [hasSavedPlan]);
 
   // Logo Component - MB makers mark on blue circle
   // Logo, NavItem and NavGroup were moved to module scope (above RetirementPlanner).
@@ -20800,6 +20894,9 @@ function RetirementPlanner() {
   const loadScenario = (id) => {
     const scenario = scenarios.find(s => s.id === id);
     if (scenario) {
+      // Loading a scenario replaces the working plan. If the edits on screen were
+      // never saved to a scenario of their own, this is where they go.
+      snapshotNow('before loading a scenario');
       setPersonalInfo({ ...DEFAULT_PERSONAL_INFO, ...scenario.personalInfo });
       // Always overwrite list fields — defaulting to [] so loading an older
       // scenario that predates a field (or that explicitly cleared it) wipes
@@ -20817,12 +20914,26 @@ function RetirementPlanner() {
     }
   };
   
+  // The snapshot ring copies whatever the autosave last wrote, so a restore can
+  // never bring back a shape the save path would not produce. Held in a ref
+  // rather than recomputed, so the "before something destructive" copies below
+  // capture the plan as it stood a moment ago rather than reassembling it.
+  const lastSavedPlan = useRef(null);
+  const snapshotNow = (reason) => {
+    if (lastSavedPlan.current) writeSnapshot(lastSavedPlan.current, reason);
+  };
+
   // Auto-save to localStorage with debouncing to prevent excessive saves
   useEffect(() => {
     const saveTimer = setTimeout(() => {
       const data = { personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, sectionVisibility, detailLevel, scenarios, currentYear: currentYearData, sandboxConfig, lastSaved: new Date().toISOString() };
       const result = saveToStorage(data);
       if (result.ok) {
+        // Order matters: the plan is safely written before anything is spent on
+        // history, so a snapshot that hits quota can never cost the user the
+        // save it was meant to protect.
+        lastSavedPlan.current = data;
+        writeSnapshot(data, 'auto');
         setSaveStatus('Saved');
       } else if (result.reason === 'quota') {
         // Surface the failure rather than letting users keep editing under the
@@ -20873,6 +20984,8 @@ function RetirementPlanner() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+    try { localStorage.setItem(LAST_EXPORT_KEY, String(Date.now())); } catch (e) { /* storage off */ }
+    setExportNudge(false);
     setSaveStatus('Exported!');
     setTimeout(() => setSaveStatus(''), 2000);
   };
@@ -20881,6 +20994,10 @@ function RetirementPlanner() {
   const handleImport = (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    // Taken before the file is even read: an import replaces everything, and the
+    // moment to keep a copy is before, not after a shape check that might pass
+    // on a file the user did not mean to pick.
+    snapshotNow('before import');
     
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -20964,6 +21081,9 @@ function RetirementPlanner() {
   
   // Reset to defaults
   const handleReset = () => {
+    // The plan is about to go. Keep a copy first — Reset is the single most
+    // regretted button in the app and there was no way back from it.
+    snapshotNow('before reset');
     // Clear localStorage first
     try {
       localStorage.removeItem(STORAGE_KEY);
@@ -21128,6 +21248,7 @@ function RetirementPlanner() {
   }), [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
 
   const applyAiPlan = (next) => {
+    snapshotNow('before applying an assistant suggestion');
     setPersonalInfo(next.personalInfo);
     setAccounts(next.accounts);
     setIncomeStreams(next.incomeStreams);
@@ -21262,6 +21383,7 @@ function RetirementPlanner() {
           existingData={{ personalInfo, accounts, incomeStreams, assets }}
           hasSavedPlan={hasSavedPlan}
           onComplete={(pi, accts, incomes, assetList) => {
+            snapshotNow('before the setup wizard');
             setPersonalInfo(pi);
             setAccounts(accts);
             setIncomeStreams(incomes);
@@ -21388,6 +21510,14 @@ function RetirementPlanner() {
               <span className="text-base">💾</span>
               {!sidebarCollapsed && <span className="text-sm font-medium">Import/Export</span>}
             </button>
+            <button
+              onClick={() => { setSnapshots(readSnapshots()); setShowSnapshots(true); }}
+              className="w-full flex items-center gap-3 px-3 py-2 text-slate-400 hover:text-slate-200 hover:bg-slate-700/50 rounded-lg transition-all"
+              title="Recent copies of this plan, kept in this browser"
+            >
+              <span className="text-base">🕘</span>
+              {!sidebarCollapsed && <span className="text-sm font-medium">Plan history</span>}
+            </button>
             <button 
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
               className="w-full flex items-center gap-3 px-3 py-2 mt-1 text-slate-500 hover:text-slate-300 hover:bg-slate-700/50 rounded-lg transition-all"
@@ -21494,6 +21624,124 @@ function RetirementPlanner() {
           handleReset={handleReset}
         />
       )}
+      {exportNudge && (
+        <div className="fixed bottom-4 right-4 z-40 max-w-sm">
+          <div className={`${cardStyle} border-amber-500/40`}>
+            <div className="text-sm font-semibold text-slate-100 mb-1">Keep a copy somewhere else</div>
+            <p className="text-xs text-slate-400 leading-relaxed mb-3">
+              This plan lives in this browser. Plan history protects you from a bad edit, but clearing site
+              data — or a new machine — takes it and the history together. An export is a single file you can
+              put anywhere.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setExportNudge(false)}
+                className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1">Not now</button>
+              <button onClick={handleExport} className={buttonPrimary}>Export</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSnapshots && (() => {
+        // Enough of each copy to tell them apart WITHOUT restoring one to look:
+        // when it was taken, why, and the two or three figures a reader would
+        // use to recognise their own plan. A list of timestamps alone makes the
+        // choice a guess.
+        const describe = (snap) => {
+          try {
+            const d = JSON.parse(snap.body);
+            const pi = d.personalInfo || {};
+            const bal = (d.accounts || []).reduce((t, a) => t + (a.balance || 0), 0);
+            return {
+              accounts: (d.accounts || []).length,
+              streams: (d.incomeStreams || []).length,
+              balance: bal,
+              retireAt: pi.myRetirementAge,
+              spend: pi.desiredIncome ?? pi.desiredRetirementIncome,
+            };
+          } catch (e) { return null; }
+        };
+        const when = (ms) => {
+          const mins = Math.round((Date.now() - ms) / 60000);
+          if (mins < 1) return 'just now';
+          if (mins < 60) return `${mins} min ago`;
+          const hrs = Math.round(mins / 60);
+          if (hrs < 24) return `${hrs} hr ago`;
+          return `${Math.round(hrs / 24)} days ago`;
+        };
+        const restore = (snap) => {
+          let d;
+          try { d = JSON.parse(snap.body); } catch (e) { return; }
+          // The copy about to be replaced is itself worth keeping — restoring the
+          // wrong one should not be the mistake you cannot undo.
+          snapshotNow('before restoring a copy');
+          setPersonalInfo({ ...DEFAULT_PERSONAL_INFO, ...(d.personalInfo || {}) });
+          setAccounts(d.accounts || []);
+          setIncomeStreams(d.incomeStreams || []);
+          setAssets(d.assets || []);
+          setOneTimeEvents(d.oneTimeEvents || []);
+          setRecurringExpenses(d.recurringExpenses || []);
+          setCurrentYearData({ ...DEFAULT_CURRENT_YEAR, ...(d.currentYear || {}) });
+          if (d.scenarios) setScenarios(d.scenarios);
+          setShowSnapshots(false);
+          setSaveStatus('Restored an earlier copy');
+          setTimeout(() => setSaveStatus(''), 4000);
+        };
+        return (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <div className={`${cardStyle} max-w-2xl w-full max-h-[85vh] overflow-y-auto`}>
+              <h3 className="text-xl font-bold text-slate-100 mb-1">Plan history</h3>
+              <p className="text-xs text-slate-500 mb-4">
+                Recent copies of this plan, kept in this browser — one every half hour while you work, plus
+                one taken before anything that replaces the whole plan.{' '}
+                <strong className="text-amber-400/90">These live in this browser only.</strong> Clearing site
+                data or moving to another machine takes them with the plan, so an export is still the backup
+                that survives.
+              </p>
+              {snapshots.length === 0 ? (
+                <p className="text-sm text-slate-400 mb-4">
+                  No copies yet. The first is taken shortly after you start editing.
+                </p>
+              ) : (
+                <div className="space-y-2 mb-4">
+                  {snapshots.map((snap, i) => {
+                    const d = describe(snap);
+                    return (
+                      <div key={snap.at + '-' + i}
+                           className="flex flex-wrap items-center justify-between gap-3 p-3 bg-slate-800/50 border border-slate-700/50 rounded-lg">
+                        <div className="min-w-[220px]">
+                          <div className="text-sm text-slate-200">
+                            {when(snap.at)}
+                            {snap.reason !== 'auto' && (
+                              <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/40">
+                                {snap.reason}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            {new Date(snap.at).toLocaleString()}
+                          </div>
+                        </div>
+                        <div className="text-xs text-slate-400 flex-1 min-w-[200px]">
+                          {d ? (
+                            <>{d.accounts} accounts · {formatCurrency(d.balance)} · retire at {d.retireAt}
+                               {d.spend ? <> · {formatCurrency(d.spend)}/yr</> : null}</>
+                          ) : 'unreadable copy'}
+                        </div>
+                        <button onClick={() => restore(snap)} className={buttonSecondary}>Restore</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setShowSnapshots(false)} className={buttonPrimary}>Close</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {survivorNotice && (() => {
         // Say what moved in THIS plan, not what the feature does in general. The
         // horizon comes from the engine's own rule rather than a second copy of

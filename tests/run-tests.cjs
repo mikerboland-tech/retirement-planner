@@ -12042,6 +12042,121 @@ section('P99 — survivor modelling on by default, and honest about what that mo
   }
 }
 
+section('P100 — a plan you can get back');
+
+{
+  // The whole plan lived in one localStorage key with nothing behind it. A bad
+  // import, a mis-clicked Reset, or a scenario loaded over unsaved work took it
+  // and there was no way back. This pack exercises the ring buffer directly —
+  // its trimming rule is the part that can silently do the wrong thing, because
+  // a ring that evicts the "before reset" copy to make room for routine ones is
+  // worse than useless: it looks like protection and is not.
+  const fs10 = require('fs');
+  const path10 = require('path');
+  const src = fs10.readFileSync(path10.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+
+  // Lift the two pure functions out of the .jsx and run them against a fake
+  // localStorage. They are plain data handling; the alternative is a second copy
+  // of the trimming rule in the test, which is the drift this suite exists to
+  // prevent.
+  const grab = (name) => {
+    const at = src.indexOf('function ' + name + '(');
+    gt(at, 0, `${name} is where the test expects it`);
+    let depth = 0, i = src.indexOf('{', at);
+    for (let j = i; j < src.length; j++) {
+      if (src[j] === '{') depth++;
+      else if (src[j] === '}') { depth--; if (depth === 0) return src.slice(at, j + 1); }
+    }
+    return '';
+  };
+  const store = {};
+  const localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+    removeItem: (k) => { delete store[k]; },
+  };
+  const SNAPSHOT_KEY = 'retirement_planner_snapshots';
+  const MAX_SNAPSHOTS = 10;
+  const SNAPSHOT_MIN_GAP_MS = 30 * 60 * 1000;
+  const SNAPSHOT_BUDGET_BYTES = 1500000;
+  const SCHEMA_VERSION = 6;
+  const readSnapshots = eval('(' + grab('readSnapshots') + ')');
+  const writeSnapshot = eval('(' + grab('writeSnapshot') + ')');
+
+  const plan = (n) => ({ personalInfo: { myAge: 50, tag: n }, accounts: [{ id: 1, balance: n * 1000 }] });
+
+  // ── routine copies are spaced, and never duplicate ───────────────────────
+  ok(writeSnapshot(plan(1), 'auto'), 'the first routine copy is taken');
+  eq(readSnapshots().length, 1, 'and stored');
+  ok(!writeSnapshot(plan(2), 'auto'),
+    'a second routine copy moments later is refused — the ring is not a keystroke log');
+  eq(readSnapshots().length, 1, 'so nothing was added');
+
+  // ── deliberate copies are always taken, however recent the last one ──────
+  ok(writeSnapshot(plan(3), 'before reset'),
+    'a copy taken before something destructive ignores the spacing rule');
+  eq(readSnapshots().length, 2, 'and lands');
+  eq(readSnapshots()[0].reason, 'before reset', 'newest first');
+
+  // ── the trimming rule: routine copies are evicted, valuable ones are not ──
+  {
+    store[SNAPSHOT_KEY] = JSON.stringify([]);
+    writeSnapshot(plan(0), 'before reset');
+    // fill well past capacity with routine copies, back-dating each so the
+    // spacing rule does not refuse them
+    for (let i = 1; i <= 25; i++) {
+      const list = readSnapshots();
+      list.forEach(x => { x.at -= SNAPSHOT_MIN_GAP_MS + 1000; });
+      store[SNAPSHOT_KEY] = JSON.stringify(list);
+      writeSnapshot(plan(i), 'auto');
+    }
+    const list = readSnapshots();
+    ok(list.length <= MAX_SNAPSHOTS, 'the ring stays within its capacity');
+    const kept = list.filter(x => x.reason === 'before reset');
+    eq(kept.length, 1,
+      'and the copy taken before a destructive action survives 25 routine ones — '
+      + 'evicting it would leave protection that only looks like protection');
+  }
+
+  // ── a snapshot failure must never cost the user the save ────────────────
+  {
+    const before = store[SNAPSHOT_KEY];
+    localStorage.setItem = () => { const e = new Error('quota'); e.name = 'QuotaExceededError'; throw e; };
+    const ok1 = writeSnapshot(plan(99), 'before import');
+    eq(ok1, false, 'a snapshot that cannot be written reports failure rather than throwing');
+    localStorage.setItem = (k, v) => { store[k] = String(v); };
+    store[SNAPSHOT_KEY] = before || '[]';
+  }
+
+  // ── the wiring: every path that replaces the whole plan takes a copy ─────
+  ['before reset', 'before import', 'before loading a scenario',
+   'before the setup wizard', 'before applying an assistant suggestion',
+   'before restoring a copy'].forEach(reason => {
+    ok(src.indexOf(`snapshotNow('${reason}')`) > 0,
+      `a copy is taken ${reason}`);
+  });
+  // The save runs BEFORE the snapshot, so history can never cost the plan.
+  const saveAt = src.indexOf('lastSavedPlan.current = data;');
+  const writeAt = src.indexOf("writeSnapshot(data, 'auto');");
+  gt(saveAt, 0, 'the autosave records what it wrote');
+  ok(writeAt > saveAt, 'and the snapshot is taken after the real save has succeeded');
+
+  // ── the history is reachable, and the export nudge is honest about scope ──
+  ok(src.indexOf('Plan history') > 0, 'the history is reachable from the sidebar');
+  ok(/These live in this browser only/.test(src),
+    'and says plainly that it does not survive a cleared browser');
+  ok(src.indexOf('LAST_EXPORT_KEY') > 0 && src.indexOf('EXPORT_NUDGE_DAYS') > 0,
+    'an export reminder exists for the failure the ring cannot cover');
+  ok(/if \(!last\) \{[\s\S]{0,600}?localStorage\.setItem\(LAST_EXPORT_KEY/.test(src),
+    'a plan with no export clock starts one rather than counting as overdue — the banner must '
+    + 'not appear the moment someone finishes the wizard');
+  // The export timestamp must NOT ride along in the exported file.
+  const expStart = src.indexOf('const handleExport = ');
+  const expBlock = src.slice(expStart, src.indexOf('setSaveStatus(\'Exported!\')', expStart));
+  ok(expBlock.indexOf('lastExport') < 0 && expBlock.indexOf('LAST_EXPORT_KEY: ') < 0,
+    'the export payload does not carry the reminder clock — importing a file must not reset it');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
