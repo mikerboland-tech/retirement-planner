@@ -11851,8 +11851,10 @@ section('P98 — no surface shows money in a basis it never declared');
   // Each entry is a decision someone made on purpose: 'real' follows the
   // setting, 'nominal' opts out and must carry a BasisNote saying why.
   const EXPECTED = {
+    // scenarios is absent on purpose: the tab was merged into the Sandbox in
+    // v2.14.0, and its comparison rides the Sandbox's basis with everything else.
     dashboard: 'real', accounts: 'real', income: 'real', socialsecurity: 'real',
-    sandbox: 'real', scenarios: 'real', withdrawal: 'real', stresstest: 'real',
+    sandbox: 'real', withdrawal: 'real', stresstest: 'real',
     sensitivity: 'real', assistant: 'real',
     taxplanning: 'nominal', currentyear: 'nominal', montecarlo: 'nominal',
   };
@@ -12239,6 +12241,60 @@ section('P101 — the Sandbox is a primary surface, and charts can be stretched'
     ok(sv.indexOf('panels: [...panels]') > 0 && sv.indexOf('controls') < 0,
       'a view stores the layout and nothing else — recalling one must not move the sliders');
   }
+}
+
+section('P102 — the Scenarios tab lives inside the Sandbox');
+
+{
+  const fs12 = require('fs');
+  const path12 = require('path');
+  const src = fs12.readFileSync(path12.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+
+  // The tab is gone and the comparison survived as a panel.
+  eq((src.match(/function ScenarioComparisonTab\(/g) || []).length, 0,
+    'the standalone Scenarios tab is gone');
+  eq((src.match(/function ScenarioComparisonPanel\(/g) || []).length, 1,
+    'and its comparison lives on as a Sandbox panel rather than being rewritten');
+  ok(src.indexOf("activeTab === 'scenarios'") < 0, 'nothing routes to it any more');
+  const navAt = src.indexOf('const navGroups = [');
+  const nav = src.slice(navAt, src.indexOf('\n  ];', navAt));
+  ok(nav.indexOf("id: 'scenarios'") < 0, 'and the nav no longer offers it');
+  ok(src.indexOf("{ id: 'scenarios',   label: 'Saved scenarios & comparison' }") > 0,
+    'it is in the Sandbox catalogue instead, where it can be turned on like any other panel');
+
+  // ── the point of the merge: save the COMPOSED plan, not the live one ─────
+  // The old tab could only save the plan as it already was, so you had to APPLY
+  // a change before you could keep it as an alternative to that change.
+  {
+    ok(src.indexOf('const createScenarioFrom = (name, plan)') > 0,
+      'a scenario can be built from any plan, not just the one on screen');
+    const wrapAt = src.indexOf('const createScenario = (name) =>');
+    gt(wrapAt, 0, 'and createScenario still exists');
+    const wrap = src.slice(wrapAt, wrapAt + 260);
+    ok(wrap.indexOf('createScenarioFrom') > 0,
+      'as a thin wrapper over it — the scenario shape is defined once, not twice');
+    const composeAt = src.indexOf('const composedPlan = ()');
+    gt(composeAt, 0, 'the Sandbox can hand over the plan its controls compose');
+    const compose = src.slice(composeAt, composeAt + 420);
+    ok(compose.indexOf('sc.pi') > 0 && compose.indexOf('sc.accts') > 0 && compose.indexOf('sc.streams') > 0,
+      'and that plan is the scenario’s own personal info, accounts and streams — not the baseline');
+  }
+
+  // ── promoting a scenario to the baseline is undoable ────────────────────
+  {
+    const at = src.indexOf('const applyPlanAsBaseline = (plan)');
+    gt(at, 0, 'a scenario can be promoted to the plan');
+    const body = src.slice(at, at + 1200);
+    ok(body.indexOf("snapshotNow('before making a scenario the plan')") > 0,
+      'and a copy is kept first — this overwrites the whole plan, which is exactly the click people want back');
+    ok(body.indexOf('setPersonalInfo') > 0 && body.indexOf('setAccounts') > 0
+       && body.indexOf('setIncomeStreams') > 0,
+      'it replaces the plan rather than half of it');
+  }
+  // It is gated on something having actually changed: replacing the plan with
+  // itself is a destructive no-op, and offering it invites the click.
+  ok(/disabled=\{!previewing\}/.test(src),
+    'and "Make this the plan" is disabled until a control has been moved');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

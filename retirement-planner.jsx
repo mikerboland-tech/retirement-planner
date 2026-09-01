@@ -7511,10 +7511,13 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
 }
 
 // ============================================
-// ScenarioComparisonTab — Lifted to module scope
+// ScenarioComparisonPanel
 // ============================================
-function ScenarioComparisonTab({ activeScenarioId, assets, computeProjections, createScenario, deleteScenario, loadScenario, oneTimeEvents, personalInfo, projections, recurringExpenses, scenarios }) {
-  const [newScenarioName, setNewScenarioName] = useState('');
+// Lifted out of the Scenarios tab in v2.14.0 and turned into a Sandbox panel.
+// Only the tab chrome and the "save the current plan" card were dropped: saving
+// now happens in the Sandbox, from the plan its controls compose, which is the
+// whole reason the two merged. The comparison itself is unchanged.
+function ScenarioComparisonPanel({ activeScenarioId, assets, computeProjections, deleteScenario, loadScenario, oneTimeEvents, personalInfo, projections, recurringExpenses, scenarios, onHide }) {
   const [selectedScenarios, setSelectedScenarios] = useState([]);
   
   const generateScenarioProjections = (scenario) => {
@@ -7559,13 +7562,6 @@ function ScenarioComparisonTab({ activeScenarioId, assets, computeProjections, c
     };
   });
   
-  const handleCreateScenario = () => {
-    if (newScenarioName.trim()) {
-      createScenario(newScenarioName.trim());
-      setNewScenarioName('');
-    }
-  };
-  
   const toggleScenarioSelection = (id) => {
     setSelectedScenarios(prev => prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]);
   };
@@ -7587,27 +7583,21 @@ function ScenarioComparisonTab({ activeScenarioId, assets, computeProjections, c
   
   return (
     <div className="space-y-6">
-      <BasisLabel pi={personalInfo} />
-      <div>
-        <h3 className="text-xl font-semibold text-slate-100 mb-2">Scenario Comparison</h3>
-        <p className="text-slate-400 text-sm">Create and compare multiple "what-if" scenarios.</p>
-      </div>
-      
       <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-amber-400 mb-4">Create New Scenario</h4>
-        <div className="flex gap-3">
-          <input type="text" value={newScenarioName} onChange={e => setNewScenarioName(e.target.value)}
-            placeholder="Scenario name (e.g., 'Retire at 60')" className={`${inputStyle} flex-1`} />
-          <button onClick={handleCreateScenario} className={buttonPrimary} disabled={!newScenarioName.trim()}>
-            Save Current as Scenario
-          </button>
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <h4 className="text-lg font-semibold text-amber-400">Saved Scenarios ({scenarios.length})</h4>
+          {onHide && (
+            <button onClick={onHide}
+              className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors">
+              Hide
+            </button>
+          )}
         </div>
-      </div>
-      
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-amber-400 mb-4">Saved Scenarios ({scenarios.length})</h4>
         {scenarios.length === 0 ? (
-          <p className="text-slate-400 text-sm">No scenarios saved yet. Create one above to start comparing.</p>
+          <p className="text-slate-400 text-sm">
+            No scenarios saved yet. Move the controls above until you have something worth keeping,
+            then use <strong className="text-slate-300">Save as scenario</strong>.
+          </p>
         ) : (
           <div className="space-y-3">
             {scenarios.map((scenario) => (
@@ -14118,6 +14108,7 @@ const SANDBOX_EXTRA_PANELS = [
   { id: 'balances',    label: 'Balances by tax treatment' },
   { id: 'conversions', label: 'Roth conversions by year' },
   { id: 'changes',     label: 'What the controls changed (dates)' },
+  { id: 'scenarios',   label: 'Saved scenarios & comparison' },
 ];
 const DEFAULT_SANDBOX_PANELS = ['kpis', 'netWorth', 'retirementIncome'];
 
@@ -14189,8 +14180,10 @@ const SandboxSwitch = ({ label, on, onChange, planLabel, note, disabled }) => (
   </div>
 );
 
-function SandboxTab({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents,
-                      personalInfo, projections, recurringExpenses, sandboxConfig, setSandboxConfig }) {
+function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, computeProjections,
+                      createScenarioFrom, deleteScenario, incomeStreams, loadScenario, oneTimeEvents,
+                      personalInfo, projections, recurringExpenses, sandboxConfig, scenarios,
+                      setSandboxConfig }) {
   const R = window.Recharts || {};
   const { ComposedChart, LineChart, BarChart, Line, Bar, Area, XAxis, YAxis,
           CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } = R;
@@ -14288,6 +14281,35 @@ function SandboxTab({ accounts, assets, computeProjections, incomeStreams, oneTi
   const previewing = live !== projections;
 
   const resetAll = () => setSandboxConfig(prev => ({ ...(prev || {}), controls: {} }));
+
+  // ── From experiment to decision ──────────────────────────────────────────
+  // The Scenarios tab could only ever save the plan as it already was, which
+  // meant you had to APPLY a change before you could save it as an alternative
+  // to the change. Here the plan being saved is the one the controls compose,
+  // so an experiment can be kept without touching the baseline first.
+  const composedPlan = () => {
+    const sc = (scenario && !scenario.error) ? scenario : null;
+    return {
+      personalInfo: sc ? sc.pi : personalInfo,
+      accounts: sc ? sc.accts : accounts,
+      incomeStreams: sc ? sc.streams : incomeStreams,
+      assets, oneTimeEvents, recurringExpenses,
+    };
+  };
+  const [scenarioName, setScenarioName] = useState('');
+  const saveAsScenario = () => {
+    const name = scenarioName.trim();
+    if (!name) return;
+    createScenarioFrom(name, composedPlan());
+    setScenarioName('');
+    // Show the list, or the scenario just saved vanishes into a panel that is
+    // not on screen and the click reads as having done nothing.
+    setSandboxConfig(prev => {
+      const list = Array.isArray(prev?.panels) ? prev.panels : DEFAULT_SANDBOX_PANELS;
+      return list.includes('scenarios') ? prev : { ...(prev || {}), panels: [...list, 'scenarios'] };
+    });
+  };
+  const [confirmBaseline, setConfirmBaseline] = useState(false);
 
   // Built the same way the Dashboard builds its own, from whatever the controls
   // compose — so a panel cannot tell which tab it is on, and does not need to.
@@ -14448,6 +14470,53 @@ function SandboxTab({ accounts, assets, computeProjections, incomeStreams, oneTi
         {scenario && scenario.error && (
           <p className="text-sm text-red-400 mt-3">Could not run that scenario: {scenario.error}</p>
         )}
+
+        {/* ── Keep it, or commit to it ──────────────────────────────────── */}
+        <div className="mt-4 pt-4 border-t border-slate-700/50 flex flex-wrap items-center gap-2">
+          <input
+            value={scenarioName}
+            onChange={e => setScenarioName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') saveAsScenario(); }}
+            placeholder={previewing ? 'Name this scenario' : 'Name this scenario (nothing changed yet)'}
+            className="flex-1 min-w-[200px] bg-slate-800 border border-slate-600 rounded px-3 py-1.5 text-sm text-slate-100"
+          />
+          <button onClick={saveAsScenario} disabled={!scenarioName.trim()}
+            className={`px-4 py-1.5 rounded-lg border text-sm transition-colors ${
+              scenarioName.trim()
+                ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/25'
+                : 'bg-slate-800/40 border-slate-700 text-slate-600 cursor-not-allowed'}`}>
+            Save as scenario
+          </button>
+          <span className="text-slate-700">|</span>
+          {!confirmBaseline ? (
+            <button onClick={() => setConfirmBaseline(true)} disabled={!previewing}
+              className={`px-4 py-1.5 rounded-lg border text-sm transition-colors ${
+                previewing
+                  ? 'bg-amber-500/15 border-amber-500/50 text-amber-300 hover:bg-amber-500/25'
+                  : 'bg-slate-800/40 border-slate-700 text-slate-600 cursor-not-allowed'}`}
+              title={previewing ? 'Replace your saved plan with this one'
+                                : 'Move a control first — this would replace your plan with itself'}>
+              Make this the plan
+            </button>
+          ) : (
+            <span className="inline-flex items-center gap-2">
+              <span className="text-xs text-amber-300">Replace your saved plan?</span>
+              <button onClick={() => { applyPlanAsBaseline(composedPlan()); setConfirmBaseline(false); resetAll(); }}
+                className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-900 text-sm font-semibold hover:bg-amber-400">
+                Yes, replace it
+              </button>
+              <button onClick={() => setConfirmBaseline(false)}
+                className="px-3 py-1.5 rounded-lg border border-slate-600 text-slate-400 text-sm hover:text-slate-200">
+                Cancel
+              </button>
+            </span>
+          )}
+          <span className="w-full text-[11px] text-slate-500">
+            A scenario keeps this experiment alongside your plan without changing it.{' '}
+            <strong className="text-slate-400">Make this the plan</strong> replaces the baseline every other
+            tab describes — a copy is kept in Plan history first.
+          </span>
+        </div>
       </div>
 
       {/* ── Panel picker ───────────────────────────────────────────────── */}
@@ -14634,6 +14703,26 @@ function SandboxTab({ accounts, assets, computeProjections, incomeStreams, oneTi
             another is a real and often good choice, so the two are never chained together here.
           </p>
         </PanelCard>
+      )}
+
+      {/* The Scenarios tab, folded in. It compares against the SAVED plan rather
+          than the composed one, which is deliberate: a scenario is an
+          alternative to the baseline, and the baseline is what it has to be
+          measured against. */}
+      {panelOn('scenarios') && (
+        <ScenarioComparisonPanel
+          activeScenarioId={activeScenarioId}
+          assets={assets}
+          computeProjections={computeProjections}
+          deleteScenario={deleteScenario}
+          loadScenario={loadScenario}
+          oneTimeEvents={oneTimeEvents}
+          personalInfo={personalInfo}
+          projections={projections}
+          recurringExpenses={recurringExpenses}
+          scenarios={scenarios}
+          onHide={() => togglePanel('scenarios')}
+        />
       )}
     </div>
   );
@@ -20727,24 +20816,50 @@ function RetirementPlanner() {
   const [activeScenarioId, setActiveScenarioId] = useState(null);
   
   // Create a scenario from current settings
-  const createScenario = (name) => {
+  // Save ANY plan as a scenario. The Sandbox composes a plan out of its
+  // controls and needs to save that, not the live one — so the shape a scenario
+  // has is defined once, here, and createScenario becomes the special case that
+  // passes the plan currently on screen.
+  const createScenarioFrom = (name, plan) => {
     const newScenario = {
       id: Date.now(),
       name,
-      personalInfo: { ...personalInfo },
-      accounts: accounts.map(a => ({ ...a })),
-      incomeStreams: incomeStreams.map(i => ({ ...i })),
-      assets: assets.map(a => ({ ...a })),
-      oneTimeEvents: oneTimeEvents.map(e => ({ ...e })),
-      recurringExpenses: recurringExpenses.map(e => ({ ...e })),
+      personalInfo: { ...plan.personalInfo },
+      accounts: (plan.accounts || []).map(a => ({ ...a })),
+      incomeStreams: (plan.incomeStreams || []).map(i => ({ ...i })),
+      assets: (plan.assets || []).map(a => ({ ...a })),
+      oneTimeEvents: (plan.oneTimeEvents || []).map(e => ({ ...e })),
+      recurringExpenses: (plan.recurringExpenses || []).map(e => ({ ...e })),
       // Snapshotted with the rest of the plan: a scenario that changes the
       // deferral election has to carry the payroll it changed, or comparing two
       // scenarios silently compares them against the same current-year data.
-      currentYear: JSON.parse(JSON.stringify(currentYearData)),
+      currentYear: JSON.parse(JSON.stringify(plan.currentYear || currentYearData)),
       createdAt: new Date().toISOString()
     };
     setScenarios(prev => [...prev, newScenario]);
     return newScenario.id;
+  };
+
+  const createScenario = (name) => createScenarioFrom(name, {
+    personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
+    currentYear: currentYearData,
+  });
+
+  // Promote a plan to the baseline — the plan every other tab describes. Used by
+  // the Sandbox's "Make this the plan", which is the step that turns an
+  // experiment into a decision. Takes a snapshot first: this overwrites the
+  // whole plan, and it is exactly the kind of click people want back.
+  const applyPlanAsBaseline = (plan) => {
+    snapshotNow('before making a scenario the plan');
+    setPersonalInfo({ ...DEFAULT_PERSONAL_INFO, ...(plan.personalInfo || {}) });
+    setAccounts((plan.accounts || []).map(a => ({ ...a })));
+    setIncomeStreams((plan.incomeStreams || []).map(i => ({ ...i })));
+    if (plan.assets) setAssets(plan.assets.map(a => ({ ...a })));
+    if (plan.oneTimeEvents) setOneTimeEvents(plan.oneTimeEvents.map(e => ({ ...e })));
+    if (plan.recurringExpenses) setRecurringExpenses(plan.recurringExpenses.map(e => ({ ...e })));
+    if (plan.currentYear) setCurrentYearData({ ...DEFAULT_CURRENT_YEAR, ...plan.currentYear });
+    setSaveStatus('This is your plan now');
+    setTimeout(() => setSaveStatus(''), 4000);
   };
   
   // Delete a scenario
@@ -21163,7 +21278,6 @@ function RetirementPlanner() {
       label: 'TOOLS',
       icon: '🔧',
       items: [
-        { id: 'scenarios', label: 'Scenarios', icon: '🔀' },
         { id: 'assistant', label: 'AI Assistant', icon: '💬' },
         { id: 'faq', label: 'Assumptions', icon: '❓' }
       ]
@@ -21450,8 +21564,7 @@ function RetirementPlanner() {
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
             {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={displayProjections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
             {activeTab === 'socialsecurity' && <SocialSecurityTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
-            {activeTab === 'sandbox' && <SandboxTab accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
-            {activeTab === 'scenarios' && <ScenarioComparisonTab activeScenarioId={activeScenarioId} assets={assets} computeProjections={displayComputeProjections} createScenario={createScenario} deleteScenario={deleteScenario} loadScenario={loadScenario} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} scenarios={scenarios} />}
+            {activeTab === 'sandbox' && <SandboxTab accounts={accounts} activeScenarioId={activeScenarioId} applyPlanAsBaseline={applyPlanAsBaseline} createScenarioFrom={createScenarioFrom} deleteScenario={deleteScenario} loadScenario={loadScenario} scenarios={scenarios} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'currentyear' && <CurrentYearTab currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'withdrawal' && <WithdrawalStrategiesTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={displayProjections} />}
