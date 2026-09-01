@@ -12157,6 +12157,90 @@ section('P100 — a plan you can get back');
     'the export payload does not carry the reminder clock — importing a file must not reset it');
 }
 
+section('P101 — the Sandbox is a primary surface, and charts can be stretched');
+
+{
+  const fs11 = require('fs');
+  const path11 = require('path');
+  const src = fs11.readFileSync(path11.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+
+  // ── the Sandbox sits under the Dashboard, not seven groups down ──────────
+  const navAt = src.indexOf('const navGroups = [');
+  gt(navAt, 0, 'the nav is where the test expects it');
+  const nav = src.slice(navAt, src.indexOf('\n  ];', navAt));
+  const dashAt = nav.indexOf("id: 'dashboard'");
+  const sandAt = nav.indexOf("id: 'sandbox'");
+  gt(dashAt, 0, 'the Dashboard is in the nav');
+  gt(sandAt, 0, 'so is the Sandbox');
+  gt(sandAt, dashAt, 'and the Sandbox comes after the Dashboard');
+  {
+    // Same group: no group label may sit between them.
+    const between = nav.slice(dashAt, sandAt);
+    ok(between.indexOf('label:') < 0 || between.indexOf("items: [") < 0,
+      'they are in the same nav group — the Sandbox is a headline surface, not a tool');
+  }
+  eq((nav.match(/id: 'sandbox'/g) || []).length, 1,
+    'and it appears once — promoting it must not leave a copy behind in TOOLS');
+
+  // ── the two one-lever what-ifs the Sandbox replaces are gone ─────────────
+  eq((src.match(/<RetirementAgeExplorer/g) || []).length, 0,
+    'the Dashboard’s retirement-age slider is gone — the Sandbox does it with two sliders and every other lever');
+  eq((src.match(/function RetirementAgeExplorer\(/g) || []).length, 0,
+    'and the component went with it rather than being left as dead code');
+  {
+    // The savings explorer is NOT deleted — it moved. It must still exist and
+    // still be reachable from the Sandbox catalogue.
+    eq((src.match(/function SavingsRateExplorer\(/g) || []).length, 1,
+      'the savings-rate explorer still exists');
+    const acctAt = src.indexOf('function AccountsTab(');
+    const acctEnd = src.indexOf('\nfunction ', acctAt + 10);
+    ok(src.slice(acctAt, acctEnd).indexOf('<SavingsRateExplorer') < 0,
+      'but the Accounts tab no longer renders it');
+    ok(src.indexOf("id: 'savingsRate'") > 0,
+      'and the Sandbox catalogue still offers it, so it moved rather than vanished');
+  }
+
+  // ── chart height: a multiplier, read at render time ──────────────────────
+  {
+    ok(/const CHART = \{ scale: 1 \}/.test(src),
+      'the chart scale lives in a mutable module object');
+    // The P92 trap: a module-scope const capturing the NUMBER would freeze at
+    // the first value and never move again. chartBox must read CHART.scale when
+    // it is called, not close over a copy.
+    const fnAt = src.indexOf('const chartBox = (basePx)');
+    gt(fnAt, 0, 'chartBox exists');
+    const fn = src.slice(fnAt, src.indexOf('\n', fnAt));
+    ok(fn.indexOf('CHART.scale') > 0,
+      'and reads CHART.scale at call time, so changing the setting actually redraws');
+    // Every chart container goes through it — a leftover fixed height would be
+    // the one chart that refuses to grow.
+    ['h-64', 'h-72', 'h-80', 'h-96'].forEach(cls => {
+      eq((src.match(new RegExp('className="' + cls + '"', 'g')) || []).length, 0,
+        `no chart container is still pinned to ${cls}`);
+    });
+    gt((src.match(/chartBox\(/g) || []).length, 10,
+      'and there are a dozen containers going through the scale');
+  }
+
+  // ── views: a saved LAYOUT, not a saved scenario ──────────────────────────
+  {
+    ok(src.indexOf('const saveView = ()') > 0, 'a view can be saved');
+    ok(src.indexOf('const applyView = ') > 0, 'and recalled');
+    ok(src.indexOf('const deleteView = ') > 0, 'and deleted');
+    ok(src.indexOf('const showAllPanels = ') > 0,
+      'and every panel can be turned on at once instead of one click each');
+    // Saving under an existing name updates rather than duplicating.
+    const svAt = src.indexOf('const saveView = ()');
+    const sv = src.slice(svAt, svAt + 700);
+    ok(sv.indexOf('filter(v => v.name !== name)') > 0,
+      'saving over a name replaces that view rather than leaving two with the same label');
+    // A view carries panels only. Bundling the control positions in would mean
+    // recalling a layout silently moved someone's retirement age.
+    ok(sv.indexOf('panels: [...panels]') > 0 && sv.indexOf('controls') < 0,
+      'a view stores the layout and nothing else — recalling one must not move the sliders');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

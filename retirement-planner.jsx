@@ -88,6 +88,29 @@ const initialThemeMode = (() => {
 // there is no reason to make someone pick a bucket when the thing they want is
 // a number. WIDTH_MAX doubles as "no cap": at the top of the range the max-width
 // comes off entirely so the layout fills the window at any resolution.
+// How tall a chart is drawn, as a MULTIPLIER on each chart's own base height
+// rather than one absolute figure. The charts are not all meant to be the same
+// height — a withdrawal-rate strip and a stacked income chart carry different
+// amounts of information — and flattening them to a single number would throw
+// that away. Scaling preserves the ratios and still lets a 30" monitor pull
+// every one of them taller, which is the point: the y axis gets more pixels, so
+// a $40k difference stops being two pixels of bar.
+//
+// Held in a mutable module object and READ AT RENDER TIME, the same shape as
+// THEME. A module-scope const capturing the number would freeze at the first
+// value and never move again — the exact trap P92 exists for.
+const CHART = { scale: 1 };
+const CHART_SCALE_KEY = 'retirement_planner_chart_scale';
+const CHART_SCALE_MIN = 0.7;
+const CHART_SCALE_MAX = 2.5;
+try {
+  const v = Number(localStorage.getItem(CHART_SCALE_KEY));
+  if (Number.isFinite(v) && v >= CHART_SCALE_MIN && v <= CHART_SCALE_MAX) CHART.scale = v;
+} catch (e) { /* storage unavailable — the default stands */ }
+// Base heights match the Tailwind classes these replaced: h-64 256, h-72 288,
+// h-80 320, h-96 384.
+const chartBox = (basePx) => ({ height: Math.round(basePx * CHART.scale) });
+
 const WIDTH_MIN = 1024;
 const WIDTH_MAX = 3200;
 const WIDTH_STORAGE_KEY = 'retirement_planner_width';
@@ -479,7 +502,6 @@ const LEVEL_SHOWS = { essentials: 0, standard: 1, everything: 2 };
 const SECTION_MANIFEST = {
   dashboard: [
     { id: 'summaryCards',     label: 'Summary Cards',                 level: 'essential' },
-    { id: 'retirementAge',    label: 'Retirement Age What-If',        level: 'standard' },
     { id: 'netWorth',         label: 'Net Worth Projection',          level: 'essential' },
     { id: 'retirementIncome', label: 'Retirement Income vs Spending', level: 'essential' },
     { id: 'cashFlow',         label: 'Annual Cash Flow',              level: 'standard' },
@@ -4096,7 +4118,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
           </div>
         ) : (
           <>
-            <div className="h-80">
+            <div style={chartBox(320)}>
               <ResponsiveContainer width="100%" height="100%">
                 {(() => { const iBracket = lastDefinedIndex(curve, 'bracket'),
                                 iEff = lastDefinedIndex(curve, 'effectiveRate'),
@@ -4229,7 +4251,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
       {/* Chart */}
       <div className="mb-6">
         <h5 className="text-md font-semibold text-slate-200 mb-3">Income + Conversions vs. Baseline</h5>
-        <div className="h-80">
+        <div style={chartBox(320)}>
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={conversionAnalysis} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -6375,7 +6397,7 @@ function TaxPlanningTab({ accounts, assets, computeProjections, detailLevel, inc
               </div>
             </div>
           </div>
-          <div className="h-96">
+          <div style={chartBox(384)}>
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={taxPlanningData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -7387,7 +7409,7 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
           
           {/* Percentile Bands Chart */}
           <Section tab="montecarlo" id="bands" title={"Portfolio Projection Bands"} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
-            <div className="h-80">
+            <div style={chartBox(320)}>
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={showRealDollars && simResults.percentileBandsReal ? simResults.percentileBandsReal : simResults.percentileBands}>
                   <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -7421,7 +7443,7 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
           
           {/* Sample Paths (Spaghetti Chart) */}
           <Section tab="montecarlo" id="paths" title={<>Sample Simulation Paths ({simResults.portfolioPaths.length} of {simResults.totalSimulations} scenarios)</>} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
-            <div className="h-72">
+            <div style={chartBox(288)}>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart>
                   <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -8748,7 +8770,7 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
       {/* Portfolio Value Chart */}
       <div className={cardStyle}>
         <h4 className="text-lg font-semibold text-slate-100 mb-4">Portfolio Value Over Time</h4>
-        <div className="h-80">
+        <div style={chartBox(320)}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -8782,7 +8804,7 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
       {/* Withdrawal Amount Chart */}
       <div className={cardStyle}>
         <h4 className="text-lg font-semibold text-slate-100 mb-4">Annual Portfolio Withdrawal by Strategy</h4>
-        <div className="h-80">
+        <div style={chartBox(320)}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -12315,208 +12337,10 @@ function SavingsRateTooltip({ active, payload, label, baseRate, targetRate }) {
 }
 
 // ============================================
-// RetirementAgeExplorer — drag the retirement age, watch the whole plan move.
-//
-// Retirement age is the single most consequential number in a plan and the one
-// people are least sure about. It was adjustable only by typing it into
-// Personal Info and reading the consequences off five other tabs — which is a
-// slow enough loop that nobody runs it more than once or twice.
-//
-// The reason a slider needs an engine function behind it is that a retirement
-// age on its own is nearly inert. Move it alone and the plan retires at 67
-// while the salary still stops at 64 and the 401(k) still stops taking money at
-// 65 — two years of neither working nor drawing. planAtRetirementAge moves the
-// stream and account ages that sit where the convention puts them, leaves the
-// ones the user placed deliberately, and reports what it touched, so this panel
-// can say what it changed instead of quietly rewriting the plan.
-//
-// One projection is a couple of milliseconds, so this re-runs the SAME
-// computeProjections the rest of the app uses rather than approximating.
-// Nothing here is written back until the reader asks for it.
-//
-// At module scope: defined inside DashboardTab it would be a new component
-// identity on every render, remounting and resetting the slider on every
-// keystroke elsewhere on the page.
-// ============================================
-// The slider's state and its scenario projection live in DashboardTab, not here.
-// They have to: the Net Worth and Income charts are siblings of this panel, and
-// showing a what-if on the tiles while the charts underneath still draw the
-// saved plan is worse than not showing it at all — two answers to one question
-// on one screen.
-function RetirementAgeExplorer({ personalInfo, projections, setPersonalInfo, setAccounts,
-                                 setIncomeStreams, detailLevel, sectionVisibility,
-                                 setSectionVisibility, baseAge, target, setAge, scenario }) {
-  const minAge = Math.max((personalInfo.myAge || 0) + 1, 45);
-  const maxAge = Math.min(80, (personalInfo.legacyAge || 95) - 1);
-
-  // The four figures worth watching, each measured the same way on both plans.
-  const measure = (proj, retAge) => {
-    if (!proj || !proj.length) return null;
-    const last = proj[proj.length - 1];
-    const short = planShortfall(proj, { retirementAge: retAge });
-    return {
-      ending: last.totalPortfolio || 0,
-      atRetirement: (proj.find(p => p.myAge === retAge) || {}).totalPortfolio || 0,
-      // Every year, not just the retired ones. Measuring "tax in retirement"
-      // compares ages 65-95 against 70-95 — two different spans — and hides the
-      // five extra years of payroll and income tax that working longer costs,
-      // which is exactly the trade-off the slider exists to show.
-      lifetimeTax: proj.reduce((sum, p) => sum + (p.totalTax || 0), 0),
-      // The estate net of what the heirs owe on inherited pre-tax dollars. This
-      // is the figure that can move the OPPOSITE way to the ending portfolio:
-      // retiring earlier opens a longer conversion window, which spends the
-      // portfolio down and still leaves more behind because the dollars left are
-      // Roth dollars. Same engine rule as the dashboard tile.
-      afterTaxLegacy: (afterTaxLegacyValue(proj, {
-        legacyAge: personalInfo.legacyAge || 95,
-        heirTaxRate: personalInfo.heirTaxRate ?? 0.25,
-      }) || {}).afterTax || 0,
-      fails: !!short.fails,
-      depletedYear: short.depletedYear || null,
-    };
-  };
-  const now = measure(projections, baseAge);
-  const then = scenario && !scenario.error ? measure(scenario.proj, target) : null;
-
-  const delta = (a, b) => (b === null || a === null) ? null : b - a;
-  const arrow = (v, goodWhenUp = true) => {
-    if (v === null || Math.abs(v) < 1) return 'text-slate-500';
-    return (v > 0) === goodWhenUp ? 'text-emerald-400' : 'text-red-400';
-  };
-  const signed = (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + formatCurrency(Math.abs(v));
-
-  const applyToPlan = () => {
-    if (!scenario || scenario.error) return;
-    setPersonalInfo(prev => ({ ...prev, myRetirementAge: target }));
-    setAccounts(scenario.shifted.accts);
-    setIncomeStreams(scenario.shifted.streams);
-    setAge(null);
-  };
-
-  return (
-    <Section
-      tab="dashboard" id="retirementAge" level={detailLevel}
-      vis={sectionVisibility} setVis={setSectionVisibility}
-      title="What if you retired earlier — or later?"
-      // Sticky ONLY while the slider is off the plan's own age. Moving the panel
-      // above the charts is not enough on its own: a control and two full-height
-      // charts do not fit in a laptop viewport together, so whichever chart you
-      // want to watch, you would still be scrolling away from the slider.
-      // Pinned, it stays under your hand at any scroll position — and at rest it
-      // is an ordinary card, so it costs nothing when nobody is experimenting.
-      // Pinned, this panel sits ON TOP of the charts it is changing, so it wants
-      // to be see-through enough that the lines moving underneath stay readable
-      // through it. A heavier backdrop-blur carries the text at a much lower
-      // background alpha than the resting card uses.
-      className={target !== baseAge
-        ? 'sticky top-2 z-30 bg-slate-900/45 backdrop-blur-md border border-amber-500/40 rounded-xl p-5 shadow-2xl'
-        : cardStyle}
-    >
-      <div className="flex flex-wrap items-center gap-4 mb-4">
-        <div className="flex-1 min-w-[260px]">
-          <input
-            type="range" min={minAge} max={maxAge} step={1} value={target}
-            onChange={e => setAge(Number(e.target.value))}
-            className="w-full accent-amber-500"
-            aria-label="Retirement age"
-          />
-          <div className="flex justify-between text-xs text-slate-500 mt-1">
-            <span>{minAge}</span>
-            <span className="text-slate-300">
-              Retire at <strong className="text-amber-400 text-base">{target}</strong>
-              {target !== baseAge && <span className="text-slate-500"> (plan says {baseAge})</span>}
-            </span>
-            <span>{maxAge}</span>
-          </div>
-        </div>
-        {target !== baseAge && (
-          <div className="flex gap-2">
-            <button className={buttonSecondary} onClick={() => setAge(null)}>Reset</button>
-            <button className={buttonPrimary} onClick={applyToPlan}>Use this</button>
-          </div>
-        )}
-      </div>
-
-      {scenario && scenario.error && (
-        <p className="text-sm text-red-400">Could not run that scenario: {scenario.error}</p>
-      )}
-
-      {now && (
-        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-          {[
-            ['Portfolio at retirement', now.atRetirement, then && then.atRetirement, true],
-            ['Ending portfolio', now.ending, then && then.ending, true],
-            [`After-tax legacy (heirs at ${Math.round((personalInfo.heirTaxRate ?? 0.25) * 100)}%)`,
-             now.afterTaxLegacy, then && then.afterTaxLegacy, true],
-            ['Lifetime tax, all years', now.lifetimeTax, then && then.lifetimeTax, false],
-          ].map(([label, a, b, goodWhenUp]) => (
-            <div key={label} className="bg-slate-900/60 border border-slate-700/50 rounded-lg px-3 py-2">
-              <div className="text-xs text-slate-500">{label}</div>
-              <div className="text-slate-100 font-semibold">{formatCurrency(b === null || b === undefined ? a : b)}</div>
-              {b !== null && b !== undefined && (
-                <div className={`text-xs ${arrow(delta(a, b), goodWhenUp)}`}>{signed(delta(a, b))}</div>
-              )}
-            </div>
-          ))}
-          <div className="bg-slate-900/60 border border-slate-700/50 rounded-lg px-3 py-2">
-            <div className="text-xs text-slate-500">Money lasts</div>
-            <div className={`font-semibold ${(then || now).fails ? 'text-red-400' : 'text-emerald-400'}`}>
-              {(then || now).fails
-                ? `Runs out at ${(then || now).depletedYear || '—'}`
-                : 'Through the plan'}
-            </div>
-            {then && then.fails !== now.fails && (
-              <div className={`text-xs ${then.fails ? 'text-red-400' : 'text-emerald-400'}`}>
-                {then.fails ? 'was fine before' : 'fixes the shortfall'}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* The part that makes the number trustworthy: what else moved. A
-          retirement age that moves alone is not a scenario, and a reader who
-          cannot see the salary and the deferrals following it has no reason to
-          believe the figures above. */}
-      {scenario && !scenario.error && (
-        <div className="mt-4 text-xs text-slate-400 border-t border-slate-700/50 pt-3">
-          {scenario.moved.length > 0 ? (
-            <>
-              {/* One flowing line, not one row per account. A plan with three
-                  accounts and a conversion window produced five stacked lines of
-                  small print in a panel that is pinned over the charts — the
-                  list is reassurance that the years line up, not something
-                  anyone reads top to bottom. */}
-              <span className="text-slate-500">Moved with it: </span>
-              {scenario.moved.map((m, i) => (
-                <span key={i} className="whitespace-nowrap">
-                  {i > 0 && <span className="text-slate-600"> · </span>}
-                  <span className="text-slate-300">{m.name}</span>
-                  <span className="text-slate-500">{' '}
-                    {m.kind === 'conversion' ? (m.field === 'startAge' ? 'start' : 'end')
-                      : m.field === 'endAge' ? 'last yr'
-                      : m.field === 'startAge' ? 'starts' : 'stop'}{' '}
-                  </span>
-                  <span className="text-slate-400">{m.from}→{m.to}</span>
-                </span>
-              ))}
-              {/* One line. Pinned over the charts, every extra line of small print
-                  is a line of chart the reader cannot see. */}
-              <p className="text-slate-500 mt-1.5">
-                Social Security and anything you dated yourself are left alone — a claim age is its own decision.
-              </p>
-            </>
-          ) : (
-            <p>
-              Nothing else in the plan is tied to your retirement age, so only the age itself moved. If your
-              salary or contributions should stop at a different age, set them on the Income and Accounts tabs.
-            </p>
-          )}
-        </div>
-      )}
-    </Section>
-  );
-}
+// RetirementAgeExplorer lived here and was removed in v2.13.0. Its whole job —
+// drag a retirement age and watch the plan move — is what the Sandbox does, with
+// two independent sliders for a couple and every other lever beside them. Keeping
+// a second, weaker copy on the Dashboard meant two places to fix one behaviour.
 
 function SavingsRateExplorer({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents,
                               personalInfo, projections, recurringExpenses, currentEarnedIncome,
@@ -12786,7 +12610,7 @@ function SavingsRateExplorer({ accounts, assets, computeProjections, incomeStrea
       )}
 
       {/* ── The chart ───────────────────────────────────────────────────── */}
-      <div className="h-80">
+      <div style={chartBox(320)}>
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 10, right: 76, left: 10, bottom: 5 }}>
             <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -13226,19 +13050,10 @@ function AccountsTab({ accountTypes, accounts, assets, computeProjections, contr
         </div>
       </div>
       
-      <SavingsRateExplorer
-        accounts={localAccounts}
-        assets={assets}
-        computeProjections={computeProjections}
-        incomeStreams={incomeStreams}
-        oneTimeEvents={oneTimeEvents}
-        personalInfo={personalInfo}
-        projections={projections}
-        recurringExpenses={recurringExpenses}
-        currentEarnedIncome={currentEarnedIncome}
-        myContributions={myContributions}
-        savingsRate={savingsRate}
-      />
+      {/* The savings-rate explorer moved to the Sandbox in v2.13.0, where it sits
+          beside the retirement-age, claiming-age and spending levers instead of
+          being the only what-if on a data-entry tab. Same component, same
+          registry entry: turn on "What if you saved more?" from the picker. */}
 
       {/* Year-by-Year Account Balances Table */}
       <div className={cardStyle}>
@@ -14536,6 +14351,33 @@ function SandboxTab({ accounts, assets, computeProjections, incomeStreams, oneTi
 
   const panelOn = (id) => panels.includes(id);
 
+  // ── Views: named panel arrangements ──────────────────────────────────────
+  // Stored alongside the panels in sandboxConfig, so they travel with the plan
+  // and with an export. A view is a LAYOUT, not a scenario: it says which panels
+  // to draw, and deliberately says nothing about the control positions, so
+  // switching to "Tax view" while a retirement age is dragged keeps the drag.
+  const allPanelIds = useMemo(
+    () => [...PANEL_REGISTRY.map(e => e.id), ...SANDBOX_EXTRA_PANELS.map(e => e.id)], []);
+  const views = Array.isArray(cfg.views) ? cfg.views : [];
+  const [viewName, setViewName] = useState('');
+  const sameSet = (a, b) => a.length === b.length && a.every(x => b.includes(x));
+  const showAllPanels = () => setSandboxConfig(prev => ({ ...(prev || {}), panels: allPanelIds }));
+  const applyView = (v) => setSandboxConfig(prev => ({ ...(prev || {}), panels: [...v.panels] }));
+  const saveView = () => {
+    const name = viewName.trim();
+    if (!name || !panels.length) return;
+    setSandboxConfig(prev => {
+      const list = Array.isArray(prev?.views) ? prev.views : [];
+      // Same name replaces rather than duplicating — "save" on a name you already
+      // used means update it, which is what every other tool means by it.
+      const next = list.filter(v => v.name !== name).concat([{ name, panels: [...panels] }]);
+      return { ...(prev || {}), views: next };
+    });
+    setViewName('');
+  };
+  const deleteView = (name) => setSandboxConfig(prev => ({
+    ...(prev || {}), views: (prev?.views || []).filter(v => v.name !== name) }));
+
   return (
     <div className="space-y-6">
       <BasisLabel pi={personalInfo} />
@@ -14610,8 +14452,55 @@ function SandboxTab({ accounts, assets, computeProjections, incomeStreams, oneTi
 
       {/* ── Panel picker ───────────────────────────────────────────────── */}
       <div className={cardStyle}>
+        {/* Views. The panel selection already persists with the plan, so this is
+            not about remembering — it is about having MORE THAN ONE arrangement.
+            "Everything on" is how you find what is available; a four-panel
+            layout is how you actually read a decision. Switching between them
+            should not mean twenty clicks either way. */}
+        <div className="flex flex-wrap items-center gap-2 mb-3 pb-3 border-b border-slate-700/50">
+          <span className="text-sm text-slate-400 mr-1">Views:</span>
+          {views.length === 0 && <span className="text-xs text-slate-600">none saved yet</span>}
+          {views.map(v => (
+            <span key={v.name} className="inline-flex items-center rounded-lg border border-slate-700 bg-slate-800/60 overflow-hidden">
+              <button onClick={() => applyView(v)}
+                className={`px-3 py-1 text-xs transition-colors ${
+                  sameSet(v.panels, panels) ? 'bg-amber-500/15 text-amber-300' : 'text-slate-300 hover:text-slate-100'}`}
+                title={`${v.panels.length} panel${v.panels.length === 1 ? '' : 's'}`}>
+                {v.name}
+              </button>
+              <button onClick={() => deleteView(v.name)}
+                className="px-2 py-1 text-xs text-slate-600 hover:text-red-400 transition-colors"
+                title={`Delete the "${v.name}" view`}>×</button>
+            </span>
+          ))}
+          <div className="flex items-center gap-1 ml-auto">
+            <input
+              value={viewName}
+              onChange={e => setViewName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') saveView(); }}
+              placeholder="Name this view"
+              className="w-40 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs text-slate-100"
+            />
+            <button onClick={saveView} disabled={!viewName.trim() || panels.length === 0}
+              className={`px-3 py-1 rounded-lg border text-xs transition-colors ${
+                viewName.trim() && panels.length
+                  ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/25'
+                  : 'bg-slate-800/40 border-slate-700 text-slate-600 cursor-not-allowed'}`}>
+              Save view
+            </button>
+          </div>
+        </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm text-slate-400 mr-1">Show:</span>
+          <button onClick={showAllPanels}
+            className="px-3 py-1 rounded-lg border border-slate-600 bg-slate-800/60 text-xs text-slate-300 hover:text-slate-100 transition-colors">
+            All ({allPanelIds.length})
+          </button>
+          <button onClick={() => setSandboxConfig(prev => ({ ...(prev || {}), panels: [] }))}
+            className="px-3 py-1 rounded-lg border border-slate-600 bg-slate-800/60 text-xs text-slate-300 hover:text-slate-100 transition-colors">
+            None
+          </button>
+          <span className="text-slate-700 mx-1">|</span>
           {/* This row is also where a panel comes BACK. Hiding one from its own
               header unticks it here rather than losing it. */}
           {[...PANEL_REGISTRY.map(e => ({ id: e.id, label: e.label })), ...SANDBOX_EXTRA_PANELS].map(p => (
@@ -14849,7 +14738,7 @@ function NetWorthProjectionChart({ data, personalInfo, retirementAge, badge, onH
             </div>
           </div>
         </div>
-        <div className="h-72">
+        <div style={chartBox(288)}>
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={rows}>
               <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -14984,7 +14873,7 @@ function IncomeVsSpendingChart({ data, personalInfo, retirementAge, badge, onHid
             </div>
           </div>
         </div>
-        <div className="h-72">
+        <div style={chartBox(288)}>
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={rows}>
               <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -15375,7 +15264,7 @@ function WithdrawalRatePanel({ ctx, badge, onHide }) {
                   </div>
                 </div>
               </div>
-              <div className="h-64">
+              <div style={chartBox(256)}>
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={withdrawalRateData}>
                     <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -16509,34 +16398,12 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
   // back next visit while real numbers are still missing.
   const [estimatesDismissed, setEstimatesDismissed] = useState(false);
 
-  // ── The retirement-age what-if ────────────────────────────────────────────
-  // Held at the top of the tab, and aliased over `projections`, so that while
-  // the slider is off the plan's own age EVERYTHING on this page describes the
-  // same scenario. Previewing only the charts would leave the summary cards
-  // answering the same question differently three inches higher up — two plans
-  // on one screen, which is worse than showing no preview at all.
-  const dashBaseRetAge = personalInfo.myRetirementAge || 65;
-  const [previewRetAge, setPreviewRetAge] = useState(null);   // null = follow the plan
-  const previewTarget = previewRetAge === null ? dashBaseRetAge : previewRetAge;
-  useEffect(() => { setPreviewRetAge(null); }, [dashBaseRetAge]);
-
-  const retAgeScenario = useMemo(() => {
-    if (previewTarget === dashBaseRetAge) return null;
-    try {
-      const shifted = planAtRetirementAge(personalInfo, accounts, incomeStreams,
-        { myRetirementAge: previewTarget });
-      const proj = computeProjections(shifted.pi, shifted.accts, shifted.streams,
-        assets, oneTimeEvents, recurringExpenses);
-      return { proj, moved: shifted.moved, shifted };
-    } catch (e) { return { error: e.message }; }
-  }, [previewTarget, dashBaseRetAge, personalInfo, accounts, incomeStreams, assets,
-      oneTimeEvents, recurringExpenses]);
-
-  const previewing = !!(retAgeScenario && !retAgeScenario.error);
-  // From here down, `projections` IS the scenario while one is on screen. The
-  // panel below is handed planProjections explicitly, because comparing the two
-  // is its entire job.
-  const projections = previewing ? retAgeScenario.proj : planProjections;
+  // The retirement-age what-if used to live here, aliasing `projections` so the
+  // whole tab previewed one age. The Sandbox does that job properly now — two
+  // independent sliders for a couple, and every other lever beside them — so the
+  // Dashboard is back to one thing: what the plan as saved actually says.
+  const previewing = false;
+  const projections = planProjections;
   const current = projections[0];
   
   // The dashboard's section guards stay as they are — `visibilitySettings.x &&`
@@ -16699,20 +16566,6 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
           onHide={() => toggleVisibility('summaryCards')} />
       )}
       
-      {/* Sits ABOVE the two charts it moves. It is a control, and a control you
-          have to scroll away from to see the effect of is one nobody drags
-          twice — the whole value of a slider over a number field is watching
-          the lines redraw while your hand is still on it. */}
-      <RetirementAgeExplorer
-        personalInfo={personalInfo} projections={planProjections}
-        setPersonalInfo={setPersonalInfo}
-        setAccounts={setAccounts} setIncomeStreams={setIncomeStreams}
-        detailLevel={detailLevel} sectionVisibility={sectionVisibility}
-        setSectionVisibility={setSectionVisibility}
-        baseAge={dashBaseRetAge} target={previewTarget} setAge={setPreviewRetAge}
-        scenario={retAgeScenario}
-      />
-
       {visibilitySettings.netWorth && (
         <NetWorthProjectionChart data={projections} personalInfo={personalInfo}
           retirementAge={retirementAge} badge={previewBadge}
@@ -20712,6 +20565,16 @@ function RetirementPlanner() {
   };
   const [contentWidth, setContentWidth] = useState(initialContentWidth);
   const [widthOpen, setWidthOpen] = useState(false);
+  // Mirrors applyThemeMode: mutate the module object FIRST so the single
+  // re-render this triggers already draws at the new height, then record it in
+  // state so React knows something changed.
+  const [chartScale, setChartScaleState] = useState(CHART.scale);
+  const changeChartScale = (v) => {
+    const n = Math.min(CHART_SCALE_MAX, Math.max(CHART_SCALE_MIN, Number(v) || 1));
+    CHART.scale = n;
+    setChartScaleState(n);
+    try { localStorage.setItem(CHART_SCALE_KEY, String(n)); } catch (e) { /* storage off */ }
+  };
   const changeContentWidth = (px) => {
     const v = Math.min(WIDTH_MAX, Math.max(WIDTH_MIN, Math.round(px) || WIDTH_MIN));
     setContentWidth(v);
@@ -21264,7 +21127,12 @@ function RetirementPlanner() {
       label: 'OVERVIEW',
       icon: '📊',
       items: [
-        { id: 'dashboard', label: 'Dashboard', icon: '🏠' }
+        { id: 'dashboard', label: 'Dashboard', icon: '🏠' },
+        // Promoted out of TOOLS. The Dashboard answers "where does my plan
+        // stand"; the Sandbox answers "what happens if I change it", which is
+        // the question most people arrive with. Seven groups down it read as a
+        // curiosity rather than the second half of the app.
+        { id: 'sandbox', label: 'Sandbox', icon: '🎛️' }
       ]
     },
     {
@@ -21295,7 +21163,6 @@ function RetirementPlanner() {
       label: 'TOOLS',
       icon: '🔧',
       items: [
-        { id: 'sandbox', label: 'Sandbox', icon: '🎛️' },
         { id: 'scenarios', label: 'Scenarios', icon: '🔀' },
         { id: 'assistant', label: 'AI Assistant', icon: '💬' },
         { id: 'faq', label: 'Assumptions', icon: '❓' }
@@ -21467,6 +21334,23 @@ function RetirementPlanner() {
               >
                 fit this window
               </button>
+              <div className="mt-2 pt-2 border-t border-slate-700/50">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-slate-500">Chart height</span>
+                  <span className="text-[10px] text-slate-400">{Math.round(chartScale * 100)}%</span>
+                </div>
+                <input
+                  type="range" min={CHART_SCALE_MIN} max={CHART_SCALE_MAX} step={0.05}
+                  value={chartScale}
+                  onChange={e => changeChartScale(e.target.value)}
+                  className="w-full accent-amber-500"
+                  aria-label="Chart height"
+                />
+                <div className="text-[10px] text-slate-600 leading-tight">
+                  Taller charts spread the same range over more pixels, so small
+                  differences stop collapsing into one bar.
+                </div>
+              </div>
             </div>
           )}
         </div>
