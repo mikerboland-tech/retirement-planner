@@ -12445,6 +12445,71 @@ section('P104 — every tab that has sections can put them away');
     'the app gates well over thirty sections now, not the nine it started with');
 }
 
+section('P105 — one palette for the three tax treatments, not four');
+
+{
+  // The three buckets — pre-tax, Roth, brokerage — had their colours written out
+  // by hand in four separate places, and no two agreed. Roth was purple in the
+  // withdrawal-priority chips, sky in one traditional-vs-Roth verdict, purple
+  // again in another, and green (the palette's actual answer) only in the table
+  // that had already been corrected. Someone who learned the colours from the
+  // charts read three of the four backwards.
+  const fs15 = require('fs');
+  const path15 = require('path');
+  const src = fs15.readFileSync(path15.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+
+  ok(src.indexOf('const treatmentInk = (kind) =>') > 0,
+    'the three treatments have one colour source');
+  ok(src.indexOf('const treatmentChip = (kind) =>') > 0,
+    'and one chip style derived from it, rather than three hand-picked Tailwind steps');
+  // A function, not a const holding a value: applyThemeMode repaints SERIES in
+  // place, so a captured colour would freeze at whichever mode loaded first.
+  {
+    const at = src.indexOf('const treatmentInk = (kind) =>');
+    const body = src.slice(at, at + 400);
+    ok(body.indexOf('SERIES.preTax') > 0 && body.indexOf('SERIES.roth') > 0
+       && body.indexOf('SERIES.brokerage') > 0,
+      'and it reads the palette rather than restating it');
+  }
+
+  // No parallel palette may be rebuilt. The signature of one is a literal object
+  // mapping the bucket names to colours — which is exactly what was there.
+  {
+    const bad = [];
+    const re = /\{[^{}]*\bpretax\s*:[^{}]*\b(?:brokerage|roth)\s*:[^{}]*\}/g;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      if (/emerald|purple|sky|cyan|violet|indigo|pink|rose/.test(m[0])) bad.push(m[0].slice(0, 80));
+    }
+    eq(bad.length, 0,
+      'nothing maps the three buckets to hand-picked colours again'
+      + (bad.length ? ': ' + bad.join(' | ') : ''));
+  }
+
+  // The two verdicts must agree with each other, which was the sharpest symptom:
+  // the same word, "Roth", in two different colours on two tabs.
+  {
+    const verdicts = (src.match(/treatmentInk\((?:decision|y)\.favors\)/g) || []);
+    eq(verdicts.length, 2,
+      'both traditional-vs-Roth verdicts read the same source, so the same word is the same colour');
+    ok(!/favors === 'roth' \? 'text-/.test(src),
+      'and neither still picks a Tailwind class by hand');
+  }
+
+  // Figures that ARE an entity carry that entity's token.
+  // Anchor on the RENDER, not the declaration — the first mention of
+  // currentEarnedIncome is the const that computes it, two hundred lines above
+  // anywhere it is drawn.
+  [['formatCurrency(row.remainingPreTax)', 'SERIES.preTax'],
+   ['formatCurrency(s.lifetimeRothConversions)', 'SERIES.rothConversion'],
+   ['formatCurrency(currentEarnedIncome)', 'SERIES.earnedIncome']].forEach(([call, token]) => {
+    const at = src.indexOf(call);
+    gt(at, 0, `${call} is rendered somewhere`);
+    ok(src.slice(Math.max(0, at - 200), at).indexOf(token) > 0,
+      `${call} is coloured with ${token}`);
+  });
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

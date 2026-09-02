@@ -1384,6 +1384,28 @@ const BasisNote = ({ pi, reason }) => {
   );
 };
 
+// The three tax treatments, in the palette, in ONE place. They had been written
+// out by hand in four: the withdrawal-priority chips, two traditional-vs-Roth
+// verdicts, and the balances table. No two agreed — Roth was purple in one, sky
+// in another, emerald in a third, and green (correct) only in the table that had
+// already been fixed. A reader who learned the colours from the charts read
+// three of the four backwards.
+//
+// A function, not a const: applyThemeMode repaints SERIES in place, so this has
+// to read it when it is called or it freezes at whichever mode loaded first.
+const treatmentInk = (kind) => ({
+  pretax: SERIES.preTax, traditional: SERIES.preTax,
+  roth: SERIES.roth,
+  brokerage: SERIES.brokerage,
+}[kind] || THEME.inkSecondary);
+
+// The same three as a chip — tint, border and text derived from the one colour
+// rather than three hand-picked Tailwind steps.
+const treatmentChip = (kind) => {
+  const c = treatmentInk(kind);
+  return { background: `${c}33`, borderColor: `${c}80`, color: c };
+};
+
 // One switch for the yardstick every money figure on the page is quoted in.
 // Small, and next to the section controls rather than buried in a settings
 // panel, because the answer to "is that $3M real money?" has to be visible at
@@ -4429,7 +4451,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                   {row.irmaaDelta > 0 ? '+' + formatCurrency(row.irmaaDelta) : '—'}
                 </td>
                 <td className="py-2 px-2 text-right text-purple-400">{formatCurrency(row.cumulativeConversion)}</td>
-                <td className="py-2 px-2 text-right text-sky-400">{formatCurrency(row.remainingPreTax)}</td>
+                <td className="py-2 px-2 text-right" style={{ color: SERIES.preTax }}>{formatCurrency(row.remainingPreTax)}</td>
               </tr>
             ))}
           </tbody>
@@ -4444,7 +4466,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
               <td className="py-3 px-2 text-right text-amber-400 font-bold">{(totals.avgEffRate * 100).toFixed(1)}%</td>
               <td></td>
               <td></td>
-              <td className="py-3 px-2 text-right text-sky-400 font-bold">{formatCurrency(conversionAnalysis[conversionAnalysis.length - 1]?.remainingPreTax || 0)}</td>
+              <td className="py-3 px-2 text-right font-bold" style={{ color: SERIES.preTax }}>{formatCurrency(conversionAnalysis[conversionAnalysis.length - 1]?.remainingPreTax || 0)}</td>
             </tr>
           </tfoot>
         </table>
@@ -5696,7 +5718,8 @@ function CurrentYearTab({ detailLevel, sectionVisibility, setDetailLevel, setSec
                   </div>
                   <div>
                     <p className="text-[11px] text-slate-400">Verdict</p>
-                    <p className={`text-2xl font-semibold ${decision.favors === 'traditional' ? 'text-emerald-400' : decision.favors === 'roth' ? 'text-sky-400' : 'text-slate-300'}`}>
+                    <p className="text-2xl font-semibold"
+                       style={{ color: decision.favors === 'close' ? THEME.inkSecondary : treatmentInk(decision.favors) }}>
                       {decision.favors === 'traditional' ? 'Traditional' : decision.favors === 'roth' ? 'Roth' : 'Line ball'}
                     </p>
                     <p className="text-[11px] text-slate-500">
@@ -6074,9 +6097,7 @@ function DeferralDecisionPanel({ personalInfo, accounts, incomeStreams, assets, 
                       {Math.abs(y.gap) < 0.0005 ? '0.0' : `${y.gap > 0 ? '+' : ''}${(y.gap * 100).toFixed(1)}`}
                     </td>
                     <td className="py-1.5 px-2">
-                      <span className={
-                        y.favors === 'traditional' ? 'text-emerald-400'
-                        : y.favors === 'roth' ? 'text-purple-400' : 'text-slate-400'}>
+                      <span style={{ color: y.favors === 'close' ? THEME.inkMuted : treatmentInk(y.favors) }}>
                         {y.favors === 'close' ? 'too close to call' : y.favors}
                       </span>
                     </td>
@@ -9001,7 +9022,7 @@ function WithdrawalStrategiesTab({ detailLevel, sectionVisibility, setDetailLeve
               <p className="text-xs text-slate-400">Guaranteed minimum (3% floor) plus 50% of portfolio gains. Protects downside while sharing in good years.</p>
             </div>
             <div className="p-3 bg-slate-800/50 rounded-lg">
-              <h5 className="font-medium text-pink-400 mb-1">RMD-Based</h5>
+              <h5 className="font-medium mb-1" style={{ color: SERIES.rmd }}>RMD-Based</h5>
               <p className="text-xs text-slate-400">Follow IRS Required Minimum Distribution tables. Conservative early, increases with age. Never runs out by design.</p>
             </div>
           </div>
@@ -9901,7 +9922,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, currentYearRe
                           <td className="text-right py-2 px-2 text-purple-400">{formatCurrency(s.lifetimeTax)}</td>
                           <td className="text-right py-2 px-2 text-orange-400">{formatCurrency(s.lifetimeWithdrawals)}</td>
                           {rothConversionActive && (
-                            <td className="text-right py-2 px-2 text-purple-300">{formatCurrency(s.lifetimeRothConversions)}</td>
+                            <td className="text-right py-2 px-2" style={{ color: SERIES.rothConversion }}>{formatCurrency(s.lifetimeRothConversions)}</td>
                           )}
                           <td className="text-right py-2 px-2 text-emerald-400 font-semibold">{formatCurrency(s.netLifetimeWealth)}</td>
                           <td className={`text-right py-2 px-2 font-medium ${delta > 0 ? 'text-emerald-400' : delta < 0 ? 'text-red-400' : 'text-slate-400'}`}>
@@ -11713,7 +11734,8 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
           <div className="flex flex-col gap-2">
             {(localInfo.withdrawalPriority || ['pretax', 'brokerage', 'roth']).map((item, idx) => {
               const labels = { pretax: 'Pre-Tax (401k, Trad IRA, 457b)', brokerage: 'Brokerage & HSA', roth: 'Roth Accounts' };
-              const colors = { pretax: 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400', brokerage: 'bg-sky-500/20 border-sky-500/50 text-sky-400', roth: 'bg-purple-500/20 border-purple-500/50 text-purple-400' };
+              // Colours come from treatmentChip so these chips agree with every
+              // chart and table that draws the same three buckets.
               const priority = localInfo.withdrawalPriority || ['pretax', 'brokerage', 'roth'];
               
               const moveUp = () => {
@@ -11731,7 +11753,8 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
               };
               
               return (
-                <div key={item} className={`flex items-center gap-3 px-4 py-2 rounded-lg border ${colors[item]}`}>
+                <div key={item} className="flex items-center gap-3 px-4 py-2 rounded-lg border"
+                     style={treatmentChip(item)}>
                   <span className="text-slate-500 font-bold text-lg w-6">{idx + 1}.</span>
                   <span className="flex-1 font-medium">{labels[item]}</span>
                   <div className="flex gap-1">
@@ -12661,7 +12684,7 @@ function AccountsTab({ detailLevel, sectionVisibility, setDetailLevel, setSectio
             <div className="w-px h-10 bg-slate-700"></div>
             <div>
               <div className="text-slate-500 text-xs mb-0.5">Earned + Business Income</div>
-              <div className="text-xl font-bold text-emerald-400">{formatCurrency(currentEarnedIncome)}</div>
+              <div className="text-xl font-bold" style={{ color: SERIES.earnedIncome }}>{formatCurrency(currentEarnedIncome)}</div>
             </div>
             {savingsRate !== null && (
               <>
@@ -16816,7 +16839,7 @@ function IncomeModal({ editingIncome, personalInfo, incomeStreams = [], onClose,
                   <div className="flex items-center justify-between gap-3 pt-1 border-t border-purple-700/30">
                     <div className="text-sm">
                       <div className="text-slate-400 text-[11px]">Estimated pension</div>
-                      <div className="text-emerald-400 font-bold text-lg">{formatCurrency(estResult ? estResult.annualPension : 0)}<span className="text-xs text-slate-500 font-normal">/yr at {ownerRetAge}</span></div>
+                      <div className="font-bold text-lg" style={{ color: SERIES.pension }}>{formatCurrency(estResult ? estResult.annualPension : 0)}<span className="text-xs text-slate-500 font-normal">/yr at {ownerRetAge}</span></div>
                       <div className="text-[10px] text-slate-500">
                         {(estResult && estResult.multiplierUsed ? (estResult.multiplierUsed * 100).toFixed(2) : '0')}% × {est.yearsOfService} yr · COLA {(estResult ? (estResult.colaRate * 100).toFixed(1) : '0')}%{estResult && estResult.colaStartAge ? ` from age ${estResult.colaStartAge}` : ''}
                       </div>
