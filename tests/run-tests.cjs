@@ -10958,11 +10958,25 @@ section('P92 — a colour pinned at module scope never changes mode again');
 
   // And the replacements really are lazy: called at render time, so they see
   // whatever mode is current.
-  ['srBaseColor', 'srWhatIfColor', 'srBaseInk', 'srWhatIfInk'].forEach(fn => {
-    ok(new RegExp(`const ${fn} = \\(\\) =>`).test(src),
-      `${fn} is a function, so it reads the palette when it is used`);
-    ok(new RegExp(`${fn}\\(\\)`).test(src), `and every call site invokes it`);
-  });
+  // This used to name the four helpers the savings-rate panel defined. That panel
+  // is gone (v2.15.0), and naming components in a test is how a test rots — so
+  // the RULE is asserted instead, against the whole file: no module-scope binding
+  // may capture a palette VALUE. applyThemeMode repaints THEME and SERIES in
+  // place, so a function that reads them when called is live and a const that
+  // copies a string out of them freezes at whichever mode happened to load first.
+  {
+    const frozen = [];
+    const re = /^const\s+(\w+)\s*=\s*((?:THEME|SERIES)\.[\w.[\]']+)\s*;/gm;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      // SERIES itself is the live object, not a value copied out of it.
+      if (m[1] === 'SERIES') continue;
+      frozen.push(`${m[1]} = ${m[2]}`);
+    }
+    eq(frozen.length, 0,
+      'no module-scope const copies a colour out of the palette — it would never change mode again'
+      + (frozen.length ? ': ' + frozen.join(', ') : ''));
+  }
 
   // The theme module itself must offer both modes for every value these read,
   // or the lazy read just returns undefined in one of them.
@@ -11490,15 +11504,28 @@ section('P94 — no component is defined inside another component');
 
   // The savings-rate explorer is on the Sandbox's catalogue, using the same
   // component the Accounts tab renders rather than a second copy of it.
-  const reg = src.slice(src.indexOf('const PANEL_REGISTRY = ['));
-  const regEnd = reg.indexOf('\n];');
-  const registry = reg.slice(0, regEnd);
-  ok(registry.indexOf("id: 'savingsRate'") > 0,
-    'the savings-rate explorer is in the panel registry, so the Sandbox can show it');
-  ok(registry.indexOf('<SavingsRateExplorer') > 0,
-    'and it is the same component, not a reimplementation');
-  eq((src.match(/function SavingsRateExplorer\(/g) || []).length, 1,
-    'there is exactly one SavingsRateExplorer in the file');
+  // The savings-rate explorer was a registry entry for two releases and is gone:
+  // the Sandbox's own "Savings rate while working" slider asks the same question
+  // against the same engine, and two savings sliders on one page compete rather
+  // than add. What must survive is the ENGINE rule they shared — which bucket the
+  // next saved dollar fills, and where it stops — because the slider still needs
+  // it. That is the part worth pinning, not the panel that used to draw it.
+  eq((src.match(/function SavingsRateExplorer\(/g) || []).length, 0,
+    'the savings-rate panel is gone, not merely unlinked');
+  ok(src.indexOf("id: 'savingsRate'") < 0,
+    'and the Sandbox catalogue no longer offers a panel that does not exist');
+  ok(typeof engine.savingsTargetPlan === 'function',
+    'but the fill rule it used is still in the engine');
+  {
+    // and the Sandbox still reaches it, so the slider fills in priority order
+    // and stops at the IRS limits exactly as the removed panel did.
+    const engineSrc = require('fs').readFileSync(
+      require('path').resolve(__dirname, '..', 'engine.js'), 'utf8');
+    const sbAt = engineSrc.indexOf('const sandboxScenario =');
+    gt(sbAt, 0, 'sandboxScenario exists');
+    ok(engineSrc.slice(sbAt, sbAt + 4000).indexOf('savingsTargetPlan(') > 0,
+      'and the Sandbox savings slider fills through it rather than scaling accounts by a factor');
+  }
 }
 
 section('P95 — after-tax legacy, and the two reasons Monte Carlo looked broken');
@@ -12192,14 +12219,12 @@ section('P101 — the Sandbox is a primary surface, and charts can be stretched'
   {
     // The savings explorer is NOT deleted — it moved. It must still exist and
     // still be reachable from the Sandbox catalogue.
-    eq((src.match(/function SavingsRateExplorer\(/g) || []).length, 1,
-      'the savings-rate explorer still exists');
-    const acctAt = src.indexOf('function AccountsTab(');
-    const acctEnd = src.indexOf('\nfunction ', acctAt + 10);
-    ok(src.slice(acctAt, acctEnd).indexOf('<SavingsRateExplorer') < 0,
-      'but the Accounts tab no longer renders it');
-    ok(src.indexOf("id: 'savingsRate'") > 0,
-      'and the Sandbox catalogue still offers it, so it moved rather than vanished');
+    // It left the Accounts tab in v2.13.0 and was removed outright in v2.15.0,
+    // once it was clear the Sandbox's own slider had replaced it.
+    eq((src.match(/<SavingsRateExplorer/g) || []).length, 0,
+      'nothing renders the savings-rate panel any more');
+    eq((src.match(/srWhatIfInk|SR_BUCKET_LABEL/g) || []).length, 0,
+      'and its helpers went with it rather than sitting unreferenced');
   }
 
   // ── chart height: a multiplier, read at render time ──────────────────────
@@ -12220,8 +12245,8 @@ section('P101 — the Sandbox is a primary surface, and charts can be stretched'
       eq((src.match(new RegExp('className="' + cls + '"', 'g')) || []).length, 0,
         `no chart container is still pinned to ${cls}`);
     });
-    gt((src.match(/chartBox\(/g) || []).length, 10,
-      'and there are a dozen containers going through the scale');
+    gt((src.match(/chartBox\(/g) || []).length, 8,
+      'and every remaining chart container goes through the scale');
   }
 
   // ── views: a saved LAYOUT, not a saved scenario ──────────────────────────
