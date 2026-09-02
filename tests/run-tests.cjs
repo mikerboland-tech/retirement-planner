@@ -12297,6 +12297,48 @@ section('P102 — the Scenarios tab lives inside the Sandbox');
     'and "Make this the plan" is disabled until a control has been moved');
 }
 
+section('P103 — no control that does nothing');
+
+{
+  // "What does the View Settings button on the dashboard do?" — nothing. It
+  // toggled showDashboardSettings, which was read in exactly three places: to
+  // initialise itself, to flip itself, and to change its own label between
+  // "View Settings" and "Hide Settings". Nothing on the page was gated on it.
+  // Clicking it left the DOM node count, page height and text length identical.
+  //
+  // It was a leftover: the panel it used to open was replaced by
+  // SectionControls, and the button outlived it — carried down through the shell
+  // as two props for no reason. Same defect as the Hide buttons wired to a
+  // no-op, and the third time this session a control that looks like it works
+  // has turned out not to.
+  const fs13 = require('fs');
+  const path13 = require('path');
+  const src = fs13.readFileSync(path13.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+
+  eq((src.match(/showDashboardSettings/g) || []).length, 1,
+    'showDashboardSettings survives only in the comment explaining why it is gone');
+  ok(src.indexOf('>View Settings<') < 0 && src.indexOf("'View Settings'") < 0,
+    'and the button it drove is gone with it');
+
+  // ── the general rule ────────────────────────────────────────────────────
+  // A piece of useState that is never READ is either a control that does
+  // nothing or a feature someone abandoned half-built. Either way it should not
+  // survive a build. Setters are excluded from the read count on purpose: a
+  // flag that is only ever written is exactly the case being caught.
+  const dead = [];
+  const re = /const \[([A-Za-z_]\w*), (set\w+)\] = useState/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    const [, name, setter] = m;
+    const reads = (src.match(new RegExp('(?<![\\w.$])' + name + '(?![\\w])', 'g')) || []).length - 1;
+    const writes = (src.match(new RegExp('(?<![\\w.$])' + setter + '(?![\\w])', 'g')) || []).length - 1;
+    if (reads === 0) dead.push(`${name} (read ${reads}x, written ${writes}x)`);
+  }
+  eq(dead.length, 0,
+    'every piece of state is actually read somewhere'
+    + (dead.length ? ': ' + dead.join(', ') : ''));
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

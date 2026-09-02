@@ -8966,7 +8966,6 @@ function SocialSecurityTab({ accounts, assets, computeProjections, currentYearRe
   // roughly the post-war US dispersion of 10-year average CPI. Zero disables the
   // draw and keeps SS at its entered COLA.
   const [mcInflationVol, setMcInflationVol] = useState(0.015);
-  const [mcAnalysisStatus, setMcAnalysisStatus] = useState('idle');  // idle | running | done
 
   // R6: heavy SS-grid computation runs in a Web Worker. Status: 'idle' | 'running' | 'error'.
   // gridResult.allScenarios is read by the JSX below; null while a job is in flight.
@@ -16482,7 +16481,7 @@ function CharitableGivingPanel({ ctx }) {
   );
 }
 
-function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, detailLevel, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections: planProjections, recurringExpenses, setAccounts, setActiveTab, setDashboardVisibility, setDetailLevel, setIncomeStreams, setPersonalInfo, setSectionVisibility, setShowDashboardSettings, sectionVisibility, showDashboardSettings, showTourOffer }) {
+function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, detailLevel, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections: planProjections, recurringExpenses, setAccounts, setActiveTab, setDashboardVisibility, setDetailLevel, setIncomeStreams, setPersonalInfo, setSectionVisibility, sectionVisibility, showTourOffer }) {
   // Session-only: the banner should stop nagging once acknowledged, but must come
   // back next visit while real numbers are still missing.
   const [estimatesDismissed, setEstimatesDismissed] = useState(false);
@@ -16505,8 +16504,13 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
   SECTION_MANIFEST.dashboard.forEach(e => {
     visibilitySettings[e.id] = sectionIsVisible(sectionVisibility, detailLevel, 'dashboard', e.id);
   });
-  const showSettings = showDashboardSettings;
-  const setShowSettings = setShowDashboardSettings;
+  // A "View Settings" button used to sit here. It opened a panel listing the
+  // dashboard's sections — a panel replaced by SectionControls below, which is
+  // where hiding and restoring sections actually live now. The button outlived
+  // it: showDashboardSettings was read only to flip itself and to change its own
+  // label, so clicking it left the DOM byte-identical. Measured, not assumed.
+  // Same defect as the Hide buttons wired to a no-op: a control that looks like
+  // it works and does not.
 
   const toggleVisibility = (key) => {
     const on = sectionIsVisible(sectionVisibility, detailLevel, 'dashboard', key);
@@ -16626,16 +16630,6 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
           </div>
         </div>
       )}
-
-      {/* View Settings Toggle Button */}
-      <div className="flex justify-end">
-        <button
-          onClick={() => setShowSettings(!showSettings)}
-          className="px-4 py-2 bg-slate-800/60 border border-slate-600/50 rounded-lg text-sm text-slate-300 hover:bg-slate-700/60 transition-colors flex items-center gap-2"
-        >
-          <span>{showSettings ? 'Hide Settings' : 'View Settings'}</span>
-        </button>
-      </div>
 
       {/* The section list used to be written out again here, next to a chain of
           `visibilitySettings.x &&` guards that had to agree with it by hand. Both
@@ -20804,7 +20798,6 @@ function RetirementPlanner() {
   const [showAccountModal, setShowAccountModal] = useState(false);
   const [showIncomeModal, setShowIncomeModal] = useState(false);
   const [showAssetModal, setShowAssetModal] = useState(false);
-  const [showDashboardSettings, setShowDashboardSettings] = useState(false);
   const [editingAccount, setEditingAccount] = useState(null);
   const [editingIncome, setEditingIncome] = useState(null);
   const [editingAsset, setEditingAsset] = useState(null);
@@ -21558,7 +21551,7 @@ function RetirementPlanner() {
             sticky work. */}
         <main className="flex-1 p-6">
           <div className="mx-auto w-full" style={{ maxWidth: contentWidthCss(contentWidth) }}>
-            {activeTab === 'dashboard' && <DashboardTab setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} setShowDashboardSettings={setShowDashboardSettings} showDashboardSettings={showDashboardSettings} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
+            {activeTab === 'dashboard' && <DashboardTab setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
             {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
             {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
