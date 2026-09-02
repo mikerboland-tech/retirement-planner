@@ -514,6 +514,44 @@ const SECTION_MANIFEST = {
   // hidden and its detail level did nothing. The IRMAA card arriving from the
   // dashboard would otherwise have been the one section on the tab with no way
   // to put it away.
+  // Data-entry tabs get one too. A tab whose sections cannot be put away is a
+  // tab that grows monotonically: the year-by-year tables on Accounts are the
+  // reason someone scrolls past their own account list every time they want to
+  // change a balance.
+  accounts: [
+    { id: 'quickEdit',          label: 'Quick edit — balances & contributions', level: 'essential' },
+    { id: 'balancesTable',      label: 'Year-by-year account balances',  level: 'standard' },
+    { id: 'contributionsTable', label: 'Year-by-year contributions',     level: 'advanced' },
+  ],
+  income: [
+    { id: 'quickEdit',          label: 'Quick edit — income streams',    level: 'essential' },
+    { id: 'projectionTable',    label: 'Detailed annual projections',    level: 'standard' },
+  ],
+  withdrawal: [
+    { id: 'summary',            label: 'Strategy summary comparison',    level: 'essential' },
+    { id: 'portfolioChart',     label: 'Portfolio value over time',      level: 'essential' },
+    { id: 'withdrawalChart',    label: 'Annual withdrawal by strategy',  level: 'standard' },
+    { id: 'yearTable',          label: 'Detailed year-by-year',          level: 'advanced' },
+    { id: 'explanations',       label: 'Strategy explanations',          level: 'advanced' },
+  ],
+  stresstest: [
+    { id: 'startingConditions', label: 'Starting conditions at retirement', level: 'standard' },
+    { id: 'scenarioChart',      label: 'Portfolio value under each scenario', level: 'essential' },
+  ],
+  sensitivity: [
+    // Not the baseline card: it carries the Run Analysis button, and a section
+    // toggle that hides the way to run the tool is a trap, not a preference.
+    { id: 'ranking',            label: 'Impact ranking (tornado)',       level: 'essential' },
+    { id: 'perVariable',        label: 'Detailed results per variable',  level: 'standard' },
+  ],
+  currentyear: [
+    { id: 'payroll',            label: 'Paychecks',                      level: 'essential' },
+    { id: 'k1s',                label: 'Schedule K-1s',                  level: 'standard' },
+    { id: 'otherIncome',        label: 'Everything else',                level: 'standard' },
+    { id: 'form1040',           label: 'Projected Form 1040',            level: 'essential' },
+    { id: 'decisions',          label: 'What to do about it',            level: 'standard' },
+    { id: 'feedPlan',           label: 'Use these figures in the plan',  level: 'advanced' },
+  ],
   taxplanning: [
     { id: 'bracketSummary',  label: 'Bracket summary cards',              level: 'essential' },
     { id: 'bracketChart',    label: 'Income vs. Tax Bracket Thresholds',  level: 'essential' },
@@ -2583,7 +2621,7 @@ function AssetsTab({ assetTypes, assets, setAssets, setEditingAsset, setShowAsse
 // ============================================
 // IncomeStreamsTab — Lifted to module scope
 // ============================================
-function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projections, setEditingIncome, setIncomeStreams, setShowIncomeModal }) {
+function IncomeStreamsTab({ detailLevel, sectionVisibility, setDetailLevel, setSectionVisibility, incomeStreams, incomeTypes, personalInfo, projections, setEditingIncome, setIncomeStreams, setShowIncomeModal }) {
   const [incomeInfoOpen, setIncomeInfoOpen] = useState(false);
   const [localIncomes, setLocalIncomes] = useState(incomeStreams);
   const [dirtyIncomes, setDirtyIncomes] = useState(false);
@@ -2629,285 +2667,293 @@ function IncomeStreamsTab({ incomeStreams, incomeTypes, personalInfo, projection
         </div>
       )}
       
+      <SectionControls tab="income" vis={sectionVisibility} setVis={setSectionVisibility}
+                       level={detailLevel} setLevel={setDetailLevel} />
       {/* Quick Edit Table */}
-      <div className={cardStyle}>
-        <div className="flex items-center justify-between gap-2 mb-4">
-          <div className="flex items-center gap-2">
-          <h4 className="text-lg font-semibold text-slate-100">Quick Edit - Income Streams</h4>
-          <InfoCard
-            title="Income Streams"
-            isOpen={incomeInfoOpen}
-            onToggle={() => setIncomeInfoOpen(prev => !prev)}
-            sections={[
-              {
-                heading: 'What This Table Does',
-                body: 'This defines all your income sources — both current (like salary) and future (like Social Security and pensions). Each row is a stream of income that starts and stops at specific ages. The planner uses these to calculate how much of your retirement spending is covered by guaranteed income vs. portfolio withdrawals.'
-              },
-              {
-                heading: 'Column Definitions',
-                items: [
-                  { icon: '📝', label: 'Name', desc: 'A descriptive label (e.g., "My Social Security", "John\'s Pension", "Part-time Consulting"). For your reference only.' },
-                  { icon: '🏷️', label: 'Type', desc: 'The category of income. This affects how the planner treats it for tax calculations: Earned Income is subject to payroll taxes and signals you\'re still working. Social Security uses special IRS taxation rules (only 50–85% may be taxable). Pension and Other Income are taxed as ordinary income.' },
-                  { icon: '👤', label: 'Owner', desc: '"Me", "Spouse", or "Joint". Determines whose age triggers the start/stop of this stream, and — when survivor modeling is on — whether it stops at that person\'s death. Choose Joint for household income that keeps paying after the first death: rental income, a joint-and-survivor annuity, a business interest. Its ages follow yours. Social Security is always individual, so Joint is not offered there; the survivor automatically keeps the higher of the two benefits.' },
-                  { icon: '💰', label: 'Amount', desc: 'Annual income in today\'s dollars. For Social Security, enter your estimated annual benefit at the claiming age you plan to use (check ssa.gov for your estimate). For salary, enter your current annual gross pay.' },
-                  { icon: '📈', label: 'COLA', desc: 'Cost-of-Living Adjustment — the annual percentage increase for this income. Social Security typically gets 2–3% COLA. Pensions may have 0–2%. Salary might grow 2–4%. This compounds each year from the start age.' },
-                  { icon: '📅', label: 'Ages', desc: `The start and end ages for this income. Social Security: typically 62 to your planning age (or your chosen claiming age). Salary: current age to retirement age. Pension: pension start age to your planning age. Set end age to ${personalInfo.legacyAge || 95} for lifetime income.` }
-                ]
-              },
-              {
-                heading: 'Income Types Explained',
-                items: [
-                  { icon: '💼', label: 'Earned Income', desc: 'Salary, wages, or self-employment income. Having earned income tells the planner you\'re still working — it won\'t draw from your portfolio during these years (except for RMDs if applicable). Subject to payroll taxes.' },
-                  { icon: '🏛️', label: 'Social Security', desc: 'Your SS benefit. Taxed differently than other income: depending on your total income, 0%, 50%, or up to 85% of your benefit may be subject to federal income tax. The planner handles this automatically using IRS combined income thresholds.' },
-                  { icon: '📋', label: 'Pension', desc: 'Defined-benefit pension payments. Fully taxed as ordinary income. If your pension has a COLA provision, enter the annual adjustment rate.' },
-                  { icon: '📦', label: 'Other Income', desc: 'Catch-all for rental income, annuity payments, part-time work in retirement, royalties, etc. Taxed as ordinary income.' }
-                ]
-              },
-              {
-                heading: 'Tips',
-                items: [
-                  { icon: '🔑', label: 'Social Security Claiming Age', desc: 'The start age for SS has a huge impact. Benefits are permanently reduced ~6–7% per year before Full Retirement Age (66–67) and increase 8% per year from FRA to age 70. The planner applies these adjustments automatically based on your birth year.' },
-                  { icon: '👫', label: 'Spousal Benefits', desc: 'Add separate income streams for each spouse\'s Social Security, pension, etc. Set the owner field to match. The planner uses each person\'s age independently.' },
-                  { icon: '📊', label: 'Impact on Dashboard', desc: 'These income streams flow directly into the "Retirement Income" summary card, the stacked bars in the Income vs Spending chart, and the Cash Flow Sankey diagram. They determine how much the planner needs to pull from your portfolio.' }
-                ],
-                tip: 'Not sure about your Social Security amount? Visit ssa.gov/myaccount to get your personalized estimate. Enter the amount for the age you plan to claim — the planner will apply the correct early/delayed claiming adjustments.'
-              }
-            ]}
-          />
+      <HideableBlock tab="income" id="quickEdit" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <div className={cardStyle}>
+          <div className="flex items-center justify-between gap-2 mb-4">
+            <div className="flex items-center gap-2">
+            <h4 className="text-lg font-semibold text-slate-100">Quick Edit - Income Streams</h4>
+            <InfoCard
+              title="Income Streams"
+              isOpen={incomeInfoOpen}
+              onToggle={() => setIncomeInfoOpen(prev => !prev)}
+              sections={[
+                {
+                  heading: 'What This Table Does',
+                  body: 'This defines all your income sources — both current (like salary) and future (like Social Security and pensions). Each row is a stream of income that starts and stops at specific ages. The planner uses these to calculate how much of your retirement spending is covered by guaranteed income vs. portfolio withdrawals.'
+                },
+                {
+                  heading: 'Column Definitions',
+                  items: [
+                    { icon: '📝', label: 'Name', desc: 'A descriptive label (e.g., "My Social Security", "John\'s Pension", "Part-time Consulting"). For your reference only.' },
+                    { icon: '🏷️', label: 'Type', desc: 'The category of income. This affects how the planner treats it for tax calculations: Earned Income is subject to payroll taxes and signals you\'re still working. Social Security uses special IRS taxation rules (only 50–85% may be taxable). Pension and Other Income are taxed as ordinary income.' },
+                    { icon: '👤', label: 'Owner', desc: '"Me", "Spouse", or "Joint". Determines whose age triggers the start/stop of this stream, and — when survivor modeling is on — whether it stops at that person\'s death. Choose Joint for household income that keeps paying after the first death: rental income, a joint-and-survivor annuity, a business interest. Its ages follow yours. Social Security is always individual, so Joint is not offered there; the survivor automatically keeps the higher of the two benefits.' },
+                    { icon: '💰', label: 'Amount', desc: 'Annual income in today\'s dollars. For Social Security, enter your estimated annual benefit at the claiming age you plan to use (check ssa.gov for your estimate). For salary, enter your current annual gross pay.' },
+                    { icon: '📈', label: 'COLA', desc: 'Cost-of-Living Adjustment — the annual percentage increase for this income. Social Security typically gets 2–3% COLA. Pensions may have 0–2%. Salary might grow 2–4%. This compounds each year from the start age.' },
+                    { icon: '📅', label: 'Ages', desc: `The start and end ages for this income. Social Security: typically 62 to your planning age (or your chosen claiming age). Salary: current age to retirement age. Pension: pension start age to your planning age. Set end age to ${personalInfo.legacyAge || 95} for lifetime income.` }
+                  ]
+                },
+                {
+                  heading: 'Income Types Explained',
+                  items: [
+                    { icon: '💼', label: 'Earned Income', desc: 'Salary, wages, or self-employment income. Having earned income tells the planner you\'re still working — it won\'t draw from your portfolio during these years (except for RMDs if applicable). Subject to payroll taxes.' },
+                    { icon: '🏛️', label: 'Social Security', desc: 'Your SS benefit. Taxed differently than other income: depending on your total income, 0%, 50%, or up to 85% of your benefit may be subject to federal income tax. The planner handles this automatically using IRS combined income thresholds.' },
+                    { icon: '📋', label: 'Pension', desc: 'Defined-benefit pension payments. Fully taxed as ordinary income. If your pension has a COLA provision, enter the annual adjustment rate.' },
+                    { icon: '📦', label: 'Other Income', desc: 'Catch-all for rental income, annuity payments, part-time work in retirement, royalties, etc. Taxed as ordinary income.' }
+                  ]
+                },
+                {
+                  heading: 'Tips',
+                  items: [
+                    { icon: '🔑', label: 'Social Security Claiming Age', desc: 'The start age for SS has a huge impact. Benefits are permanently reduced ~6–7% per year before Full Retirement Age (66–67) and increase 8% per year from FRA to age 70. The planner applies these adjustments automatically based on your birth year.' },
+                    { icon: '👫', label: 'Spousal Benefits', desc: 'Add separate income streams for each spouse\'s Social Security, pension, etc. Set the owner field to match. The planner uses each person\'s age independently.' },
+                    { icon: '📊', label: 'Impact on Dashboard', desc: 'These income streams flow directly into the "Retirement Income" summary card, the stacked bars in the Income vs Spending chart, and the Cash Flow Sankey diagram. They determine how much the planner needs to pull from your portfolio.' }
+                  ],
+                  tip: 'Not sure about your Social Security amount? Visit ssa.gov/myaccount to get your personalized estimate. Enter the amount for the age you plan to claim — the planner will apply the correct early/delayed claiming adjustments.'
+                }
+              ]}
+            />
+            </div>
+            {dirtyIncomes && <button onClick={saveIncomeChanges} className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-sm font-medium transition-colors">💾 Save Changes</button>}
           </div>
-          {dirtyIncomes && <button onClick={saveIncomeChanges} className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-sm font-medium transition-colors">💾 Save Changes</button>}
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-max">
+              <thead>
+                <tr className="border-b border-slate-700">
+                  <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Name</th>
+                  <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Type</th>
+                  <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Owner</th>
+                  <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Amount</th>
+                  <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">COLA</th>
+                  <th className="text-center py-3 px-1 text-slate-400 font-medium whitespace-nowrap" title="Checked: the amount is in today's dollars and COLA compounds from today — future-dated streams get indexed up to their start age. Unchecked: the amount is what you'll actually receive in the first year (COLA starts at the start age).">Today's $</th>
+                  <th className="text-center py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Ages</th>
+                  <th className="text-center py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {localIncomes.map((stream, idx) => (
+                  <tr key={stream.id} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''}`}>
+                    <td className="py-2 px-1">
+                      <SpreadsheetCell
+                        value={stream.name}
+                        onChange={e => updateIncome(stream.id, 'name', e.target.value)}
+                        style={{ width: `${maxNameWidth}ch` }}
+                        className="bg-transparent border border-transparent rounded px-2 py-1.5 text-slate-100 font-medium focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                      />
+                    </td>
+                    <td className="py-2 px-1">
+                      <GridSelect
+                        value={stream.type}
+                        onChange={e => updateIncome(stream.id, 'type', e.target.value)}
+                        className="bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors cursor-pointer"
+                      >
+                        {incomeTypes.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                      </GridSelect>
+                    </td>
+                    <td className="py-2 px-1">
+                      <GridSelect
+                        value={stream.owner}
+                        onChange={e => updateIncome(stream.id, 'owner', e.target.value)}
+                        className="bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors cursor-pointer"
+                      >
+                        <option value="me">Me</option>
+                        <option value="spouse">Spouse</option>
+                        {/* Social Security is always an individual entitlement, and
+                            the survivor rule works by finding the OTHER spouse's
+                            stream — a joint one would have no other side. Every
+                            other kind of income can belong to the household. */}
+                        {stream.type !== 'social_security' && <option value="joint">Joint</option>}
+                      </GridSelect>
+                    </td>
+                    <td className="py-2 px-1">
+                      <CurrencyCell
+                        value={stream.amount}
+                        onValueChange={v => updateIncome(stream.id, 'amount', v)}
+                        className="bg-transparent border border-transparent rounded px-2 py-1.5 text-emerald-400 font-semibold text-right w-20 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                      />
+                    </td>
+                    <td className="py-2 px-1">
+                      <PercentCell
+                        value={stream.cola}
+                        onValueChange={v => updateIncome(stream.id, 'cola', v)}
+                        className="bg-transparent border border-transparent rounded px-2 py-1.5 text-sky-400 font-semibold text-right w-16 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                      />
+                    </td>
+                    <td className="py-2 px-1 text-center">
+                      <input
+                        type="checkbox"
+                        checked={!!stream.todaysDollars}
+                        onChange={e => updateIncome(stream.id, 'todaysDollars', e.target.checked)}
+                        className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-amber-500 cursor-pointer"
+                        title="Amount is in today's dollars — COLA compounds from today, so a future-dated stream is indexed up to its start age"
+                      />
+                    </td>
+                    <td className="py-2 px-1">
+                      <div className="flex items-center justify-center gap-0.5">
+                        <AgeCell
+                          value={stream.startAge}
+                          onChange={e => updateIncome(stream.id, 'startAge', Number(e.target.value))}
+                          className="w-12 bg-transparent border border-transparent rounded px-1 py-1.5 text-amber-400 font-medium text-center text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                        />
+                        <span className="text-slate-500">-</span>
+                        <AgeCell
+                          value={stream.endAge}
+                          onChange={e => updateIncome(stream.id, 'endAge', Number(e.target.value))}
+                          className="w-12 bg-transparent border border-transparent rounded px-1 py-1.5 text-amber-400 font-medium text-center text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                        />
+                      </div>
+                    </td>
+                    <td className="py-2 px-1 text-center">
+                      <div className="flex justify-center gap-1">
+                        <button tabIndex={-1} onClick={() => { setEditingIncome(stream); setShowIncomeModal(true); }} className="text-slate-400 hover:text-amber-400 text-sm px-1 py-1" title="Edit all details">⚙️</button>
+                        <button tabIndex={-1} onClick={() => { setLocalIncomes(prev => prev.filter(i => i.id !== stream.id)); setDirtyIncomes(true); }} className="text-slate-400 hover:text-red-400 text-sm px-1 py-1" title="Delete (applies on Save)">🗑️</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-slate-600 bg-slate-800/50">
+                  {/* This is the column sum, NOT household income in any year — the
+                      streams above start and stop at different ages, so a salary
+                      ending at 65 is being added to a benefit starting at 67. It is
+                      also a mix of dollar bases: each amount is in today's dollars
+                      or nominal at its own start age depending on that stream's
+                      "Today's $" setting. Labelled for what it is; the Dashboard's
+                      income chart is the figure to read for any given year. */}
+                  <td colSpan="3" className="py-3 px-1 text-slate-300 font-semibold">
+                    Sum of all entries
+                    <span className="block text-xs font-normal text-slate-500">
+                      Not income in any one year — these start and stop at different ages
+                    </span>
+                  </td>
+                  <td className="py-3 px-1 text-right text-emerald-400 font-bold">{formatCurrency(totalAnnualIncome)}</td>
+                  <td colSpan="4"></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-max">
+      </HideableBlock>
+      
+      {/* Detailed Annual Projections (formerly its own tab) */}
+      <HideableBlock tab="income" id="projectionTable" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <div className="border-t border-slate-700/50 pt-6 mt-6">
+      <div className="space-y-6">
+        <div className="flex items-center gap-4">
+          <h3 className="text-xl font-semibold text-slate-100">Detailed Annual Projections</h3>
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-slate-400">Starting Age:</label>
+            <input type="number" value={tableStartAge} onChange={e => setTableStartAge(Number(e.target.value))} className="w-20 bg-slate-900 border border-slate-600 rounded px-3 py-1 text-slate-100" />
+          </div>
+        </div>
+        <div className={`${cardStyle} overflow-x-auto`}>
+          <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-slate-700">
-                <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Name</th>
-                <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Type</th>
-                <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Owner</th>
-                <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Amount</th>
-                <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">COLA</th>
-                <th className="text-center py-3 px-1 text-slate-400 font-medium whitespace-nowrap" title="Checked: the amount is in today's dollars and COLA compounds from today — future-dated streams get indexed up to their start age. Unchecked: the amount is what you'll actually receive in the first year (COLA starts at the start age).">Today's $</th>
-                <th className="text-center py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Ages</th>
-                <th className="text-center py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Actions</th>
+                <th className="text-left py-3 px-2 text-slate-400 font-medium">Age</th>
+                <th className="text-right py-3 px-2 text-slate-400 font-medium">Year</th>
+                <th className="text-right py-3 px-2 text-slate-400 font-medium">Desired Income</th>
+                <th className="text-right py-3 px-2 text-slate-400 font-medium">Social Security</th>
+                <th className="text-right py-3 px-2 text-slate-400 font-medium">Pension</th>
+                <th className="text-right py-3 px-2 text-slate-400 font-medium">Other Income</th>
+                <th className="text-right py-3 px-2 text-slate-400 font-medium">Portfolio Draw</th>
+                <th className="text-right py-3 px-2 text-slate-400 font-medium">RMD</th>
+                <th className="text-right py-3 px-2 text-emerald-400 font-medium">QCD</th>
+                <th className="text-right py-3 px-2 font-medium" style={{ color: SERIES.rothConversion }}>Roth Conv.</th>
+                <th className="text-right py-3 px-2 text-amber-400 font-medium">Taxable Income</th>
+                <th className="text-right py-3 px-2 text-amber-400 font-medium">MAGI</th>
+                <th className="text-right py-3 px-2 text-slate-400 font-medium">Federal Tax</th>
+                <th className="text-right py-3 px-2 text-amber-400 font-medium">State Taxable</th>
+                <th className="text-right py-3 px-2 text-slate-400 font-medium">State Tax</th>
+                <th className="text-right py-3 px-2 text-slate-400 font-medium">FICA</th>
+                <th className="text-right py-3 px-2 text-slate-400 font-medium">IRMAA</th>
+                <th className="text-right py-3 px-2 text-slate-400 font-medium">Net Income</th>
+                <th className="text-right py-3 px-2 text-slate-400 font-medium">Portfolio</th>
               </tr>
             </thead>
             <tbody>
-              {localIncomes.map((stream, idx) => (
-                <tr key={stream.id} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''}`}>
-                  <td className="py-2 px-1">
-                    <SpreadsheetCell
-                      value={stream.name}
-                      onChange={e => updateIncome(stream.id, 'name', e.target.value)}
-                      style={{ width: `${maxNameWidth}ch` }}
-                      className="bg-transparent border border-transparent rounded px-2 py-1.5 text-slate-100 font-medium focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                    />
+              {tableData.map((row, idx) => (
+                <tr key={row.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${row.qcd > 0 ? 'bg-emerald-900/10' : ''} ${row.rothConversion > 0 ? 'bg-purple-900/10' : ''} ${row.survivorEvent ? 'bg-red-900/15 border-red-500/30' : ''} ${row.oneTimeEvents?.length ? 'bg-amber-900/10' : ''} ${row.unfundedShortfall > 0 ? 'bg-red-900/25' : ''}`}>
+                  <td className="py-2 px-2 text-slate-100 font-medium">
+                    {row.myAge}
+                    {row.survivorEvent === 'spouse_died' && <span title="Spouse passed" className="ml-1">🕊️</span>}
+                    {row.survivorEvent === 'primary_died' && <span title="Primary passed" className="ml-1">🕊️</span>}
+                    {row.effectiveFilingStatus === 'single' && <span title="Filing as Single" className="ml-1 text-xs text-red-400">(S)</span>}
                   </td>
-                  <td className="py-2 px-1">
-                    <GridSelect
-                      value={stream.type}
-                      onChange={e => updateIncome(stream.id, 'type', e.target.value)}
-                      className="bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors cursor-pointer"
-                    >
-                      {incomeTypes.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                    </GridSelect>
+                  <td className="py-2 px-2 text-right text-slate-300">{row.year}</td>
+                  <td className="py-2 px-2 text-right text-amber-400">
+                    {formatCurrency(row.desiredIncome)}
+                    {row.healthcareExpense > 0 && <div className="text-xs text-pink-400" title="Healthcare costs">+{formatCurrency(row.healthcareExpense)} HC</div>}
+                    {row.recurringExpenses > 0 && <div className="text-xs text-cyan-400" title="Recurring expenses">+{formatCurrency(row.recurringExpenses)} RE</div>}
+                    {row.oneTimeExpense > 0 && <div className="text-xs text-red-400">+{formatCurrency(row.oneTimeExpense)}</div>}
                   </td>
-                  <td className="py-2 px-1">
-                    <GridSelect
-                      value={stream.owner}
-                      onChange={e => updateIncome(stream.id, 'owner', e.target.value)}
-                      className="bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors cursor-pointer"
-                    >
-                      <option value="me">Me</option>
-                      <option value="spouse">Spouse</option>
-                      {/* Social Security is always an individual entitlement, and
-                          the survivor rule works by finding the OTHER spouse's
-                          stream — a joint one would have no other side. Every
-                          other kind of income can belong to the household. */}
-                      {stream.type !== 'social_security' && <option value="joint">Joint</option>}
-                    </GridSelect>
+                  <td className="py-2 px-2 text-right" style={{ color: SERIES.socialSecurity }}>
+                    {formatCurrency(row.socialSecurity)}
+                    {row.ssEarningsTestReduction > 0 && <div className="text-xs text-red-400" title="SS reduced by earnings test">-{formatCurrency(row.ssEarningsTestReduction)} ET</div>}
                   </td>
-                  <td className="py-2 px-1">
-                    <CurrencyCell
-                      value={stream.amount}
-                      onValueChange={v => updateIncome(stream.id, 'amount', v)}
-                      className="bg-transparent border border-transparent rounded px-2 py-1.5 text-emerald-400 font-semibold text-right w-20 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                    />
+                  <td className="py-2 px-2 text-right" style={{ color: SERIES.pension }}>{formatCurrency(row.pension)}</td>
+                  <td className="py-2 px-2 text-right" style={{ color: SERIES.otherIncome }}>{formatCurrency(row.otherIncome)}</td>
+                  <td className="py-2 px-2 text-right" style={{ color: SERIES.withdrawalVoluntary }}>
+                    {formatCurrency(row.portfolioWithdrawal)}
+                    {row.contributionsPaused > 0 && (
+                      <div className="text-xs text-sky-300" title="Saving paused this year to pay for an expense dated before retirement">
+                        paused {formatCurrency(row.contributionsPaused)} saving
+                      </div>
+                    )}
+                    {row.unfundedShortfall > 0 && (
+                      <div className="text-xs text-red-400" title="Spending this year's portfolio could not fund — the plan is short by this much">
+                        short {formatCurrency(row.unfundedShortfall)}
+                      </div>
+                    )}
                   </td>
-                  <td className="py-2 px-1">
-                    <PercentCell
-                      value={stream.cola}
-                      onValueChange={v => updateIncome(stream.id, 'cola', v)}
-                      className="bg-transparent border border-transparent rounded px-2 py-1.5 text-sky-400 font-semibold text-right w-16 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                    />
+                  <td className="py-2 px-2 text-right" style={{ color: SERIES.rmd }}>{row.rmd > 0 ? formatCurrency(row.rmd) : '—'}</td>
+                  <td className="py-2 px-2 text-right text-emerald-400 font-medium">{row.qcd > 0 ? formatCurrency(row.qcd) : '—'}</td>
+                  <td className="py-2 px-2 text-right font-medium" style={{ color: SERIES.rothConversion }}>{row.rothConversion > 0 ? formatCurrency(row.rothConversion) : '—'}</td>
+                  <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.taxableIncome)}</td>
+                  <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.magi)}</td>
+                  <td className="py-2 px-2 text-right text-red-400">
+                    ({formatCurrency(row.federalTax)})
+                    {row.earlyWithdrawalPenalty > 0 && (
+                      <div className="text-xs text-red-300" title="10% §72(t) additional tax on pre-tax withdrawals before age 59½ (included in the federal tax above)">
+                        incl. {formatCurrency(row.earlyWithdrawalPenalty)} 72(t)
+                      </div>
+                    )}
                   </td>
-                  <td className="py-2 px-1 text-center">
-                    <input
-                      type="checkbox"
-                      checked={!!stream.todaysDollars}
-                      onChange={e => updateIncome(stream.id, 'todaysDollars', e.target.checked)}
-                      className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-amber-500 cursor-pointer"
-                      title="Amount is in today's dollars — COLA compounds from today, so a future-dated stream is indexed up to its start age"
-                    />
-                  </td>
-                  <td className="py-2 px-1">
-                    <div className="flex items-center justify-center gap-0.5">
-                      <AgeCell
-                        value={stream.startAge}
-                        onChange={e => updateIncome(stream.id, 'startAge', Number(e.target.value))}
-                        className="w-12 bg-transparent border border-transparent rounded px-1 py-1.5 text-amber-400 font-medium text-center text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                      />
-                      <span className="text-slate-500">-</span>
-                      <AgeCell
-                        value={stream.endAge}
-                        onChange={e => updateIncome(stream.id, 'endAge', Number(e.target.value))}
-                        className="w-12 bg-transparent border border-transparent rounded px-1 py-1.5 text-amber-400 font-medium text-center text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                      />
-                    </div>
-                  </td>
-                  <td className="py-2 px-1 text-center">
-                    <div className="flex justify-center gap-1">
-                      <button tabIndex={-1} onClick={() => { setEditingIncome(stream); setShowIncomeModal(true); }} className="text-slate-400 hover:text-amber-400 text-sm px-1 py-1" title="Edit all details">⚙️</button>
-                      <button tabIndex={-1} onClick={() => { setLocalIncomes(prev => prev.filter(i => i.id !== stream.id)); setDirtyIncomes(true); }} className="text-slate-400 hover:text-red-400 text-sm px-1 py-1" title="Delete (applies on Save)">🗑️</button>
-                    </div>
-                  </td>
+                  <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.stateTaxableIncome)}</td>
+                  <td className="py-2 px-2 text-right text-red-400">({formatCurrency(row.stateTax)})</td>
+                  <td className="py-2 px-2 text-right text-red-400">{row.ficaTax > 0 ? `(${formatCurrency(row.ficaTax)})` : '—'}</td>
+                  <td className="py-2 px-2 text-right text-red-400">{row.irmaaSurcharge > 0 ? `(${formatCurrency(row.irmaaSurcharge)})` : '—'}</td>
+                  <td className="py-2 px-2 text-right text-emerald-400 font-medium">{formatCurrency(row.netIncome)}</td>
+                  <td className="py-2 px-2 text-right text-slate-300">{formatCurrency(row.totalPortfolio)}</td>
                 </tr>
               ))}
             </tbody>
-            <tfoot>
-              <tr className="border-t-2 border-slate-600 bg-slate-800/50">
-                {/* This is the column sum, NOT household income in any year — the
-                    streams above start and stop at different ages, so a salary
-                    ending at 65 is being added to a benefit starting at 67. It is
-                    also a mix of dollar bases: each amount is in today's dollars
-                    or nominal at its own start age depending on that stream's
-                    "Today's $" setting. Labelled for what it is; the Dashboard's
-                    income chart is the figure to read for any given year. */}
-                <td colSpan="3" className="py-3 px-1 text-slate-300 font-semibold">
-                  Sum of all entries
-                  <span className="block text-xs font-normal text-slate-500">
-                    Not income in any one year — these start and stop at different ages
-                  </span>
-                </td>
-                <td className="py-3 px-1 text-right text-emerald-400 font-bold">{formatCurrency(totalAnnualIncome)}</td>
-                <td colSpan="4"></td>
-              </tr>
-            </tfoot>
           </table>
         </div>
+        {charitablePercent > 0 && (
+          <div className="p-3 bg-emerald-900/20 border border-emerald-700/30 rounded-lg">
+            <p className="text-sm text-emerald-300">
+              <strong>💡 QCD Active ({charitablePercent}% charitable giving):</strong> Starting at age 70, your charitable giving is fulfilled via Qualified Charitable Distributions from your IRA. 
+              QCD amounts are excluded from taxable income, reducing your tax burden while still allowing the standard deduction.
+            </p>
+          </div>
+        )}
+        {conversionIsActive(personalInfo) && (
+          <div className="p-3 bg-purple-900/20 border border-purple-700/30 rounded-lg">
+            <p className="text-sm text-purple-300">
+              <strong>🔄 Roth Conversions Active ({conversionModeLabel(personalInfo)}, ages {personalInfo.rothConversionStartAge || getDefaultRothConversionWindow(personalInfo).startAge}–{personalInfo.rothConversionEndAge || getDefaultRothConversionWindow(personalInfo).endAge}):</strong> Purple-highlighted rows show years where conversions execute. The converted amount increases taxable income (and federal/state tax) that year but shifts assets to tax-free Roth growth. Watch the "Portfolio" column — pre-tax balance decreases while Roth balance grows, reducing future RMDs.
+            </p>
+          </div>
+        )}
       </div>
-      
-      {/* Detailed Annual Projections (formerly its own tab) */}
-      <div className="border-t border-slate-700/50 pt-6 mt-6">
-    <div className="space-y-6">
-      <div className="flex items-center gap-4">
-        <h3 className="text-xl font-semibold text-slate-100">Detailed Annual Projections</h3>
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-slate-400">Starting Age:</label>
-          <input type="number" value={tableStartAge} onChange={e => setTableStartAge(Number(e.target.value))} className="w-20 bg-slate-900 border border-slate-600 rounded px-3 py-1 text-slate-100" />
-        </div>
-      </div>
-      <div className={`${cardStyle} overflow-x-auto`}>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-slate-700">
-              <th className="text-left py-3 px-2 text-slate-400 font-medium">Age</th>
-              <th className="text-right py-3 px-2 text-slate-400 font-medium">Year</th>
-              <th className="text-right py-3 px-2 text-slate-400 font-medium">Desired Income</th>
-              <th className="text-right py-3 px-2 text-slate-400 font-medium">Social Security</th>
-              <th className="text-right py-3 px-2 text-slate-400 font-medium">Pension</th>
-              <th className="text-right py-3 px-2 text-slate-400 font-medium">Other Income</th>
-              <th className="text-right py-3 px-2 text-slate-400 font-medium">Portfolio Draw</th>
-              <th className="text-right py-3 px-2 text-slate-400 font-medium">RMD</th>
-              <th className="text-right py-3 px-2 text-emerald-400 font-medium">QCD</th>
-              <th className="text-right py-3 px-2 font-medium" style={{ color: SERIES.rothConversion }}>Roth Conv.</th>
-              <th className="text-right py-3 px-2 text-amber-400 font-medium">Taxable Income</th>
-              <th className="text-right py-3 px-2 text-amber-400 font-medium">MAGI</th>
-              <th className="text-right py-3 px-2 text-slate-400 font-medium">Federal Tax</th>
-              <th className="text-right py-3 px-2 text-amber-400 font-medium">State Taxable</th>
-              <th className="text-right py-3 px-2 text-slate-400 font-medium">State Tax</th>
-              <th className="text-right py-3 px-2 text-slate-400 font-medium">FICA</th>
-              <th className="text-right py-3 px-2 text-slate-400 font-medium">IRMAA</th>
-              <th className="text-right py-3 px-2 text-slate-400 font-medium">Net Income</th>
-              <th className="text-right py-3 px-2 text-slate-400 font-medium">Portfolio</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tableData.map((row, idx) => (
-              <tr key={row.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${row.qcd > 0 ? 'bg-emerald-900/10' : ''} ${row.rothConversion > 0 ? 'bg-purple-900/10' : ''} ${row.survivorEvent ? 'bg-red-900/15 border-red-500/30' : ''} ${row.oneTimeEvents?.length ? 'bg-amber-900/10' : ''} ${row.unfundedShortfall > 0 ? 'bg-red-900/25' : ''}`}>
-                <td className="py-2 px-2 text-slate-100 font-medium">
-                  {row.myAge}
-                  {row.survivorEvent === 'spouse_died' && <span title="Spouse passed" className="ml-1">🕊️</span>}
-                  {row.survivorEvent === 'primary_died' && <span title="Primary passed" className="ml-1">🕊️</span>}
-                  {row.effectiveFilingStatus === 'single' && <span title="Filing as Single" className="ml-1 text-xs text-red-400">(S)</span>}
-                </td>
-                <td className="py-2 px-2 text-right text-slate-300">{row.year}</td>
-                <td className="py-2 px-2 text-right text-amber-400">
-                  {formatCurrency(row.desiredIncome)}
-                  {row.healthcareExpense > 0 && <div className="text-xs text-pink-400" title="Healthcare costs">+{formatCurrency(row.healthcareExpense)} HC</div>}
-                  {row.recurringExpenses > 0 && <div className="text-xs text-cyan-400" title="Recurring expenses">+{formatCurrency(row.recurringExpenses)} RE</div>}
-                  {row.oneTimeExpense > 0 && <div className="text-xs text-red-400">+{formatCurrency(row.oneTimeExpense)}</div>}
-                </td>
-                <td className="py-2 px-2 text-right" style={{ color: SERIES.socialSecurity }}>
-                  {formatCurrency(row.socialSecurity)}
-                  {row.ssEarningsTestReduction > 0 && <div className="text-xs text-red-400" title="SS reduced by earnings test">-{formatCurrency(row.ssEarningsTestReduction)} ET</div>}
-                </td>
-                <td className="py-2 px-2 text-right" style={{ color: SERIES.pension }}>{formatCurrency(row.pension)}</td>
-                <td className="py-2 px-2 text-right" style={{ color: SERIES.otherIncome }}>{formatCurrency(row.otherIncome)}</td>
-                <td className="py-2 px-2 text-right" style={{ color: SERIES.withdrawalVoluntary }}>
-                  {formatCurrency(row.portfolioWithdrawal)}
-                  {row.contributionsPaused > 0 && (
-                    <div className="text-xs text-sky-300" title="Saving paused this year to pay for an expense dated before retirement">
-                      paused {formatCurrency(row.contributionsPaused)} saving
-                    </div>
-                  )}
-                  {row.unfundedShortfall > 0 && (
-                    <div className="text-xs text-red-400" title="Spending this year's portfolio could not fund — the plan is short by this much">
-                      short {formatCurrency(row.unfundedShortfall)}
-                    </div>
-                  )}
-                </td>
-                <td className="py-2 px-2 text-right" style={{ color: SERIES.rmd }}>{row.rmd > 0 ? formatCurrency(row.rmd) : '—'}</td>
-                <td className="py-2 px-2 text-right text-emerald-400 font-medium">{row.qcd > 0 ? formatCurrency(row.qcd) : '—'}</td>
-                <td className="py-2 px-2 text-right font-medium" style={{ color: SERIES.rothConversion }}>{row.rothConversion > 0 ? formatCurrency(row.rothConversion) : '—'}</td>
-                <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.taxableIncome)}</td>
-                <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.magi)}</td>
-                <td className="py-2 px-2 text-right text-red-400">
-                  ({formatCurrency(row.federalTax)})
-                  {row.earlyWithdrawalPenalty > 0 && (
-                    <div className="text-xs text-red-300" title="10% §72(t) additional tax on pre-tax withdrawals before age 59½ (included in the federal tax above)">
-                      incl. {formatCurrency(row.earlyWithdrawalPenalty)} 72(t)
-                    </div>
-                  )}
-                </td>
-                <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.stateTaxableIncome)}</td>
-                <td className="py-2 px-2 text-right text-red-400">({formatCurrency(row.stateTax)})</td>
-                <td className="py-2 px-2 text-right text-red-400">{row.ficaTax > 0 ? `(${formatCurrency(row.ficaTax)})` : '—'}</td>
-                <td className="py-2 px-2 text-right text-red-400">{row.irmaaSurcharge > 0 ? `(${formatCurrency(row.irmaaSurcharge)})` : '—'}</td>
-                <td className="py-2 px-2 text-right text-emerald-400 font-medium">{formatCurrency(row.netIncome)}</td>
-                <td className="py-2 px-2 text-right text-slate-300">{formatCurrency(row.totalPortfolio)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {charitablePercent > 0 && (
-        <div className="p-3 bg-emerald-900/20 border border-emerald-700/30 rounded-lg">
-          <p className="text-sm text-emerald-300">
-            <strong>💡 QCD Active ({charitablePercent}% charitable giving):</strong> Starting at age 70, your charitable giving is fulfilled via Qualified Charitable Distributions from your IRA. 
-            QCD amounts are excluded from taxable income, reducing your tax burden while still allowing the standard deduction.
-          </p>
-        </div>
-      )}
-      {conversionIsActive(personalInfo) && (
-        <div className="p-3 bg-purple-900/20 border border-purple-700/30 rounded-lg">
-          <p className="text-sm text-purple-300">
-            <strong>🔄 Roth Conversions Active ({conversionModeLabel(personalInfo)}, ages {personalInfo.rothConversionStartAge || getDefaultRothConversionWindow(personalInfo).startAge}–{personalInfo.rothConversionEndAge || getDefaultRothConversionWindow(personalInfo).endAge}):</strong> Purple-highlighted rows show years where conversions execute. The converted amount increases taxable income (and federal/state tax) that year but shifts assets to tax-free Roth growth. Watch the "Portfolio" column — pre-tax balance decreases while Roth balance grows, reducing future RMDs.
-          </p>
-        </div>
-      )}
-    </div>
 
-      </div>
+        </div>
+      </HideableBlock>
       
     </div>
   );
@@ -5283,7 +5329,7 @@ function TaxBreakpointsTable({ projections, personalInfo, fixedAge = null, forPr
 }
 
 
-function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, projections, setPersonalInfo }) {
+function CurrentYearTab({ detailLevel, sectionVisibility, setDetailLevel, setSectionVisibility, currentYearData, setCurrentYearData, personalInfo, projections, setPersonalInfo }) {
   const [openInfoCard, setOpenInfoCard] = React.useState(null);
   const [showPrior, setShowPrior] = React.useState(false);
   const [rateOverride, setRateOverride] = React.useState(null);
@@ -5376,216 +5422,230 @@ function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, pro
         </div>
       </div>
 
-      {/* ── Paystubs ───────────────────────────────────────────────────── */}
-      <div className={cardStyle}>
-        <div className="flex items-center justify-between mb-3">
-          <h4 className="text-lg font-semibold text-slate-100">Paychecks</h4>
-          <button
-            onClick={() => set({ payroll: [...(cy.payroll || []), newPayrollRow(hasSpouse && (cy.payroll || []).length ? 'spouse' : 'me')] })}
-            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded">+ Add employer</button>
-        </div>
-        {(cy.payroll || []).length === 0 && (
-          <p className="text-sm text-slate-500">
-            Add an employer and copy in the year-to-date column of a recent paystub. That single column is
-            enough to project the whole year.
-          </p>
-        )}
-        {(cy.payroll || []).map((row, i) => (
-          <PayrollRow
-            key={row.id} row={row} hasSpouse={hasSpouse}
-            projected={payrollProjections[i] ? payrollProjections[i].projected : null}
-            onChange={(next) => set({ payroll: cy.payroll.map(x => x.id === row.id ? next : x) })}
-            onDelete={() => set({ payroll: cy.payroll.filter(x => x.id !== row.id) })}
-          />
-        ))}
-      </div>
-
-      {/* ── K-1s ───────────────────────────────────────────────────────── */}
-      <div className={cardStyle}>
-        <div className="flex items-center justify-between mb-3">
-          <h4 className="text-lg font-semibold text-slate-100">Schedule K-1s</h4>
-          <button onClick={() => set({ k1s: [...(cy.k1s || []), newK1Row()] })}
-            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded">+ Add K-1</button>
-        </div>
-        {(cy.k1s || []).length === 0 && (
-          <p className="text-sm text-slate-500">
-            Add a K-1 for each partnership. Until this year&rsquo;s arrives, last year&rsquo;s figures are the
-            best available estimate — the point is to be roughly right in time to act, not exactly right in April.
-          </p>
-        )}
-        {(cy.k1s || []).map((k1, i) => (
-          <K1Row
-            key={k1.id} k1={k1} detail={r.k1s[i]}
-            onChange={(next) => set({ k1s: cy.k1s.map(x => x.id === k1.id ? next : x) })}
-            onDelete={() => set({ k1s: cy.k1s.filter(x => x.id !== k1.id) })}
-          />
-        ))}
-      </div>
-
-      {/* ── Other income, deductions, payments, prior year ─────────────── */}
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-100 mb-3">Everything else</h4>
-        <p className="text-[11px] text-slate-500 mb-2">Investment income outside a K-1.</p>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
-          <MoneyField label="Taxable interest" value={cy.otherIncome.taxableInterest} onChange={(v) => setIn('otherIncome', { taxableInterest: v })} />
-          <MoneyField label="Tax-exempt interest" value={cy.otherIncome.taxExemptInterest} onChange={(v) => setIn('otherIncome', { taxExemptInterest: v })} />
-          <MoneyField label="Ordinary dividends" value={cy.otherIncome.ordinaryDividends} onChange={(v) => setIn('otherIncome', { ordinaryDividends: v })} />
-          <MoneyField label="Qualified dividends" value={cy.otherIncome.qualifiedDividends} onChange={(v) => setIn('otherIncome', { qualifiedDividends: v })} />
-          <MoneyField label="Short-term gains" value={cy.otherIncome.shortTermGain} onChange={(v) => setIn('otherIncome', { shortTermGain: v })} />
-          <MoneyField label="Long-term gains" value={cy.otherIncome.longTermGain} onChange={(v) => setIn('otherIncome', { longTermGain: v })} />
-          <MoneyField label="Capital loss carried in" value={cy.otherIncome.longTermLossCarryforward} onChange={(v) => setIn('otherIncome', { longTermLossCarryforward: v })} />
-          <MoneyField label="Other income" value={cy.otherIncome.otherIncome} onChange={(v) => setIn('otherIncome', { otherIncome: v })} />
-        </div>
-
-        <p className="text-[11px] text-slate-500 mb-2">
-          Deductions. The tool takes whichever is larger and tells you which — with the 2026 SALT cap at
-          {' '}{formatCurrency(saltCapFor(cy.taxYear, personalInfo.filingStatus, L('11')))} rather than $10,000,
-          that answer may not be the one you are used to.
-        </p>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
-          <MoneyField label="Property tax" value={cy.deductions.propertyTax} onChange={(v) => setIn('deductions', { propertyTax: v })} />
-          <MoneyField label="Mortgage interest" value={cy.deductions.mortgageInterest} onChange={(v) => setIn('deductions', { mortgageInterest: v })} />
-          <MoneyField label="Charitable (cash)" value={cy.deductions.charitableCash} onChange={(v) => setIn('deductions', { charitableCash: v })} />
-          <MoneyField label="Medical expenses" value={cy.deductions.medicalExpenses} onChange={(v) => setIn('deductions', { medicalExpenses: v })} />
-          <MoneyField label="Direct HSA (not payroll)" value={cy.adjustments.hsaDirectContribution} onChange={(v) => setIn('adjustments', { hsaDirectContribution: v })}
-            hint="Only contributions you made outside payroll. A payroll HSA already came out of Box 1." />
-          <MoneyField label="Deductible IRA" value={cy.adjustments.deductibleIRA} onChange={(v) => setIn('adjustments', { deductibleIRA: v })} />
-        </div>
-
-        <p className="text-[11px] text-slate-500 mb-2">Estimated tax payments already made.</p>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
-          {[0, 1, 2, 3].map(q => (
-            <MoneyField key={q} label={`Federal Q${q + 1}`}
-              value={(cy.estimatedPayments.federal || [])[q]}
-              onChange={(v) => {
-                const next = [...(cy.estimatedPayments.federal || [0, 0, 0, 0])];
-                next[q] = v;
-                setIn('estimatedPayments', { federal: next });
-              }} />
+      <SectionControls tab="currentyear" vis={sectionVisibility} setVis={setSectionVisibility}
+                       level={detailLevel} setLevel={setDetailLevel} />
+      <HideableBlock tab="currentyear" id="payroll" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        {/* ── Paystubs ───────────────────────────────────────────────────── */}
+        <div className={cardStyle}>
+          <div className="flex items-center justify-between mb-3">
+            <h4 className="text-lg font-semibold text-slate-100">Paychecks</h4>
+            <button
+              onClick={() => set({ payroll: [...(cy.payroll || []), newPayrollRow(hasSpouse && (cy.payroll || []).length ? 'spouse' : 'me')] })}
+              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded">+ Add employer</button>
+          </div>
+          {(cy.payroll || []).length === 0 && (
+            <p className="text-sm text-slate-500">
+              Add an employer and copy in the year-to-date column of a recent paystub. That single column is
+              enough to project the whole year.
+            </p>
+          )}
+          {(cy.payroll || []).map((row, i) => (
+            <PayrollRow
+              key={row.id} row={row} hasSpouse={hasSpouse}
+              projected={payrollProjections[i] ? payrollProjections[i].projected : null}
+              onChange={(next) => set({ payroll: cy.payroll.map(x => x.id === row.id ? next : x) })}
+              onDelete={() => set({ payroll: cy.payroll.filter(x => x.id !== row.id) })}
+            />
           ))}
         </div>
+      </HideableBlock>
 
-        <button onClick={() => setShowPrior(!showPrior)}
-          className="text-sm text-amber-400 hover:text-amber-300">
-          {showPrior ? '− ' : '+ '}Last year&rsquo;s return {r.safeHarbor.priorYearTest === null && (
-            <span className="text-slate-500">— needed for the safe-harbor test</span>)}
-        </button>
-        {showPrior && (
-          <div className="mt-3">
-            <p className="text-[11px] text-slate-500 mb-2">
-              Two lines off last year&rsquo;s Form 1040. They set the §6654 safe harbor, which is usually the
-              cheaper of the two ways to avoid an underpayment penalty — and the only one you can compute
-              before the year is over.
+      <HideableBlock tab="currentyear" id="k1s" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        {/* ── K-1s ───────────────────────────────────────────────────────── */}
+        <div className={cardStyle}>
+          <div className="flex items-center justify-between mb-3">
+            <h4 className="text-lg font-semibold text-slate-100">Schedule K-1s</h4>
+            <button onClick={() => set({ k1s: [...(cy.k1s || []), newK1Row()] })}
+              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded">+ Add K-1</button>
+          </div>
+          {(cy.k1s || []).length === 0 && (
+            <p className="text-sm text-slate-500">
+              Add a K-1 for each partnership. Until this year&rsquo;s arrives, last year&rsquo;s figures are the
+              best available estimate — the point is to be roughly right in time to act, not exactly right in April.
             </p>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-              <MoneyField label="Line 11 — AGI" value={cy.priorYearReturn.agi} onChange={(v) => setIn('priorYearReturn', { agi: v })} />
-              <MoneyField label="Line 24 — total tax" value={cy.priorYearReturn.totalTax} onChange={(v) => setIn('priorYearReturn', { totalTax: v })} />
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* ── The return itself ──────────────────────────────────────────── */}
-      <div className={cardStyle}>
-        <div className="flex items-start justify-between gap-4 mb-1">
-          <h4 className="text-lg font-semibold text-slate-100">Projected Form 1040</h4>
-          <span className="text-xs text-slate-500">line numbers match the real form</span>
+          )}
+          {(cy.k1s || []).map((k1, i) => (
+            <K1Row
+              key={k1.id} k1={k1} detail={r.k1s[i]}
+              onChange={(next) => set({ k1s: cy.k1s.map(x => x.id === k1.id ? next : x) })}
+              onDelete={() => set({ k1s: cy.k1s.filter(x => x.id !== k1.id) })}
+            />
+          ))}
         </div>
-        <p className="text-sm text-slate-400 mb-4">
-          Where this year lands if nothing changes. Every line carries its actual 1040 number so you can
-          set it beside a filed return, or your preparer&rsquo;s draft, and reconcile it line by line.
-        </p>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <tbody>
-              {formGroups.map(group => (
-                <React.Fragment key={group.title}>
-                  <tr>
-                    <td colSpan={3} className="pt-4 pb-1 text-xs uppercase tracking-wide text-slate-500 font-semibold">
-                      {group.title}
-                    </td>
-                  </tr>
-                  {group.lines.map(k => {
-                    const line = r.lines[k];
-                    if (!line) return null;
-                    const memo = memoLines.has(k);
-                    const key = keyLines.has(k);
-                    return (
-                      <tr key={k} className={`border-b border-slate-800/70 ${key ? 'bg-slate-800/40' : ''}`}>
-                        <td className="py-1.5 pr-3 text-slate-500 font-mono text-xs w-12 align-top">{k}</td>
-                        <td className={`py-1.5 pr-4 ${memo ? 'text-slate-500' : key ? 'text-slate-100 font-medium' : 'text-slate-300'}`}>
-                          {line.label}
-                          {line.which && <span className="ml-2 text-xs text-amber-400">({line.which})</span>}
-                          {memo && <span className="ml-2 text-[10px] text-slate-500">memo — already inside the line above</span>}
-                        </td>
-                        <td className={`py-1.5 text-right tabular-nums whitespace-nowrap ${
-                          memo ? 'text-slate-500' : key ? 'text-slate-100 font-semibold' : 'text-slate-300'}`}>
-                          {formatCurrency(line.amount)}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </React.Fragment>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      </HideableBlock>
 
-        {/* Supporting schedules — the working behind the lines above. */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
-          <div className="bg-slate-800/40 rounded-lg p-3">
-            <h5 className="text-sm font-semibold text-slate-200 mb-2">Schedule A vs. the standard deduction</h5>
-            <div className="text-xs text-slate-400 space-y-1">
-              <div className="flex justify-between"><span>State and local tax paid</span><span className="text-slate-200">{formatCurrency(r.schedules.A.saltPaid)}</span></div>
-              <div className="flex justify-between"><span>SALT cap this year</span><span className={r.schedules.A.saltCapBinding ? 'text-amber-300' : 'text-slate-200'}>{formatCurrency(r.schedules.A.saltCap)}</span></div>
-              <div className="flex justify-between"><span>Mortgage interest</span><span className="text-slate-200">{formatCurrency(r.schedules.A.mortgageInterest)}</span></div>
-              <div className="flex justify-between"><span>Charitable, less the 0.5% AGI floor</span><span className="text-slate-200">{formatCurrency(r.schedules.A.charitableDeductible)}</span></div>
-              <div className="flex justify-between border-t border-slate-700 pt-1 mt-1">
-                <span className="text-slate-300">Itemized total</span><span className="text-slate-100 font-medium">{formatCurrency(r.schedules.A.allowedAfterCap)}</span></div>
-              <div className="flex justify-between"><span className="text-slate-300">Standard deduction</span><span className="text-slate-100 font-medium">{formatCurrency(r.schedules.A.standardAlternative)}</span></div>
-              <div className={`mt-2 px-2 py-1.5 rounded ${r.schedules.A.wouldItemize ? 'bg-emerald-900/30 text-emerald-300' : 'bg-slate-700/40 text-slate-300'}`}>
-                {r.schedules.A.wouldItemize
-                  ? `Itemizing wins by ${formatCurrency(r.schedules.A.allowedAfterCap - r.schedules.A.standardAlternative)}.`
-                  : `The standard deduction wins by ${formatCurrency(r.schedules.A.standardAlternative - r.schedules.A.allowedAfterCap)}.`}
-              </div>
-            </div>
+      <HideableBlock tab="currentyear" id="otherIncome" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        {/* ── Other income, deductions, payments, prior year ─────────────── */}
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-100 mb-3">Everything else</h4>
+          <p className="text-[11px] text-slate-500 mb-2">Investment income outside a K-1.</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
+            <MoneyField label="Taxable interest" value={cy.otherIncome.taxableInterest} onChange={(v) => setIn('otherIncome', { taxableInterest: v })} />
+            <MoneyField label="Tax-exempt interest" value={cy.otherIncome.taxExemptInterest} onChange={(v) => setIn('otherIncome', { taxExemptInterest: v })} />
+            <MoneyField label="Ordinary dividends" value={cy.otherIncome.ordinaryDividends} onChange={(v) => setIn('otherIncome', { ordinaryDividends: v })} />
+            <MoneyField label="Qualified dividends" value={cy.otherIncome.qualifiedDividends} onChange={(v) => setIn('otherIncome', { qualifiedDividends: v })} />
+            <MoneyField label="Short-term gains" value={cy.otherIncome.shortTermGain} onChange={(v) => setIn('otherIncome', { shortTermGain: v })} />
+            <MoneyField label="Long-term gains" value={cy.otherIncome.longTermGain} onChange={(v) => setIn('otherIncome', { longTermGain: v })} />
+            <MoneyField label="Capital loss carried in" value={cy.otherIncome.longTermLossCarryforward} onChange={(v) => setIn('otherIncome', { longTermLossCarryforward: v })} />
+            <MoneyField label="Other income" value={cy.otherIncome.otherIncome} onChange={(v) => setIn('otherIncome', { otherIncome: v })} />
           </div>
 
-          <div className="bg-slate-800/40 rounded-lg p-3">
-            <h5 className="text-sm font-semibold text-slate-200 mb-2">K-1s, §199A and the 3.8% surtax</h5>
-            <div className="text-xs text-slate-400 space-y-1">
-              <div className="flex justify-between"><span>Passive income reaching AGI</span><span className="text-slate-200">{formatCurrency(r.passive.netPassiveToAGI)}</span></div>
-              {r.passive.suspendedCarryforwardEnd > 0 && (
-                <div className="flex justify-between"><span>Passive loss suspended (§469)</span><span className="text-amber-300">{formatCurrency(r.passive.suspendedCarryforwardEnd)}</span></div>
-              )}
-              <div className="flex justify-between"><span>Net qualified business income</span><span className="text-slate-200">{formatCurrency(r.qbi.netQBI)}</span></div>
-              <div className="flex justify-between"><span>§199A deduction</span><span className="text-slate-100 font-medium">{formatCurrency(r.qbi.deduction)}</span></div>
-              {r.qbi.phase > 0 && (
-                <div className="text-[11px] text-amber-400/90">
-                  You are {Math.round(r.qbi.phase * 100)}% through the §199A phase-in — each extra dollar of
-                  taxable income is also shrinking this deduction.
-                </div>
-              )}
-              <div className="flex justify-between border-t border-slate-700 pt-1 mt-1"><span>Net investment income</span><span className="text-slate-200">{formatCurrency(r.netInvestmentIncome)}</span></div>
-              <div className="flex justify-between"><span>Net investment income tax</span><span className={r.schedules.two.niit > 0 ? 'text-amber-300 font-medium' : 'text-slate-200'}>{formatCurrency(r.schedules.two.niit)}</span></div>
-              {r.schedules.SE.total > 0 && (
-                <div className="flex justify-between"><span>Self-employment tax (box 14a)</span><span className="text-slate-200">{formatCurrency(r.schedules.SE.total)}</span></div>
-              )}
-            </div>
+          <p className="text-[11px] text-slate-500 mb-2">
+            Deductions. The tool takes whichever is larger and tells you which — with the 2026 SALT cap at
+            {' '}{formatCurrency(saltCapFor(cy.taxYear, personalInfo.filingStatus, L('11')))} rather than $10,000,
+            that answer may not be the one you are used to.
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
+            <MoneyField label="Property tax" value={cy.deductions.propertyTax} onChange={(v) => setIn('deductions', { propertyTax: v })} />
+            <MoneyField label="Mortgage interest" value={cy.deductions.mortgageInterest} onChange={(v) => setIn('deductions', { mortgageInterest: v })} />
+            <MoneyField label="Charitable (cash)" value={cy.deductions.charitableCash} onChange={(v) => setIn('deductions', { charitableCash: v })} />
+            <MoneyField label="Medical expenses" value={cy.deductions.medicalExpenses} onChange={(v) => setIn('deductions', { medicalExpenses: v })} />
+            <MoneyField label="Direct HSA (not payroll)" value={cy.adjustments.hsaDirectContribution} onChange={(v) => setIn('adjustments', { hsaDirectContribution: v })}
+              hint="Only contributions you made outside payroll. A payroll HSA already came out of Box 1." />
+            <MoneyField label="Deductible IRA" value={cy.adjustments.deductibleIRA} onChange={(v) => setIn('adjustments', { deductibleIRA: v })} />
           </div>
-        </div>
 
-        {r.diagnostics.length > 0 && (
-          <div className="mt-4 space-y-1">
-            {r.diagnostics.map((d, i) => (
-              <div key={i} className={`text-xs px-3 py-2 rounded ${
-                d.severity === 'warning' ? 'bg-amber-900/25 text-amber-300' : 'bg-slate-800/60 text-slate-400'}`}>
-                {d.message}
-              </div>
+          <p className="text-[11px] text-slate-500 mb-2">Estimated tax payments already made.</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
+            {[0, 1, 2, 3].map(q => (
+              <MoneyField key={q} label={`Federal Q${q + 1}`}
+                value={(cy.estimatedPayments.federal || [])[q]}
+                onChange={(v) => {
+                  const next = [...(cy.estimatedPayments.federal || [0, 0, 0, 0])];
+                  next[q] = v;
+                  setIn('estimatedPayments', { federal: next });
+                }} />
             ))}
           </div>
-        )}
-      </div>
+
+          <button onClick={() => setShowPrior(!showPrior)}
+            className="text-sm text-amber-400 hover:text-amber-300">
+            {showPrior ? '− ' : '+ '}Last year&rsquo;s return {r.safeHarbor.priorYearTest === null && (
+              <span className="text-slate-500">— needed for the safe-harbor test</span>)}
+          </button>
+          {showPrior && (
+            <div className="mt-3">
+              <p className="text-[11px] text-slate-500 mb-2">
+                Two lines off last year&rsquo;s Form 1040. They set the §6654 safe harbor, which is usually the
+                cheaper of the two ways to avoid an underpayment penalty — and the only one you can compute
+                before the year is over.
+              </p>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <MoneyField label="Line 11 — AGI" value={cy.priorYearReturn.agi} onChange={(v) => setIn('priorYearReturn', { agi: v })} />
+                <MoneyField label="Line 24 — total tax" value={cy.priorYearReturn.totalTax} onChange={(v) => setIn('priorYearReturn', { totalTax: v })} />
+              </div>
+            </div>
+          )}
+        </div>
+      </HideableBlock>
+
+      <HideableBlock tab="currentyear" id="form1040" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        {/* ── The return itself ──────────────────────────────────────────── */}
+        <div className={cardStyle}>
+          <div className="flex items-start justify-between gap-4 mb-1">
+            <h4 className="text-lg font-semibold text-slate-100">Projected Form 1040</h4>
+            <span className="text-xs text-slate-500">line numbers match the real form</span>
+          </div>
+          <p className="text-sm text-slate-400 mb-4">
+            Where this year lands if nothing changes. Every line carries its actual 1040 number so you can
+            set it beside a filed return, or your preparer&rsquo;s draft, and reconcile it line by line.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <tbody>
+                {formGroups.map(group => (
+                  <React.Fragment key={group.title}>
+                    <tr>
+                      <td colSpan={3} className="pt-4 pb-1 text-xs uppercase tracking-wide text-slate-500 font-semibold">
+                        {group.title}
+                      </td>
+                    </tr>
+                    {group.lines.map(k => {
+                      const line = r.lines[k];
+                      if (!line) return null;
+                      const memo = memoLines.has(k);
+                      const key = keyLines.has(k);
+                      return (
+                        <tr key={k} className={`border-b border-slate-800/70 ${key ? 'bg-slate-800/40' : ''}`}>
+                          <td className="py-1.5 pr-3 text-slate-500 font-mono text-xs w-12 align-top">{k}</td>
+                          <td className={`py-1.5 pr-4 ${memo ? 'text-slate-500' : key ? 'text-slate-100 font-medium' : 'text-slate-300'}`}>
+                            {line.label}
+                            {line.which && <span className="ml-2 text-xs text-amber-400">({line.which})</span>}
+                            {memo && <span className="ml-2 text-[10px] text-slate-500">memo — already inside the line above</span>}
+                          </td>
+                          <td className={`py-1.5 text-right tabular-nums whitespace-nowrap ${
+                            memo ? 'text-slate-500' : key ? 'text-slate-100 font-semibold' : 'text-slate-300'}`}>
+                            {formatCurrency(line.amount)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Supporting schedules — the working behind the lines above. */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
+            <div className="bg-slate-800/40 rounded-lg p-3">
+              <h5 className="text-sm font-semibold text-slate-200 mb-2">Schedule A vs. the standard deduction</h5>
+              <div className="text-xs text-slate-400 space-y-1">
+                <div className="flex justify-between"><span>State and local tax paid</span><span className="text-slate-200">{formatCurrency(r.schedules.A.saltPaid)}</span></div>
+                <div className="flex justify-between"><span>SALT cap this year</span><span className={r.schedules.A.saltCapBinding ? 'text-amber-300' : 'text-slate-200'}>{formatCurrency(r.schedules.A.saltCap)}</span></div>
+                <div className="flex justify-between"><span>Mortgage interest</span><span className="text-slate-200">{formatCurrency(r.schedules.A.mortgageInterest)}</span></div>
+                <div className="flex justify-between"><span>Charitable, less the 0.5% AGI floor</span><span className="text-slate-200">{formatCurrency(r.schedules.A.charitableDeductible)}</span></div>
+                <div className="flex justify-between border-t border-slate-700 pt-1 mt-1">
+                  <span className="text-slate-300">Itemized total</span><span className="text-slate-100 font-medium">{formatCurrency(r.schedules.A.allowedAfterCap)}</span></div>
+                <div className="flex justify-between"><span className="text-slate-300">Standard deduction</span><span className="text-slate-100 font-medium">{formatCurrency(r.schedules.A.standardAlternative)}</span></div>
+                <div className={`mt-2 px-2 py-1.5 rounded ${r.schedules.A.wouldItemize ? 'bg-emerald-900/30 text-emerald-300' : 'bg-slate-700/40 text-slate-300'}`}>
+                  {r.schedules.A.wouldItemize
+                    ? `Itemizing wins by ${formatCurrency(r.schedules.A.allowedAfterCap - r.schedules.A.standardAlternative)}.`
+                    : `The standard deduction wins by ${formatCurrency(r.schedules.A.standardAlternative - r.schedules.A.allowedAfterCap)}.`}
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-slate-800/40 rounded-lg p-3">
+              <h5 className="text-sm font-semibold text-slate-200 mb-2">K-1s, §199A and the 3.8% surtax</h5>
+              <div className="text-xs text-slate-400 space-y-1">
+                <div className="flex justify-between"><span>Passive income reaching AGI</span><span className="text-slate-200">{formatCurrency(r.passive.netPassiveToAGI)}</span></div>
+                {r.passive.suspendedCarryforwardEnd > 0 && (
+                  <div className="flex justify-between"><span>Passive loss suspended (§469)</span><span className="text-amber-300">{formatCurrency(r.passive.suspendedCarryforwardEnd)}</span></div>
+                )}
+                <div className="flex justify-between"><span>Net qualified business income</span><span className="text-slate-200">{formatCurrency(r.qbi.netQBI)}</span></div>
+                <div className="flex justify-between"><span>§199A deduction</span><span className="text-slate-100 font-medium">{formatCurrency(r.qbi.deduction)}</span></div>
+                {r.qbi.phase > 0 && (
+                  <div className="text-[11px] text-amber-400/90">
+                    You are {Math.round(r.qbi.phase * 100)}% through the §199A phase-in — each extra dollar of
+                    taxable income is also shrinking this deduction.
+                  </div>
+                )}
+                <div className="flex justify-between border-t border-slate-700 pt-1 mt-1"><span>Net investment income</span><span className="text-slate-200">{formatCurrency(r.netInvestmentIncome)}</span></div>
+                <div className="flex justify-between"><span>Net investment income tax</span><span className={r.schedules.two.niit > 0 ? 'text-amber-300 font-medium' : 'text-slate-200'}>{formatCurrency(r.schedules.two.niit)}</span></div>
+                {r.schedules.SE.total > 0 && (
+                  <div className="flex justify-between"><span>Self-employment tax (box 14a)</span><span className="text-slate-200">{formatCurrency(r.schedules.SE.total)}</span></div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {r.diagnostics.length > 0 && (
+            <div className="mt-4 space-y-1">
+              {r.diagnostics.map((d, i) => (
+                <div key={i} className={`text-xs px-3 py-2 rounded ${
+                  d.severity === 'warning' ? 'bg-amber-900/25 text-amber-300' : 'bg-slate-800/60 text-slate-400'}`}>
+                  {d.message}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </HideableBlock>
 
       {/* Pinned to this year: on this tab the question is always "what can I
           still do before December 31", so a year selector would be noise. */}
@@ -5596,238 +5656,244 @@ function CurrentYearTab({ currentYearData, setCurrentYearData, personalInfo, pro
         title={`Income thresholds for ${cy.taxYear}`}
       />
 
-      {/* ── Decisions ──────────────────────────────────────────────────── */}
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-100 mb-1">What to do about it</h4>
-        <p className="text-sm text-slate-400 mb-4">
-          Four things you can still change before December 31.
-        </p>
+      <HideableBlock tab="currentyear" id="decisions" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        {/* ── Decisions ──────────────────────────────────────────────────── */}
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-100 mb-1">What to do about it</h4>
+          <p className="text-sm text-slate-400 mb-4">
+            Four things you can still change before December 31.
+          </p>
 
-        {/* 1. Traditional vs Roth */}
-        <div className="bg-slate-800/40 rounded-lg p-4 mb-3">
-          <h5 className="text-sm font-semibold text-slate-200 mb-2">1 &middot; Traditional or Roth for the rest of the year</h5>
-          {decision ? (
-            <>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
-                <div>
-                  <p className="text-[11px] text-slate-400">Rate you avoid now</p>
-                  <p className="text-2xl font-semibold text-amber-400">{(decision.marginalRateNow * 100).toFixed(1)}%</p>
-                  <p className="text-[11px] text-slate-500">measured on the whole return, not read off a bracket</p>
-                </div>
-                <div>
-                  <p className="text-[11px] text-slate-400">Rate you expect to pay later</p>
-                  <div className="flex items-center gap-2">
-                    <PercentCell
-                      value={futureRate}
-                      onValueChange={(v) => setRateOverride(v)}
-                      className="w-20 bg-slate-900/70 border border-slate-600/50 rounded px-2 py-1 text-lg text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
-                    />
-                    {rateOverride !== null && (
-                      <button onClick={() => setRateOverride(null)} className="text-[11px] text-slate-500 hover:text-slate-300 underline">reset</button>
-                    )}
+          {/* 1. Traditional vs Roth */}
+          <div className="bg-slate-800/40 rounded-lg p-4 mb-3">
+            <h5 className="text-sm font-semibold text-slate-200 mb-2">1 &middot; Traditional or Roth for the rest of the year</h5>
+            {decision ? (
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+                  <div>
+                    <p className="text-[11px] text-slate-400">Rate you avoid now</p>
+                    <p className="text-2xl font-semibold text-amber-400">{(decision.marginalRateNow * 100).toFixed(1)}%</p>
+                    <p className="text-[11px] text-slate-500">measured on the whole return, not read off a bracket</p>
                   </div>
-                  <p className="text-[11px] text-slate-500">
-                    {future.sample > 0
-                      ? `median bracket across ${future.sample} retirement years in your plan (${(future.low * 100).toFixed(0)}–${(future.high * 100).toFixed(0)}%)`
-                      : 'no retirement years projected yet'}
-                  </p>
+                  <div>
+                    <p className="text-[11px] text-slate-400">Rate you expect to pay later</p>
+                    <div className="flex items-center gap-2">
+                      <PercentCell
+                        value={futureRate}
+                        onValueChange={(v) => setRateOverride(v)}
+                        className="w-20 bg-slate-900/70 border border-slate-600/50 rounded px-2 py-1 text-lg text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+                      />
+                      {rateOverride !== null && (
+                        <button onClick={() => setRateOverride(null)} className="text-[11px] text-slate-500 hover:text-slate-300 underline">reset</button>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-slate-500">
+                      {future.sample > 0
+                        ? `median bracket across ${future.sample} retirement years in your plan (${(future.low * 100).toFixed(0)}–${(future.high * 100).toFixed(0)}%)`
+                        : 'no retirement years projected yet'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] text-slate-400">Verdict</p>
+                    <p className={`text-2xl font-semibold ${decision.favors === 'traditional' ? 'text-emerald-400' : decision.favors === 'roth' ? 'text-sky-400' : 'text-slate-300'}`}>
+                      {decision.favors === 'traditional' ? 'Traditional' : decision.favors === 'roth' ? 'Roth' : 'Line ball'}
+                    </p>
+                    <p className="text-[11px] text-slate-500">
+                      {Math.abs(decision.advantagePerDollar * 100).toFixed(1)} cents per dollar deferred
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-[11px] text-slate-400">Verdict</p>
-                  <p className={`text-2xl font-semibold ${decision.favors === 'traditional' ? 'text-emerald-400' : decision.favors === 'roth' ? 'text-sky-400' : 'text-slate-300'}`}>
-                    {decision.favors === 'traditional' ? 'Traditional' : decision.favors === 'roth' ? 'Roth' : 'Line ball'}
-                  </p>
-                  <p className="text-[11px] text-slate-500">
-                    {Math.abs(decision.advantagePerDollar * 100).toFixed(1)} cents per dollar deferred
-                  </p>
+                {/* Only line 16, Schedule 2 and state are ADDITIVE — together they are
+                    the whole saving. The QBI and deduction figures explain part of
+                    why line 16 moved as much as it did and are already inside it, so
+                    they are stated separately rather than listed alongside, which
+                    would read as double-counting and would not sum to the rate. */}
+                <div className="text-xs text-slate-400">
+                  Where the {(decision.marginalRateNow * 100).toFixed(1)}% comes from, per $1,000 deferred:
+                  <span className="text-slate-300"> {formatCurrency(Math.abs(decision.components.bracket))} income tax</span>
+                  {Math.abs(decision.components.niit) > 0.5 && <span className="text-amber-300"> + {formatCurrency(Math.abs(decision.components.niit))} net investment income tax</span>}
+                  {Math.abs(decision.components.state) > 0.5 && <span className="text-slate-300"> + {formatCurrency(Math.abs(decision.components.state))} state</span>}
+                  {' '}= <span className="text-slate-200">{formatCurrency(decision.taxSavedNow)}</span>.
                 </div>
+                {(Math.abs(decision.components.qbi) > 0.5 || Math.abs(decision.components.deduction) > 0.5) && (
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    That income-tax figure is larger than your bracket alone because deferring also
+                    {Math.abs(decision.components.qbi) > 0.5 && <> restores {formatCurrency(Math.abs(decision.components.qbi))} of §199A deduction</>}
+                    {Math.abs(decision.components.qbi) > 0.5 && Math.abs(decision.components.deduction) > 0.5 && ' and'}
+                    {Math.abs(decision.components.deduction) > 0.5 && <> recovers {formatCurrency(Math.abs(decision.components.deduction))} of deduction</>}
+                    {' '}— already counted above, not additional to it.
+                  </div>
+                )}
+                <p className="text-[11px] text-slate-500 mt-2">
+                  Deferring never saves Social Security or Medicare tax — those come out of Box 3/5, which a
+                  deferral does not touch. So this is a straight comparison of income-tax rates, now against later.
+                </p>
+              </>
+            ) : <p className="text-sm text-slate-500">Add a paycheck to compare.</p>}
+          </div>
+
+          {/* 2. Deferral headroom */}
+          <div className="bg-slate-800/40 rounded-lg p-4 mb-3">
+            <h5 className="text-sm font-semibold text-slate-200 mb-2">2 &middot; How much more can you defer</h5>
+            {payrollProjections.length ? (
+              <div className="space-y-2">
+                {payrollProjections.map((p, i) => (
+                  <div key={i} className="flex flex-wrap justify-between gap-2 text-xs">
+                    <span className="text-slate-400">
+                      {p.row.employerLabel || 'Employer'} ({p.row.owner === 'spouse' ? 'spouse' : 'you'})
+                    </span>
+                    <span className="text-slate-300">
+                      on track for {formatCurrency(p.projected.deferral.projectedTotal)} of {formatCurrency(p.projected.deferral.cap)}
+                      {' '}&mdash; <span className={p.projected.deferral.roomRemaining > 0 ? 'text-emerald-400' : 'text-slate-500'}>
+                        {formatCurrency(p.projected.deferral.roomRemaining)} of room left</span>
+                    </span>
+                  </div>
+                ))}
+                <p className="text-[11px] text-slate-500 pt-2 border-t border-slate-700/50">
+                  The §402(g) limit is <strong className="text-slate-400">per person, per year</strong> — traditional
+                  and Roth share it, and a second employer&rsquo;s plan or a solo 401(k) shares it too. It is not a
+                  limit per account.
+                  {(cy.k1s || []).length > 0 && (
+                    <> Your K-1 income adds <strong className="text-slate-400">no</strong> deferral room:
+                    it is not earned income, so it opens no 401(k), SEP or solo-401(k) capacity.</>
+                  )}
+                </p>
               </div>
-              {/* Only line 16, Schedule 2 and state are ADDITIVE — together they are
-                  the whole saving. The QBI and deduction figures explain part of
-                  why line 16 moved as much as it did and are already inside it, so
-                  they are stated separately rather than listed alongside, which
-                  would read as double-counting and would not sum to the rate. */}
-              <div className="text-xs text-slate-400">
-                Where the {(decision.marginalRateNow * 100).toFixed(1)}% comes from, per $1,000 deferred:
-                <span className="text-slate-300"> {formatCurrency(Math.abs(decision.components.bracket))} income tax</span>
-                {Math.abs(decision.components.niit) > 0.5 && <span className="text-amber-300"> + {formatCurrency(Math.abs(decision.components.niit))} net investment income tax</span>}
-                {Math.abs(decision.components.state) > 0.5 && <span className="text-slate-300"> + {formatCurrency(Math.abs(decision.components.state))} state</span>}
-                {' '}= <span className="text-slate-200">{formatCurrency(decision.taxSavedNow)}</span>.
-              </div>
-              {(Math.abs(decision.components.qbi) > 0.5 || Math.abs(decision.components.deduction) > 0.5) && (
-                <div className="text-[11px] text-slate-500 mt-1">
-                  That income-tax figure is larger than your bracket alone because deferring also
-                  {Math.abs(decision.components.qbi) > 0.5 && <> restores {formatCurrency(Math.abs(decision.components.qbi))} of §199A deduction</>}
-                  {Math.abs(decision.components.qbi) > 0.5 && Math.abs(decision.components.deduction) > 0.5 && ' and'}
-                  {Math.abs(decision.components.deduction) > 0.5 && <> recovers {formatCurrency(Math.abs(decision.components.deduction))} of deduction</>}
-                  {' '}— already counted above, not additional to it.
+            ) : <p className="text-sm text-slate-500">Add a paycheck to see your remaining limit.</p>}
+          </div>
+
+          {/* 3. Withholding / estimated payments */}
+          <div className="bg-slate-800/40 rounded-lg p-4 mb-3">
+            <h5 className="text-sm font-semibold text-slate-200 mb-2">3 &middot; Withholding and estimated payments</h5>
+            <div className="text-xs text-slate-400 space-y-1">
+              <div className="flex justify-between"><span>Projected total tax</span><span className="text-slate-200">{formatCurrency(L('24'))}</span></div>
+              <div className="flex justify-between"><span>Projected payments</span><span className="text-slate-200">{formatCurrency(L('33'))}</span></div>
+              <div className="flex justify-between border-t border-slate-700 pt-1">
+                <span className="text-slate-300">{L('37') > 0 ? 'Balance due in April' : 'Refund'}</span>
+                <span className={L('37') > 0 ? 'text-amber-300 font-medium' : 'text-emerald-300 font-medium'}>
+                  {formatCurrency(L('37') > 0 ? L('37') : L('34'))}</span></div>
+              <div className="flex justify-between pt-2"><span>Safe-harbor requirement ({r.safeHarbor.basis})</span><span className="text-slate-200">{formatCurrency(r.safeHarbor.required)}</span></div>
+              {r.safeHarbor.shortfall > 0 ? (
+                <div className="mt-2 px-3 py-2 rounded bg-amber-900/25 text-amber-300">
+                  You are {formatCurrency(r.safeHarbor.shortfall)} short of the safe harbor.
+                  {totalRemainingPeriods > 0 && (
+                    <> Raising withholding by about <strong>{formatCurrency(perCheckBump)}</strong> per paycheck
+                    across your {totalRemainingPeriods} remaining checks would close it.</>
+                  )}
+                  <div className="text-[11px] mt-1 text-amber-400/80">
+                    Withholding counts as paid evenly across the year no matter when it is withheld, so a
+                    December increase cures an underpayment that a Q4 estimated payment would not.
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-2 px-3 py-2 rounded bg-emerald-900/25 text-emerald-300">
+                  {r.safeHarbor.deMinimis
+                    ? 'No penalty exposure — the balance due is under $1,000.'
+                    : 'You have already met the safe harbor, so there is no underpayment penalty even if you owe in April.'}
                 </div>
               )}
-              <p className="text-[11px] text-slate-500 mt-2">
-                Deferring never saves Social Security or Medicare tax — those come out of Box 3/5, which a
-                deferral does not touch. So this is a straight comparison of income-tax rates, now against later.
-              </p>
-            </>
-          ) : <p className="text-sm text-slate-500">Add a paycheck to compare.</p>}
-        </div>
-
-        {/* 2. Deferral headroom */}
-        <div className="bg-slate-800/40 rounded-lg p-4 mb-3">
-          <h5 className="text-sm font-semibold text-slate-200 mb-2">2 &middot; How much more can you defer</h5>
-          {payrollProjections.length ? (
-            <div className="space-y-2">
-              {payrollProjections.map((p, i) => (
-                <div key={i} className="flex flex-wrap justify-between gap-2 text-xs">
-                  <span className="text-slate-400">
-                    {p.row.employerLabel || 'Employer'} ({p.row.owner === 'spouse' ? 'spouse' : 'you'})
-                  </span>
-                  <span className="text-slate-300">
-                    on track for {formatCurrency(p.projected.deferral.projectedTotal)} of {formatCurrency(p.projected.deferral.cap)}
-                    {' '}&mdash; <span className={p.projected.deferral.roomRemaining > 0 ? 'text-emerald-400' : 'text-slate-500'}>
-                      {formatCurrency(p.projected.deferral.roomRemaining)} of room left</span>
-                  </span>
-                </div>
-              ))}
-              <p className="text-[11px] text-slate-500 pt-2 border-t border-slate-700/50">
-                The §402(g) limit is <strong className="text-slate-400">per person, per year</strong> — traditional
-                and Roth share it, and a second employer&rsquo;s plan or a solo 401(k) shares it too. It is not a
-                limit per account.
-                {(cy.k1s || []).length > 0 && (
-                  <> Your K-1 income adds <strong className="text-slate-400">no</strong> deferral room:
-                  it is not earned income, so it opens no 401(k), SEP or solo-401(k) capacity.</>
-                )}
-              </p>
-            </div>
-          ) : <p className="text-sm text-slate-500">Add a paycheck to see your remaining limit.</p>}
-        </div>
-
-        {/* 3. Withholding / estimated payments */}
-        <div className="bg-slate-800/40 rounded-lg p-4 mb-3">
-          <h5 className="text-sm font-semibold text-slate-200 mb-2">3 &middot; Withholding and estimated payments</h5>
-          <div className="text-xs text-slate-400 space-y-1">
-            <div className="flex justify-between"><span>Projected total tax</span><span className="text-slate-200">{formatCurrency(L('24'))}</span></div>
-            <div className="flex justify-between"><span>Projected payments</span><span className="text-slate-200">{formatCurrency(L('33'))}</span></div>
-            <div className="flex justify-between border-t border-slate-700 pt-1">
-              <span className="text-slate-300">{L('37') > 0 ? 'Balance due in April' : 'Refund'}</span>
-              <span className={L('37') > 0 ? 'text-amber-300 font-medium' : 'text-emerald-300 font-medium'}>
-                {formatCurrency(L('37') > 0 ? L('37') : L('34'))}</span></div>
-            <div className="flex justify-between pt-2"><span>Safe-harbor requirement ({r.safeHarbor.basis})</span><span className="text-slate-200">{formatCurrency(r.safeHarbor.required)}</span></div>
-            {r.safeHarbor.shortfall > 0 ? (
-              <div className="mt-2 px-3 py-2 rounded bg-amber-900/25 text-amber-300">
-                You are {formatCurrency(r.safeHarbor.shortfall)} short of the safe harbor.
-                {totalRemainingPeriods > 0 && (
-                  <> Raising withholding by about <strong>{formatCurrency(perCheckBump)}</strong> per paycheck
-                  across your {totalRemainingPeriods} remaining checks would close it.</>
-                )}
-                <div className="text-[11px] mt-1 text-amber-400/80">
-                  Withholding counts as paid evenly across the year no matter when it is withheld, so a
-                  December increase cures an underpayment that a Q4 estimated payment would not.
-                </div>
-              </div>
-            ) : (
-              <div className="mt-2 px-3 py-2 rounded bg-emerald-900/25 text-emerald-300">
-                {r.safeHarbor.deMinimis
-                  ? 'No penalty exposure — the balance due is under $1,000.'
-                  : 'You have already met the safe harbor, so there is no underpayment penalty even if you owe in April.'}
-              </div>
-            )}
-            {r.safeHarbor.priorYearTest === null && (
-              <p className="text-[11px] text-slate-500 pt-1">
-                Entering last year&rsquo;s AGI and total tax above would likely lower this requirement — the
-                prior-year test is usually the cheaper of the two.
-              </p>
-            )}
-          </div>
-        </div>
-
-        {/* 4. Cash vs tax */}
-        {(cy.k1s || []).length > 0 && (
-          <div className="bg-slate-800/40 rounded-lg p-4">
-            <h5 className="text-sm font-semibold text-slate-200 mb-2">4 &middot; Will the K-1 tax pay for itself</h5>
-            <div className="text-xs text-slate-400 space-y-1">
-              <div className="flex justify-between"><span>Taxable share of partnership income</span>
-                <span className="text-slate-200">{formatCurrency(r.k1s.reduce((s, k) => s + k.taxableShare, 0))}</span></div>
-              <div className="flex justify-between"><span>Cash actually distributed to you</span>
-                <span className="text-slate-200">{formatCurrency(r.k1s.reduce((s, k) => s + k.cashDistributed, 0))}</span></div>
-              <div className="flex justify-between border-t border-slate-700 pt-1">
-                <span className="text-slate-300">Income taxed but not received</span>
-                <span className={r.phantomIncome > 0 ? 'text-amber-300 font-medium' : 'text-emerald-300 font-medium'}>
-                  {formatCurrency(r.phantomIncome)}</span></div>
-              <p className="text-[11px] text-slate-500 pt-2">
-                A partner is taxed on the distributive share whether or not the cash came out. When this figure
-                is positive, part of the bill has to be funded from somewhere else.
-              </p>
+              {r.safeHarbor.priorYearTest === null && (
+                <p className="text-[11px] text-slate-500 pt-1">
+                  Entering last year&rsquo;s AGI and total tax above would likely lower this requirement — the
+                  prior-year test is usually the cheaper of the two.
+                </p>
+              )}
             </div>
           </div>
-        )}
-      </div>
 
-      {/* ── Feed it into the long-range plan ───────────────────────────── */}
-      <div className={cardStyle}>
-        <div className="flex items-start justify-between gap-4 mb-2">
-          <div>
-            <h4 className="text-lg font-semibold text-slate-100">Use these figures in the 40-year plan</h4>
-            <p className="text-sm text-slate-400 mt-1">
-              Year one of your long-range projection is normally a synthetic year built from a single
-              salary figure. It cannot see a K-1, an itemized deduction, or what you have actually
-              withheld. Switching this on replaces that first year with the return above.
-            </p>
-          </div>
-          <label className="flex items-center gap-2 shrink-0 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={!!personalInfo.useDetailedCurrentYear}
-              onChange={(e) => setPersonalInfo({ ...personalInfo, useDetailedCurrentYear: e.target.checked })}
-              className="w-4 h-4 accent-amber-500"
-            />
-            <span className="text-sm text-slate-300">Use detailed figures</span>
-          </label>
+          {/* 4. Cash vs tax */}
+          {(cy.k1s || []).length > 0 && (
+            <div className="bg-slate-800/40 rounded-lg p-4">
+              <h5 className="text-sm font-semibold text-slate-200 mb-2">4 &middot; Will the K-1 tax pay for itself</h5>
+              <div className="text-xs text-slate-400 space-y-1">
+                <div className="flex justify-between"><span>Taxable share of partnership income</span>
+                  <span className="text-slate-200">{formatCurrency(r.k1s.reduce((s, k) => s + k.taxableShare, 0))}</span></div>
+                <div className="flex justify-between"><span>Cash actually distributed to you</span>
+                  <span className="text-slate-200">{formatCurrency(r.k1s.reduce((s, k) => s + k.cashDistributed, 0))}</span></div>
+                <div className="flex justify-between border-t border-slate-700 pt-1">
+                  <span className="text-slate-300">Income taxed but not received</span>
+                  <span className={r.phantomIncome > 0 ? 'text-amber-300 font-medium' : 'text-emerald-300 font-medium'}>
+                    {formatCurrency(r.phantomIncome)}</span></div>
+                <p className="text-[11px] text-slate-500 pt-2">
+                  A partner is taxed on the distributive share whether or not the cash came out. When this figure
+                  is positive, part of the bill has to be funded from somewhere else.
+                </p>
+              </div>
+            </div>
+          )}
         </div>
+      </HideableBlock>
 
-        {(() => {
-          const yr0 = (projections || [])[0];
-          if (!yr0) return null;
-          if (!personalInfo.useDetailedCurrentYear) {
-            return (
-              <p className="text-xs text-slate-500">
-                Currently off. The long-range plan is using its own estimate for {cy.taxYear}.
+      <HideableBlock tab="currentyear" id="feedPlan" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        {/* ── Feed it into the long-range plan ───────────────────────────── */}
+        <div className={cardStyle}>
+          <div className="flex items-start justify-between gap-4 mb-2">
+            <div>
+              <h4 className="text-lg font-semibold text-slate-100">Use these figures in the 40-year plan</h4>
+              <p className="text-sm text-slate-400 mt-1">
+                Year one of your long-range projection is normally a synthetic year built from a single
+                salary figure. It cannot see a K-1, an itemized deduction, or what you have actually
+                withheld. Switching this on replaces that first year with the return above.
               </p>
-            );
-          }
-          if (!yr0.detailedCurrentYear) {
+            </div>
+            <label className="flex items-center gap-2 shrink-0 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={!!personalInfo.useDetailedCurrentYear}
+                onChange={(e) => setPersonalInfo({ ...personalInfo, useDetailedCurrentYear: e.target.checked })}
+                className="w-4 h-4 accent-amber-500"
+              />
+              <span className="text-sm text-slate-300">Use detailed figures</span>
+            </label>
+          </div>
+
+          {(() => {
+            const yr0 = (projections || [])[0];
+            if (!yr0) return null;
+            if (!personalInfo.useDetailedCurrentYear) {
+              return (
+                <p className="text-xs text-slate-500">
+                  Currently off. The long-range plan is using its own estimate for {cy.taxYear}.
+                </p>
+              );
+            }
+            if (!yr0.detailedCurrentYear) {
+              return (
+                <div className="text-xs px-3 py-2 rounded bg-amber-900/25 text-amber-300">
+                  {yr0.detailedCurrentYearMessage
+                    || 'Detailed figures are switched on but were not applied to this year.'}
+                  {' '}The plan is using its own estimate for {cy.taxYear} instead.
+                </div>
+              );
+            }
             return (
-              <div className="text-xs px-3 py-2 rounded bg-amber-900/25 text-amber-300">
-                {yr0.detailedCurrentYearMessage
-                  || 'Detailed figures are switched on but were not applied to this year.'}
-                {' '}The plan is using its own estimate for {cy.taxYear} instead.
+              <div className="text-xs text-slate-400 space-y-1">
+                <div className="flex justify-between">
+                  <span>Federal income tax the plan would have assumed</span>
+                  <span className="text-slate-300">{formatCurrency(yr0.engineFederalTax)}</span></div>
+                <div className="flex justify-between">
+                  <span>Federal income tax from the return above</span>
+                  <span className="text-slate-100 font-medium">{formatCurrency(yr0.federalTax)}</span></div>
+                <div className="flex justify-between border-t border-slate-700 pt-1">
+                  <span className="text-slate-300">Difference</span>
+                  <span className={yr0.federalTax > yr0.engineFederalTax ? 'text-amber-300 font-medium' : 'text-emerald-300 font-medium'}>
+                    {formatCurrency(Math.abs(yr0.federalTax - yr0.engineFederalTax))}
+                    {yr0.federalTax > yr0.engineFederalTax ? ' more than it assumed' : ' less than it assumed'}</span></div>
+                <p className="text-[11px] text-slate-500 pt-2">
+                  Only this first year changes; every later year is still a forecast and is untouched.
+                  Social Security and Medicare tax also stay on the plan&rsquo;s own calculation, because the
+                  withdrawal engine reads that figure while it works. Monte Carlo, the Social Security
+                  grid and the Roth optimizer run their own projections and still use the estimate — for a
+                  working year that makes no difference to a balance, since the tax is paid out of salary
+                  rather than the portfolio.
+                </p>
               </div>
             );
-          }
-          return (
-            <div className="text-xs text-slate-400 space-y-1">
-              <div className="flex justify-between">
-                <span>Federal income tax the plan would have assumed</span>
-                <span className="text-slate-300">{formatCurrency(yr0.engineFederalTax)}</span></div>
-              <div className="flex justify-between">
-                <span>Federal income tax from the return above</span>
-                <span className="text-slate-100 font-medium">{formatCurrency(yr0.federalTax)}</span></div>
-              <div className="flex justify-between border-t border-slate-700 pt-1">
-                <span className="text-slate-300">Difference</span>
-                <span className={yr0.federalTax > yr0.engineFederalTax ? 'text-amber-300 font-medium' : 'text-emerald-300 font-medium'}>
-                  {formatCurrency(Math.abs(yr0.federalTax - yr0.engineFederalTax))}
-                  {yr0.federalTax > yr0.engineFederalTax ? ' more than it assumed' : ' less than it assumed'}</span></div>
-              <p className="text-[11px] text-slate-500 pt-2">
-                Only this first year changes; every later year is still a forecast and is untouched.
-                Social Security and Medicare tax also stay on the plan&rsquo;s own calculation, because the
-                withdrawal engine reads that figure while it works. Monte Carlo, the Social Security
-                grid and the Roth optimizer run their own projections and still use the estimate — for a
-                working year that makes no difference to a balance, since the tax is paid out of salary
-                rather than the portfolio.
-              </p>
-            </div>
-          );
-        })()}
-      </div>
+          })()}
+        </div>
+      </HideableBlock>
     </div>
   );
 }
@@ -7700,7 +7766,7 @@ function ScenarioComparisonPanel({ activeScenarioId, assets, computeProjections,
 // ============================================
 // StressTestTab — Lifted to module scope
 // ============================================
-function StressTestTab({ accounts, assets, computeProjections, currentYear, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses }) {
+function StressTestTab({ detailLevel, sectionVisibility, setDetailLevel, setSectionVisibility, accounts, assets, computeProjections, currentYear, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses }) {
   const retirementAge = personalInfo.myRetirementAge;
   const endAge = personalInfo.legacyAge || 95;
   const retirementProjection = projections.find(p => p.myAge === retirementAge);
@@ -7890,35 +7956,40 @@ function StressTestTab({ accounts, assets, computeProjections, currentYear, inco
         </p>
       </div>
       
-      {/* Starting conditions */}
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-200 mb-3">Starting Conditions at Retirement (Age {retirementAge})</h4>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div>
-            <div className="text-xs text-slate-500">Portfolio at Retirement</div>
-            <div className="text-lg font-bold text-emerald-400">{formatCurrency(retirementPortfolio)}</div>
-          </div>
-          <div>
-            <div className="text-xs text-slate-500">Annual Spending Goal</div>
-            {/* Both figures below are in the dollars of the retirement YEAR. Showing
-                today's desiredRetirementIncome against a future portfolio balance
-                mixed real and nominal dollars and understated the withdrawal rate
-                by the whole inflation factor — a plan drawing 6.7% displayed as
-                1.5%, which made stress-test failures look impossible. */}
-            <div className="text-lg font-bold text-amber-400">{formatCurrency(retirementProjection?.desiredIncome || personalInfo.desiredRetirementIncome)}</div>
-            <div className="text-[10px] text-slate-500">in age-{retirementAge} dollars</div>
-          </div>
-          <div>
-            <div className="text-xs text-slate-500">Withdrawal Rate</div>
-            <div className="text-lg font-bold text-slate-200">{retirementPortfolio > 0 ? ((retirementProjection?.portfolioWithdrawal || 0) / retirementPortfolio * 100).toFixed(1) : '—'}%</div>
-            <div className="text-[10px] text-slate-500">first-year draw ÷ portfolio</div>
-          </div>
-          <div>
-            <div className="text-xs text-slate-500">Planning Horizon</div>
-            <div className="text-lg font-bold text-slate-200">{endAge - retirementAge} years (to age {endAge})</div>
+      <SectionControls tab="stresstest" vis={sectionVisibility} setVis={setSectionVisibility}
+                       level={detailLevel} setLevel={setDetailLevel} />
+      <HideableBlock tab="stresstest" id="startingConditions" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        {/* Starting conditions */}
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-200 mb-3">Starting Conditions at Retirement (Age {retirementAge})</h4>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <div className="text-xs text-slate-500">Portfolio at Retirement</div>
+              <div className="text-lg font-bold text-emerald-400">{formatCurrency(retirementPortfolio)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Annual Spending Goal</div>
+              {/* Both figures below are in the dollars of the retirement YEAR. Showing
+                  today's desiredRetirementIncome against a future portfolio balance
+                  mixed real and nominal dollars and understated the withdrawal rate
+                  by the whole inflation factor — a plan drawing 6.7% displayed as
+                  1.5%, which made stress-test failures look impossible. */}
+              <div className="text-lg font-bold text-amber-400">{formatCurrency(retirementProjection?.desiredIncome || personalInfo.desiredRetirementIncome)}</div>
+              <div className="text-[10px] text-slate-500">in age-{retirementAge} dollars</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Withdrawal Rate</div>
+              <div className="text-lg font-bold text-slate-200">{retirementPortfolio > 0 ? ((retirementProjection?.portfolioWithdrawal || 0) / retirementPortfolio * 100).toFixed(1) : '—'}%</div>
+              <div className="text-[10px] text-slate-500">first-year draw ÷ portfolio</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Planning Horizon</div>
+              <div className="text-lg font-bold text-slate-200">{endAge - retirementAge} years (to age {endAge})</div>
+            </div>
           </div>
         </div>
-      </div>
+      </HideableBlock>
       
       {/* Scenario selection */}
       <div className={cardStyle}>
@@ -8019,57 +8090,60 @@ function StressTestTab({ accounts, assets, computeProjections, currentYear, inco
             ))}
           </div>
           
-          {/* Portfolio chart */}
-          {LineChart && (
-            <div className={cardStyle}>
-              <h4 className="text-lg font-semibold text-slate-200 mb-4">Portfolio Value Under Each Scenario</h4>
-              <div style={{ height: 450 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart margin={{ top: 10, right: 30, left: 20, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
-                    <XAxis 
-                      dataKey="age" 
-                      type="number" 
-                      domain={[retirementAge, endAge]}
-                      tick={{ fill: THEME.inkMuted, fontSize: 12 }}
-                      label={{ value: 'Age', position: 'insideBottom', offset: -5, fill: THEME.inkMuted }}
-                      allowDuplicatedCategory={false}
-                    />
-                    <YAxis 
-                      tick={{ fill: THEME.inkMuted, fontSize: 12 }}
-                      tickFormatter={v => v >= 1000000 ? `$${(v/1000000).toFixed(1)}M` : `$${(v/1000).toFixed(0)}k`}
-                    />
-                    <Tooltip 
-                      contentStyle={{ backgroundColor: THEME.surfaceRaised, border: '1px solid #334155', borderRadius: '8px' }}
-                      labelStyle={{ color: THEME.inkPrimary }}
-                      formatter={(value, name) => [formatCurrency(value), name]}
-                      labelFormatter={label => `Age ${label}`}
-                    />
-                    <Legend formatter={legendInk} />
-                    <ReferenceLine y={0} stroke={THEME.grid} strokeDasharray="3 3" />
-                    {stressResults.map(result => (
-                      <Line 
-                        key={result.id}
-                        data={result.yearData}
-                        dataKey="portfolio"
-                        name={result.name}
-                        stroke={result.color}
-                        strokeWidth={result.id === 'baseline' ? 3 : 2}
-                        strokeDasharray={result.id === 'baseline' ? '8 4' : undefined}
-                        dot={false}
-                        connectNulls
+          <HideableBlock tab="stresstest" id="scenarioChart" level={detailLevel}
+                         vis={sectionVisibility} setVis={setSectionVisibility}>
+            {/* Portfolio chart */}
+            {LineChart && (
+              <div className={cardStyle}>
+                <h4 className="text-lg font-semibold text-slate-200 mb-4">Portfolio Value Under Each Scenario</h4>
+                <div style={{ height: 450 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart margin={{ top: 10, right: 30, left: 20, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+                      <XAxis 
+                        dataKey="age" 
+                        type="number" 
+                        domain={[retirementAge, endAge]}
+                        tick={{ fill: THEME.inkMuted, fontSize: 12 }}
+                        label={{ value: 'Age', position: 'insideBottom', offset: -5, fill: THEME.inkMuted }}
+                        allowDuplicatedCategory={false}
                       />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
+                      <YAxis 
+                        tick={{ fill: THEME.inkMuted, fontSize: 12 }}
+                        tickFormatter={v => v >= 1000000 ? `$${(v/1000000).toFixed(1)}M` : `$${(v/1000).toFixed(0)}k`}
+                      />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: THEME.surfaceRaised, border: '1px solid #334155', borderRadius: '8px' }}
+                        labelStyle={{ color: THEME.inkPrimary }}
+                        formatter={(value, name) => [formatCurrency(value), name]}
+                        labelFormatter={label => `Age ${label}`}
+                      />
+                      <Legend formatter={legendInk} />
+                      <ReferenceLine y={0} stroke={THEME.grid} strokeDasharray="3 3" />
+                      {stressResults.map(result => (
+                        <Line 
+                          key={result.id}
+                          data={result.yearData}
+                          dataKey="portfolio"
+                          name={result.name}
+                          stroke={result.color}
+                          strokeWidth={result.id === 'baseline' ? 3 : 2}
+                          strokeDasharray={result.id === 'baseline' ? '8 4' : undefined}
+                          dot={false}
+                          connectNulls
+                        />
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+                <p className="text-xs text-slate-500 mt-2">
+                  Dashed green line = your baseline (constant {((retirementProjection?.weightedCAGR || 0.07) * 100).toFixed(1)}% returns). 
+                  Solid lines show each stress scenario. Bad years early in retirement permanently reduce 
+                  the portfolio's growth base, which compounds over decades.
+                </p>
               </div>
-              <p className="text-xs text-slate-500 mt-2">
-                Dashed green line = your baseline (constant {((retirementProjection?.weightedCAGR || 0.07) * 100).toFixed(1)}% returns). 
-                Solid lines show each stress scenario. Bad years early in retirement permanently reduce 
-                the portfolio's growth base, which compounds over decades.
-              </p>
-            </div>
-          )}
+            )}
+          </HideableBlock>
           
           {/* Year-by-year returns table for worst scenario */}
           {(() => {
@@ -8158,7 +8232,7 @@ function StressTestTab({ accounts, assets, computeProjections, currentYear, inco
 // ============================================
 // WithdrawalStrategiesTab — Lifted to module scope
 // ============================================
-function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projections }) {
+function WithdrawalStrategiesTab({ detailLevel, sectionVisibility, setDetailLevel, setSectionVisibility, accounts, incomeStreams, personalInfo, projections }) {
   // Retirement age: always use personalInfo as source of truth
   const retirementAge = personalInfo.myRetirementAge;
   const retirementProjection = projections.find(p => p.myAge === retirementAge);
@@ -8708,214 +8782,231 @@ function WithdrawalStrategiesTab({ accounts, incomeStreams, personalInfo, projec
         </div>
       </div>
       
-      {/* Summary Comparison */}
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-100 mb-4">Strategy Summary Comparison</h4>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-slate-700">
-                <th className="text-left py-2 px-3 text-slate-400">Strategy</th>
-                <th className="text-right py-2 px-3 text-slate-400">Avg Annual Withdrawal</th>
-                <th className="text-right py-2 px-3 text-slate-400">Min Withdrawal</th>
-                <th className="text-right py-2 px-3 text-slate-400">Max Withdrawal</th>
-                <th className="text-right py-2 px-3 text-slate-400">Total Withdrawn</th>
-                <th className="text-right py-2 px-3 text-slate-400">Final Portfolio</th>
-                <th className="text-center py-2 px-3 text-slate-400">Runs Out?</th>
-              </tr>
-            </thead>
-            <tbody>
+      <SectionControls tab="withdrawal" vis={sectionVisibility} setVis={setSectionVisibility}
+                       level={detailLevel} setLevel={setDetailLevel} />
+      <HideableBlock tab="withdrawal" id="summary" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        {/* Summary Comparison */}
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-100 mb-4">Strategy Summary Comparison</h4>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-700">
+                  <th className="text-left py-2 px-3 text-slate-400">Strategy</th>
+                  <th className="text-right py-2 px-3 text-slate-400">Avg Annual Withdrawal</th>
+                  <th className="text-right py-2 px-3 text-slate-400">Min Withdrawal</th>
+                  <th className="text-right py-2 px-3 text-slate-400">Max Withdrawal</th>
+                  <th className="text-right py-2 px-3 text-slate-400">Total Withdrawn</th>
+                  <th className="text-right py-2 px-3 text-slate-400">Final Portfolio</th>
+                  <th className="text-center py-2 px-3 text-slate-400">Runs Out?</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selectedStrategies.map(key => {
+                  const info = strategyInfo.find(s => s.key === key);
+                  const stats = getSummaryStats(strategies[key]);
+                  return (
+                    <tr key={key} className="border-b border-slate-700/50 hover:bg-slate-800/30">
+                      <td className="py-2 px-3">
+                        <div className="flex items-center gap-2">
+                          <div className="w-3 h-3 rounded-full" style={{ backgroundColor: info?.color }}></div>
+                          <span className="text-slate-200 font-medium">{info?.name}</span>
+                        </div>
+                      </td>
+                      <td className="py-2 px-3 text-right text-emerald-400">{formatCurrency(stats.avgWithdrawal)}</td>
+                      <td className="py-2 px-3 text-right text-slate-400">{formatCurrency(stats.minWithdrawal)}</td>
+                      <td className="py-2 px-3 text-right text-slate-400">{formatCurrency(stats.maxWithdrawal)}</td>
+                      <td className="py-2 px-3 text-right text-sky-400">{formatCurrency(stats.totalWithdrawals)}</td>
+                      <td className="py-2 px-3 text-right text-amber-400 font-semibold">{formatCurrency(stats.finalPortfolio)}</td>
+                      <td className="py-2 px-3 text-center">
+                        {stats.portfolioRanOut >= 0 ? (
+                          <span className="text-red-400 font-medium">Age {settings.retirementAge + stats.portfolioRanOut}</span>
+                        ) : (
+                          <span className="text-emerald-400">✓ Lasts</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </HideableBlock>
+      
+      <HideableBlock tab="withdrawal" id="portfolioChart" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        {/* Portfolio Value Chart */}
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-100 mb-4">Portfolio Value Over Time</h4>
+          <div style={chartBox(320)}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+                <XAxis dataKey="age" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
+                <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000000).toFixed(1)}M`} />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} 
+                  formatter={(v, name) => [formatCurrency(v), name.replace('Portfolio', '')]}
+                  labelFormatter={l => `Age ${l}`}
+                />
+                <Legend formatter={legendInk} />
+                {selectedStrategies.map(key => {
+                  const info = strategyInfo.find(s => s.key === key);
+                  return (
+                    <Line 
+                      key={key}
+                      type="monotone" 
+                      dataKey={`${key}Portfolio`} 
+                      stroke={info?.color} 
+                      strokeWidth={2} 
+                      dot={false}
+                      name={info?.name}
+                    />
+                  );
+                })}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </HideableBlock>
+      
+      <HideableBlock tab="withdrawal" id="withdrawalChart" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        {/* Withdrawal Amount Chart */}
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-100 mb-4">Annual Portfolio Withdrawal by Strategy</h4>
+          <div style={chartBox(320)}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+                <XAxis dataKey="age" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
+                <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} 
+                  formatter={(v, name) => [formatCurrency(v), name.replace('Withdrawal', '')]}
+                  labelFormatter={l => `Age ${l}`}
+                />
+                <Legend formatter={legendInk} />
+                {selectedStrategies.map(key => {
+                  const info = strategyInfo.find(s => s.key === key);
+                  return (
+                    <Line 
+                      key={key}
+                      type="monotone" 
+                      dataKey={`${key}Withdrawal`} 
+                      stroke={info?.color} 
+                      strokeWidth={2} 
+                      dot={false}
+                      name={info?.name}
+                    />
+                  );
+                })}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </HideableBlock>
+      
+      <HideableBlock tab="withdrawal" id="yearTable" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        {/* Detailed Year-by-Year Table */}
+        <div className={cardStyle}>
+          <div className="flex items-center justify-between mb-4">
+            <h4 className="text-lg font-semibold text-slate-100">Detailed Year-by-Year</h4>
+            <select
+              value={showDetails}
+              onChange={e => setShowDetails(e.target.value)}
+              className="bg-slate-800 border border-slate-600 rounded px-3 py-1 text-slate-100"
+            >
               {selectedStrategies.map(key => {
                 const info = strategyInfo.find(s => s.key === key);
-                const stats = getSummaryStats(strategies[key]);
-                return (
-                  <tr key={key} className="border-b border-slate-700/50 hover:bg-slate-800/30">
-                    <td className="py-2 px-3">
-                      <div className="flex items-center gap-2">
-                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: info?.color }}></div>
-                        <span className="text-slate-200 font-medium">{info?.name}</span>
-                      </div>
+                return <option key={key} value={key}>{info?.name}</option>;
+              })}
+            </select>
+          </div>
+          <div className="overflow-x-auto max-h-96">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-slate-900">
+                <tr className="border-b border-slate-700">
+                  <th className="text-left py-2 px-2 text-slate-400">Age</th>
+                  <th className="text-right py-2 px-2 text-slate-400">Portfolio</th>
+                  <th className="text-right py-2 px-2 text-slate-400">Withdrawal</th>
+                  <th className="text-right py-2 px-2 text-slate-400">Rate</th>
+                  <th className="text-right py-2 px-2 text-slate-400">Other Income</th>
+                  <th className="text-right py-2 px-2 text-slate-400">Total Income</th>
+                  <th className="text-right py-2 px-2 text-slate-400">Desired</th>
+                  <th className="text-center py-2 px-2 text-slate-400">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {strategies[showDetails]?.map((row, idx) => (
+                  <tr key={row.age} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''}`}>
+                    <td className="py-2 px-2 text-slate-300 font-medium">
+                      {row.age}
+                      {row.phase && <span className="text-xs text-slate-500 ml-1">({row.phase})</span>}
                     </td>
-                    <td className="py-2 px-3 text-right text-emerald-400">{formatCurrency(stats.avgWithdrawal)}</td>
-                    <td className="py-2 px-3 text-right text-slate-400">{formatCurrency(stats.minWithdrawal)}</td>
-                    <td className="py-2 px-3 text-right text-slate-400">{formatCurrency(stats.maxWithdrawal)}</td>
-                    <td className="py-2 px-3 text-right text-sky-400">{formatCurrency(stats.totalWithdrawals)}</td>
-                    <td className="py-2 px-3 text-right text-amber-400 font-semibold">{formatCurrency(stats.finalPortfolio)}</td>
-                    <td className="py-2 px-3 text-center">
-                      {stats.portfolioRanOut >= 0 ? (
-                        <span className="text-red-400 font-medium">Age {settings.retirementAge + stats.portfolioRanOut}</span>
+                    <td className="py-2 px-2 text-right text-emerald-400">{formatCurrency(row.portfolio)}</td>
+                    <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.withdrawal)}</td>
+                    <td className="py-2 px-2 text-right text-slate-400">{(row.withdrawalRate * 100).toFixed(1)}%</td>
+                    <td className="py-2 px-2 text-right text-sky-400">{formatCurrency(row.otherIncome)}</td>
+                    <td className="py-2 px-2 text-right text-purple-400 font-medium">{formatCurrency(row.totalIncome)}</td>
+                    <td className="py-2 px-2 text-right text-slate-400">{formatCurrency(row.desiredSpending)}</td>
+                    <td className="py-2 px-2 text-center">
+                      {row.totalIncome >= row.desiredSpending ? (
+                        <span className="text-emerald-400">✓</span>
+                      ) : row.totalIncome >= row.desiredSpending * 0.8 ? (
+                        <span className="text-amber-400">~</span>
                       ) : (
-                        <span className="text-emerald-400">✓ Lasts</span>
+                        <span className="text-red-400">✗</span>
                       )}
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      </HideableBlock>
       
-      {/* Portfolio Value Chart */}
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-100 mb-4">Portfolio Value Over Time</h4>
-        <div style={chartBox(320)}>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
-              <XAxis dataKey="age" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
-              <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000000).toFixed(1)}M`} />
-              <Tooltip 
-                contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} 
-                formatter={(v, name) => [formatCurrency(v), name.replace('Portfolio', '')]}
-                labelFormatter={l => `Age ${l}`}
-              />
-              <Legend formatter={legendInk} />
-              {selectedStrategies.map(key => {
-                const info = strategyInfo.find(s => s.key === key);
-                return (
-                  <Line 
-                    key={key}
-                    type="monotone" 
-                    dataKey={`${key}Portfolio`} 
-                    stroke={info?.color} 
-                    strokeWidth={2} 
-                    dot={false}
-                    name={info?.name}
-                  />
-                );
-              })}
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-      
-      {/* Withdrawal Amount Chart */}
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-100 mb-4">Annual Portfolio Withdrawal by Strategy</h4>
-        <div style={chartBox(320)}>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
-              <XAxis dataKey="age" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
-              <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
-              <Tooltip 
-                contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`, borderRadius: '8px' }} 
-                formatter={(v, name) => [formatCurrency(v), name.replace('Withdrawal', '')]}
-                labelFormatter={l => `Age ${l}`}
-              />
-              <Legend formatter={legendInk} />
-              {selectedStrategies.map(key => {
-                const info = strategyInfo.find(s => s.key === key);
-                return (
-                  <Line 
-                    key={key}
-                    type="monotone" 
-                    dataKey={`${key}Withdrawal`} 
-                    stroke={info?.color} 
-                    strokeWidth={2} 
-                    dot={false}
-                    name={info?.name}
-                  />
-                );
-              })}
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-      
-      {/* Detailed Year-by-Year Table */}
-      <div className={cardStyle}>
-        <div className="flex items-center justify-between mb-4">
-          <h4 className="text-lg font-semibold text-slate-100">Detailed Year-by-Year</h4>
-          <select
-            value={showDetails}
-            onChange={e => setShowDetails(e.target.value)}
-            className="bg-slate-800 border border-slate-600 rounded px-3 py-1 text-slate-100"
-          >
-            {selectedStrategies.map(key => {
-              const info = strategyInfo.find(s => s.key === key);
-              return <option key={key} value={key}>{info?.name}</option>;
-            })}
-          </select>
-        </div>
-        <div className="overflow-x-auto max-h-96">
-          <table className="w-full text-sm">
-            <thead className="sticky top-0 bg-slate-900">
-              <tr className="border-b border-slate-700">
-                <th className="text-left py-2 px-2 text-slate-400">Age</th>
-                <th className="text-right py-2 px-2 text-slate-400">Portfolio</th>
-                <th className="text-right py-2 px-2 text-slate-400">Withdrawal</th>
-                <th className="text-right py-2 px-2 text-slate-400">Rate</th>
-                <th className="text-right py-2 px-2 text-slate-400">Other Income</th>
-                <th className="text-right py-2 px-2 text-slate-400">Total Income</th>
-                <th className="text-right py-2 px-2 text-slate-400">Desired</th>
-                <th className="text-center py-2 px-2 text-slate-400">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {strategies[showDetails]?.map((row, idx) => (
-                <tr key={row.age} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''}`}>
-                  <td className="py-2 px-2 text-slate-300 font-medium">
-                    {row.age}
-                    {row.phase && <span className="text-xs text-slate-500 ml-1">({row.phase})</span>}
-                  </td>
-                  <td className="py-2 px-2 text-right text-emerald-400">{formatCurrency(row.portfolio)}</td>
-                  <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.withdrawal)}</td>
-                  <td className="py-2 px-2 text-right text-slate-400">{(row.withdrawalRate * 100).toFixed(1)}%</td>
-                  <td className="py-2 px-2 text-right text-sky-400">{formatCurrency(row.otherIncome)}</td>
-                  <td className="py-2 px-2 text-right text-purple-400 font-medium">{formatCurrency(row.totalIncome)}</td>
-                  <td className="py-2 px-2 text-right text-slate-400">{formatCurrency(row.desiredSpending)}</td>
-                  <td className="py-2 px-2 text-center">
-                    {row.totalIncome >= row.desiredSpending ? (
-                      <span className="text-emerald-400">✓</span>
-                    ) : row.totalIncome >= row.desiredSpending * 0.8 ? (
-                      <span className="text-amber-400">~</span>
-                    ) : (
-                      <span className="text-red-400">✗</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-      
-      {/* Strategy Explanations */}
-      <div className={cardStyle}>
-        <h4 className="text-lg font-semibold text-slate-100 mb-4">📚 Strategy Explanations</h4>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="p-3 bg-slate-800/50 rounded-lg">
-            <h5 className="font-medium text-blue-400 mb-1">Fixed Percentage</h5>
-            <p className="text-xs text-slate-400">Withdraw a constant percentage of your current portfolio each year. Simple but volatile - income fluctuates with market.</p>
-          </div>
-          <div className="p-3 bg-slate-800/50 rounded-lg">
-            <h5 className="font-medium text-emerald-400 mb-1">Constant Dollar (4% Rule)</h5>
-            <p className="text-xs text-slate-400">The classic Bengen approach: withdraw 4% initially, then adjust for inflation. Stable income but may deplete in bad markets.</p>
-          </div>
-          <div className="p-3 bg-slate-800/50 rounded-lg">
-            <h5 className="font-medium text-amber-400 mb-1">Guyton-Klinger Guardrails</h5>
-            <p className="text-xs text-slate-400">Dynamic rules: cut spending if withdrawal rate exceeds ceiling, raise it if below floor. Balances income stability with portfolio protection.</p>
-          </div>
-          <div className="p-3 bg-slate-800/50 rounded-lg">
-            <h5 className="font-medium text-purple-400 mb-1">Dynamic Smoothed</h5>
-            <p className="text-xs text-slate-400">Take a percentage of portfolio but smooth changes over time (70/30 blend). Reduces year-to-year income volatility.</p>
-          </div>
-          <div className="p-3 bg-slate-800/50 rounded-lg">
-            <h5 className="font-medium text-red-400 mb-1">Go-Go / Slow-Go / No-Go</h5>
-            <p className="text-xs text-slate-400">Spend more in early active retirement (Go-Go), less as activity decreases (Slow-Go), minimal in later years (No-Go). Matches spending to lifestyle.</p>
-          </div>
-          <div className="p-3 bg-slate-800/50 rounded-lg">
-            <h5 className="font-medium text-cyan-400 mb-1">Floor + Upside</h5>
-            <p className="text-xs text-slate-400">Guaranteed minimum (3% floor) plus 50% of portfolio gains. Protects downside while sharing in good years.</p>
-          </div>
-          <div className="p-3 bg-slate-800/50 rounded-lg">
-            <h5 className="font-medium text-pink-400 mb-1">RMD-Based</h5>
-            <p className="text-xs text-slate-400">Follow IRS Required Minimum Distribution tables. Conservative early, increases with age. Never runs out by design.</p>
+      <HideableBlock tab="withdrawal" id="explanations" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        {/* Strategy Explanations */}
+        <div className={cardStyle}>
+          <h4 className="text-lg font-semibold text-slate-100 mb-4">📚 Strategy Explanations</h4>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="p-3 bg-slate-800/50 rounded-lg">
+              <h5 className="font-medium text-blue-400 mb-1">Fixed Percentage</h5>
+              <p className="text-xs text-slate-400">Withdraw a constant percentage of your current portfolio each year. Simple but volatile - income fluctuates with market.</p>
+            </div>
+            <div className="p-3 bg-slate-800/50 rounded-lg">
+              <h5 className="font-medium text-emerald-400 mb-1">Constant Dollar (4% Rule)</h5>
+              <p className="text-xs text-slate-400">The classic Bengen approach: withdraw 4% initially, then adjust for inflation. Stable income but may deplete in bad markets.</p>
+            </div>
+            <div className="p-3 bg-slate-800/50 rounded-lg">
+              <h5 className="font-medium text-amber-400 mb-1">Guyton-Klinger Guardrails</h5>
+              <p className="text-xs text-slate-400">Dynamic rules: cut spending if withdrawal rate exceeds ceiling, raise it if below floor. Balances income stability with portfolio protection.</p>
+            </div>
+            <div className="p-3 bg-slate-800/50 rounded-lg">
+              <h5 className="font-medium text-purple-400 mb-1">Dynamic Smoothed</h5>
+              <p className="text-xs text-slate-400">Take a percentage of portfolio but smooth changes over time (70/30 blend). Reduces year-to-year income volatility.</p>
+            </div>
+            <div className="p-3 bg-slate-800/50 rounded-lg">
+              <h5 className="font-medium text-red-400 mb-1">Go-Go / Slow-Go / No-Go</h5>
+              <p className="text-xs text-slate-400">Spend more in early active retirement (Go-Go), less as activity decreases (Slow-Go), minimal in later years (No-Go). Matches spending to lifestyle.</p>
+            </div>
+            <div className="p-3 bg-slate-800/50 rounded-lg">
+              <h5 className="font-medium text-cyan-400 mb-1">Floor + Upside</h5>
+              <p className="text-xs text-slate-400">Guaranteed minimum (3% floor) plus 50% of portfolio gains. Protects downside while sharing in good years.</p>
+            </div>
+            <div className="p-3 bg-slate-800/50 rounded-lg">
+              <h5 className="font-medium text-pink-400 mb-1">RMD-Based</h5>
+              <p className="text-xs text-slate-400">Follow IRS Required Minimum Distribution tables. Conservative early, increases with age. Never runs out by design.</p>
+            </div>
           </div>
         </div>
-      </div>
+      </HideableBlock>
     </div>
   );
 }
@@ -9936,7 +10027,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, currentYearRe
 // ============================================
 // SensitivityTab — Lifted to module scope
 // ============================================
-function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses }) {
+function SensitivityTab({ detailLevel, sectionVisibility, setDetailLevel, setSectionVisibility, accounts, assets, computeProjections, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses }) {
   const retirementAge = personalInfo.myRetirementAge;
   const endAge = personalInfo.legacyAge || 95;
 
@@ -10281,6 +10372,8 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
   return (
     <div className="space-y-6">
       <BasisLabel pi={personalInfo} />
+      <SectionControls tab="sensitivity" vis={sectionVisibility} setVis={setSectionVisibility}
+                       level={detailLevel} setLevel={setDetailLevel} />
       <div>
         <h3 className="text-xl font-semibold text-slate-100 mb-2">Sensitivity Analysis</h3>
         <p className="text-slate-400 text-sm">
@@ -10364,144 +10457,150 @@ function SensitivityTab({ accounts, assets, computeProjections, incomeStreams, o
             </div>
           </div>
 
-          {/* Tornado chart: which variables matter most */}
-          <div className={cardStyle}>
-            <h4 className="text-lg font-semibold text-slate-200 mb-2">Impact Ranking: Which Variables Matter Most?</h4>
-            <p className="text-xs text-slate-500 mb-4">Shows the range of ending portfolio values, in {dollarBasis === "today's $" ? "today's dollars" : 'future (nominal) dollars'}, when each variable is adjusted to its minimum and maximum test values. Wider bars = your plan is more sensitive to that variable.</p>
+          <HideableBlock tab="sensitivity" id="ranking" level={detailLevel}
+                         vis={sectionVisibility} setVis={setSectionVisibility}>
+            {/* Tornado chart: which variables matter most */}
+            <div className={cardStyle}>
+              <h4 className="text-lg font-semibold text-slate-200 mb-2">Impact Ranking: Which Variables Matter Most?</h4>
+              <p className="text-xs text-slate-500 mb-4">Shows the range of ending portfolio values, in {dollarBasis === "today's $" ? "today's dollars" : 'future (nominal) dollars'}, when each variable is adjusted to its minimum and maximum test values. Wider bars = your plan is more sensitive to that variable.</p>
             
-            {(() => {
-              // Build tornado data: for each variable, get the min and max portfolio-at-end
-              const basePortfolio = money(results[0]?.stepResults.find(s => s.isBase) || {}, 'portfolioAtEnd') || 0;
-              const tornadoData = results.map(variable => {
-                const portfolios = variable.stepResults.map(s => money(s, 'portfolioAtEnd'));
-                const minPortfolio = Math.min(...portfolios);
-                const maxPortfolio = Math.max(...portfolios);
-                return {
-                  name: variable.label,
-                  downside: minPortfolio - basePortfolio,
-                  upside: maxPortfolio - basePortfolio,
-                  range: maxPortfolio - minPortfolio
-                };
-              }).sort((a, b) => b.range - a.range);
+              {(() => {
+                // Build tornado data: for each variable, get the min and max portfolio-at-end
+                const basePortfolio = money(results[0]?.stepResults.find(s => s.isBase) || {}, 'portfolioAtEnd') || 0;
+                const tornadoData = results.map(variable => {
+                  const portfolios = variable.stepResults.map(s => money(s, 'portfolioAtEnd'));
+                  const minPortfolio = Math.min(...portfolios);
+                  const maxPortfolio = Math.max(...portfolios);
+                  return {
+                    name: variable.label,
+                    downside: minPortfolio - basePortfolio,
+                    upside: maxPortfolio - basePortfolio,
+                    range: maxPortfolio - minPortfolio
+                  };
+                }).sort((a, b) => b.range - a.range);
               
-              return (
-                <div className="space-y-3">
-                  {tornadoData.map((item, idx) => {
-                    const maxRange = Math.max(...tornadoData.map(d => d.range));
-                    const barScale = maxRange > 0 ? 100 / maxRange : 1;
-                    const downsideWidth = Math.abs(item.downside) * barScale;
-                    const upsideWidth = Math.abs(item.upside) * barScale;
+                return (
+                  <div className="space-y-3">
+                    {tornadoData.map((item, idx) => {
+                      const maxRange = Math.max(...tornadoData.map(d => d.range));
+                      const barScale = maxRange > 0 ? 100 / maxRange : 1;
+                      const downsideWidth = Math.abs(item.downside) * barScale;
+                      const upsideWidth = Math.abs(item.upside) * barScale;
                     
-                    return (
-                      <div key={idx} className="flex items-center gap-3">
-                        <div className="w-40 text-sm text-slate-300 text-right flex-shrink-0 truncate">{item.name}</div>
-                        <div className="flex-1 flex items-center h-8">
-                          {/* Downside bar (left, red) */}
-                          <div className="flex-1 flex justify-end">
-                            <div 
-                              className="h-6 bg-red-500/60 rounded-l flex items-center justify-start pl-1"
-                              style={{ width: `${Math.max(2, downsideWidth)}%` }}
-                            >
-                              {downsideWidth > 15 && (
-                                <span className="text-[10px] text-red-200 whitespace-nowrap">{formatCurrency(item.downside)}</span>
-                              )}
-                            </div>
-                          </div>
-                          {/* Center line */}
-                          <div className="w-px h-8 bg-slate-500 flex-shrink-0" />
-                          {/* Upside bar (right, green) */}
-                          <div className="flex-1">
-                            <div 
-                              className="h-6 bg-emerald-500/60 rounded-r flex items-center justify-end pr-1"
-                              style={{ width: `${Math.max(2, upsideWidth)}%` }}
-                            >
-                              {upsideWidth > 15 && (
-                                <span className="text-[10px] text-emerald-200 whitespace-nowrap">+{formatCurrency(item.upside)}</span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="w-24 text-xs text-slate-500 flex-shrink-0">
-                          Range: {formatCurrency(item.range)}
-                        </div>
-                      </div>
-                    );
-                  })}
-                  <div className="flex items-center gap-3 mt-1">
-                    <div className="w-40" />
-                    <div className="flex-1 flex text-[10px] text-slate-500">
-                      <div className="flex-1 text-right pr-1">← Worse</div>
-                      <div className="w-px" />
-                      <div className="flex-1 pl-1">Better →</div>
-                    </div>
-                    <div className="w-24" />
-                  </div>
-                </div>
-              );
-            })()}
-          </div>
-          
-          {/* Detailed results per variable */}
-          {results.map((variable, varIdx) => (
-            <div key={variable.id} className={cardStyle}>
-              <h4 className="text-lg font-semibold text-slate-200 mb-1">{variable.label}</h4>
-              <p className="text-xs text-slate-500 mb-3">
-                Base: {variable.formatStep(variable.baseValue, 0)} · all dollar figures in {showRealDollars ? "today's dollars" : 'future (nominal) dollars'}
-                {!showRealDollars && variable.scenarioInflation && (
-                  <span className="text-amber-400"> · these scenarios each end in a DIFFERENT currency, so compare them in today's dollars instead</span>
-                )}
-              </p>
-              
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-700/50">
-                      <th className="text-left py-2 px-3 text-slate-400 font-medium">Scenario</th>
-                      <th className="text-right py-2 px-3 text-slate-400 font-medium">Portfolio at {retirementAge}<span className="block text-[10px] font-normal text-slate-500">{dollarBasis}</span></th>
-                      <th className="text-right py-2 px-3 text-slate-400 font-medium">Portfolio at {endAge}<span className="block text-[10px] font-normal text-slate-500">{dollarBasis}</span></th>
-                      <th className="text-right py-2 px-3 text-slate-400 font-medium">vs Base</th>
-                      <th className="text-center py-2 px-3 text-slate-400 font-medium">Survives?</th>
-                      <th className="text-right py-2 px-3 text-slate-400 font-medium">Lifetime Tax</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {variable.stepResults.map((step, stepIdx) => {
-                      const baseStep = variable.stepResults.find(s => s.isBase);
-                      const baseEnd = (baseStep ? money(baseStep, 'portfolioAtEnd') : 0) || 0;
-                      const stepEnd = money(step, 'portfolioAtEnd');
-                      const diff = stepEnd - baseEnd;
-                      
                       return (
-                        <tr key={stepIdx} className={`border-b border-slate-800/50 ${step.isBase ? 'bg-amber-500/10' : ''} ${getImpactBg(stepEnd, baseEnd)}`}>
-                          <td className="py-2 px-3">
-                            <span className={`font-medium ${step.isBase ? 'text-amber-400' : 'text-slate-200'}`}>
-                              {step.label}
-                            </span>
-                            {step.isBase && <span className="text-amber-500 text-xs ml-2">◆ Current</span>}
-                            {!step.isBase && <span className="text-slate-500 text-xs ml-2">({step.deltaLabel})</span>}
-                          </td>
-                          <td className="py-2 px-3 text-right text-slate-300">{formatCurrency(money(step, 'portfolioAtRetirement'))}</td>
-                          <td className={`py-2 px-3 text-right font-medium ${getImpactColor(stepEnd, baseEnd)}`}>
-                            {formatCurrency(stepEnd)}
-                          </td>
-                          <td className={`py-2 px-3 text-right ${diff > 0 ? 'text-emerald-400' : diff < 0 ? 'text-red-400' : 'text-slate-500'}`}>
-                            {step.isBase ? '—' : `${diff > 0 ? '+' : ''}${formatCurrency(diff)}`}
-                          </td>
-                          <td className="py-2 px-3 text-center">
-                            {step.survives 
-                              ? <span className="text-emerald-400">✓</span>
-                              : <span className="text-red-400">✗ {step.failureAge}</span>
-                            }
-                          </td>
-                          <td className="py-2 px-3 text-right text-slate-400">{formatCurrency(money(step, 'lifetimeTax'))}</td>
-                        </tr>
+                        <div key={idx} className="flex items-center gap-3">
+                          <div className="w-40 text-sm text-slate-300 text-right flex-shrink-0 truncate">{item.name}</div>
+                          <div className="flex-1 flex items-center h-8">
+                            {/* Downside bar (left, red) */}
+                            <div className="flex-1 flex justify-end">
+                              <div 
+                                className="h-6 bg-red-500/60 rounded-l flex items-center justify-start pl-1"
+                                style={{ width: `${Math.max(2, downsideWidth)}%` }}
+                              >
+                                {downsideWidth > 15 && (
+                                  <span className="text-[10px] text-red-200 whitespace-nowrap">{formatCurrency(item.downside)}</span>
+                                )}
+                              </div>
+                            </div>
+                            {/* Center line */}
+                            <div className="w-px h-8 bg-slate-500 flex-shrink-0" />
+                            {/* Upside bar (right, green) */}
+                            <div className="flex-1">
+                              <div 
+                                className="h-6 bg-emerald-500/60 rounded-r flex items-center justify-end pr-1"
+                                style={{ width: `${Math.max(2, upsideWidth)}%` }}
+                              >
+                                {upsideWidth > 15 && (
+                                  <span className="text-[10px] text-emerald-200 whitespace-nowrap">+{formatCurrency(item.upside)}</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="w-24 text-xs text-slate-500 flex-shrink-0">
+                            Range: {formatCurrency(item.range)}
+                          </div>
+                        </div>
                       );
                     })}
-                  </tbody>
-                </table>
-              </div>
+                    <div className="flex items-center gap-3 mt-1">
+                      <div className="w-40" />
+                      <div className="flex-1 flex text-[10px] text-slate-500">
+                        <div className="flex-1 text-right pr-1">← Worse</div>
+                        <div className="w-px" />
+                        <div className="flex-1 pl-1">Better →</div>
+                      </div>
+                      <div className="w-24" />
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
-          ))}
+          </HideableBlock>
+          
+          <HideableBlock tab="sensitivity" id="perVariable" level={detailLevel}
+                         vis={sectionVisibility} setVis={setSectionVisibility}>
+            {/* Detailed results per variable */}
+            {results.map((variable, varIdx) => (
+              <div key={variable.id} className={cardStyle}>
+                <h4 className="text-lg font-semibold text-slate-200 mb-1">{variable.label}</h4>
+                <p className="text-xs text-slate-500 mb-3">
+                  Base: {variable.formatStep(variable.baseValue, 0)} · all dollar figures in {showRealDollars ? "today's dollars" : 'future (nominal) dollars'}
+                  {!showRealDollars && variable.scenarioInflation && (
+                    <span className="text-amber-400"> · these scenarios each end in a DIFFERENT currency, so compare them in today's dollars instead</span>
+                  )}
+                </p>
+              
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-700/50">
+                        <th className="text-left py-2 px-3 text-slate-400 font-medium">Scenario</th>
+                        <th className="text-right py-2 px-3 text-slate-400 font-medium">Portfolio at {retirementAge}<span className="block text-[10px] font-normal text-slate-500">{dollarBasis}</span></th>
+                        <th className="text-right py-2 px-3 text-slate-400 font-medium">Portfolio at {endAge}<span className="block text-[10px] font-normal text-slate-500">{dollarBasis}</span></th>
+                        <th className="text-right py-2 px-3 text-slate-400 font-medium">vs Base</th>
+                        <th className="text-center py-2 px-3 text-slate-400 font-medium">Survives?</th>
+                        <th className="text-right py-2 px-3 text-slate-400 font-medium">Lifetime Tax</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {variable.stepResults.map((step, stepIdx) => {
+                        const baseStep = variable.stepResults.find(s => s.isBase);
+                        const baseEnd = (baseStep ? money(baseStep, 'portfolioAtEnd') : 0) || 0;
+                        const stepEnd = money(step, 'portfolioAtEnd');
+                        const diff = stepEnd - baseEnd;
+                      
+                        return (
+                          <tr key={stepIdx} className={`border-b border-slate-800/50 ${step.isBase ? 'bg-amber-500/10' : ''} ${getImpactBg(stepEnd, baseEnd)}`}>
+                            <td className="py-2 px-3">
+                              <span className={`font-medium ${step.isBase ? 'text-amber-400' : 'text-slate-200'}`}>
+                                {step.label}
+                              </span>
+                              {step.isBase && <span className="text-amber-500 text-xs ml-2">◆ Current</span>}
+                              {!step.isBase && <span className="text-slate-500 text-xs ml-2">({step.deltaLabel})</span>}
+                            </td>
+                            <td className="py-2 px-3 text-right text-slate-300">{formatCurrency(money(step, 'portfolioAtRetirement'))}</td>
+                            <td className={`py-2 px-3 text-right font-medium ${getImpactColor(stepEnd, baseEnd)}`}>
+                              {formatCurrency(stepEnd)}
+                            </td>
+                            <td className={`py-2 px-3 text-right ${diff > 0 ? 'text-emerald-400' : diff < 0 ? 'text-red-400' : 'text-slate-500'}`}>
+                              {step.isBase ? '—' : `${diff > 0 ? '+' : ''}${formatCurrency(diff)}`}
+                            </td>
+                            <td className="py-2 px-3 text-center">
+                              {step.survives 
+                                ? <span className="text-emerald-400">✓</span>
+                                : <span className="text-red-400">✗ {step.failureAge}</span>
+                              }
+                            </td>
+                            <td className="py-2 px-3 text-right text-slate-400">{formatCurrency(money(step, 'lifetimeTax'))}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+          </HideableBlock>
           
           {/* Key insight */}
           <div className="p-4 bg-amber-900/20 border border-amber-700/50 rounded-lg">
@@ -12254,7 +12353,7 @@ function employerContribShare(account, amount) {
 // the IRS limits exactly as the removed panel did. The .jsx no longer imports
 // those three — the engine reaches them itself.
 
-function AccountsTab({ accountTypes, accounts, assets, computeProjections, contributorTypes, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setAccounts, setEditingAccount, setShowAccountModal }) {
+function AccountsTab({ detailLevel, sectionVisibility, setDetailLevel, setSectionVisibility, accountTypes, accounts, assets, computeProjections, contributorTypes, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setAccounts, setEditingAccount, setShowAccountModal }) {
   const [acctInfoOpen, setAcctInfoOpen] = useState(null);
   const [showIndividualAccounts, setShowIndividualAccounts] = useState(false);
   const [showIndividualContribs, setShowIndividualContribs] = useState(false);
@@ -12353,184 +12452,189 @@ function AccountsTab({ accountTypes, accounts, assets, computeProjections, contr
         </div>
       )}
       
+      <SectionControls tab="accounts" vis={sectionVisibility} setVis={setSectionVisibility}
+                       level={detailLevel} setLevel={setDetailLevel} />
       {/* Quick Edit Table */}
-      <div className={cardStyle}>
-        <div className="flex items-center gap-2 mb-4">
-          <h4 className="text-lg font-semibold text-slate-100">Quick Edit - Balances & Contributions</h4>
-          <InfoCard
-            title="Accounts — Balances & Contributions"
-            isOpen={acctInfoOpen === 'quickEdit'}
-            onToggle={() => setAcctInfoOpen(prev => prev === 'quickEdit' ? null : 'quickEdit')}
-            sections={[
-              {
-                heading: 'What This Table Does',
-                body: 'This is a spreadsheet-style editor for all your retirement and investment accounts. Each row is one account. Click any value to edit it, then tab between fields. When you have unsaved changes, a green "💾 Save Changes" button appears — click it to apply your edits to the projections.'
-              },
-              {
-                heading: 'Column Definitions',
-                items: [
-                  { icon: '📝', label: 'Account', desc: 'A descriptive name for this account (e.g., "My 401k at Fidelity"). For your reference only — doesn\'t affect calculations.' },
-                  { icon: '🏷️', label: 'Type', desc: 'The tax treatment of the account. This is critical — it determines how withdrawals are taxed. Pre-tax types (401k, Traditional IRA, 403b, 457b) are taxed as ordinary income. Roth types are tax-free. Brokerage generates capital gains. HSA is tax-free for medical expenses.' },
-                  { icon: '👤', label: 'Owner', desc: '"Me", "Spouse", or "Joint". Determines whose age is used for contribution periods, RMD calculations, and retirement timing.' },
-                  { icon: '💁', label: 'Contributor', desc: 'Who makes the contributions — used for calculating your personal savings rate. "Employer" contributions (like a match) don\'t count toward your savings rate but do grow your balance.' },
-                  { icon: '💰', label: 'Balance', desc: 'Current account balance as of today. This is your starting point — the projection grows this balance forward using contributions and the CAGR you set.' },
-                  { icon: '📥', label: 'Contribution', desc: 'Annual contribution amount in today\'s dollars. Include your contribution AND any employer match as separate accounts (or combined). This is added to the balance each year during the contribution period.' },
-                  { icon: '📈', label: 'Contrib +%', desc: 'Annual growth rate of your contribution amount (not the account itself). For example, if you increase contributions by 2% each year to keep pace with salary raises, enter 2.0%. Set to 0% if contributions stay flat.' },
-                  { icon: '📅', label: 'Period', desc: 'The age range during which contributions are made (e.g., 45–65). Contributions stop after the end age. Typically your start age to your retirement age.' },
-                  { icon: '📊', label: 'CAGR', desc: 'Compound Annual Growth Rate — the expected average annual return for this account. Stocks typically 7–10%, bonds 3–5%, savings 2–4%. This is applied to the entire balance each year after withdrawals.' }
-                ]
-              },
-              {
-                heading: 'Tips',
-                items: [
-                  { icon: '➕', label: 'Adding Accounts', desc: 'Use the "+ Add Account" button below the table. Create separate entries for each account with different types or owners.' },
-                  { icon: '🔄', label: 'Employer Match', desc: 'Enter employer matches as a separate account or add the match amount to your contribution. Either way, set the contributor to "Employer" for match-only entries so your savings rate calculates correctly.' },
-                  { icon: '⚠️', label: 'Account Types Matter', desc: 'The type field has the biggest impact on your projections. A 401k vs Roth 401k with the same balance and growth will produce very different retirement outcomes because of tax treatment on withdrawals.' }
-                ],
-                tip: 'If you have both a 401k and an employer match, consider adding them as two rows: one for your personal contribution (contributor = "Me") and one for the match (contributor = "Employer"). This gives you an accurate savings rate while still modeling the full growth.'
-              }
-            ]}
-          />
-        </div>
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-xs text-slate-500">Click any value to edit · Tab between fields · Click Save when done</p>
-          {dirty && <button onClick={saveChanges} className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-sm font-medium transition-colors">💾 Save Changes</button>}
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-max">
-            <thead>
-              <tr className="border-b border-slate-700">
-                <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Account</th>
-                <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Type</th>
-                <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Owner</th>
-                <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Contributor</th>
-                <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Balance</th>
-                <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Contribution</th>
-                <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Contrib +%</th>
-                <th className="text-center py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Period</th>
-                <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">CAGR</th>
-                <th className="text-center py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {localAccounts.map((account, idx) => (
-                <tr key={account.id} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''}`}>
-                  <td className="py-2 px-1">
-                    <SpreadsheetCell
-                      value={account.name}
-                      onChange={e => updateAccount(account.id, 'name', e.target.value)}
-                      style={{ width: `${maxNameWidth}ch` }}
-                      className="bg-transparent border border-transparent rounded px-2 py-1.5 text-slate-100 font-medium focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                    />
-                  </td>
-                  <td className="py-2 px-1">
-                    <GridSelect
-                      value={account.type}
-                      onChange={e => updateAccount(account.id, 'type', e.target.value)}
-                      className="bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors cursor-pointer"
-                    >
-                      {accountTypes.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                    </GridSelect>
-                  </td>
-                  <td className="py-2 px-1">
-                    <GridSelect
-                      value={account.owner}
-                      onChange={e => updateAccount(account.id, 'owner', e.target.value)}
-                      className="bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors cursor-pointer"
-                    >
-                      <option value="me">Me</option>
-                      <option value="spouse">Spouse</option>
-                      <option value="joint">Joint</option>
-                    </GridSelect>
-                  </td>
-                  <td className="py-2 px-1">
-                    <GridSelect
-                      value={account.contributor || 'me'}
-                      onChange={e => updateAccount(account.id, 'contributor', e.target.value)}
-                      className="bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors cursor-pointer"
-                    >
-                      {contributorTypes.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                    </GridSelect>
-                  </td>
-                  <td className="py-2 px-1">
-                    <CurrencyCell
-                      value={account.balance}
-                      onValueChange={v => updateAccount(account.id, 'balance', v)}
-                      className="bg-transparent border border-transparent rounded px-2 py-1.5 text-emerald-400 font-semibold text-right w-24 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                    />
-                  </td>
-                  <td className="py-2 px-1">
-                    {account.contributionMode === 'percent' ? (
-                      <div
-                        onClick={() => { setEditingAccount(account); setShowAccountModal(true); }}
-                        className="px-2 py-1.5 text-sky-400 font-semibold text-right w-20 cursor-pointer hover:bg-slate-800/50 rounded text-sm"
-                        title="Percent-mode contribution — click to edit in modal"
-                      >% salary</div>
-                    ) : (
-                      <CurrencyCell
-                        value={account.contribution}
-                        onValueChange={v => updateAccount(account.id, 'contribution', v)}
-                        className="bg-transparent border border-transparent rounded px-2 py-1.5 text-sky-400 font-semibold text-right w-20 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                      />
-                    )}
-                  </td>
-                  <td className="py-2 px-1">
-                    {account.contributionMode === 'percent' ? (
-                      <div
-                        onClick={() => { setEditingAccount(account); setShowAccountModal(true); }}
-                        className="px-2 py-1.5 text-cyan-400 font-semibold text-right w-20 cursor-pointer hover:bg-slate-800/50 rounded text-xs whitespace-nowrap"
-                        title="Employee + employer match — click to edit"
-                      >{((account.employeePercent || 0) * 100).toFixed(1)}%+{((account.employerMatchPercent || 0) * 100).toFixed(1)}%</div>
-                    ) : (
-                      <PercentCell
-                        value={account.contributionGrowth || 0}
-                        onValueChange={v => updateAccount(account.id, 'contributionGrowth', v)}
-                        className="bg-transparent border border-transparent rounded px-2 py-1.5 text-cyan-400 font-semibold text-right w-16 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                      />
-                    )}
-                  </td>
-                  <td className="py-2 px-1">
-                    <div className="flex items-center justify-center gap-0.5">
-                      <AgeCell
-                        value={account.startAge}
-                        onChange={e => updateAccount(account.id, 'startAge', Number(e.target.value))}
-                        className="w-12 bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-center text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                      />
-                      <span className="text-slate-500">-</span>
-                      <AgeCell
-                        value={account.stopAge}
-                        onChange={e => updateAccount(account.id, 'stopAge', Number(e.target.value))}
-                        className="w-12 bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-center text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                      />
-                    </div>
-                  </td>
-                  <td className="py-2 px-1">
-                    <PercentCell
-                      value={account.cagr}
-                      onValueChange={v => updateAccount(account.id, 'cagr', v)}
-                      className="bg-transparent border border-transparent rounded px-2 py-1.5 text-amber-400 font-semibold text-right w-16 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
-                    />
-                  </td>
-                  <td className="py-2 px-1 text-center">
-                    <div className="flex justify-center gap-1">
-                      <button tabIndex={-1} onClick={() => { setEditingAccount(account); setShowAccountModal(true); }} className="text-slate-400 hover:text-amber-400 text-sm px-1 py-1" title="Edit all details">⚙️</button>
-                      <button tabIndex={-1} onClick={() => { setLocalAccounts(prev => prev.filter(a => a.id !== account.id)); setDirty(true); }} className="text-slate-400 hover:text-red-400 text-sm px-1 py-1" title="Delete (applies on Save)">🗑️</button>
-                    </div>
-                  </td>
+      <HideableBlock tab="accounts" id="quickEdit" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <div className={cardStyle}>
+          <div className="flex items-center gap-2 mb-4">
+            <h4 className="text-lg font-semibold text-slate-100">Quick Edit - Balances & Contributions</h4>
+            <InfoCard
+              title="Accounts — Balances & Contributions"
+              isOpen={acctInfoOpen === 'quickEdit'}
+              onToggle={() => setAcctInfoOpen(prev => prev === 'quickEdit' ? null : 'quickEdit')}
+              sections={[
+                {
+                  heading: 'What This Table Does',
+                  body: 'This is a spreadsheet-style editor for all your retirement and investment accounts. Each row is one account. Click any value to edit it, then tab between fields. When you have unsaved changes, a green "💾 Save Changes" button appears — click it to apply your edits to the projections.'
+                },
+                {
+                  heading: 'Column Definitions',
+                  items: [
+                    { icon: '📝', label: 'Account', desc: 'A descriptive name for this account (e.g., "My 401k at Fidelity"). For your reference only — doesn\'t affect calculations.' },
+                    { icon: '🏷️', label: 'Type', desc: 'The tax treatment of the account. This is critical — it determines how withdrawals are taxed. Pre-tax types (401k, Traditional IRA, 403b, 457b) are taxed as ordinary income. Roth types are tax-free. Brokerage generates capital gains. HSA is tax-free for medical expenses.' },
+                    { icon: '👤', label: 'Owner', desc: '"Me", "Spouse", or "Joint". Determines whose age is used for contribution periods, RMD calculations, and retirement timing.' },
+                    { icon: '💁', label: 'Contributor', desc: 'Who makes the contributions — used for calculating your personal savings rate. "Employer" contributions (like a match) don\'t count toward your savings rate but do grow your balance.' },
+                    { icon: '💰', label: 'Balance', desc: 'Current account balance as of today. This is your starting point — the projection grows this balance forward using contributions and the CAGR you set.' },
+                    { icon: '📥', label: 'Contribution', desc: 'Annual contribution amount in today\'s dollars. Include your contribution AND any employer match as separate accounts (or combined). This is added to the balance each year during the contribution period.' },
+                    { icon: '📈', label: 'Contrib +%', desc: 'Annual growth rate of your contribution amount (not the account itself). For example, if you increase contributions by 2% each year to keep pace with salary raises, enter 2.0%. Set to 0% if contributions stay flat.' },
+                    { icon: '📅', label: 'Period', desc: 'The age range during which contributions are made (e.g., 45–65). Contributions stop after the end age. Typically your start age to your retirement age.' },
+                    { icon: '📊', label: 'CAGR', desc: 'Compound Annual Growth Rate — the expected average annual return for this account. Stocks typically 7–10%, bonds 3–5%, savings 2–4%. This is applied to the entire balance each year after withdrawals.' }
+                  ]
+                },
+                {
+                  heading: 'Tips',
+                  items: [
+                    { icon: '➕', label: 'Adding Accounts', desc: 'Use the "+ Add Account" button below the table. Create separate entries for each account with different types or owners.' },
+                    { icon: '🔄', label: 'Employer Match', desc: 'Enter employer matches as a separate account or add the match amount to your contribution. Either way, set the contributor to "Employer" for match-only entries so your savings rate calculates correctly.' },
+                    { icon: '⚠️', label: 'Account Types Matter', desc: 'The type field has the biggest impact on your projections. A 401k vs Roth 401k with the same balance and growth will produce very different retirement outcomes because of tax treatment on withdrawals.' }
+                  ],
+                  tip: 'If you have both a 401k and an employer match, consider adding them as two rows: one for your personal contribution (contributor = "Me") and one for the match (contributor = "Employer"). This gives you an accurate savings rate while still modeling the full growth.'
+                }
+              ]}
+            />
+          </div>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs text-slate-500">Click any value to edit · Tab between fields · Click Save when done</p>
+            {dirty && <button onClick={saveChanges} className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-sm font-medium transition-colors">💾 Save Changes</button>}
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-max">
+              <thead>
+                <tr className="border-b border-slate-700">
+                  <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Account</th>
+                  <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Type</th>
+                  <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Owner</th>
+                  <th className="text-left py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Contributor</th>
+                  <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Balance</th>
+                  <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Contribution</th>
+                  <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Contrib +%</th>
+                  <th className="text-center py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Period</th>
+                  <th className="text-right py-3 px-1 text-slate-400 font-medium whitespace-nowrap">CAGR</th>
+                  <th className="text-center py-3 px-1 text-slate-400 font-medium whitespace-nowrap">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr className="border-t-2 border-slate-600 bg-slate-800/50">
-                <td colSpan="4" className="py-3 px-1 text-slate-300 font-semibold">Totals</td>
-                <td className="py-3 px-1 text-right text-emerald-400 font-bold">{formatCurrency(totalBalance)}</td>
-                <td className="py-3 px-1 text-right text-sky-400 font-bold">{formatCurrency(totalContributions)}</td>
-                <td colSpan="4"></td>
-              </tr>
-            </tfoot>
-          </table>
+              </thead>
+              <tbody>
+                {localAccounts.map((account, idx) => (
+                  <tr key={account.id} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''}`}>
+                    <td className="py-2 px-1">
+                      <SpreadsheetCell
+                        value={account.name}
+                        onChange={e => updateAccount(account.id, 'name', e.target.value)}
+                        style={{ width: `${maxNameWidth}ch` }}
+                        className="bg-transparent border border-transparent rounded px-2 py-1.5 text-slate-100 font-medium focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                      />
+                    </td>
+                    <td className="py-2 px-1">
+                      <GridSelect
+                        value={account.type}
+                        onChange={e => updateAccount(account.id, 'type', e.target.value)}
+                        className="bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors cursor-pointer"
+                      >
+                        {accountTypes.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                      </GridSelect>
+                    </td>
+                    <td className="py-2 px-1">
+                      <GridSelect
+                        value={account.owner}
+                        onChange={e => updateAccount(account.id, 'owner', e.target.value)}
+                        className="bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors cursor-pointer"
+                      >
+                        <option value="me">Me</option>
+                        <option value="spouse">Spouse</option>
+                        <option value="joint">Joint</option>
+                      </GridSelect>
+                    </td>
+                    <td className="py-2 px-1">
+                      <GridSelect
+                        value={account.contributor || 'me'}
+                        onChange={e => updateAccount(account.id, 'contributor', e.target.value)}
+                        className="bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors cursor-pointer"
+                      >
+                        {contributorTypes.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                      </GridSelect>
+                    </td>
+                    <td className="py-2 px-1">
+                      <CurrencyCell
+                        value={account.balance}
+                        onValueChange={v => updateAccount(account.id, 'balance', v)}
+                        className="bg-transparent border border-transparent rounded px-2 py-1.5 text-emerald-400 font-semibold text-right w-24 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                      />
+                    </td>
+                    <td className="py-2 px-1">
+                      {account.contributionMode === 'percent' ? (
+                        <div
+                          onClick={() => { setEditingAccount(account); setShowAccountModal(true); }}
+                          className="px-2 py-1.5 text-sky-400 font-semibold text-right w-20 cursor-pointer hover:bg-slate-800/50 rounded text-sm"
+                          title="Percent-mode contribution — click to edit in modal"
+                        >% salary</div>
+                      ) : (
+                        <CurrencyCell
+                          value={account.contribution}
+                          onValueChange={v => updateAccount(account.id, 'contribution', v)}
+                          className="bg-transparent border border-transparent rounded px-2 py-1.5 text-sky-400 font-semibold text-right w-20 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                        />
+                      )}
+                    </td>
+                    <td className="py-2 px-1">
+                      {account.contributionMode === 'percent' ? (
+                        <div
+                          onClick={() => { setEditingAccount(account); setShowAccountModal(true); }}
+                          className="px-2 py-1.5 text-cyan-400 font-semibold text-right w-20 cursor-pointer hover:bg-slate-800/50 rounded text-xs whitespace-nowrap"
+                          title="Employee + employer match — click to edit"
+                        >{((account.employeePercent || 0) * 100).toFixed(1)}%+{((account.employerMatchPercent || 0) * 100).toFixed(1)}%</div>
+                      ) : (
+                        <PercentCell
+                          value={account.contributionGrowth || 0}
+                          onValueChange={v => updateAccount(account.id, 'contributionGrowth', v)}
+                          className="bg-transparent border border-transparent rounded px-2 py-1.5 text-cyan-400 font-semibold text-right w-16 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                        />
+                      )}
+                    </td>
+                    <td className="py-2 px-1">
+                      <div className="flex items-center justify-center gap-0.5">
+                        <AgeCell
+                          value={account.startAge}
+                          onChange={e => updateAccount(account.id, 'startAge', Number(e.target.value))}
+                          className="w-12 bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-center text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                        />
+                        <span className="text-slate-500">-</span>
+                        <AgeCell
+                          value={account.stopAge}
+                          onChange={e => updateAccount(account.id, 'stopAge', Number(e.target.value))}
+                          className="w-12 bg-transparent border border-transparent rounded px-1 py-1.5 text-slate-300 text-center text-sm focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                        />
+                      </div>
+                    </td>
+                    <td className="py-2 px-1">
+                      <PercentCell
+                        value={account.cagr}
+                        onValueChange={v => updateAccount(account.id, 'cagr', v)}
+                        className="bg-transparent border border-transparent rounded px-2 py-1.5 text-amber-400 font-semibold text-right w-16 focus:bg-slate-800 focus:border-amber-500/70 focus:outline-none hover:bg-slate-800/50 hover:border-slate-600 transition-colors"
+                      />
+                    </td>
+                    <td className="py-2 px-1 text-center">
+                      <div className="flex justify-center gap-1">
+                        <button tabIndex={-1} onClick={() => { setEditingAccount(account); setShowAccountModal(true); }} className="text-slate-400 hover:text-amber-400 text-sm px-1 py-1" title="Edit all details">⚙️</button>
+                        <button tabIndex={-1} onClick={() => { setLocalAccounts(prev => prev.filter(a => a.id !== account.id)); setDirty(true); }} className="text-slate-400 hover:text-red-400 text-sm px-1 py-1" title="Delete (applies on Save)">🗑️</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-slate-600 bg-slate-800/50">
+                  <td colSpan="4" className="py-3 px-1 text-slate-300 font-semibold">Totals</td>
+                  <td className="py-3 px-1 text-right text-emerald-400 font-bold">{formatCurrency(totalBalance)}</td>
+                  <td className="py-3 px-1 text-right text-sky-400 font-bold">{formatCurrency(totalContributions)}</td>
+                  <td colSpan="4"></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
         </div>
-      </div>
+      </HideableBlock>
       
       {/* Contributions & Savings Rate Card */}
       <div className={cardStyle}>
@@ -12608,124 +12712,189 @@ function AccountsTab({ accountTypes, accounts, assets, computeProjections, contr
           registry entry: turn on "What if you saved more?" from the picker. */}
 
       {/* Year-by-Year Account Balances Table */}
-      <div className={cardStyle}>
-        <div className="flex items-center justify-between gap-2 mb-2">
-          <div className="flex items-center gap-2">
-            <h4 className="text-lg font-semibold text-slate-100">Year-by-Year Account Balances</h4>
-            <InfoCard
-              title="Year-by-Year Account Balances"
-              isOpen={acctInfoOpen === 'yearByYear'}
-              onToggle={() => setAcctInfoOpen(prev => prev === 'yearByYear' ? null : 'yearByYear')}
-              sections={[
-                {
-                  heading: 'What This Table Shows',
-                  body: `This is the detailed output of the projection engine — one row per year from today through age ${personalInfo.legacyAge || 95}. It shows your account balances after all transactions (contributions, withdrawals, growth) have been applied for that year, plus the key cash flow events that happened during the year.`
-                },
-                {
-                  heading: 'The Balance Columns',
-                  items: [
-                    { color: '#10b981', label: 'Pre-Tax (Green)', desc: 'Combined balance of all pre-tax accounts (401k, Traditional IRA, 403b, 457b). These balances shrink in retirement as RMDs and spending withdrawals are taken. Every dollar withdrawn is taxed as ordinary income.' },
-                    { color: '#a855f7', label: 'Roth (Purple)', desc: 'Combined balance of all Roth accounts. These grow tax-free and withdrawals are tax-free. The planner typically draws from Roth last (per your withdrawal priority), so this balance may grow well into retirement.' },
-                    { color: '#38bdf8', label: 'Brokerage (Sky Blue)', desc: 'Combined taxable investment and HSA balances. Notice this column may jump UP in RMD years — that\'s excess RMD money being reinvested here after taxes.' },
-                    { color: THEME.inkPrimary, label: 'Total', desc: `Sum of all three account types — your total liquid investment portfolio. This is the number that needs to stay above zero through age ${personalInfo.legacyAge || 95}.` }
-                  ]
-                },
-                {
-                  heading: 'The Transaction Columns',
-                  items: [
-                    { color: '#f87171', label: 'RMD (Red)', desc: 'Required Minimum Distribution — the amount the IRS mandates you withdraw from pre-tax accounts starting at age 72–75 (depending on birth year). This is calculated using your account balance and the IRS Uniform Lifetime Table. Shows "—" in years with no RMD.' },
-                    { color: '#fb923c', label: 'Withdrawal (Orange)', desc: 'Total portfolio withdrawal for the year — the gross amount taken from your accounts to fund spending (after accounting for guaranteed income). This includes the RMD if it covers part of your spending need, plus any additional withdrawal beyond the RMD.' },
-                    { color: '#22d3ee', label: 'Excess → Brok (Cyan)', desc: 'When your RMD exceeds what you need for spending, the surplus is "excess RMD." You must withdraw it (and pay taxes on it), but the after-tax remainder gets reinvested into your brokerage account. This is why brokerage balances sometimes grow during RMD years.' }
-                  ]
-                },
-                {
-                  heading: 'Row Highlighting',
-                  items: [
-                    { icon: '🟧', label: 'Orange-tinted rows', desc: 'Years where RMDs are active. These rows have a subtle orange background to help you quickly identify when mandatory distributions begin and how they affect your balances.' },
-                    { icon: '📅', label: 'Year & Age', desc: 'The calendar year and your age. Use the age column to quickly find key milestones — retirement age, Social Security start, RMD start, etc.' }
-                  ]
-                },
-                {
-                  heading: 'How to Use This Table',
-                  body: `Scan the Total column to see if your portfolio stays positive through age ${personalInfo.legacyAge || 95}. Watch for the transition from growth (pre-retirement, balances climbing) to drawdown (post-retirement, balances declining). The rate of decline tells you how sustainable your plan is.`,
-                  tip: 'Pay special attention to the "Excess → Brok" column. Large excess RMDs mean your pre-tax accounts may be too heavily weighted — Roth conversions before retirement could reduce these forced withdrawals and the associated tax hit. If you see consistent excess RMDs, it may be worth exploring conversion strategies.'
-                }
-              ]}
-            />
+      <HideableBlock tab="accounts" id="balancesTable" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <div className={cardStyle}>
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <div className="flex items-center gap-2">
+              <h4 className="text-lg font-semibold text-slate-100">Year-by-Year Account Balances</h4>
+              <InfoCard
+                title="Year-by-Year Account Balances"
+                isOpen={acctInfoOpen === 'yearByYear'}
+                onToggle={() => setAcctInfoOpen(prev => prev === 'yearByYear' ? null : 'yearByYear')}
+                sections={[
+                  {
+                    heading: 'What This Table Shows',
+                    body: `This is the detailed output of the projection engine — one row per year from today through age ${personalInfo.legacyAge || 95}. It shows your account balances after all transactions (contributions, withdrawals, growth) have been applied for that year, plus the key cash flow events that happened during the year.`
+                  },
+                  {
+                    heading: 'The Balance Columns',
+                    items: [
+                      { color: '#10b981', label: 'Pre-Tax (Green)', desc: 'Combined balance of all pre-tax accounts (401k, Traditional IRA, 403b, 457b). These balances shrink in retirement as RMDs and spending withdrawals are taken. Every dollar withdrawn is taxed as ordinary income.' },
+                      { color: '#a855f7', label: 'Roth (Purple)', desc: 'Combined balance of all Roth accounts. These grow tax-free and withdrawals are tax-free. The planner typically draws from Roth last (per your withdrawal priority), so this balance may grow well into retirement.' },
+                      { color: '#38bdf8', label: 'Brokerage (Sky Blue)', desc: 'Combined taxable investment and HSA balances. Notice this column may jump UP in RMD years — that\'s excess RMD money being reinvested here after taxes.' },
+                      { color: THEME.inkPrimary, label: 'Total', desc: `Sum of all three account types — your total liquid investment portfolio. This is the number that needs to stay above zero through age ${personalInfo.legacyAge || 95}.` }
+                    ]
+                  },
+                  {
+                    heading: 'The Transaction Columns',
+                    items: [
+                      { color: '#f87171', label: 'RMD (Red)', desc: 'Required Minimum Distribution — the amount the IRS mandates you withdraw from pre-tax accounts starting at age 72–75 (depending on birth year). This is calculated using your account balance and the IRS Uniform Lifetime Table. Shows "—" in years with no RMD.' },
+                      { color: '#fb923c', label: 'Withdrawal (Orange)', desc: 'Total portfolio withdrawal for the year — the gross amount taken from your accounts to fund spending (after accounting for guaranteed income). This includes the RMD if it covers part of your spending need, plus any additional withdrawal beyond the RMD.' },
+                      { color: '#22d3ee', label: 'Excess → Brok (Cyan)', desc: 'When your RMD exceeds what you need for spending, the surplus is "excess RMD." You must withdraw it (and pay taxes on it), but the after-tax remainder gets reinvested into your brokerage account. This is why brokerage balances sometimes grow during RMD years.' }
+                    ]
+                  },
+                  {
+                    heading: 'Row Highlighting',
+                    items: [
+                      { icon: '🟧', label: 'Orange-tinted rows', desc: 'Years where RMDs are active. These rows have a subtle orange background to help you quickly identify when mandatory distributions begin and how they affect your balances.' },
+                      { icon: '📅', label: 'Year & Age', desc: 'The calendar year and your age. Use the age column to quickly find key milestones — retirement age, Social Security start, RMD start, etc.' }
+                    ]
+                  },
+                  {
+                    heading: 'How to Use This Table',
+                    body: `Scan the Total column to see if your portfolio stays positive through age ${personalInfo.legacyAge || 95}. Watch for the transition from growth (pre-retirement, balances climbing) to drawdown (post-retirement, balances declining). The rate of decline tells you how sustainable your plan is.`,
+                    tip: 'Pay special attention to the "Excess → Brok" column. Large excess RMDs mean your pre-tax accounts may be too heavily weighted — Roth conversions before retirement could reduce these forced withdrawals and the associated tax hit. If you see consistent excess RMDs, it may be worth exploring conversion strategies.'
+                  }
+                ]}
+              />
+            </div>
+            {/* Aggregated / Individual toggle */}
+            <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 gap-0.5">
+              <button
+                onClick={() => setShowIndividualAccounts(false)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  !showIndividualAccounts
+                    ? 'bg-slate-600 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                By Type
+              </button>
+              <button
+                onClick={() => setShowIndividualAccounts(true)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  showIndividualAccounts
+                    ? 'bg-slate-600 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                By Account
+              </button>
+            </div>
           </div>
-          {/* Aggregated / Individual toggle */}
-          <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 gap-0.5">
-            <button
-              onClick={() => setShowIndividualAccounts(false)}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                !showIndividualAccounts
-                  ? 'bg-slate-600 text-slate-100'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              By Type
-            </button>
-            <button
-              onClick={() => setShowIndividualAccounts(true)}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                showIndividualAccounts
-                  ? 'bg-slate-600 text-slate-100'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              By Account
-            </button>
-          </div>
-        </div>
-        <p className="text-sm text-slate-400 mb-4">
-          {showIndividualAccounts
-            ? 'Individual account balances year-by-year — each column is one account, useful for cross-checking against other planning tools.'
-            : 'Detailed projection showing contributions, RMDs, withdrawals, and excess RMD transfers to brokerage. Balances shown are end-of-year after all transactions and growth.'}
-        </p>
+          <p className="text-sm text-slate-400 mb-4">
+            {showIndividualAccounts
+              ? 'Individual account balances year-by-year — each column is one account, useful for cross-checking against other planning tools.'
+              : 'Detailed projection showing contributions, RMDs, withdrawals, and excess RMD transfers to brokerage. Balances shown are end-of-year after all transactions and growth.'}
+          </p>
 
-        {showIndividualAccounts ? (() => {
-          // Stable color palette per account index
-          // One validated categorical cycle instead of a per-table hand-picked list.
-          const acctColors = THEME.categorical;
-          const colorFor = (idx) => acctColors[idx % acctColors.length];
-          const typeLabel = (type) => ({
-            '401k':'401k','traditional_ira':'Trad IRA','457b':'457b','403b':'403b',
-            'roth_401k':'Roth 401k','roth_ira':'Roth IRA','roth_457b':'Roth 457b','roth_403b':'Roth 403b',
-            'brokerage':'Brokerage','hsa':'HSA'
-          }[type] || type);
-          return (
+          {showIndividualAccounts ? (() => {
+            // Stable color palette per account index
+            // One validated categorical cycle instead of a per-table hand-picked list.
+            const acctColors = THEME.categorical;
+            const colorFor = (idx) => acctColors[idx % acctColors.length];
+            const typeLabel = (type) => ({
+              '401k':'401k','traditional_ira':'Trad IRA','457b':'457b','403b':'403b',
+              'roth_401k':'Roth 401k','roth_ira':'Roth IRA','roth_457b':'Roth 457b','roth_403b':'Roth 403b',
+              'brokerage':'Brokerage','hsa':'HSA'
+            }[type] || type);
+            return (
+              <>
+                <div className="overflow-x-auto max-h-[500px]">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 bg-slate-900 z-10">
+                      <tr className="border-b border-slate-700">
+                        <th className="text-left py-2 px-2 text-slate-400 font-medium whitespace-nowrap">Year</th>
+                        <th className="text-center py-2 px-2 text-slate-400 font-medium">Age</th>
+                        {accounts.map((acct, i) => (
+                          <th key={acct.id} className="text-right py-2 px-2 font-medium whitespace-nowrap" style={{ color: colorFor(i) }}>
+                            {acct.name}
+                            <div className="text-slate-500 font-normal text-xs">{typeLabel(acct.type)}{acct.owner === 'spouse' ? ' · spouse' : ''} · {(acct.cagr * 100).toFixed(1)}%</div>
+                          </th>
+                        ))}
+                        <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {projections.filter((_, idx) => idx <= 50).map((p, idx) => {
+                        const hasRMD = p.rmd > 0;
+                        return (
+                          <tr key={p.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${hasRMD ? 'bg-orange-900/10' : ''}`}>
+                            <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
+                            <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
+                            {accounts.map((acct, i) => {
+                              const bal = (p.perAccountBalances || {})[acct.id] || 0;
+                              return (
+                                <td key={acct.id} className="py-1.5 px-2 text-right font-mono" style={{ color: bal > 0 ? colorFor(i) : THEME.inkMuted }}>
+                                  {bal > 0 ? formatCurrency(bal) : '—'}
+                                </td>
+                              );
+                            })}
+                            <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">{formatCurrency(p.totalPortfolio)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="mt-4 flex flex-wrap gap-4 text-xs">
+                  {accounts.map((acct, i) => (
+                    <div key={acct.id} className="flex items-center gap-2">
+                      <div className="w-3 h-3 rounded" style={{ background: colorFor(i) }}></div>
+                      <span className="text-slate-400">{acct.name} <span className="text-slate-500">({typeLabel(acct.type)})</span></span>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3 p-3 bg-slate-800/50 rounded-lg">
+                  <p className="text-xs text-slate-400">
+                    <strong className="text-slate-300">By Account view:</strong> Each column tracks one account independently. Balances reflect end-of-year values after contributions, withdrawals, RMDs, Roth conversions, and growth. When an account is fully depleted it shows "—". The Total column matches the aggregated view.
+                  </p>
+                </div>
+              </>
+            );
+          })() : (
             <>
               <div className="overflow-x-auto max-h-[500px]">
                 <table className="w-full text-sm">
                   <thead className="sticky top-0 bg-slate-900 z-10">
                     <tr className="border-b border-slate-700">
-                      <th className="text-left py-2 px-2 text-slate-400 font-medium whitespace-nowrap">Year</th>
+                      <th className="text-left py-2 px-2 text-slate-400 font-medium">Year</th>
                       <th className="text-center py-2 px-2 text-slate-400 font-medium">Age</th>
-                      {accounts.map((acct, i) => (
-                        <th key={acct.id} className="text-right py-2 px-2 font-medium whitespace-nowrap" style={{ color: colorFor(i) }}>
-                          {acct.name}
-                          <div className="text-slate-500 font-normal text-xs">{typeLabel(acct.type)}{acct.owner === 'spouse' ? ' · spouse' : ''} · {(acct.cagr * 100).toFixed(1)}%</div>
-                        </th>
-                      ))}
+                      <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.preTax }}>Pre-Tax</th>
+                      <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.roth }}>Roth</th>
+                      <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.brokerage }}>Brokerage</th>
                       <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
+                      <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.rmd }}>RMD</th>
+                      <th className="text-right py-2 px-2 text-orange-400 font-medium">Withdrawal</th>
+                      <th className="text-right py-2 px-2 text-cyan-400 font-medium">Excess → Brok</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {projections.filter((_, idx) => idx <= 50).map((p, idx) => {
+                    {projections.filter((p, idx) => idx <= 50).map((p, idx) => {
                       const hasRMD = p.rmd > 0;
+                      const hasExcess = p.excessRMD > 0;
                       return (
-                        <tr key={p.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${hasRMD ? 'bg-orange-900/10' : ''}`}>
+                        <tr
+                          key={p.year}
+                          className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${hasRMD ? 'bg-orange-900/10' : ''}`}
+                        >
                           <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
                           <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
-                          {accounts.map((acct, i) => {
-                            const bal = (p.perAccountBalances || {})[acct.id] || 0;
-                            return (
-                              <td key={acct.id} className="py-1.5 px-2 text-right font-mono" style={{ color: bal > 0 ? colorFor(i) : THEME.inkMuted }}>
-                                {bal > 0 ? formatCurrency(bal) : '—'}
-                              </td>
-                            );
-                          })}
+                          <td className="py-1.5 px-2 text-right font-mono" style={{ color: SERIES.preTax }}>{formatCurrency(p.preTaxBalance)}</td>
+                          <td className="py-1.5 px-2 text-right font-mono" style={{ color: SERIES.roth }}>{formatCurrency(p.rothBalance)}</td>
+                          <td className="py-1.5 px-2 text-right font-mono" style={{ color: SERIES.brokerage }}>{formatCurrency(p.brokerageBalance)}</td>
                           <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">{formatCurrency(p.totalPortfolio)}</td>
+                          <td className="py-1.5 px-2 text-right font-mono"
+                              style={{ color: hasRMD ? SERIES.rmd : THEME.inkMuted }}>
+                            {hasRMD ? formatCurrency(p.rmd) : '—'}
+                          </td>
+                          <td className={`py-1.5 px-2 text-right font-mono ${p.portfolioWithdrawal > 0 ? 'text-orange-400' : 'text-slate-500'}`}>
+                            {p.portfolioWithdrawal > 0 ? formatCurrency(p.portfolioWithdrawal) : '—'}
+                          </td>
+                          <td className={`py-1.5 px-2 text-right font-mono ${hasExcess ? 'text-cyan-400' : 'text-slate-500'}`}>
+                            {hasExcess ? formatCurrency(p.excessRMD) : '—'}
+                          </td>
                         </tr>
                       );
                     })}
@@ -12733,329 +12902,270 @@ function AccountsTab({ accountTypes, accounts, assets, computeProjections, contr
                 </table>
               </div>
               <div className="mt-4 flex flex-wrap gap-4 text-xs">
-                {accounts.map((acct, i) => (
-                  <div key={acct.id} className="flex items-center gap-2">
-                    <div className="w-3 h-3 rounded" style={{ background: colorFor(i) }}></div>
-                    <span className="text-slate-400">{acct.name} <span className="text-slate-500">({typeLabel(acct.type)})</span></span>
-                  </div>
-                ))}
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded" style={{ background: SERIES.preTax }}></div>
+                  <span className="text-slate-400">Pre-Tax (401k, Trad IRA, 457b)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded" style={{ background: SERIES.roth }}></div>
+                  <span className="text-slate-400">Roth Accounts</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded" style={{ background: SERIES.brokerage }}></div>
+                  <span className="text-slate-400">Brokerage</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded" style={{ background: SERIES.rmd }}></div>
+                  <span className="text-slate-400">Required Minimum Distribution</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded bg-cyan-400"></div>
+                  <span className="text-slate-400">Excess RMD → Brokerage (after tax)</span>
+                </div>
               </div>
               <div className="mt-3 p-3 bg-slate-800/50 rounded-lg">
                 <p className="text-xs text-slate-400">
-                  <strong className="text-slate-300">By Account view:</strong> Each column tracks one account independently. Balances reflect end-of-year values after contributions, withdrawals, RMDs, Roth conversions, and growth. When an account is fully depleted it shows "—". The Total column matches the aggregated view.
+                  <strong className="text-slate-300">How to read this table:</strong> RMDs begin at age 75 and are withdrawn from pre-tax accounts.
+                  If the RMD exceeds your spending needs, the excess (after paying taxes) is transferred to your brokerage account.
+                  The "Withdrawal" column shows total portfolio withdrawals needed to meet your desired income.
+                  When RMD &gt; Withdrawal needed, the difference becomes "Excess → Brok".
                 </p>
               </div>
             </>
-          );
-        })() : (
-          <>
-            <div className="overflow-x-auto max-h-[500px]">
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 bg-slate-900 z-10">
-                  <tr className="border-b border-slate-700">
-                    <th className="text-left py-2 px-2 text-slate-400 font-medium">Year</th>
-                    <th className="text-center py-2 px-2 text-slate-400 font-medium">Age</th>
-                    <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.preTax }}>Pre-Tax</th>
-                    <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.roth }}>Roth</th>
-                    <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.brokerage }}>Brokerage</th>
-                    <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
-                    <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.rmd }}>RMD</th>
-                    <th className="text-right py-2 px-2 text-orange-400 font-medium">Withdrawal</th>
-                    <th className="text-right py-2 px-2 text-cyan-400 font-medium">Excess → Brok</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {projections.filter((p, idx) => idx <= 50).map((p, idx) => {
-                    const hasRMD = p.rmd > 0;
-                    const hasExcess = p.excessRMD > 0;
-                    return (
-                      <tr
-                        key={p.year}
-                        className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${hasRMD ? 'bg-orange-900/10' : ''}`}
-                      >
-                        <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
-                        <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
-                        <td className="py-1.5 px-2 text-right font-mono" style={{ color: SERIES.preTax }}>{formatCurrency(p.preTaxBalance)}</td>
-                        <td className="py-1.5 px-2 text-right font-mono" style={{ color: SERIES.roth }}>{formatCurrency(p.rothBalance)}</td>
-                        <td className="py-1.5 px-2 text-right font-mono" style={{ color: SERIES.brokerage }}>{formatCurrency(p.brokerageBalance)}</td>
-                        <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">{formatCurrency(p.totalPortfolio)}</td>
-                        <td className="py-1.5 px-2 text-right font-mono"
-                            style={{ color: hasRMD ? SERIES.rmd : THEME.inkMuted }}>
-                          {hasRMD ? formatCurrency(p.rmd) : '—'}
-                        </td>
-                        <td className={`py-1.5 px-2 text-right font-mono ${p.portfolioWithdrawal > 0 ? 'text-orange-400' : 'text-slate-500'}`}>
-                          {p.portfolioWithdrawal > 0 ? formatCurrency(p.portfolioWithdrawal) : '—'}
-                        </td>
-                        <td className={`py-1.5 px-2 text-right font-mono ${hasExcess ? 'text-cyan-400' : 'text-slate-500'}`}>
-                          {hasExcess ? formatCurrency(p.excessRMD) : '—'}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <div className="mt-4 flex flex-wrap gap-4 text-xs">
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded" style={{ background: SERIES.preTax }}></div>
-                <span className="text-slate-400">Pre-Tax (401k, Trad IRA, 457b)</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded" style={{ background: SERIES.roth }}></div>
-                <span className="text-slate-400">Roth Accounts</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded" style={{ background: SERIES.brokerage }}></div>
-                <span className="text-slate-400">Brokerage</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded" style={{ background: SERIES.rmd }}></div>
-                <span className="text-slate-400">Required Minimum Distribution</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded bg-cyan-400"></div>
-                <span className="text-slate-400">Excess RMD → Brokerage (after tax)</span>
-              </div>
-            </div>
-            <div className="mt-3 p-3 bg-slate-800/50 rounded-lg">
-              <p className="text-xs text-slate-400">
-                <strong className="text-slate-300">How to read this table:</strong> RMDs begin at age 75 and are withdrawn from pre-tax accounts.
-                If the RMD exceeds your spending needs, the excess (after paying taxes) is transferred to your brokerage account.
-                The "Withdrawal" column shows total portfolio withdrawals needed to meet your desired income.
-                When RMD &gt; Withdrawal needed, the difference becomes "Excess → Brok".
-              </p>
-            </div>
-          </>
-        )}
-      </div>
+          )}
+        </div>
+      </HideableBlock>
       
       {/* Year-by-Year Contributions Table */}
-      <div className={cardStyle}>
-        <div className="flex items-center justify-between gap-2 mb-2">
-          <div className="flex items-center gap-2">
-            <h4 className="text-lg font-semibold text-slate-100">Year-by-Year Contributions</h4>
-            <InfoCard
-              title="Year-by-Year Contributions"
-              isOpen={acctInfoOpen === 'yearByYearContribs'}
-              onToggle={() => setAcctInfoOpen(prev => prev === 'yearByYearContribs' ? null : 'yearByYearContribs')}
-              sections={[
-                {
-                  heading: 'What This Table Shows',
-                  body: 'Annual contributions flowing into each account from the projection engine. Contributions are calculated based on the base amount, growth rate, and active contribution period (start age to stop age) you defined for each account.'
-                },
-                {
-                  heading: 'By Type View',
-                  items: [
-                    { color: '#10b981', label: 'Pre-Tax (Green)', desc: 'Combined contributions to all pre-tax accounts (401k, Traditional IRA, 403b, 457b). These reduce your taxable income in the year contributed.' },
-                    { color: '#a855f7', label: 'Roth (Purple)', desc: 'Combined contributions to all Roth accounts. These are made with after-tax dollars but grow and withdraw tax-free.' },
-                    { color: '#38bdf8', label: 'Brokerage (Sky Blue)', desc: 'Combined contributions to taxable brokerage and HSA accounts.' },
-                    { color: THEME.inkPrimary, label: 'Total', desc: 'Sum of all contributions for the year across all account types.' }
-                  ]
-                },
-                {
-                  heading: 'By Account View',
-                  body: 'Shows each individual account as its own column so you can see exactly how much goes into each account each year. Contributions grow annually by the contribution growth rate you set, and stop at the stop age.'
-                },
-                {
-                  heading: 'How to Use This',
-                  body: 'Verify your contribution assumptions look correct year by year. Watch for the transition when contributions stop at retirement — this is when your accounts shift from accumulation to drawdown. If you see zeros where you expect contributions, check the start/stop ages on your accounts.',
-                  tip: 'The contribution growth rate compounds each year. A $10,000 contribution growing at 3% becomes $10,300 next year, then $10,609, etc. This models annual raise-based increases to retirement savings.'
-                }
-              ]}
-            />
+      <HideableBlock tab="accounts" id="contributionsTable" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <div className={cardStyle}>
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <div className="flex items-center gap-2">
+              <h4 className="text-lg font-semibold text-slate-100">Year-by-Year Contributions</h4>
+              <InfoCard
+                title="Year-by-Year Contributions"
+                isOpen={acctInfoOpen === 'yearByYearContribs'}
+                onToggle={() => setAcctInfoOpen(prev => prev === 'yearByYearContribs' ? null : 'yearByYearContribs')}
+                sections={[
+                  {
+                    heading: 'What This Table Shows',
+                    body: 'Annual contributions flowing into each account from the projection engine. Contributions are calculated based on the base amount, growth rate, and active contribution period (start age to stop age) you defined for each account.'
+                  },
+                  {
+                    heading: 'By Type View',
+                    items: [
+                      { color: '#10b981', label: 'Pre-Tax (Green)', desc: 'Combined contributions to all pre-tax accounts (401k, Traditional IRA, 403b, 457b). These reduce your taxable income in the year contributed.' },
+                      { color: '#a855f7', label: 'Roth (Purple)', desc: 'Combined contributions to all Roth accounts. These are made with after-tax dollars but grow and withdraw tax-free.' },
+                      { color: '#38bdf8', label: 'Brokerage (Sky Blue)', desc: 'Combined contributions to taxable brokerage and HSA accounts.' },
+                      { color: THEME.inkPrimary, label: 'Total', desc: 'Sum of all contributions for the year across all account types.' }
+                    ]
+                  },
+                  {
+                    heading: 'By Account View',
+                    body: 'Shows each individual account as its own column so you can see exactly how much goes into each account each year. Contributions grow annually by the contribution growth rate you set, and stop at the stop age.'
+                  },
+                  {
+                    heading: 'How to Use This',
+                    body: 'Verify your contribution assumptions look correct year by year. Watch for the transition when contributions stop at retirement — this is when your accounts shift from accumulation to drawdown. If you see zeros where you expect contributions, check the start/stop ages on your accounts.',
+                    tip: 'The contribution growth rate compounds each year. A $10,000 contribution growing at 3% becomes $10,300 next year, then $10,609, etc. This models annual raise-based increases to retirement savings.'
+                  }
+                ]}
+              />
+            </div>
+            {/* Aggregated / Individual toggle */}
+            <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 gap-0.5">
+              <button
+                onClick={() => setShowIndividualContribs(false)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  !showIndividualContribs
+                    ? 'bg-slate-600 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                By Type
+              </button>
+              <button
+                onClick={() => setShowIndividualContribs(true)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  showIndividualContribs
+                    ? 'bg-slate-600 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                By Account
+              </button>
+            </div>
           </div>
-          {/* Aggregated / Individual toggle */}
-          <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700 gap-0.5">
-            <button
-              onClick={() => setShowIndividualContribs(false)}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                !showIndividualContribs
-                  ? 'bg-slate-600 text-slate-100'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              By Type
-            </button>
-            <button
-              onClick={() => setShowIndividualContribs(true)}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                showIndividualContribs
-                  ? 'bg-slate-600 text-slate-100'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              By Account
-            </button>
-          </div>
-        </div>
-        <p className="text-sm text-slate-400 mb-4">
-          {showIndividualContribs
-            ? 'Individual account contributions year-by-year — each column is one account.'
-            : 'Contributions aggregated by account type (pre-tax, Roth, brokerage). Shows annual amounts including contribution growth.'}
-        </p>
+          <p className="text-sm text-slate-400 mb-4">
+            {showIndividualContribs
+              ? 'Individual account contributions year-by-year — each column is one account.'
+              : 'Contributions aggregated by account type (pre-tax, Roth, brokerage). Shows annual amounts including contribution growth.'}
+          </p>
         
-        {showIndividualContribs ? (() => {
-          // One validated categorical cycle instead of a per-table hand-picked list.
-          const acctColors = THEME.categorical;
-          const colorFor = (idx) => acctColors[idx % acctColors.length];
-          const contribYears = projections.filter(p => {
-            const contribs = p.perAccountContributions || {};
-            return Object.values(contribs).some(v => v > 0);
-          });
-          // Show all years up to last contribution year + 2 for context, max 50
-          const lastContribAge = contribYears.length > 0 ? contribYears[contribYears.length - 1].myAge : personalInfo.myAge;
-          const displayYears = projections.filter(p => p.myAge <= Math.min(lastContribAge + 2, personalInfo.myAge + 50));
+          {showIndividualContribs ? (() => {
+            // One validated categorical cycle instead of a per-table hand-picked list.
+            const acctColors = THEME.categorical;
+            const colorFor = (idx) => acctColors[idx % acctColors.length];
+            const contribYears = projections.filter(p => {
+              const contribs = p.perAccountContributions || {};
+              return Object.values(contribs).some(v => v > 0);
+            });
+            // Show all years up to last contribution year + 2 for context, max 50
+            const lastContribAge = contribYears.length > 0 ? contribYears[contribYears.length - 1].myAge : personalInfo.myAge;
+            const displayYears = projections.filter(p => p.myAge <= Math.min(lastContribAge + 2, personalInfo.myAge + 50));
           
-          return (
-            <div className="overflow-x-auto max-h-[500px]">
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 bg-slate-900 z-10">
-                  <tr className="border-b border-slate-700">
-                    <th className="text-left py-2 px-2 text-slate-400 font-medium">Year</th>
-                    <th className="text-center py-2 px-2 text-slate-400 font-medium">Age</th>
-                    {accounts.map((acct, i) => (
-                      <th key={acct.id} className="text-right py-2 px-2 font-medium" style={{ color: colorFor(i) }}>
-                        {acct.name.length > 12 ? acct.name.substring(0, 12) + '…' : acct.name}
-                      </th>
-                    ))}
-                    <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
-                    <th className="text-right py-2 px-2 text-amber-400 font-medium">Gross %</th>
-                    <th className="text-right py-2 px-2 text-emerald-400 font-medium">Net %</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayYears.map((p, idx) => {
-                    const contribs = p.perAccountContributions || {};
-                    const total = Object.values(contribs).reduce((s, v) => s + v, 0);
-                    let myTotal = 0;
-                    accounts.forEach(a => {
-                      myTotal += myContribShare(a, contribs[a.id] || 0);
-                    });
-                    const grossRate = p.earnedIncome > 0 ? (myTotal / p.earnedIncome) * 100 : null;
-                    const afterTax = p.earnedIncome - (p.federalTax || 0) - (p.stateTax || 0) - (p.ficaTax || 0);
-                    const netRate = afterTax > 0 ? (myTotal / afterTax) * 100 : null;
-                    return (
-                      <tr key={p.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${total === 0 ? 'opacity-40' : ''}`}>
-                        <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
-                        <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
-                        {accounts.map((acct, i) => {
-                          const c = contribs[acct.id] || 0;
+            return (
+              <div className="overflow-x-auto max-h-[500px]">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-slate-900 z-10">
+                    <tr className="border-b border-slate-700">
+                      <th className="text-left py-2 px-2 text-slate-400 font-medium">Year</th>
+                      <th className="text-center py-2 px-2 text-slate-400 font-medium">Age</th>
+                      {accounts.map((acct, i) => (
+                        <th key={acct.id} className="text-right py-2 px-2 font-medium" style={{ color: colorFor(i) }}>
+                          {acct.name.length > 12 ? acct.name.substring(0, 12) + '…' : acct.name}
+                        </th>
+                      ))}
+                      <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
+                      <th className="text-right py-2 px-2 text-amber-400 font-medium">Gross %</th>
+                      <th className="text-right py-2 px-2 text-emerald-400 font-medium">Net %</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {displayYears.map((p, idx) => {
+                      const contribs = p.perAccountContributions || {};
+                      const total = Object.values(contribs).reduce((s, v) => s + v, 0);
+                      let myTotal = 0;
+                      accounts.forEach(a => {
+                        myTotal += myContribShare(a, contribs[a.id] || 0);
+                      });
+                      const grossRate = p.earnedIncome > 0 ? (myTotal / p.earnedIncome) * 100 : null;
+                      const afterTax = p.earnedIncome - (p.federalTax || 0) - (p.stateTax || 0) - (p.ficaTax || 0);
+                      const netRate = afterTax > 0 ? (myTotal / afterTax) * 100 : null;
+                      return (
+                        <tr key={p.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${total === 0 ? 'opacity-40' : ''}`}>
+                          <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
+                          <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
+                          {accounts.map((acct, i) => {
+                            const c = contribs[acct.id] || 0;
+                            return (
+                              <td key={acct.id} className="py-1.5 px-2 text-right font-mono" style={{ color: c > 0 ? colorFor(i) : THEME.inkMuted }}>
+                                {c > 0 ? formatCurrency(c) : '—'}
+                              </td>
+                            );
+                          })}
+                          <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">
+                            {total > 0 ? formatCurrency(total) : '—'}
+                          </td>
+                          <td className={`py-1.5 px-2 text-right font-mono ${grossRate !== null && grossRate > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
+                            {grossRate !== null && grossRate > 0 ? `${grossRate.toFixed(1)}%` : '—'}
+                          </td>
+                          <td className={`py-1.5 px-2 text-right font-mono ${netRate !== null && netRate > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
+                            {netRate !== null && netRate > 0 ? `${netRate.toFixed(1)}%` : '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })() : (
+            <>
+              {(() => {
+                const contribYears = projections.filter(p => {
+                  const contribs = p.perAccountContributions || {};
+                  return Object.values(contribs).some(v => v > 0);
+                });
+                const lastContribAge = contribYears.length > 0 ? contribYears[contribYears.length - 1].myAge : personalInfo.myAge;
+                const displayYears = projections.filter(p => p.myAge <= Math.min(lastContribAge + 2, personalInfo.myAge + 50));
+              
+                return (
+                  <div className="overflow-x-auto max-h-[500px]">
+                    <table className="w-full text-sm">
+                      <thead className="sticky top-0 bg-slate-900 z-10">
+                        <tr className="border-b border-slate-700">
+                          <th className="text-left py-2 px-2 text-slate-400 font-medium">Year</th>
+                          <th className="text-center py-2 px-2 text-slate-400 font-medium">Age</th>
+                          <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.preTax }}>Pre-Tax</th>
+                          <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.roth }}>Roth</th>
+                          <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.brokerage }}>Brokerage/HSA</th>
+                          <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
+                          <th className="text-right py-2 px-2 text-amber-400 font-medium">Gross %</th>
+                          <th className="text-right py-2 px-2 text-emerald-400 font-medium">Net %</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {displayYears.map((p, idx) => {
+                          const contribs = p.perAccountContributions || {};
+                          let preTaxC = 0, rothC = 0, brokerageC = 0;
+                          accounts.forEach(a => {
+                            const c = contribs[a.id] || 0;
+                            if (isPreTaxAccount(a.type)) preTaxC += c;
+                            else if (isRothAccount(a.type)) rothC += c;
+                            else brokerageC += c;
+                          });
+                          const total = preTaxC + rothC + brokerageC;
+                          // Only count the saver's own money for savings rate (exclude employer match)
+                          let myTotal = 0;
+                          accounts.forEach(a => {
+                            myTotal += myContribShare(a, contribs[a.id] || 0);
+                          });
+                          const grossRate = p.earnedIncome > 0 ? (myTotal / p.earnedIncome) * 100 : null;
+                          const afterTax = p.earnedIncome - (p.federalTax || 0) - (p.stateTax || 0) - (p.ficaTax || 0);
+                          const netRate = afterTax > 0 ? (myTotal / afterTax) * 100 : null;
                           return (
-                            <td key={acct.id} className="py-1.5 px-2 text-right font-mono" style={{ color: c > 0 ? colorFor(i) : THEME.inkMuted }}>
-                              {c > 0 ? formatCurrency(c) : '—'}
-                            </td>
+                            <tr key={p.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${total === 0 ? 'opacity-40' : ''}`}>
+                              <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
+                              <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
+                              <td className="py-1.5 px-2 text-right font-mono"
+                                  style={{ color: preTaxC > 0 ? SERIES.preTax : THEME.inkMuted }}>
+                                {preTaxC > 0 ? formatCurrency(preTaxC) : '—'}
+                              </td>
+                              <td className="py-1.5 px-2 text-right font-mono"
+                                  style={{ color: rothC > 0 ? SERIES.roth : THEME.inkMuted }}>
+                                {rothC > 0 ? formatCurrency(rothC) : '—'}
+                              </td>
+                              <td className="py-1.5 px-2 text-right font-mono"
+                                  style={{ color: brokerageC > 0 ? SERIES.brokerage : THEME.inkMuted }}>
+                                {brokerageC > 0 ? formatCurrency(brokerageC) : '—'}
+                              </td>
+                              <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">
+                                {total > 0 ? formatCurrency(total) : '—'}
+                              </td>
+                              <td className={`py-1.5 px-2 text-right font-mono ${grossRate !== null && grossRate > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
+                                {grossRate !== null && grossRate > 0 ? `${grossRate.toFixed(1)}%` : '—'}
+                              </td>
+                              <td className={`py-1.5 px-2 text-right font-mono ${netRate !== null && netRate > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
+                                {netRate !== null && netRate > 0 ? `${netRate.toFixed(1)}%` : '—'}
+                              </td>
+                            </tr>
                           );
                         })}
-                        <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">
-                          {total > 0 ? formatCurrency(total) : '—'}
-                        </td>
-                        <td className={`py-1.5 px-2 text-right font-mono ${grossRate !== null && grossRate > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
-                          {grossRate !== null && grossRate > 0 ? `${grossRate.toFixed(1)}%` : '—'}
-                        </td>
-                        <td className={`py-1.5 px-2 text-right font-mono ${netRate !== null && netRate > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
-                          {netRate !== null && netRate > 0 ? `${netRate.toFixed(1)}%` : '—'}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          );
-        })() : (
-          <>
-            {(() => {
-              const contribYears = projections.filter(p => {
-                const contribs = p.perAccountContributions || {};
-                return Object.values(contribs).some(v => v > 0);
-              });
-              const lastContribAge = contribYears.length > 0 ? contribYears[contribYears.length - 1].myAge : personalInfo.myAge;
-              const displayYears = projections.filter(p => p.myAge <= Math.min(lastContribAge + 2, personalInfo.myAge + 50));
-              
-              return (
-                <div className="overflow-x-auto max-h-[500px]">
-                  <table className="w-full text-sm">
-                    <thead className="sticky top-0 bg-slate-900 z-10">
-                      <tr className="border-b border-slate-700">
-                        <th className="text-left py-2 px-2 text-slate-400 font-medium">Year</th>
-                        <th className="text-center py-2 px-2 text-slate-400 font-medium">Age</th>
-                        <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.preTax }}>Pre-Tax</th>
-                        <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.roth }}>Roth</th>
-                        <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.brokerage }}>Brokerage/HSA</th>
-                        <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
-                        <th className="text-right py-2 px-2 text-amber-400 font-medium">Gross %</th>
-                        <th className="text-right py-2 px-2 text-emerald-400 font-medium">Net %</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {displayYears.map((p, idx) => {
-                        const contribs = p.perAccountContributions || {};
-                        let preTaxC = 0, rothC = 0, brokerageC = 0;
-                        accounts.forEach(a => {
-                          const c = contribs[a.id] || 0;
-                          if (isPreTaxAccount(a.type)) preTaxC += c;
-                          else if (isRothAccount(a.type)) rothC += c;
-                          else brokerageC += c;
-                        });
-                        const total = preTaxC + rothC + brokerageC;
-                        // Only count the saver's own money for savings rate (exclude employer match)
-                        let myTotal = 0;
-                        accounts.forEach(a => {
-                          myTotal += myContribShare(a, contribs[a.id] || 0);
-                        });
-                        const grossRate = p.earnedIncome > 0 ? (myTotal / p.earnedIncome) * 100 : null;
-                        const afterTax = p.earnedIncome - (p.federalTax || 0) - (p.stateTax || 0) - (p.ficaTax || 0);
-                        const netRate = afterTax > 0 ? (myTotal / afterTax) * 100 : null;
-                        return (
-                          <tr key={p.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${total === 0 ? 'opacity-40' : ''}`}>
-                            <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
-                            <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
-                            <td className="py-1.5 px-2 text-right font-mono"
-                                style={{ color: preTaxC > 0 ? SERIES.preTax : THEME.inkMuted }}>
-                              {preTaxC > 0 ? formatCurrency(preTaxC) : '—'}
-                            </td>
-                            <td className="py-1.5 px-2 text-right font-mono"
-                                style={{ color: rothC > 0 ? SERIES.roth : THEME.inkMuted }}>
-                              {rothC > 0 ? formatCurrency(rothC) : '—'}
-                            </td>
-                            <td className="py-1.5 px-2 text-right font-mono"
-                                style={{ color: brokerageC > 0 ? SERIES.brokerage : THEME.inkMuted }}>
-                              {brokerageC > 0 ? formatCurrency(brokerageC) : '—'}
-                            </td>
-                            <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">
-                              {total > 0 ? formatCurrency(total) : '—'}
-                            </td>
-                            <td className={`py-1.5 px-2 text-right font-mono ${grossRate !== null && grossRate > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
-                              {grossRate !== null && grossRate > 0 ? `${grossRate.toFixed(1)}%` : '—'}
-                            </td>
-                            <td className={`py-1.5 px-2 text-right font-mono ${netRate !== null && netRate > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
-                              {netRate !== null && netRate > 0 ? `${netRate.toFixed(1)}%` : '—'}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+              <div className="mt-4 flex flex-wrap gap-4 text-xs">
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded bg-emerald-400"></div>
+                  <span className="text-slate-400">Pre-Tax (401k, Trad IRA, 457b, 403b)</span>
                 </div>
-              );
-            })()}
-            <div className="mt-4 flex flex-wrap gap-4 text-xs">
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded bg-emerald-400"></div>
-                <span className="text-slate-400">Pre-Tax (401k, Trad IRA, 457b, 403b)</span>
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded bg-purple-400"></div>
+                  <span className="text-slate-400">Roth Accounts</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded bg-sky-400"></div>
+                  <span className="text-slate-400">Brokerage / HSA</span>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded bg-purple-400"></div>
-                <span className="text-slate-400">Roth Accounts</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded bg-sky-400"></div>
-                <span className="text-slate-400">Brokerage / HSA</span>
-              </div>
-            </div>
-          </>
-        )}
-      </div>
+            </>
+          )}
+        </div>
+      </HideableBlock>
     </div>
   );
 }
@@ -21092,17 +21202,17 @@ function RetirementPlanner() {
           <div className="mx-auto w-full" style={{ maxWidth: contentWidthCss(contentWidth) }}>
             {activeTab === 'dashboard' && <DashboardTab setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
             {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
-            {activeTab === 'accounts' && <AccountsTab accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
+            {activeTab === 'accounts' && <AccountsTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
-            {activeTab === 'income' && <IncomeStreamsTab incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={displayProjections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
+            {activeTab === 'income' && <IncomeStreamsTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={displayProjections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
             {activeTab === 'socialsecurity' && <SocialSecurityTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
             {activeTab === 'sandbox' && <SandboxTab accounts={accounts} activeScenarioId={activeScenarioId} applyPlanAsBaseline={applyPlanAsBaseline} createScenarioFrom={createScenarioFrom} deleteScenario={deleteScenario} loadScenario={loadScenario} scenarios={scenarios} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
-            {activeTab === 'currentyear' && <CurrentYearTab currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
-            {activeTab === 'withdrawal' && <WithdrawalStrategiesTab accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={displayProjections} />}
+            {activeTab === 'currentyear' && <CurrentYearTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
+            {activeTab === 'withdrawal' && <WithdrawalStrategiesTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={displayProjections} />}
             {activeTab === 'montecarlo' && <MonteCarloTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
-            {activeTab === 'stresstest' && <StressTestTab accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} computeProjections={displayComputeProjections} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
-            {activeTab === 'sensitivity' && <SensitivityTab accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'stresstest' && <StressTestTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} computeProjections={displayComputeProjections} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'sensitivity' && <SensitivityTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'assistant' && <AiAssistantTab computeProjections={displayComputeProjections} onApply={applyAiPlan} plan={livePlan} projections={displayProjections} />}
             {activeTab === 'faq' && <FAQTab />}
           </div>

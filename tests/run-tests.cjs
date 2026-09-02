@@ -12364,6 +12364,87 @@ section('P103 — no control that does nothing');
     + (dead.length ? ': ' + dead.join(', ') : ''));
 }
 
+section('P104 — every tab that has sections can put them away');
+
+{
+  // The manifest covered 4 of 16 tabs. Everywhere else a section could not be
+  // hidden and the detail level did nothing, so a tab grew monotonically: the
+  // two year-by-year tables on Accounts are the reason someone scrolls past
+  // their own account list every time they want to change a balance.
+  const fs14 = require('fs');
+  const path14 = require('path');
+  const src = fs14.readFileSync(path14.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+  const mStart = src.indexOf('const SECTION_MANIFEST = {');
+  const manifest = eval('(' + src.slice(mStart + 'const SECTION_MANIFEST = '.length,
+                                        src.indexOf('\n};', mStart) + 2) + ')');
+
+  // Every tab with more than one hideable section is in the manifest. The list
+  // is explicit rather than derived, because the judgement — which tabs have
+  // sections at all — is the part worth writing down.
+  ['dashboard', 'accounts', 'income', 'withdrawal', 'stresstest', 'sensitivity',
+   'currentyear', 'taxplanning', 'montecarlo', 'socialsecurity'].forEach(tab => {
+    ok(manifest[tab], `the ${tab} tab is in the manifest`);
+    gt((manifest[tab] || []).length, 1,
+      `and has more than one section, or the control strip manages nothing`);
+  });
+
+  // Deliberately absent, each for a reason:
+  //   personal  — a form; its fields are the tab, not sections of it
+  //   assets    — one hideable card once the +Add header is excluded
+  //   sandbox   — has its own panel picker, which is a better version of this
+  //   faq, assistant — reference text and a chat
+  ['personal', 'assets', 'sandbox', 'faq', 'assistant'].forEach(tab => {
+    ok(!manifest[tab], `${tab} deliberately has no section manifest`);
+  });
+
+  // ── the trap this work kept walking into ────────────────────────────────
+  // Three times while wiring these up, a card that LOOKED like a section turned
+  // out to carry the control that operates the tab — the +Add Account header,
+  // the Run Analysis button. Gating those hides the way to use the page, which
+  // is not a preference, it is a trap. So: no section may contain the button
+  // that produces the content the tab exists for.
+  // The marker has to distinguish "add a new row" from "edit THIS row": the
+  // per-row pencil buttons live inside the table and are supposed to disappear
+  // with it, while the +Add button in the header is the only way to create one.
+  // setEditingX(null) is exactly that distinction, and a first, coarser version
+  // of this check flagged both and had to be narrowed.
+  const RUN_BUTTONS = ['runAnalysis(', 'runStressTest(', 'setEditingAccount(null)',
+                       'setEditingIncome(null)', 'setEditingAsset(null)'];
+  const blocks = [];
+  {
+    const re = /<HideableBlock tab="(\w+)" id="(\w+)"/g;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      // find this block's extent by counting its own opening/closing tags
+      let depth = 0, end = m.index;
+      const rest = src.slice(m.index);
+      const opens = /<HideableBlock\b/g, closes = /<\/HideableBlock>/g;
+      let o = opens.exec(rest), c = closes.exec(rest);
+      depth = 1;
+      let cursor = m.index + 14;
+      while (depth > 0 && cursor < src.length) {
+        const nO = src.indexOf('<HideableBlock', cursor);
+        const nC = src.indexOf('</HideableBlock>', cursor);
+        if (nC < 0) break;
+        if (nO >= 0 && nO < nC) { depth++; cursor = nO + 14; }
+        else { depth--; cursor = nC + 16; end = nC; }
+      }
+      blocks.push({ tab: m[1], id: m[2], body: src.slice(m.index, end) });
+    }
+  }
+  gt(blocks.length, 20, 'there are gated sections to inspect');
+  const trapped = blocks.filter(b => RUN_BUTTONS.some(fn => b.body.indexOf(fn) >= 0));
+  eq(trapped.length, 0,
+    'no hideable section contains the control that operates its tab'
+    + (trapped.length ? ': ' + trapped.map(b => `${b.tab}/${b.id}`).join(', ') : ''));
+
+  // Every gated section id resolves to a manifest entry and vice versa — P78
+  // already checks this, but it checked 4 tabs' worth. Restate the count so a
+  // tab silently losing its wiring is visible.
+  gt(blocks.length + (src.match(/<Section\s+tab="/g) || []).length, 30,
+    'the app gates well over thirty sections now, not the nine it started with');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
