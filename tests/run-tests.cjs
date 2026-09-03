@@ -11920,7 +11920,8 @@ section('P98 — no surface shows money in a basis it never declared');
   // A tab has a toggle on screen. A printed page handed to a spouse has
   // nothing, so it always says which yardstick it is using.
   ['NextYearReport', 'PlanSummaryReport', 'SurvivorTaxReport',
-   'RothRoadmapReport', 'BreakingPointReport'].forEach(fn => {
+   'RothRoadmapReport', 'BreakingPointReport',
+   'ClaimingDecisionReport', 'ScenarioComparisonReport'].forEach(fn => {
     const k = fnStarts.findIndex(f => f.name === fn);
     ok(k >= 0, `${fn} exists`);
     if (k < 0) return;
@@ -11930,7 +11931,11 @@ section('P98 — no surface shows money in a basis it never declared');
       `${fn} prints which dollars it is quoting — it may be read with no app in front of the reader`);
   });
   // And the three that follow are actually handed the restated rows.
-  ['NextYearReport', 'PlanSummaryReport', 'BreakingPointReport'].forEach(fn => {
+  // ScenarioComparisonReport re-runs the engine through the wrapped function, so
+  // it follows the reader's basis; ClaimingDecisionReport calls
+  // claimingComparison, which uses the engine's own internal projections and is
+  // always nominal. Both say which on the page.
+  ['NextYearReport', 'PlanSummaryReport', 'BreakingPointReport', 'ScenarioComparisonReport'].forEach(fn => {
     const at = src.indexOf('<' + fn + '\n');
     gt(at, 0, `${fn} is rendered`);
     const block = src.slice(at, at + 500);
@@ -12508,6 +12513,124 @@ section('P105 — one palette for the three tax treatments, not four');
     ok(src.slice(Math.max(0, at - 200), at).indexOf(token) > 0,
       `${call} is coloured with ${token}`);
   });
+}
+
+section('P106 — the claiming decision, and the two answers that disagree');
+
+{
+  const sc = {
+    pi: { myAge: 60, spouseAge: 58, myRetirementAge: 65, spouseRetirementAge: 65,
+      filingStatus: 'married_joint', state: 'TX', inflationRate: 0.03, desiredIncome: 110000,
+      legacyAge: 95, myLifeExpectancy: 90, spouseLifeExpectancy: 93,
+      myBirthYear: 1966, spouseBirthYear: 1968, mySSClaimAge: 67, spouseSSClaimAge: 67,
+      survivorModelEnabled: true },
+    accts: [{ id: 1, name: '401k', type: '401k', balance: 1200000, contribution: 20000,
+      contributionGrowth: 0.03, cagr: 0.07, startAge: 60, stopAge: 65, owner: 'me', contributor: 'me' }],
+    // endAge matters: a stream with no upper bound is silently inert, because
+    // `age <= undefined` is false. A fixture without it reports zero Social
+    // Security in every year and every scenario ties — which is exactly how the
+    // first run of this comparison looked, and it looked like a bug in the
+    // comparison rather than in the fixture.
+    streams: [
+      { id: 1, type: 'earned_income', owner: 'me', amount: 180000, startAge: 60, endAge: 64, growthRate: 0.03 },
+      { id: 2, type: 'social_security', owner: 'me', amount: 42000, startAge: 67, endAge: 95, growthRate: 0.025 },
+      { id: 3, type: 'social_security', owner: 'spouse', amount: 21000, startAge: 67, endAge: 95, growthRate: 0.025 },
+    ],
+  };
+  const r = engine.claimingComparison(sc);
+  ok(r, 'a plan with Social Security produces a comparison');
+  eq(r.scenarios.length, 9, 'three claim ages each for a couple — small enough to run while a report opens');
+  ok(r.married, 'and it knows this is a couple');
+
+  // Every scenario must actually differ. The first version of this returned nine
+  // identical rows and the cause was the fixture, not the code — worth pinning
+  // so a future fixture mistake fails loudly instead of looking like agreement.
+  {
+    const wealths = new Set(r.scenarios.map(s => s.afterTaxAtLegacy));
+    gt(wealths.size, 3, 'the claim ages actually change the outcome');
+    const ss = new Set(r.scenarios.map(s => s.lifetimeSS));
+    gt(ss.size, 3, 'and lifetime benefits differ, so the repricing is real');
+  }
+
+  // ── the finding the report exists to state ───────────────────────────────
+  // The survivor keeps the LARGER benefit, so their income for life is set
+  // entirely by the higher earner's claim age and is unmoved by the lower
+  // earner's. This is why "delay to 70" is advice aimed at one person.
+  {
+    const byMyAge = {};
+    r.scenarios.forEach(s => {
+      byMyAge[s.myClaimAge] = byMyAge[s.myClaimAge] || new Set();
+      byMyAge[s.myClaimAge].add(s.survivorBenefit);
+    });
+    Object.entries(byMyAge).forEach(([age, set]) => {
+      eq(set.size, 1,
+        `the survivor's income is the same whatever the lower earner does, when the higher earner claims at ${age}`);
+    });
+    const ages = Object.keys(byMyAge).map(Number).sort((a, b) => a - b);
+    const at = (a) => [...byMyAge[a]][0];
+    gt(at(ages[ages.length - 1]), at(ages[0]),
+      'and delaying the higher earner raises it — the whole argument for doing so');
+  }
+
+  // survivorSSLoss returns the SMALLER benefit — the one that STOPS. Reading it
+  // as what the survivor keeps inverts the answer, which is what the first
+  // version did: it reported the widow living on the lower earner's cheque.
+  {
+    const highest = r.scenarios.reduce((a, b) => (b.survivorBenefit > a.survivorBenefit ? b : a));
+    const myFull = 42000, spouseFull = 21000;
+    gt(highest.survivorBenefit, spouseFull,
+      'the survivor keeps the larger benefit, not the smaller one');
+    gt(highest.survivorBenefit, myFull * 0.95,
+      'and at 70 it is the higher earner’s delayed benefit, not their FRA one');
+  }
+
+  // Ranking uses the engine's own comparator, so the report and the Social
+  // Security tab cannot disagree about what "best" means.
+  {
+    const ranked = r.ranked;
+    for (let i = 1; i < ranked.length; i++) {
+      ok(engine.compareClaimingScenarios(ranked[i - 1], ranked[i]) <= 0,
+        'the ranking is ordered by the engine comparator');
+    }
+  }
+
+  // A single filer gets three scenarios and no survivor column.
+  {
+    const single = engine.claimingComparison({
+      ...sc,
+      pi: { ...sc.pi, filingStatus: 'single' },
+      streams: sc.streams.filter(s => s.owner !== 'spouse'),
+    });
+    ok(single, 'a single filer still has a claiming decision');
+    eq(single.married, false, 'and it is not treated as a couple');
+    eq(single.scenarios.length, 3, 'three ages, not nine');
+    ok(single.scenarios.every(s => s.survivorBenefit === null),
+      'with no survivor figure, because there is no survivor');
+  }
+
+  // A plan with no Social Security has nothing to decide.
+  {
+    const none = engine.claimingComparison({ ...sc, streams: sc.streams.filter(s => s.type !== 'social_security') });
+    eq(none, null, 'no Social Security stream, no comparison — the report says so rather than printing zeros');
+  }
+
+  // ── the report itself ────────────────────────────────────────────────────
+  const fs16 = require('fs');
+  const path16 = require('path');
+  const src = fs16.readFileSync(path16.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+  eq((src.match(/function ClaimingDecisionReport\(/g) || []).length, 1, 'the report exists');
+  ok(src.indexOf("onPick('claiming')") > 0, 'and is reachable from the report menu');
+  ok(src.indexOf('<ReportBasisLine pi={pi} follows={false} />') > 0,
+    'and states which dollars it is quoting, like every other report');
+  {
+    // Ties on the survivor figure are the norm, so the pick must break them on
+    // the wealth ranking — otherwise it reports a large "cost" for a $1 gain.
+    const at = src.indexOf('const bySurvivor = cmp.married');
+    gt(at, 0, 'the survivor answer is chosen explicitly');
+    const body = src.slice(at, at + 700);
+    ok(body.indexOf('compareClaimingScenarios') > 0,
+      'and ties break on the wealth ranking rather than on array order');
+  }
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

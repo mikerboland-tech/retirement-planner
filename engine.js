@@ -7784,6 +7784,113 @@ const streamsAtClaimAges = (streams, pi = {}, claims = {}) => {
   });
 };
 
+// ── THE CLAIMING DECISION ────────────────────────────────────────────────────
+// When to claim Social Security is the largest mostly-irreversible choice in a
+// retirement plan, and the tab that analyses it sweeps a 296-cell grid in a
+// worker. That is the right tool for exploring; it is the wrong tool for a
+// document, which needs one answer and the handful of comparisons that justify
+// it.
+//
+// So this runs a SMALL, targeted set — 62, full retirement age, and 70 for each
+// person, plus whatever the plan is currently set to — and ranks them with
+// compareClaimingScenarios, the same comparator the tab's table and winner tiles
+// use. Nine projections for a couple, three for a single filer: fast enough to
+// run synchronously while a report opens, and it cannot disagree with the tab
+// about what "best" means.
+//
+// Everything is measured on ONE basis: each scenario is the same plan with only
+// the claim ages repriced through streamsAtClaimAges, which recomputes the
+// benefit from PIA rather than scaling the stored amount — the difference
+// between modelling the decision and approximating it.
+const claimingComparison = ({ pi, accts, streams, assets = [], events = [],
+                              recurring = [], ages = null, heirTaxRate } = {}) => {
+  if (!pi || !Array.isArray(streams)) return null;
+  const married = pi.filingStatus === 'married_joint';
+  const myBirth = pi.myBirthYear || (BASE_TAX_YEAR - (pi.myAge || 0));
+  const spBirth = pi.spouseBirthYear || (BASE_TAX_YEAR - (pi.spouseAge || 0));
+
+  const hasSS = (owner) => streams.some(s => s && s.type === 'social_security'
+    && (s.owner === 'spouse' ? 'spouse' : 'me') === owner);
+  if (!hasSS('me') && !(married && hasSS('spouse'))) return null;
+
+  const planMy = pi.mySSClaimAge || getFullRetirementAge(myBirth);
+  const planSp = pi.spouseSSClaimAge || getFullRetirementAge(spBirth);
+  const uniq = (a) => [...new Set(a.filter(x => Number.isFinite(x)))].sort((x, y) => x - y);
+  const myAges = uniq(ages || [62, getFullRetirementAge(myBirth), 70, planMy]);
+  const spAges = married ? uniq(ages || [62, getFullRetirementAge(spBirth), 70, planSp]) : [null];
+
+  const legacyAge = pi.legacyAge || 95;
+  const rate = Number.isFinite(heirTaxRate) ? heirTaxRate : (pi.heirTaxRate ?? 0.25);
+
+  const measure = (myClaimAge, spClaimAge) => {
+    const claims = { me: myClaimAge };
+    if (spClaimAge !== null) claims.spouse = spClaimAge;
+    const priced = streamsAtClaimAges(streams, pi, claims);
+    const p2 = { ...pi, mySSClaimAge: myClaimAge };
+    if (spClaimAge !== null) p2.spouseSSClaimAge = spClaimAge;
+    const proj = computeProjections(p2, accts, priced, assets, events, recurring);
+    const short = planShortfall(proj, { retirementAge: pi.myRetirementAge });
+    const legacy = afterTaxLegacyValue(proj, { legacyAge, heirTaxRate: rate });
+    const retYears = proj.filter(r => r.myAge >= (pi.myRetirementAge ?? 0));
+    // What the SURVIVOR keeps. The larger benefit is the one that continues, so
+    // this is the number the lower earner lives on for the rest of their life —
+    // and the reason delaying the HIGHER earner is worth more than the
+    // break-even on their own lifespan suggests.
+    // What the SURVIVOR keeps. survivorSSLoss returns the SMALLER benefit — the
+    // one that stops — so the survivor lives on the larger, which is the whole
+    // reason delaying the HIGHER earner is worth more than a break-even on their
+    // own lifespan suggests. Measured in the last year both are alive, so the two
+    // benefits are being compared at the same moment.
+    // The row has to be one where BOTH are still alive. Filtering on
+    // socialSecurity > 0 alone picks up survivor-only years, where the row
+    // already carries just one benefit — subtracting the smaller from that
+    // returns the smaller, which is the opposite of what the survivor keeps.
+    const joint = proj.filter(r => (r.socialSecurity || 0) > 0
+      && r.primaryAlive !== false && r.spouseAlive !== false);
+    const ssRow = joint.length ? joint[joint.length - 1] : null;
+    const lost = (married && ssRow) ? survivorSSLoss(priced, ssRow) : null;
+    const survivorKeeps = (lost === null || !ssRow)
+      ? null : Math.max(0, (ssRow.socialSecurity || 0) - lost);
+    return {
+      myClaimAge, spClaimAge,
+      label: spClaimAge === null ? `Claim at ${myClaimAge}` : `${myClaimAge} / ${spClaimAge}`,
+      // planShortfall.depletedYear is a projection ROW, not a number.
+      // compareClaimingScenarios compares this numerically, so handing it the row
+      // would have made every scenario tie on survival and rank on wealth alone.
+      depletionAge: short.depletedYear ? (short.depletedYear.myAge ?? null) : null,
+      fails: !!short.fails,
+      afterTaxAtLegacy: legacy ? legacy.afterTax : 0,
+      portfolioAtLegacy: Math.round(rowAtOrLast(proj, legacyAge).totalPortfolio || 0),
+      lifetimeTax: Math.round(retYears.reduce((t, r) => t + (r.totalTax || 0), 0)),
+      lifetimeSS: Math.round(retYears.reduce((t, r) => t + (r.socialSecurity || 0), 0)),
+      lifetimeIRMAA: Math.round(retYears.reduce((t, r) => t + (r.irmaaSurcharge || 0), 0)),
+      survivorBenefit: survivorKeeps === null ? null : Math.round(survivorKeeps),
+      isPlan: myClaimAge === planMy && (spClaimAge === null || spClaimAge === planSp),
+    };
+  };
+
+  const scenarios = [];
+  myAges.forEach(a => spAges.forEach(b => scenarios.push(measure(a, b))));
+  const ranked = [...scenarios].sort(compareClaimingScenarios);
+  const best = ranked[0];
+  const current = scenarios.find(s => s.isPlan) || null;
+  return {
+    scenarios, ranked, best, current,
+    married, planMy, planSp,
+    myFra: getFullRetirementAge(myBirth),
+    spFra: married ? getFullRetirementAge(spBirth) : null,
+    // What the recommendation is worth against the plan as saved. Null when the
+    // plan already is the recommendation, which is a result worth stating rather
+    // than dressing up as a zero.
+    gain: (best && current && best !== current)
+      ? { afterTax: best.afterTaxAtLegacy - current.afterTaxAtLegacy,
+          tax: best.lifetimeTax - current.lifetimeTax,
+          survivor: (best.survivorBenefit !== null && current.survivorBenefit !== null)
+            ? best.survivorBenefit - current.survivorBenefit : null }
+      : null,
+  };
+};
+
 // ── MOVING A RETIREMENT AGE MOVES EVERYTHING TIED TO IT ──────────────────────
 // A retirement age on its own is nearly inert: it decides when the withdrawal
 // solver switches on and when spending changes shape, and nothing else. The
@@ -10873,7 +10980,7 @@ const describePlanPatch = (state, patch) => {
     ACA_APPLICABLE_PCT_2026, ACA_BENCHMARK_PREMIUM_2026,
     getACAApplicablePercentage, calculateACAPremiumCredit,
     getSpendingPhaseMultiplier, scoreRothStrategy, afterTaxLegacyValue, rowAtOrLast,
-    deflateProjections, realDeflator, REAL_DOLLAR_FIELDS,
+    deflateProjections, realDeflator, REAL_DOLLAR_FIELDS, claimingComparison,
     reindexSSForInflation, compareClaimingScenarios,
     conversionCostComponents, conversionCostAudit, topMarginalBracket,
     SEQUENCE_RISK_RETURNS, SEQUENCE_RISK_YEARS, sequenceRiskOverrides,

@@ -54,7 +54,7 @@ const {
   taxBreakpoints, marginalCostOfNextDollar,
   conversionStagesOf, irmaaAwareConversionStages, conversionFundingCost,
   deferralDecision, convertWhileWorking,
-  survivorTaxComparison, survivorSSLoss, scoreRothStrategy, afterTaxLegacyValue,
+  survivorTaxComparison, survivorSSLoss, scoreRothStrategy, afterTaxLegacyValue, claimingComparison,
   deflateProjections,
   planShortfall, breakingPoint, accountsAtSavingsTarget,
   splitBothContributors, breakEvenTaxRate, conversionFundingComparison,
@@ -18665,6 +18665,505 @@ function RothRoadmapReport({ computeProjections, projections, personalInfo, acco
 }
 
 // ============================================
+// ScenarioComparisonReport
+// ============================================
+// The gap the Sandbox created. You can now compose an alternative plan from its
+// controls, save it as a scenario and promote one to the baseline — but there
+// was no way to put "retire at 62 vs 65 vs 67" in front of a spouse or an
+// adviser. Everything needed already existed; only the document was missing.
+//
+// Deliberately measured on ONE basis for every column: each scenario is re-run
+// through the same engine with its own saved plan, and the same five figures are
+// taken from each. Comparing a saved scenario's stored summary against a freshly
+// computed baseline is how two columns end up answering slightly different
+// questions.
+function ScenarioComparisonReport({ computeProjections, projections, personalInfo, accounts,
+                                    incomeStreams, assets, oneTimeEvents, recurringExpenses,
+                                    scenarios, onClose }) {
+  const pi = personalInfo;
+  const preparedOn = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const fmt = (n) => '$' + Math.round(n || 0).toLocaleString('en-US');
+  const fmtK = (n) => (Math.abs(n) >= 1000000 ? '$' + (n / 1000000).toFixed(2) + 'M'
+    : Math.abs(n) < 1000 ? fmt(n) : '$' + Math.round((n || 0) / 1000) + 'K');
+  const h2 = { fontSize: 16, fontWeight: 700, margin: '22px 0 8px', paddingBottom: 4, borderBottom: '1px solid #cbd5e1', breakAfter: 'avoid' };
+  const th = { textAlign: 'right', fontSize: 11, color: '#475569', padding: '6px 8px', borderBottom: '1px solid #cbd5e1' };
+  const thL = { ...th, textAlign: 'left' };
+  const td = { textAlign: 'right', fontSize: 12, padding: '5px 8px', borderBottom: '1px solid #f1f5f9' };
+  const tdL = { ...td, textAlign: 'left', fontWeight: 600 };
+
+  const legacyAge = pi.legacyAge || 95;
+  const rate = pi.heirTaxRate ?? 0.25;
+
+  // One measurement function, applied to the live plan and to every scenario, so
+  // no column can be computed a different way from its neighbours.
+  const measure = (label, p, a, s, ast, ev, rec, isBase) => {
+    const proj = computeProjections(p, a, s, ast || assets, ev || oneTimeEvents, rec || recurringExpenses);
+    const short = planShortfall(proj, { retirementAge: p.myRetirementAge });
+    const legacy = afterTaxLegacyValue(proj, { legacyAge: p.legacyAge || legacyAge, heirTaxRate: rate });
+    const retYears = proj.filter(r => r.myAge >= (p.myRetirementAge ?? 0));
+    return {
+      label, isBase,
+      retireAt: p.myRetirementAge,
+      atRetirement: Math.round((proj.find(r => r.myAge === p.myRetirementAge) || {}).totalPortfolio || 0),
+      estate: legacy ? legacy.estate : 0,
+      afterTax: legacy ? legacy.afterTax : 0,
+      lifetimeTax: Math.round(retYears.reduce((t, r) => t + (r.totalTax || 0), 0)),
+      conversions: Math.round(proj.reduce((t, r) => t + (r.rothConversion || 0), 0)),
+      fails: !!short.fails,
+      shortYears: short.shortYearCount || 0,
+      depletedAt: short.depletedYear ? short.depletedYear.myAge : null,
+      endsAt: proj.length ? proj[proj.length - 1].myAge : null,
+    };
+  };
+
+  const rows = useMemo(() => {
+    const base = measure('Your plan', pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, true);
+    const rest = (scenarios || []).map(sc => measure(
+      sc.name,
+      { ...DEFAULT_PERSONAL_INFO, ...sc.personalInfo },
+      sc.accounts || accounts,
+      sc.incomeStreams || incomeStreams,
+      sc.assets || assets,
+      sc.oneTimeEvents || oneTimeEvents,
+      sc.recurringExpenses || recurringExpenses,
+      false));
+    return [base, ...rest];
+  }, [pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, scenarios]);
+
+  const base = rows[0];
+  const others = rows.slice(1);
+  const delta = (v, b, goodWhenUp = true) => {
+    const d = v - b;
+    if (Math.abs(d) < 1) return <span style={{ color: '#94a3b8' }}>—</span>;
+    const good = (d > 0) === goodWhenUp;
+    return <span style={{ color: good ? '#047857' : '#b91c1c' }}>{d > 0 ? '+' : '−'}{fmtK(Math.abs(d))}</span>;
+  };
+
+  const overlay = (
+    <div className="report-overlay fixed inset-0 bg-black/60 flex items-start justify-center z-50 overflow-y-auto py-8 px-4">
+      <div id="report-print" style={{ background: '#ffffff', color: '#0f172a' }} className="w-full max-w-5xl rounded-xl shadow-2xl p-8">
+        <div className="print-hide flex justify-end gap-2 mb-6">
+          <button onClick={() => window.print()} className={buttonPrimary}>Print / Save as PDF</button>
+          <button onClick={onClose} className={buttonSecondary}>Close</button>
+        </div>
+
+        <div style={{ borderBottom: '2px solid #0f172a', paddingBottom: 12, marginBottom: 16 }}>
+          <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0 }}>Scenarios, Side by Side</h1>
+          <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>
+            Your plan against {others.length} saved alternative{others.length === 1 ? '' : 's'}
+            &nbsp;·&nbsp; Prepared {preparedOn}
+          </p>
+          <ReportBasisLine pi={pi} follows={true} />
+        </div>
+
+        {others.length === 0 ? (
+          <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.6 }}>
+            No scenarios have been saved yet, so there is nothing to compare your plan against. Build one on
+            the <strong>Sandbox</strong> tab — move the retirement age, claiming age, savings rate or spending
+            until you have something worth keeping, then use <strong>Save as scenario</strong>. This report
+            becomes useful the moment there are two plans to weigh.
+          </p>
+        ) : (
+          <>
+            <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.6, margin: '0 0 4px' }}>
+              Every column below is the whole plan re-run through the same engine — not a stored summary from
+              when the scenario was saved. If an assumption changed since, these figures reflect the change.
+              Differences are shown against your current plan.
+            </p>
+
+            <h2 style={h2}>The Comparison</h2>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={thL}>Scenario</th>
+                    <th style={th}>Retire at</th>
+                    <th style={th}>Portfolio then</th>
+                    <th style={th}>Estate at {legacyAge}</th>
+                    <th style={th}>After tax</th>
+                    <th style={th}>Lifetime tax</th>
+                    <th style={th}>Converted</th>
+                    <th style={th}>Funds every year</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={r.label + i} style={r.isBase ? { background: '#fef3c7' } : null}>
+                      <td style={tdL}>
+                        {r.label}
+                        {r.isBase && <span style={{ fontSize: 10, color: '#92400e', marginLeft: 6, fontWeight: 400 }}>BASELINE</span>}
+                      </td>
+                      <td style={td}>{r.retireAt}</td>
+                      <td style={td}>{fmtK(r.atRetirement)}</td>
+                      <td style={td}>{fmtK(r.estate)}</td>
+                      <td style={td}>{fmtK(r.afterTax)}</td>
+                      <td style={td}>{fmtK(r.lifetimeTax)}</td>
+                      <td style={td}>{r.conversions > 0 ? fmtK(r.conversions) : '—'}</td>
+                      <td style={{ ...td, color: r.fails ? '#b91c1c' : '#047857' }}>
+                        {r.fails ? `no — short in ${r.shortYears}` : 'yes'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <h2 style={h2}>Against Your Plan</h2>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={thL}>Scenario</th>
+                    <th style={th}>Portfolio at retirement</th>
+                    <th style={th}>After-tax estate</th>
+                    <th style={th}>Lifetime tax</th>
+                    <th style={th}>Roth converted</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {others.map((r, i) => (
+                    <tr key={r.label + i}>
+                      <td style={tdL}>{r.label}</td>
+                      <td style={td}>{delta(r.atRetirement, base.atRetirement, true)}</td>
+                      <td style={td}>{delta(r.afterTax, base.afterTax, true)}</td>
+                      {/* Lower tax is better, so the sign that reads as good is the
+                          negative one — the one place in this table where a red
+                          minus would be exactly backwards. */}
+                      <td style={td}>{delta(r.lifetimeTax, base.lifetimeTax, false)}</td>
+                      <td style={td}>{delta(r.conversions, base.conversions, true)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p style={{ fontSize: 11, color: '#64748b', margin: '6px 0 0', lineHeight: 1.5 }}>
+              Green is the better direction for that column, which is not always "up": less lifetime tax is
+              better, more estate is better. After-tax estate discounts remaining pre-tax balances at your
+              heirs' rate of {Math.round(rate * 100)}% — a pre-tax dollar and a Roth dollar are not worth the
+              same to whoever inherits them.
+            </p>
+
+            <h2 style={h2}>What Changes Between Them</h2>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={thL}>Scenario</th>
+                    <th style={thL}>Retirement</th>
+                    <th style={thL}>Spending target</th>
+                    <th style={thL}>Claiming</th>
+                    <th style={thL}>Conversions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, i) => {
+                    const src = r.isBase ? null : (scenarios[i - 1] || {});
+                    const p = r.isBase ? pi : { ...DEFAULT_PERSONAL_INFO, ...(src.personalInfo || {}) };
+                    // A claim age can live on personalInfo OR on the Social
+                    // Security stream itself, and in a plan built from the wizard
+                    // it is usually only on the stream. Reading just the first
+                    // printed "— / —" for every row of a plan that has perfectly
+                    // good claim ages.
+                    const strms = r.isBase ? incomeStreams : (src.incomeStreams || incomeStreams);
+                    const claimOf = (owner, fallback) => {
+                      if (Number.isFinite(fallback)) return fallback;
+                      const ss = (strms || []).find(x => x && x.type === 'social_security'
+                        && (x.owner === 'spouse' ? 'spouse' : 'me') === owner);
+                      return ss && Number.isFinite(ss.startAge) ? ss.startAge : null;
+                    };
+                    const myClaim = claimOf('me', p.mySSClaimAge);
+                    const spClaim = claimOf('spouse', p.spouseSSClaimAge);
+                    return (
+                      <tr key={'w' + i} style={r.isBase ? { background: '#fef3c7' } : null}>
+                        <td style={tdL}>{r.label}</td>
+                        <td style={{ ...td, textAlign: 'left', fontWeight: 400 }}>age {p.myRetirementAge}</td>
+                        <td style={{ ...td, textAlign: 'left', fontWeight: 400 }}>{fmt(p.desiredIncome ?? p.desiredRetirementIncome)}/yr</td>
+                        <td style={{ ...td, textAlign: 'left', fontWeight: 400 }}>
+                          {myClaim || '—'}{pi.filingStatus === 'married_joint' ? ` / ${spClaim || '—'}` : ''}
+                        </td>
+                        <td style={{ ...td, textAlign: 'left', fontWeight: 400 }}>{rothConversionModeLabel(p, fmt)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <h2 style={h2}>Reading This</h2>
+            <p style={{ fontSize: 13, color: '#334155', lineHeight: 1.7, margin: 0 }}>
+              A scenario that leaves more behind is not automatically the better plan. Retiring later almost
+              always wins on every column here, because the columns measure money and not the years you get
+              to spend it in. The figures worth arguing over are the last one — whether the plan funds every
+              year — and the gap between the estate and its after-tax value, which is the part a Roth
+              conversion strategy can still move. What none of these columns can price is the difference
+              between retiring at 62 and retiring at 67.
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+  return overlay;
+}
+
+// ============================================
+// ClaimingDecisionReport
+// ============================================
+// When to claim Social Security is the largest mostly-irreversible choice in a
+// retirement plan, and until now it had no document — 1,013 lines of analysis on
+// the Social Security tab that could not be printed or handed to anyone.
+//
+// The thing that makes it worth a report rather than a print button: the two
+// sensible objectives DISAGREE, and neither the tab nor the engine's ranking
+// says so. Claiming early usually maximises the estate, because Social Security
+// arriving sooner means fewer portfolio withdrawals and more left compounding.
+// Delaying the HIGHER earner maximises what the surviving spouse lives on for
+// the rest of their life, because the larger benefit is the one that continues.
+// A document that printed only "best: 62/62" would be giving bad advice with a
+// straight face. This one puts both answers at the top and says which question
+// each one answers.
+function ClaimingDecisionReport({ projections, personalInfo, accounts, incomeStreams, assets,
+                                  oneTimeEvents, recurringExpenses, onClose }) {
+  const pi = personalInfo;
+  const preparedOn = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const fmt = (n) => '$' + Math.round(n || 0).toLocaleString('en-US');
+  const fmtK = (n) => (Math.abs(n) >= 1000000 ? '$' + (n / 1000000).toFixed(2) + 'M'
+    : Math.abs(n) < 1000 ? fmt(n) : '$' + Math.round((n || 0) / 1000) + 'K');
+  const h2 = { fontSize: 16, fontWeight: 700, margin: '22px 0 8px', paddingBottom: 4, borderBottom: '1px solid #cbd5e1', breakAfter: 'avoid' };
+  const statBox = { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6, padding: '8px 12px' };
+  const statLabel = { fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#64748b', margin: 0 };
+  const statValue = { fontSize: 17, fontWeight: 700, margin: '2px 0 0', color: '#0f172a' };
+  const th = { textAlign: 'right', fontSize: 11, color: '#475569', padding: '6px 8px', borderBottom: '1px solid #cbd5e1' };
+  const thL = { ...th, textAlign: 'left' };
+  const td = { textAlign: 'right', fontSize: 12, padding: '5px 8px', borderBottom: '1px solid #f1f5f9' };
+  const tdL = { ...td, textAlign: 'left' };
+
+  // Nine projections for a couple, three for a single filer. Synchronous because
+  // it is small: the worker-backed 296-cell grid on the tab is for exploring,
+  // this is for answering.
+  const cmp = useMemo(() => claimingComparison({
+    pi, accts: accounts, streams: incomeStreams, assets,
+    events: oneTimeEvents, recurring: recurringExpenses,
+  }), [pi, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
+
+  if (!cmp) {
+    return (
+      <div className="report-overlay fixed inset-0 bg-black/60 flex items-start justify-center z-50 overflow-y-auto py-8 px-4">
+        <div id="report-print" style={{ background: '#ffffff', color: '#0f172a' }} className="w-full max-w-4xl rounded-xl shadow-2xl p-8">
+          <div className="print-hide flex justify-end gap-2 mb-6">
+            <button onClick={onClose} className={buttonSecondary}>Close</button>
+          </div>
+          <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>The Claiming Decision</h1>
+          <p style={{ fontSize: 14, color: '#475569', marginTop: 10 }}>
+            This plan has no Social Security income stream, so there is no claiming decision to analyse.
+            Add one on the Income Streams tab — the estimate on the Social Security tab will fill it in
+            from your earnings if you do not have a figure from SSA.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // The two objectives, named separately because they do not agree.
+  const byWealth = cmp.ranked[0];
+  // Ties are the NORM here, not the exception: the survivor's income depends
+  // only on the higher earner's claim age, so every scenario sharing that age
+  // has the same survivor benefit to within a rounding dollar. Picking by a bare
+  // max returned whichever tied row came first and then priced the difference
+  // against it — reporting a $626K "cost" for a $1 gain. Ties break on the
+  // wealth ranking, which means the survivor answer costs nothing it does not
+  // have to.
+  const bySurvivor = cmp.married
+    ? [...cmp.scenarios].sort((a, b) => {
+        const d = (b.survivorBenefit || 0) - (a.survivorBenefit || 0);
+        if (Math.abs(d) > 1) return d;
+        return compareClaimingScenarios(a, b);
+      })[0]
+    : null;
+  const agree = !cmp.married || (bySurvivor && byWealth
+    && byWealth.myClaimAge === bySurvivor.myClaimAge && byWealth.spClaimAge === bySurvivor.spClaimAge);
+  const cur = cmp.current;
+
+  // Which person carries the survivor benefit. It is whoever's is larger, and
+  // that is the only claim age that moves the survivor's income at all — a fact
+  // the grid makes obvious once you look for it and nearly invisible if you do not.
+  const survivorSpread = cmp.married && bySurvivor && cur
+    ? (bySurvivor.survivorBenefit || 0) - (cur.survivorBenefit || 0) : 0;
+
+  const overlay = (
+    <div className="report-overlay fixed inset-0 bg-black/60 flex items-start justify-center z-50 overflow-y-auto py-8 px-4">
+      <div id="report-print" style={{ background: '#ffffff', color: '#0f172a' }} className="w-full max-w-4xl rounded-xl shadow-2xl p-8">
+        <div className="print-hide flex justify-end gap-2 mb-6">
+          <button onClick={() => window.print()} className={buttonPrimary}>Print / Save as PDF</button>
+          <button onClick={onClose} className={buttonSecondary}>Close</button>
+        </div>
+
+        <div style={{ borderBottom: '2px solid #0f172a', paddingBottom: 12, marginBottom: 16 }}>
+          <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0 }}>The Claiming Decision</h1>
+          <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>
+            When to start Social Security &nbsp;·&nbsp; Prepared {preparedOn}
+          </p>
+          <ReportBasisLine pi={pi} follows={false} />
+        </div>
+
+        <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.6, margin: '0 0 4px' }}>
+          Claiming is close to irreversible — there is a twelve-month window to withdraw an application, once
+          in a lifetime, and the benefit must be repaid. It is also the one decision here that cannot be
+          fixed later by saving more or spending less. What follows is your plan run at{' '}
+          {cmp.scenarios.length} combinations of claim age, changing nothing else.
+        </p>
+
+        <h2 style={h2}>{agree ? 'The Answer' : 'Two Answers, and They Disagree'}</h2>
+        {agree ? (
+          <div style={{ borderLeft: '4px solid #059669', background: '#f0fdf4', borderRadius: 6, padding: '12px 16px', margin: '10px 0 14px' }}>
+            <p style={{ fontSize: 15, fontWeight: 700, margin: 0, color: '#065f46' }}>
+              Claim at {byWealth.label}.
+            </p>
+            <p style={{ fontSize: 14, color: '#334155', margin: '8px 0 0', lineHeight: 1.6 }}>
+              Unusually, the same choice both leaves the most behind and protects the survivor best, so there
+              is no trade-off to weigh here.
+            </p>
+          </div>
+        ) : (
+          <>
+            <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.6, margin: '0 0 10px' }}>
+              There is no single best claim age, because the two things you might be optimising for point in
+              opposite directions. Both are stated here rather than one being picked for you.
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <div style={{ borderLeft: '4px solid #2a78d6', background: '#eff6ff', borderRadius: 6, padding: '12px 16px' }}>
+                <p style={{ ...statLabel, color: '#1e40af' }}>Most left at the end</p>
+                <p style={{ fontSize: 18, fontWeight: 700, margin: '2px 0 6px' }}>{byWealth.label}</p>
+                <p style={{ fontSize: 13, color: '#334155', margin: 0, lineHeight: 1.5 }}>
+                  {fmtK(byWealth.afterTaxAtLegacy)} after tax at {pi.legacyAge || 95}
+                  {cur && byWealth !== cur && <> — {fmtK(byWealth.afterTaxAtLegacy - cur.afterTaxAtLegacy)} more than your plan</>}.
+                  {/* Which way this cuts is not fixed. Claiming EARLY usually wins on
+                      the estate because benefits arriving sooner replace portfolio
+                      withdrawals; claiming LATE can win instead when the larger
+                      cheque outruns that, particularly with a long horizon. The
+                      sentence has to follow the answer rather than assume one. */}
+                  {cur && byWealth.myClaimAge < cur.myClaimAge
+                    ? ' Benefits arriving sooner replace portfolio withdrawals, and what is not withdrawn keeps compounding.'
+                    : cur && byWealth.myClaimAge > cur.myClaimAge
+                      ? ' The larger delayed benefit more than repays the years of portfolio spending it costs to wait.'
+                      : ' Your plan is already the choice that leaves the most behind.'}
+                </p>
+              </div>
+              <div style={{ borderLeft: '4px solid #d97706', background: '#fffbeb', borderRadius: 6, padding: '12px 16px' }}>
+                <p style={{ ...statLabel, color: '#92400e' }}>Most for the survivor</p>
+                <p style={{ fontSize: 18, fontWeight: 700, margin: '2px 0 6px' }}>{bySurvivor.label}</p>
+                <p style={{ fontSize: 13, color: '#334155', margin: 0, lineHeight: 1.5 }}>
+                  {fmt(bySurvivor.survivorBenefit)}/yr for whoever outlives the other
+                  {survivorSpread > 0 && <> — {fmt(survivorSpread)}/yr more than your plan</>}, for the rest
+                  of their life.
+                  {byWealth.afterTaxAtLegacy - bySurvivor.afterTaxAtLegacy > 1000
+                    ? ` Costs ${fmtK(byWealth.afterTaxAtLegacy - bySurvivor.afterTaxAtLegacy)} of final estate.`
+                    : ' And it costs nothing against the choice on the left.'}
+                </p>
+              </div>
+            </div>
+            <p style={{ fontSize: 13, color: '#475569', lineHeight: 1.6, margin: '10px 0 0' }}>
+              Which one matters depends on something this plan cannot know: whether the risk you are managing
+              is leaving too little behind, or one of you living a long time alone on a reduced income. The
+              second is the harder one to recover from.
+            </p>
+          </>
+        )}
+
+        <h2 style={h2}>Every Combination</h2>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={thL}>{cmp.married ? 'You / Spouse' : 'Claim at'}</th>
+              <th style={th}>After-tax at {pi.legacyAge || 95}</th>
+              <th style={th}>Lifetime tax</th>
+              <th style={th}>Lifetime SS</th>
+              {cmp.married && <th style={th}>Survivor keeps</th>}
+              <th style={th}>Runs dry</th>
+            </tr>
+          </thead>
+          <tbody>
+            {cmp.ranked.map((s, i) => (
+              <tr key={s.label} style={s.isPlan ? { background: '#fef3c7' } : (i === 0 ? { background: '#f0fdf4' } : null)}>
+                <td style={tdL}>
+                  <strong>{s.label}</strong>
+                  {s.isPlan && <span style={{ fontSize: 10, color: '#92400e', marginLeft: 6 }}>YOUR PLAN</span>}
+                  {i === 0 && !s.isPlan && <span style={{ fontSize: 10, color: '#065f46', marginLeft: 6 }}>MOST LEFT</span>}
+                </td>
+                <td style={td}>{fmtK(s.afterTaxAtLegacy)}</td>
+                <td style={td}>{fmtK(s.lifetimeTax)}</td>
+                <td style={td}>{fmtK(s.lifetimeSS)}</td>
+                {cmp.married && <td style={td}>{s.survivorBenefit === null ? '—' : fmt(s.survivorBenefit)}</td>}
+                <td style={td}>{s.depletionAge ? `age ${s.depletionAge}` : 'never'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p style={{ fontSize: 11, color: '#64748b', margin: '6px 0 0', lineHeight: 1.5 }}>
+          Ranked by whether the plan survives first, then by what is left after tax — the same order the
+          Social Security tab uses. Each row is your whole plan re-run with only the claim ages changed;
+          benefits are recomputed from your primary insurance amount, not scaled.
+        </p>
+
+        {cmp.married && (
+          <>
+            <h2 style={h2}>Only One Claim Age Moves the Survivor</h2>
+            <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.6, margin: '0 0 8px' }}>
+              When one of you dies, the survivor keeps the <strong>larger</strong> of the two benefits and the
+              smaller one stops. So the survivor's income for the rest of their life is set entirely by when
+              the <strong>higher earner</strong> claims — look down the Survivor column and you will see it
+              change with the first number and ignore the second completely.
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+              {[...new Set(cmp.scenarios.map(s => s.myClaimAge))].sort((a, b) => a - b).map(age => {
+                const row = cmp.scenarios.find(s => s.myClaimAge === age);
+                return (
+                  <div key={age} style={statBox}>
+                    <p style={statLabel}>You claim at {age}</p>
+                    <p style={statValue}>{fmt(row.survivorBenefit)}<span style={{ fontSize: 12, fontWeight: 400, color: '#64748b' }}>/yr</span></p>
+                    <p style={{ fontSize: 11, color: '#64748b', margin: '2px 0 0' }}>survivor's income for life</p>
+                  </div>
+                );
+              })}
+            </div>
+            <p style={{ fontSize: 13, color: '#475569', lineHeight: 1.6, margin: '10px 0 0' }}>
+              This is why "delay to 70" is advice aimed at the higher earner specifically. For the lower
+              earner it buys a larger cheque only while both are alive, and nothing afterwards — which is
+              usually the weaker half of the trade.
+            </p>
+          </>
+        )}
+
+        <h2 style={h2}>What It Does to Roth Conversions</h2>
+        <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.6, margin: 0 }}>
+          Claiming later does something the table above does not price directly: it keeps taxable income low
+          for longer. The years between retiring at {pi.myRetirementAge} and starting benefits are the
+          cheapest conversion years a plan ever gets — no salary, no Social Security, and required
+          distributions still years away. Delaying from {cmp.planMy} to 70 lengthens that window by{' '}
+          {Math.max(0, 70 - cmp.planMy)} year{Math.max(0, 70 - cmp.planMy) === 1 ? '' : 's'}. The Roth
+          Conversion Roadmap prices that window with your actual bracket room; this report deliberately does
+          not, because the two decisions are usually made in sequence rather than together.
+        </p>
+
+        <h2 style={h2}>What This Does Not Model</h2>
+        <ul style={{ fontSize: 13, color: '#334155', lineHeight: 1.7, margin: 0, paddingLeft: 18 }}>
+          <li>Spousal benefits, and the restricted-application rules that ended for anyone born after
+              1 January 1954. Each person is modelled on their own record.</li>
+          <li>The earnings test is applied by the engine, but only against earned income already in this
+              plan — claiming early while still working can cost more than shown if that changes.</li>
+          <li>Divorced-spouse and survivor benefits claimed on an ex-spouse's record.</li>
+          <li>Any change to the programme itself. Benefits here are the ones currently legislated, indexed
+              at your inflation assumption of {(((pi.inflationRate ?? 0.03) * 100)).toFixed(1)}%.</li>
+          <li>Your health, and your family's longevity. That is the input that ought to move this decision
+              most, and it is the one the plan is least able to guess.</li>
+        </ul>
+      </div>
+    </div>
+  );
+  return overlay;
+}
+
+// ============================================
 // What Breaks First — failure forensics.
 //
 // Every other view of this plan answers "does it work". This one assumes it
@@ -19002,6 +19501,14 @@ function ReportMenu({ onPick, onClose }) {
           <button onClick={() => onPick('breaks')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
             <div className="font-semibold text-slate-100">🧨 What Breaks First</div>
             <div className="text-xs text-slate-400 mt-1">Failure forensics: every year that comes up short, the order your accounts drain, and how far each assumption can move before the plan gives way.</div>
+          </button>
+          <button onClick={() => onPick('scenarios')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
+            <div className="font-semibold text-slate-100">⚖️ Scenarios, Side by Side</div>
+            <div className="text-xs text-slate-400 mt-1">Your plan against every scenario you saved in the Sandbox — re-run, not recalled, so the columns are comparable.</div>
+          </button>
+          <button onClick={() => onPick('claiming')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
+            <div className="font-semibold text-slate-100">🗓️ The Claiming Decision</div>
+            <div className="text-xs text-slate-400 mt-1">When to start Social Security — and why the choice that leaves the most behind is usually not the one that protects the survivor.</div>
           </button>
           <button onClick={() => onPick('survivor')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
             <div className="font-semibold text-slate-100">🕯️ The Survivor's Tax Bill</div>
@@ -20338,7 +20845,7 @@ function RetirementPlanner() {
   const [currentYear] = useState(new Date().getFullYear());
   const [saveStatus, setSaveStatus] = useState('');
   const [showImportExport, setShowImportExport] = useState(false);
-  const [showReport, setShowReport] = useState(null); // null | 'menu' | 'summary' | 'next12'
+  const [showReport, setShowReport] = useState(null); // 'menu' | 'summary' | 'next12' | 'roadmap' | 'breaks' | 'survivor' | 'claiming' | 'scenarios'
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [dataWarnings, setDataWarnings] = useState([]);
   // Single localStorage read for the whole component — savedData feeds both
@@ -21532,6 +22039,32 @@ function RetirementPlanner() {
       {showReport === 'roadmap' && (
         <RothRoadmapReport
           computeProjections={computeProjections}
+          projections={projections}
+          personalInfo={personalInfo}
+          accounts={accounts}
+          incomeStreams={incomeStreams}
+          assets={assets}
+          oneTimeEvents={oneTimeEvents}
+          recurringExpenses={recurringExpenses}
+          onClose={() => setShowReport(null)}
+        />
+      )}
+      {showReport === 'scenarios' && (
+        <ScenarioComparisonReport
+          computeProjections={displayComputeProjections}
+          projections={displayProjections}
+          personalInfo={personalInfo}
+          accounts={accounts}
+          incomeStreams={incomeStreams}
+          assets={assets}
+          oneTimeEvents={oneTimeEvents}
+          recurringExpenses={recurringExpenses}
+          scenarios={scenarios}
+          onClose={() => setShowReport(null)}
+        />
+      )}
+      {showReport === 'claiming' && (
+        <ClaimingDecisionReport
           projections={projections}
           personalInfo={personalInfo}
           accounts={accounts}
