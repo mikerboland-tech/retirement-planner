@@ -13521,6 +13521,83 @@ section('P115 — every report component declares the plan it reads');
   ok(/function NextYearReport[\s\S]*?<ReportBasisLine pi=\{personalInfo\}/.test(src), 'and the Next 12 Months report passes the plan it was given');
 }
 
+section('P116 — the 2026 statutory figures, pinned to the published values');
+
+{
+  // Every other test compares engine OUTPUT against these constants, so a typo
+  // in a constant would agree with itself and pass. This pack pins the literal
+  // dollar amounts to the published sources, verified 2026-09:
+  //   IRS Rev. Proc. 2025-32 — brackets, standard deduction, §63(f) age-65
+  //     addition, long-term capital gains breakpoints
+  //   P.L. 119-21 §70103 (OBBBA) — the senior deduction
+  // A figure that moves for 2027 should fail here and be re-verified, not
+  // quietly edited somewhere in the middle of an 11,000-line file.
+  const B = engine.FEDERAL_TAX_BRACKETS_2026;
+  const rates = [0.10, 0.12, 0.22, 0.24, 0.32, 0.35, 0.37];
+
+  // ── ordinary brackets: the top of each rate band ─────────────────────────
+  const tops = {
+    single:            [12400, 50400, 105700, 201775, 256225, 640600, Infinity],
+    married_joint:     [24800, 100800, 211400, 403550, 512450, 768700, Infinity],
+    married_separate:  [12400, 50400, 105700, 201775, 256225, 384350, Infinity],
+    head_of_household: [17700, 67450, 105700, 201775, 256225, 640600, Infinity],
+  };
+  Object.keys(tops).forEach(status => {
+    const band = B[status];
+    eq(band.length, 7, `${status}: seven brackets`);
+    band.forEach((b, i) => {
+      eq(b.rate, rates[i], `${status}: bracket ${i + 1} is taxed at ${(rates[i] * 100)}%`);
+      eq(b.max, tops[status][i], `${status}: the ${(rates[i] * 100)}% band ends at ${tops[status][i]}`);
+      eq(b.min, i === 0 ? 0 : tops[status][i - 1], `${status}: and starts where the one below ended`);
+    });
+  });
+  // Structural facts that outlive any one year's figures.
+  eq(B.married_separate[5].max, B.married_joint[5].max / 2,
+    'married filing separately tops out at half the joint 35% ceiling');
+  eq(B.married_joint[0].max, B.single[0].max * 2, 'the 10% band is exactly doubled for joint filers');
+  eq(B.head_of_household[2].max, B.single[2].max, 'head of household rejoins the single table at the 22% ceiling');
+
+  // ── standard deduction and the two age-65 provisions ─────────────────────
+  const SD = engine.STANDARD_DEDUCTION_2026;
+  eq(SD.single, 16100, 'standard deduction, single');
+  eq(SD.married_joint, 32200, 'standard deduction, married filing jointly');
+  eq(SD.married_separate, 16100, 'standard deduction, married filing separately');
+  eq(SD.head_of_household, 24150, 'standard deduction, head of household');
+  eq(SD.married_joint, SD.single * 2, 'and the joint amount is exactly twice the single one');
+
+  const A65 = engine.ADDITIONAL_STD_DEDUCTION_65_2026;
+  eq(A65.single, 2050, '§63(f) additional deduction at 65, single');
+  eq(A65.head_of_household, 2050, 'and head of household');
+  eq(A65.married_joint, 1650, 'and per qualifying spouse when married');
+  eq(A65.married_separate, 1650, 'filing separately included');
+
+  eq(engine.SENIOR_DEDUCTION_AMOUNT, 6000, 'the OBBBA senior deduction is $6,000 per person 65+');
+  eq(engine.SENIOR_DEDUCTION_FIRST_YEAR, 2025, 'available from 2025');
+  eq(engine.SENIOR_DEDUCTION_LAST_YEAR, 2028, 'and sunsets after 2028 — it is not indexed and not permanent');
+  eq(engine.SENIOR_DEDUCTION_PHASEOUT_RATE, 0.06, 'phasing out at 6 cents per dollar of MAGI above the threshold');
+  eq(engine.SENIOR_DEDUCTION_PHASEOUT_START.single, 75000, 'from $75,000 single');
+  eq(engine.SENIOR_DEDUCTION_PHASEOUT_START.married_joint, 150000, 'and $150,000 joint');
+  // Fully gone at threshold + 6000/0.06 = +$100,000.
+  eq(engine.getFederalDeduction('single', 0, 0.03, { age65Count: 1, taxYear: 2026, magi: 175000 }),
+     engine.STANDARD_DEDUCTION_2026.single + 2050,
+     'so at $175,000 a single 65-year-old has lost the senior deduction entirely, keeping only §63(f)');
+
+  // ── long-term capital gains breakpoints ──────────────────────────────────
+  const CG = engine.CAPITAL_GAINS_THRESHOLDS_2025; // name kept for stability; values are 2026
+  eq(CG.single.zeroRate, 49450, 'top of the 0% capital gains bracket, single');
+  eq(CG.married_joint.zeroRate, 98900, 'and married filing jointly');
+  eq(CG.married_separate.zeroRate, 49450, 'married filing separately matches single');
+  eq(CG.head_of_household.zeroRate, 66200, 'head of household');
+  eq(CG.single.fifteenRate, 545500, 'top of the 15% bracket, single');
+  eq(CG.married_joint.fifteenRate, 613700, 'and married filing jointly — 20% applies above');
+  eq(CG.married_separate.fifteenRate, CG.married_joint.fifteenRate / 2, 'separately is half the joint ceiling');
+  eq(CG.married_joint.zeroRate, CG.single.zeroRate * 2, 'and the 0% ceiling is exactly doubled');
+  // The 0% band is not the same line as the 12% ordinary bracket — a real
+  // difference the withdrawal and conversion planners both depend on.
+  lt(CG.married_joint.zeroRate, B.married_joint[1].max,
+    'the 0% capital-gains ceiling sits below the top of the 12% ordinary bracket');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
