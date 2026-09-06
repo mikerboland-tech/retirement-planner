@@ -11724,7 +11724,10 @@ section('P97 — today’s dollars is a display transform, and only money moves'
                      'weightedCAGR', 'guardrailMultiplier', 'acaFplPercent',
                      // headcounts of people aged 65+, used for the additional
                      // standard deduction — a count, not an amount
-                     'age65Count', 'age65OnReturn'];
+                     'age65Count', 'age65OnReturn',
+                     // solver diagnostics: a pass count and a boolean. The
+                     // residual itself is dollars and IS restated.
+                     'solverIterations', 'solverConverged'];
   UNCHANGED.forEach(f => {
     const differs = nom.some((r, i) => typeof r[f] === 'number' && r[f] !== real[i][f]);
     ok(!differs, `${f} is not money and is left alone`);
@@ -12631,6 +12634,111 @@ section('P106 — the claiming decision, and the two answers that disagree');
     ok(body.indexOf('compareClaimingScenarios') > 0,
       'and ties break on the wealth ranking rather than on array order');
   }
+}
+
+section('P107 — the review release: RMD timing, boundary coercion, solver visibility, validation');
+
+{
+  const fs17 = require('fs');
+  const path17 = require('path');
+  const engSrc = fs17.readFileSync(path17.resolve(__dirname, '..', 'engine.js'), 'utf8');
+  const uiSrc  = fs17.readFileSync(path17.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
+
+  // ── 1. RMD on the PRIOR year-end balance ────────────────────────────────
+  // IRC §401(a)(9): the divisor applies to the balance on the prior December
+  // 31. The engine added this year's contribution to the running balance and
+  // THEN computed the RMD on it, overstating the distribution for anyone still
+  // contributing past their required beginning date.
+  {
+    const pi = { myAge: 76, myRetirementAge: 80, filingStatus: 'single', state: 'TX', inflationRate: 0.03,
+      desiredRetirementIncome: 60000, legacyAge: 90, myBirthYear: 1950, mySSClaimAge: 70 };
+    const accts = [{ id: 1, name: '401k', type: '401k', balance: 1000000, contribution: 30000, cagr: 0,
+      startAge: 76, stopAge: 80, owner: 'me', contributor: 'me' }];
+    const streams = [{ id: 1, type: 'earned_income', owner: 'me', amount: 120000, startAge: 76, endAge: 79, cola: 0 }];
+    const p = computeProjections(pi, accts, streams, [], [], []);
+    const divisor = engine.RMD_FACTORS[76];
+    ok(Math.abs(p[0].rmd - 1000000 / divisor) < 1,
+      'year-0 RMD is on the entered balance, not the balance plus this year’s contribution');
+    ok(Math.abs(p[0].rmd - 1030000 / divisor) > 1000,
+      'and it is NOT the contribution-inflated figure — a $1,266 overstatement on this fixture');
+    // Year 1's RMD is on year 0's CLOSING balance (after contribution, growth
+    // and the year-0 distribution) — which is what "prior December 31" means.
+    const close0 = p[0].perAccountBalances[1];
+    // The row's rmd is rounded to the dollar; compare at that resolution.
+    ok(Math.abs(p[1].rmd - close0 / engine.RMD_FACTORS[77]) < 1,
+      'year-1 RMD is on year-0’s closing balance, the prior December 31');
+  }
+
+  // ── 2. Coercion at the boundary ─────────────────────────────────────────
+  // A stream saved with a blank amount put NaN into 609 fields; a missing
+  // spending target put NaN in every row. Neither threw.
+  {
+    const sc = baseScenario({});
+    const clean = computeProjections(sc.pi, sc.accts, sc.streams, [], [], []);
+    const blankAmount = sc.streams.map(x => ({ ...x, amount: undefined }));
+    const p = computeProjections(sc.pi, sc.accts, blankAmount, [], [], []);
+    const nan = p.flatMap(r => Object.entries(r).filter(([k, v]) => typeof v === 'number' && !Number.isFinite(v)).map(([k]) => k));
+    eq(nan.length, 0, 'a stream with an undefined amount no longer poisons the projection with NaN');
+    const noSpend = computeProjections({ ...sc.pi, desiredRetirementIncome: undefined }, sc.accts, sc.streams, [], [], []);
+    ok(noSpend.every(r => Number.isFinite(r.desiredIncome)),
+      'a missing spending target reads as zero rather than NaN');
+    // Identity: valid input is returned untouched, to the object, so nothing
+    // downstream that keyed on identity changes and no valid number moves.
+    const s2 = engine.sanitizePlanInputs(sc.pi, sc.accts, sc.streams);
+    ok(s2.pi === sc.pi, 'a personalInfo with nothing wrong keeps its identity');
+    ok(s2.accts.every((a, i) => a === sc.accts[i]), 'so do accounts');
+    ok(s2.streams.every((x, i) => x === sc.streams[i]), 'and streams — coercion copies only what it changed');
+    const again = computeProjections(sc.pi, sc.accts, sc.streams, [], [], []);
+    ok(clean.every((r, i) => r.totalPortfolio === again[i].totalPortfolio && r.totalTax === again[i].totalTax),
+      'and a valid plan projects to the same figures as before the coercion existed');
+    // Cost basis is a share; above 1 is a typo that would book a negative gain.
+    const s3 = engine.sanitizePlanInputs(sc.pi, [{ id: 9, type: 'brokerage', balance: 100, costBasisPercent: 1.5 }], []);
+    eq(s3.accts[0].costBasisPercent, 1, 'a cost basis above 100% is clamped to 100%');
+    // Ages are deliberately NOT coerced: undefined spouseAge means no spouse.
+    const s4 = engine.sanitizePlanInputs({ ...sc.pi, spouseAge: undefined }, [], []);
+    eq(s4.pi.spouseAge, undefined, 'an undefined age is left alone — it means something');
+  }
+
+  // ── 3. Solver misses are visible ─────────────────────────────────────────
+  // The loop converges on its ESTIMATE of the draw; taxes are then settled on
+  // the real one, and the two can differ by hundreds of dollars. The residual
+  // is measured on delivered income, after that settlement, and flagged past
+  // $100 — so a miss is on the row instead of being invisible.
+  {
+    const sc = baseScenario({});
+    const p = computeProjections(sc.pi, sc.accts, sc.streams, [], [], []);
+    ok(p.every(r => 'solverResidual' in r && 'solverIterations' in r && typeof r.solverConverged === 'boolean'),
+      'every row carries the solver diagnostics');
+    ok(p.filter(r => r.myAge < sc.pi.myRetirementAge).every(r => r.solverResidual === 0 && r.solverConverged),
+      'pre-retirement years, where nothing is solved, report zero and converged');
+    // On a broad sweep the delivered residual must be small for nearly every
+    // engaged year, and the flag must agree with the residual it is derived from.
+    let engaged = 0, within = 0, disagree = 0;
+    for (const spend of [70000, 120000, 200000]) for (const st of ['TX', 'CA', 'NY']) {
+      const pi = { ...sc.pi, state: st, desiredRetirementIncome: spend };
+      computeProjections(pi, sc.accts, sc.streams, [], [], []).forEach(r => {
+        if (r.myAge < pi.myRetirementAge || (r.portfolioWithdrawal || 0) <= (r.rmd || 0) + 1) return;
+        engaged++;
+        if (Math.abs(r.solverResidual) < 100) within++;
+        if (r.solverConverged !== (Math.abs(r.solverResidual) < 100)) disagree++;
+      });
+    }
+    gt(engaged, 50, 'there are solver-engaged years in the sweep');
+    gt(within / engaged, 0.95, 'at least 95% of engaged years deliver within $100 of target');
+    eq(disagree, 0, 'solverConverged is exactly |residual| < $100, never a separate opinion');
+    // The residual is money and restates with the rest of the row.
+    ok(engine.REAL_DOLLAR_FIELDS.includes('solverResidual'), 'the residual is on the today’s-dollars whitelist');
+  }
+
+  // ── 4. The stale IRMAA comment is gone ──────────────────────────────────
+  ok(engSrc.indexOf('we approximate by using current year') < 0,
+    'no comment still claims the IRMAA lookback is approximated — the projection implements it');
+
+  // ── 5. Validation says what the engine tolerates ────────────────────────
+  ['retirement_before_now', 'horizon_before_retirement', 'life_expectancy_passed',
+   'ss_claim_out_of_range', 'no_spending_target', 'cost_basis_out_of_range'].forEach(t => {
+    ok(uiSrc.indexOf(`'${t}'`) > 0, `Personal Info warns about ${t}`);
+  });
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

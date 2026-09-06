@@ -2009,7 +2009,11 @@ const calculateIRMAA = (magi, filingStatus, yearsFromNow = 0, inflationRate = 0.
 
 // Calculate IRMAA SURCHARGE — the extra cost above the standard premium
 // For married couples, each spouse 65+ pays their own surcharge
-// Uses 2-year MAGI lookback (we approximate by using current year's MAGI)
+// This helper prices whatever MAGI it is handed. The projection loop hands it
+// MAGI from two years earlier (the real Medicare lookback, see irmaaLookbackMAGI);
+// only the first two projection years, which have no history, pass the current
+// year's figure. An earlier comment here said the lookback was approximated —
+// it is not, and that comment had outlived the code by several releases.
 const calculateIRMAASurcharge = (magi, filingStatus, yearsFromNow = 0, inflationRate = 0.03, numMedicareEligible = 1) => {
   const irmaa = calculateIRMAA(magi, filingStatus, yearsFromNow, inflationRate);
   // Standard premium indexed by the same rate as the tier premiums above, so the
@@ -3116,7 +3120,7 @@ const REAL_DOLLAR_FIELDS = [
   'rothConversionLimit', 'rothWithdrawals', 'socialSecurity', 'ssEarningsTestReduction',
   'stateTax', 'stateTaxableIncome', 'taxableIncome', 'taxableSS', 'totalGuaranteedIncome',
   'totalIncome', 'totalNetWorth', 'totalPortfolio', 'totalTax', 'unfundedShortfall',
-  'acaGrossPremium', 'acaNetPremium', 'acaSubsidy',
+  'acaGrossPremium', 'acaNetPremium', 'acaSubsidy', 'solverResidual',
 ];
 // Objects whose VALUES are money and whose keys are ids or category names.
 const REAL_DOLLAR_MAPS = ['perAccountBalances', 'perAccountContributions', 'recurringExpensesByCategory'];
@@ -6389,7 +6393,7 @@ const qcdTaxSavings = (ctx) => {
     lifetimeIrmaa += irmaa;
     lifetimeReal += real(saved, r.year);
     if ((r.qcd || 0) > 0 || Math.abs(saved) > 0.5) {
-      years.push({
+    years.push({
         year: r.year, myAge: r.myAge, qcd: Math.round(r.qcd || 0),
         federal: Math.round(federal), state: Math.round(state), irmaa: Math.round(irmaa),
         // Extra benefit dragged into tax by the same dollars, had they been an
@@ -7627,6 +7631,67 @@ const planHorizonAge = (pi = {}) => {
   return candidates.length ? Math.max(...candidates) : 95;
 };
 
+// ── INPUT COERCION AT THE BOUNDARY ───────────────────────────────────────────
+// The engine assumes its numeric fields are numbers. The UI guarantees that;
+// an imported file does not — handleImport checks that lists are lists and
+// stops there. One income stream saved with a blank amount put NaN into 609
+// fields of the projection; a missing desiredRetirementIncome put NaN in every
+// row. Neither threw, so the tables just filled with $NaN.
+//
+// Money and rate fields are coerced here, once, before anything reads them.
+// Ages are deliberately left alone: an undefined spouseAge MEANS something
+// (there is no spouse) and the engine already handles that. Objects are only
+// copied when a field actually had to change, so valid input keeps its identity
+// and its numbers to the bit.
+const numOr = (v, d) => {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : d;
+  if (v === '' || v === null || v === undefined) return d;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+};
+const coerceFields = (obj, spec, required = []) => {
+  if (!obj || typeof obj !== 'object') return obj;
+  let out = obj;
+  for (const [k, d] of Object.entries(spec)) {
+    // Present-and-wrong is coerced. Absent is left alone unless the engine is
+    // known to produce NaN without it: an absent optional key already reads as
+    // zero through `|| 0` downstream, and filling it would copy every object
+    // that simply omitted it — which is most of them.
+    if (!(k in obj) && !required.includes(k)) continue;
+    const v = numOr(obj[k], d);
+    if (v !== obj[k]) {            // NaN !== NaN, so a NaN is replaced too
+      if (out === obj) out = { ...obj };
+      out[k] = v;
+    }
+  }
+  return out;
+};
+const sanitizePlanInputs = (pi, accts, streams) => {
+  // desiredRetirementIncome is multiplied without a guard, so absent → NaN in
+  // every row; it is the one personal-info field that must be filled.
+  const p = coerceFields(pi, {
+    desiredRetirementIncome: 0, inflationRate: 0.03, heirTaxRate: 0.25,
+    charitableGivingPercent: 0, survivorSpendingFactor: 0.75,
+  }, ['desiredRetirementIncome']);
+  const a = Array.isArray(accts) ? accts.map(x => {
+    const y = coerceFields(x, {
+      balance: 0, contribution: 0, cagr: 0, contributionGrowth: 0,
+      employeePercent: 0, employerMatchPercent: 0,
+    }, ['balance']);
+    // A cost basis is a share of the balance. Above 1 is a typo; the engine
+    // would otherwise book a negative gain and a negative tax on the sale.
+    if (typeof y.costBasisPercent === 'number' && (y.costBasisPercent > 1 || y.costBasisPercent < 0)) {
+      return { ...y, costBasisPercent: Math.min(1, Math.max(0, y.costBasisPercent)) };
+    }
+    return y;
+  }) : [];
+  const st = Array.isArray(streams)
+    // A stream with no amount at all put NaN into 609 fields; it is filled.
+    ? streams.map(x => coerceFields(x, { amount: 0, cola: 0, growthRate: 0 }, ['amount']))
+    : [];
+  return { pi: p, accts: a, streams: st };
+};
+
 const normalizeContributionWindow = (accts, pi = {}) => {
   if (!Array.isArray(accts)) return [];
   return accts.map(a => {
@@ -8111,8 +8176,10 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     ? spendingRule.initialWithdrawalRate : null;
   let guardrailPrevYear = null; // last pushed year row (for prior-year rate)
   let prevYearRow = null;       // last pushed row, tracked unconditionally
-  // Before anything reads them: an account with no contribution window funds
-  // nothing at all, which is never what the row means. See the helper above.
+  // Before anything reads them: blank or non-numeric money fields become zero
+  // instead of NaN, and an account with no contribution window funds nothing
+  // at all, which is never what the row means. See the two helpers above.
+  ({ pi, accts, streams } = sanitizePlanInputs(pi, accts, streams));
   accts = normalizeContributionWindow(accts, pi);
   const years = [];
   let accountBalances = accts.reduce((acc, account) => ({ ...acc, [account.id]: account.balance }), {});
@@ -8208,6 +8275,15 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   const magiByYear = [];
 
   for (let year = currentYear; year <= currentYear + horizonYears; year++) {
+    // The RMD divisor is applied to the balance on the PRIOR December 31 (IRC
+    // §401(a)(9); Treas. Reg. §1.401(a)(9)-5). At the top of the loop
+    // accountBalances is exactly that — last year's closing figure, or the
+    // entered balance in year 0 — and nothing has been added yet. Captured here
+    // because this year's contributions land on accountBalances before the RMD
+    // block runs, and computing the RMD after them overstated it for anyone
+    // still contributing past their required beginning date.
+    const priorYearEndBalances = { ...accountBalances };
+    let solverResidual = 0, solverIterations = 0;
     const myAge = pi.myAge + (year - currentYear);
     const spouseAge = pi.spouseAge + (year - currentYear);
     const yearsFromNow = year - currentYear;
@@ -8722,7 +8798,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         const beneficiaryAge = pi.filingStatus !== 'married_joint' ? undefined
           : account.owner === 'spouse' ? (primaryAlive ? myAge : undefined)
           : (spouseAlive ? spouseAge : undefined);
-        const rmd = calculateRMD(accountBalances[account.id], ownerAge, ownerBirthYear, beneficiaryAge);
+        const rmd = calculateRMD(priorYearEndBalances[account.id] || 0, ownerAge, ownerBirthYear, beneficiaryAge);
         accountRMDs[account.id] = rmd;
         totalRMD += rmd;
       }
@@ -9047,6 +9123,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // This properly accts for actual marginal tax rates, QCD benefits,
       // and the circular dependency where withdrawals affect SS taxation
       let withdrawalNeeded = 0;
+      // How many passes the solver used. It stops at $10 or after
+      // MAX_ITERATIONS_FOR_TAX_CALC; the residual itself is measured on the
+      // delivered figure just before the row is pushed (see deliveredNet), not
+      // on the loop's estimate, because the two can disagree.
+      solverIterations = 0;
       if (afterTaxGap > 0) {
         let testWithdrawal = afterTaxGap; // Start with the gap
         
@@ -9145,6 +9226,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           const shortfall = afterTaxGap - netFromWithdrawal;
           
           // Adjust withdrawal
+          solverIterations = i + 1;
           if (Math.abs(shortfall) < 10) break; // Close enough
           testWithdrawal += shortfall;
           testWithdrawal = Math.max(0, testWithdrawal); // Don't go negative
@@ -10253,6 +10335,31 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     });
     const netAssetValue = totalAssetValue - totalAssetDebt;
     
+      // What the year actually delivered after every tax was settled on the
+    // withdrawal that was really taken — not on the composition the solver
+    // estimated. The two differ, and that difference is why a year can miss its
+    // target by hundreds of dollars while the solver's own loop reports
+    // convergence: the loop converges on its estimate, then step 2.5 re-prices
+    // the real draw. The residual is measured HERE, on the delivered figure,
+    // because that is the number a reader would check.
+    const deliveredNet = earnedIncome + totalGuaranteedIncome + portfolioWithdrawal
+      + conversionTaxWithdrawal - federalTax - stateTax - totalFICA - irmaaSurcharge;
+    // Only meaningful when the WITHDRAWAL solver was what set the year's
+    // income: a voluntary draw beyond the RMD, in retirement, with the target
+    // fundable, and no Roth conversion. A year where Social Security or a
+    // forced RMD exceeds spending over-delivers on purpose, and that is not a
+    // miss. A conversion year is excluded because the conversion runs its own
+    // fixed-point loop for the tax it triggers, and the draw that pays that tax
+    // is booked through conversionTaxWithdrawal — measured against the spending
+    // target it read as a miss in 98.9% of conversion years and 0.4% of the
+    // rest, which is the signature of a wrong yardstick rather than a wrong
+    // solver.
+    const solverEngaged = isRetired && (portfolioWithdrawal > totalRMD + 1)
+      && unfundedShortfall <= 0 && (rothConversionThisYear || 0) <= 0;
+    solverResidual = solverEngaged
+      ? (desiredIncome + healthcareExpense + Math.round(acaNetPremium)) - deliveredNet
+      : 0;
+
     years.push({
       year, myAge, spouseAge,
       // Offset from today (0 = current year). Distinct from the tax-table
@@ -10392,7 +10499,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // costs the reader's confidence in every other number on the page.
       totalTax: Math.round(federalTax) + Math.round(stateTax)
               + Math.round(totalFICA) + Math.round(irmaaSurcharge),
-      netIncome: Math.round(earnedIncome + totalGuaranteedIncome + portfolioWithdrawal + conversionTaxWithdrawal - federalTax - stateTax - totalFICA - irmaaSurcharge),
+      netIncome: Math.round(deliveredNet),
       filingStatus: effectiveFilingStatus, // Actual filing status used (may differ from input after survivor event)
       preTaxBalance: Math.round(finalPreTaxBalance),
       rothBalance: Math.round(finalRothBalance),
@@ -10427,7 +10534,16 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       primaryAlive, spouseAlive,
       // Guardrails (only when opts.spendingRule is active)
       guardrailMultiplier: spendingRule ? guardrailMultiplier : undefined,
-      guardrailEvent
+      guardrailEvent,
+      // Withdrawal solver diagnostics. solverResidual is what the year still
+      // missed its spending target by AFTER taxes were settled on the real draw
+      // (dollars; positive = under-delivered). Zero when nothing needed solving.
+      // solverConverged uses a $100 line rather than the loop's $10: the loop's
+      // tolerance is about its estimate, this is about the delivered year, and
+      // a two-figure miss on a six-figure draw is noise, not a defect.
+      solverResidual: Math.round(solverResidual),
+      solverIterations,
+      solverConverged: Math.abs(solverResidual) < 100,
     });
 
     // Guardrails bookkeeping: remember this row for next year's rate check, and
@@ -10981,6 +11097,7 @@ const describePlanPatch = (state, patch) => {
     getACAApplicablePercentage, calculateACAPremiumCredit,
     getSpendingPhaseMultiplier, scoreRothStrategy, afterTaxLegacyValue, rowAtOrLast,
     deflateProjections, realDeflator, REAL_DOLLAR_FIELDS, claimingComparison,
+    sanitizePlanInputs,
     reindexSSForInflation, compareClaimingScenarios,
     conversionCostComponents, conversionCostAudit, topMarginalBracket,
     SEQUENCE_RISK_RETURNS, SEQUENCE_RISK_YEARS, sequenceRiskOverrides,
