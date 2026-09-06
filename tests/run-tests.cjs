@@ -744,8 +744,15 @@ section('Unit — calculateIRMAA tier boundaries');
     'MFS MAGI=$109k → standard premium');
   eq(calculateIRMAA(109001, 'married_separate', 0, 0.03).partBMonthly, 649.20,
     'MFS MAGI=$109,001 → jumps straight to 3.2x standard, skipping the middle tiers');
-  eq(calculateIRMAA(391000, 'married_separate', 0, 0.03).partBMonthly, 649.20,
-    'MFS MAGI=$391k → still the 3.2x tier (boundary stays in the lower tier)');
+  // Verified against the CMS 2026 fact sheet (2026-09): the final threshold is
+  // the one boundary in the table CMS states as "greater than or equal to", so
+  // a MAGI landing exactly on it is the TOP tier. This assertion used to claim
+  // the opposite — it pinned the engine's <=-everywhere behaviour rather than
+  // the published rule. See P117.
+  eq(calculateIRMAA(391000, 'married_separate', 0, 0.03).partBMonthly, 689.90,
+    'MFS MAGI=$391k → the top tier: CMS reads "greater than or equal to $391,000"');
+  eq(calculateIRMAA(390999, 'married_separate', 0, 0.03).partBMonthly, 649.20,
+    'and a dollar below it is still the 3.2x tier');
   eq(calculateIRMAA(391001, 'married_separate', 0, 0.03).partBMonthly, 689.90,
     'MFS MAGI=$391,001 → top tier at 3.4x standard');
   eq(calculateIRMAA(391001, 'married_separate', 0, 0.03).tier, 2,
@@ -13596,6 +13603,76 @@ section('P116 — the 2026 statutory figures, pinned to the published values');
   // difference the withdrawal and conversion planners both depend on.
   lt(CG.married_joint.zeroRate, B.married_joint[1].max,
     'the 0% capital-gains ceiling sits below the top of the 12% ordinary bracket');
+}
+
+section('P117 — the 2026 Medicare figures, pinned, and the one boundary CMS reverses');
+
+{
+  // Source: CMS "2026 Medicare Parts A & B Premiums and Deductibles" fact sheet
+  // (published 2025-11-14), verified 2026-09. As with the tax figures, every
+  // other test compares engine output against this table, so a typo in the
+  // table would agree with itself and pass.
+  const T = engine.IRMAA_THRESHOLDS_2025; // name kept for stability; values are 2026
+  eq(engine.MEDICARE_PART_B_STANDARD_2025, 202.90, 'the 2026 standard Part B premium is $202.90/month');
+
+  // maxIncome, total monthly Part B, monthly Part D surcharge — per tier.
+  const table = {
+    single: [
+      [109000, 202.90, 0], [137000, 284.10, 14.50], [171000, 405.80, 37.50],
+      [205000, 527.50, 60.40], [500000, 649.20, 83.30], [Infinity, 689.90, 91.00],
+    ],
+    married_joint: [
+      [218000, 202.90, 0], [274000, 284.10, 14.50], [342000, 405.80, 37.50],
+      [410000, 527.50, 60.40], [750000, 649.20, 83.30], [Infinity, 689.90, 91.00],
+    ],
+    // Married filing separately collapses to three tiers: one dollar over the
+    // first threshold jumps straight to the fifth-tier premium.
+    married_separate: [
+      [109000, 202.90, 0], [391000, 649.20, 83.30], [Infinity, 689.90, 91.00],
+    ],
+  };
+  Object.keys(table).forEach(status => {
+    eq(T[status].length, table[status].length, `${status}: tier count`);
+    T[status].forEach((tier, i) => {
+      const [max, partB, partD] = table[status][i];
+      eq(tier.maxIncome, max, `${status} tier ${i + 1}: threshold`);
+      eq(tier.partB, partB, `${status} tier ${i + 1}: total Part B premium`);
+      eq(tier.partD, partD, `${status} tier ${i + 1}: Part D surcharge`);
+    });
+  });
+  // The premiums are the standard times the statutory 1.4/2.0/2.6/3.2/3.4
+  // multipliers, rounded to the dime — a check that survives next year's figures.
+  [1.0, 1.4, 2.0, 2.6, 3.2, 3.4].forEach((m, i) => {
+    approx(T.single[i].partB, 202.90 * m, `tier ${i + 1} is ${m}× the standard premium`, 0.001);
+  });
+  eq(T.married_joint[0].maxIncome, T.single[0].maxIncome * 2, 'the joint entry threshold is exactly double the single one');
+  eq(T.married_separate[0].maxIncome, T.single[0].maxIncome, 'married-separate shares the single entry threshold');
+  eq(T.married_separate[1].partB, T.single[4].partB, 'and then jumps straight to the fifth-tier premium');
+
+  // ── the boundary CMS reverses ────────────────────────────────────────────
+  // Every tier reads "greater than X and less than or equal to Y" EXCEPT the
+  // last pair, which reads "less than Z" / "greater than or equal to Z". So a
+  // MAGI landing exactly on the final threshold belongs to the TOP tier. The
+  // engine used <= everywhere and put those dollars one tier too low.
+  const partB = (magi, status) => engine.calculateIRMAA(magi, status, 0, 0.03).partBMonthly;
+  const top = { single: 500000, married_joint: 750000, married_separate: 391000 };
+  Object.keys(top).forEach(status => {
+    const z = top[status];
+    eq(partB(z, status), 689.90, `${status}: exactly at the final threshold is the TOP tier (CMS says "greater than or equal to")`);
+    eq(partB(z - 1, status), 649.20, `${status}: and a dollar below is the tier under it`);
+  });
+  // Every other boundary stays inclusive, which is what CMS says.
+  eq(partB(109000, 'single'), 202.90, 'exactly at the entry threshold there is no surcharge at all');
+  eq(partB(109001, 'single'), 284.10, 'a dollar over starts one');
+  eq(partB(137000, 'single'), 284.10, 'mid-table boundaries belong to the tier below');
+  eq(partB(218000, 'married_joint'), 202.90, 'joint filers likewise');
+  eq(partB(109000, 'married_separate'), 202.90, 'and married-separate');
+  eq(partB(109001, 'married_separate'), 649.20, 'whose next dollar costs five times what a single filer’s does');
+  // Head of household reads the single table, per CMS.
+  eq(partB(109001, 'head_of_household'), partB(109001, 'single'), 'head of household is priced on the single table');
+
+  // The 2-year lookback the whole table is measured against.
+  eq(engine.IRMAA_TIER_LOOKBACK_YEARS, 2, '2026 IRMAA is set by 2024 MAGI — a two-year lookback');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

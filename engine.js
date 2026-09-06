@@ -2142,17 +2142,29 @@ const calculateIRMAA = (magi, filingStatus, yearsFromNow = 0, inflationRate = 0.
   const thresholds = IRMAA_THRESHOLDS_2025[lookupStatus] || IRMAA_THRESHOLDS_2025.married_joint;
   const inflationFactor = indexTo(1, yearsFromNow, inflationRate);
 
-  // Find the applicable tier
-  for (const tier of thresholds) {
+  // Find the applicable tier.
+  //
+  // CMS's table is inclusive at every boundary EXCEPT the last one: the tiers
+  // read "greater than $109,000 and less than or equal to $137,000", but the
+  // top pair reads "greater than $205,000 and LESS THAN $500,000" / "greater
+  // than or equal to $500,000". So a MAGI landing exactly on the final
+  // threshold ($500,000 single, $750,000 joint, $391,000 married-separate)
+  // belongs to the TOP tier, not the one below it — the only boundary in the
+  // table where the dollar itself crosses over. Indexed loop rather than
+  // indexOf, which is O(n) per tier and would pick the wrong index if two
+  // tiers ever held equal values.
+  for (let i = 0; i < thresholds.length; i++) {
+    const tier = thresholds[i];
     const adjustedMax = tier.maxIncome === Infinity ? Infinity : tier.maxIncome * inflationFactor;
-    if (magi <= adjustedMax) {
+    const isLastFinite = i === thresholds.length - 2;
+    if (isLastFinite ? magi < adjustedMax : magi <= adjustedMax) {
       return {
         partBMonthly: tier.partB * inflationFactor,
         partDMonthly: tier.partD * inflationFactor,
         partBAnnual: tier.partB * 12 * inflationFactor,
         partDAnnual: tier.partD * 12 * inflationFactor,
         totalAnnual: (tier.partB + tier.partD) * 12 * inflationFactor,
-        tier: thresholds.indexOf(tier)
+        tier: i
       };
     }
   }
