@@ -496,6 +496,11 @@ function MobilePlanner() {
       rothConversionEndAge: 0,
       charitableGivingPercent: 0,
       healthcareModel: 'none', // Engine reads pi.healthcareModel (enum). The old healthcareModelEnabled key was ignored, so healthcare costs were billed by default on mobile (B11).
+      // Stated rather than inferred: long-term care is its own switch in the
+      // engine, and the bracket-fill withdrawal order is off. This gut-check
+      // has no controls for either, so neither may quietly bill or reorder.
+      ltcModel: 'none',
+      withdrawalBracketFill: '',
     };
     // In percent mode the engine reads owner salary from the earned_income stream we inject
     // below and computes contribution = salary × employeePercent each year (with salary COLA).

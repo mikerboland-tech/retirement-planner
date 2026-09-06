@@ -13448,6 +13448,40 @@ section('P113 — the Content-Security-Policy: current, strict, and complete');
   eq(remoteFetches.length, 0, 'and no other remote fetch exists in the app for the policy to block');
 }
 
+section('P114 — the mobile build: compiles, and hands the engine a plan with the switches stated');
+
+{
+  // mobile.html compiles retirement-planner-mobile.jsx in the browser with the
+  // vendored Babel. The same Babel, in node: a syntax error in the mobile
+  // source would otherwise surface only on a phone.
+  const fs = require('fs'), pathMod = require('path'), vmMod = require('vm');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const src = fs.readFileSync(pathMod.join(ROOT, 'retirement-planner-mobile.jsx'), 'utf8');
+  const sb = { console, window: {}, self: {}, setTimeout, clearTimeout };
+  sb.globalThis = sb;
+  vmMod.createContext(sb);
+  vmMod.runInContext(fs.readFileSync(pathMod.join(ROOT, 'vendor/babel.min.js'), 'utf8'), sb);
+  const Babel = sb.Babel || (sb.window && sb.window.Babel);
+  ok(Babel && typeof Babel.transform === 'function', 'the vendored Babel loads in node');
+  let compiled = null, err = null;
+  try { compiled = Babel.transform(src, { presets: ['env', 'react'] }).code; } catch (e) { err = e; }
+  ok(compiled && !err, `the mobile source compiles${err ? ': ' + err.message.slice(0, 120) : ''}`);
+  ok(compiled && /function MobilePlanner\(/.test(compiled), 'and defines MobilePlanner');
+  // The plan it builds: healthcare off, long-term care off, no bracket fill —
+  // stated, so a change to how the engine infers a missing field cannot start
+  // billing care or reordering withdrawals on a page with no control for it.
+  const piBlock = /const pi = \{([\s\S]*?)\};/.exec(src);
+  ok(piBlock, 'the mobile plan is built in one place');
+  const block = piBlock ? piBlock[1] : '';
+  ok(/healthcareModel:\s*'none'/.test(block), 'healthcare is off by name');
+  ok(/ltcModel:\s*'none'/.test(block), 'long-term care is off by name');
+  ok(/withdrawalBracketFill:\s*''/.test(block), 'the bracket-fill order is off by name');
+  ok(/desiredRetirementIncome:/.test(block), 'and the required spending target is supplied');
+  // Both pages carry the same version.
+  const v = (f) => (/window\.APP_VERSION = '([^']+)'/.exec(fs.readFileSync(pathMod.join(ROOT, f), 'utf8')) || [])[1];
+  eq(v('mobile.html'), v('index.html'), 'mobile.html and index.html carry the same APP_VERSION');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
