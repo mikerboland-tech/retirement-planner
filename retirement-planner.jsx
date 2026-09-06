@@ -17739,7 +17739,7 @@ function NextYearReport({ projections, personalInfo, accounts, incomeStreams, on
           <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>
             Retirement action plan for {currentYear} &nbsp;·&nbsp; Prepared {preparedOn}
           </p>
-          <ReportBasisLine pi={pi} follows={true} />
+          <ReportBasisLine pi={personalInfo} follows={true} />
         </div>
 
         {actions.length === 0 ? (

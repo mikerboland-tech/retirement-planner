@@ -13482,6 +13482,66 @@ section('P114 — the mobile build: compiles, and hands the engine a plan with t
   eq(v('mobile.html'), v('index.html'), 'mobile.html and index.html carry the same APP_VERSION');
 }
 
+section('P115 — every report component declares the plan it reads');
+
+{
+  // "Your Next 12 Months" crashed on open with "pi is not defined": it handed
+  // pi to the basis line without ever declaring it, and no test rendered the
+  // report. Rendering React in node is not on the table here, so this pins
+  // the shape instead: any top-level component whose body uses a bare `pi`
+  // must declare it — as a parameter or a const — before the body ends.
+  const fs = require('fs'), pathMod = require('path');
+  const src = fs.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+  const lines = src.split('\n');
+  const starts = [];
+  lines.forEach((l, i) => { const m = /^function ([A-Za-z0-9_]+)\s*\(([^)]*)\)/.exec(l); if (m) starts.push({ name: m[1], params: m[2], at: i }); });
+  const nextTop = (i) => { for (let k = i + 1; k < lines.length; k++) if (/^(function |const [A-Za-z]+ = |class |\/\/ =====)/.test(lines[k])) return k; return lines.length; };
+  let checked = 0, offenders = [];
+  for (const s of starts) {
+    const body = lines.slice(s.at + 1, nextTop(s.at)).join('\n');
+    const stripped = body.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    // A bare identifier: not `.pi`, not the object key `pi:`, not a string.
+    const usesPi = /(^|[^A-Za-z0-9_.
+    if (!usesPi) continue;
+    checked++;
+    // Declared as the component's own parameter or const, or as a parameter
+    // of an inner function — (pi) =>, (pi, x) =>, function f(pi), ({ pi }) =>.
+    const declares = /\bpi\b/.test(s.params)
+      || /\bconst pi\b|\blet pi\b|\bpi\s*=\s*personalInfo/.test(stripped)
+      || /\(\s*\{[^}]*\bpi\b[^}]*\}[^)]*\)\s*=>|\(\s*pi\b[^)]*\)\s*=>|\bpi\s*=>|function\s*[A-Za-z0-9_]*\s*\([^)]*\bpi\b[^)]*\)/.test(stripped);
+    if (!declares) offenders.push(s.name);
+  }
+  gt(checked, 5, `components that read a bare pi were found (${checked})`);
+  eq(offenders.length, 0, `every one of them declares it${offenders.length ? ' — offenders: ' + offenders.join(', ') : ''}`);
+  ok(/function NextYearReport[\s\S]*?<ReportBasisLine pi=\{personalInfo\}/.test(src), 'and the Next 12 Months report passes the plan it was given');
+}
+
+// ── Summary ──────────────────────────────────────────────────────────────────
+console.log(`\n${'─'.repeat(60)}`);
+if (fail === 0) {
+  console.log(`✓ ALL ${pass} ASSERTIONS PASSED`);
+  process.exit(0);
+} else {
+  console.log(`✗ ${fail} FAILED, ${pass} passed`);
+  console.log('\nFailures:');
+  for (const f of failures) console.log(f);
+  process.exit(1);
+}
+"`])pi(?=[.\s,)}\];])(?!\s*:)/.test(stripped);
+    if (!usesPi) continue;
+    checked++;
+    // Declared as the component's own parameter or const, or as a parameter
+    // of an inner function — (pi) =>, (pi, x) =>, function f(pi), ({ pi }) =>.
+    const declares = /\bpi\b/.test(s.params)
+      || /\bconst pi\b|\blet pi\b|\bpi\s*=\s*personalInfo/.test(stripped)
+      || /\(\s*\{[^}]*\bpi\b[^}]*\}[^)]*\)\s*=>|\(\s*pi\b[^)]*\)\s*=>|\bpi\s*=>|function\s*[A-Za-z0-9_]*\s*\([^)]*\bpi\b[^)]*\)/.test(stripped);
+    if (!declares) offenders.push(s.name);
+  }
+  gt(checked, 5, `components that read a bare pi were found (${checked})`);
+  eq(offenders.length, 0, `every one of them declares it${offenders.length ? ' — offenders: ' + offenders.join(', ') : ''}`);
+  ok(/function NextYearReport[\s\S]*?<ReportBasisLine pi=\{personalInfo\}/.test(src), 'and the Next 12 Months report passes the plan it was given');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
