@@ -3201,6 +3201,7 @@ const REAL_DOLLAR_FIELDS = [
   'totalIncome', 'totalNetWorth', 'totalPortfolio', 'totalTax', 'unfundedShortfall',
   'acaGrossPremium', 'acaNetPremium', 'acaSubsidy', 'solverResidual',
   'rothUnseasonedDrawn', 'rothTaxableEarnings', 'rothUnseasoned',
+  'bracketFillRoom', 'bracketFillDraw',
 ];
 // Objects whose VALUES are money and whose keys are ids or category names.
 const REAL_DOLLAR_MAPS = ['perAccountBalances', 'perAccountContributions', 'recurringExpensesByCategory'];
@@ -5190,6 +5191,49 @@ const irmaaTierCeiling = (tierIndex, filingStatus, yearsFromNow = 0, inflationRa
   // measured against — using this year's would tighten the ceiling every year by
   // exactly one year of indexation.
   return indexTo(tier.maxIncome, yearsFromNow + IRMAA_TIER_LOOKBACK_YEARS, inflationRate);
+};
+
+// ── ORDINARY BRACKET ROOM ────────────────────────────────────────────────────
+// Pre-tax dollars a year can still recognise as ordinary income before its
+// ordinary TAXABLE income crosses the top of `bracket`. Shared by the
+// bracket-fill WITHDRAWAL order (spend pre-tax up to the bracket top, then
+// switch to Roth/brokerage) and kept in the same shape as the Roth-conversion
+// bracket fill so the two cannot disagree about where a bracket ends.
+//
+// Same three subtleties as the conversion solve: the bracket top is a
+// post-deduction figure so the draw is grossed up by the deduction; every
+// ordinary dollar can drag up to $0.85 of Social Security into income; and the
+// senior deduction phases out with MAGI. All three are monotone in the draw, so
+// the answer is found by bisection.
+//   ordinaryBase        AGI-side ordinary income already booked (ex SS, ex the draw)
+//   capitalGains        preferential income: in the Pub 915 base, not in the bracket
+//   preTaxDeduction     added back for the deduction's MAGI test only
+const ordinaryBracketRoom = (bracket, {
+  filingStatus, taxIndexYears = 0, inflationRate = 0.03, inflationFactor = 1,
+  ordinaryBase = 0, capitalGains = 0, totalSocialSecurity = 0, preTaxDeduction = 0,
+  fedOpts = (magi) => ({ magi }),
+} = {}) => {
+  const idx = RATE_TO_BRACKET_IDX[bracket];
+  if (idx === undefined) return 0;
+  const brackets = FEDERAL_TAX_BRACKETS_2026[filingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
+  const cap = brackets[idx].max * inflationFactor;
+  if (!Number.isFinite(cap)) return 0; // the top bracket has no top to fill to
+  const base = Math.max(0, ordinaryBase);
+  const deductionAt = (magi) => getFederalDeduction(filingStatus, taxIndexYears, inflationRate, fedOpts(magi));
+  const taxableAt = (X) => {
+    const nonSS = base + X + capitalGains;
+    const ssT = calculateSocialSecurityTaxableAmount(totalSocialSecurity, nonSS, filingStatus);
+    return base + X + ssT - deductionAt(nonSS + ssT + preTaxDeduction);
+  };
+  const hiBound = Math.max(0, cap + deductionAt(base + capitalGains + preTaxDeduction) - base);
+  if (hiBound <= 0 || taxableAt(0) >= cap) return 0;
+  if (taxableAt(hiBound) <= cap) return hiBound;
+  let lo = 0, hi = hiBound;
+  for (let i = 0; i < 60 && hi - lo > 0.005; i++) {
+    const mid = (lo + hi) / 2;
+    if (taxableAt(mid) > cap) hi = mid; else lo = mid;
+  }
+  return lo;
 };
 
 // Labels for the tier picker, priced per household so the choice is legible.
@@ -8367,6 +8411,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // still contributing past their required beginning date.
     const priorYearEndBalances = { ...accountBalances };
     let solverResidual = 0, solverIterations = 0;
+    // Bracket-fill withdrawal order for the year: sized before the solver, read
+    // by the executor. Empty bracket means the plain priority order applies.
+    let yearBracketFill = { bracket: '', room: 0 };
     const myAge = pi.myAge + (year - currentYear);
     const spouseAge = pi.spouseAge + (year - currentYear);
     const yearsFromNow = year - currentYear;
@@ -9123,6 +9170,28 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // from a bracket. It is only ever set by qcdTaxSavings below.
       const canDoQCD = charitablePercent > 0 && myAge >= QCD_START_AGE && !opts.disableQCD;
 
+      // ── BRACKET-FILL WITHDRAWAL ORDER ─────────────────────────────────────────
+      // pi.withdrawalBracketFill ('12%', '22%', …) says: whatever the priority
+      // order, spend pre-tax FIRST up to the top of that bracket, then follow the
+      // order with pre-tax held back, and only go past the bracket top if the
+      // other accounts cannot cover the year. It is the classic bracket-
+      // management order — cheap ordinary income every year, Roth only above it
+      // — and it composes with a conversion fill to a higher bracket, which
+      // prices its room from the pre-tax already withdrawn and simply fills the
+      // rest. The room is sized once here, before the solver, so the solver
+      // and the executor draw against the same figure.
+      const fillBracket = isRetired && afterTaxGap > 0 ? String(pi.withdrawalBracketFill || '') : '';
+      const bracketFillRoom = fillBracket ? ordinaryBracketRoom(fillBracket, {
+        filingStatus: effectiveFilingStatus, taxIndexYears, inflationRate: pi.inflationRate, inflationFactor,
+        // QCD dollars are excluded from income; the RMD-funded share is the only
+        // part known before the draw is sized, so that is the part credited.
+        ordinaryBase: nonSSIncomeAfterDeduction + totalRMD
+          - (canDoQCD ? Math.min(charitableGiving, totalRMD, householdQCDLimit) : 0),
+        capitalGains: brokerageDividends + assetSaleTaxableGain,
+        totalSocialSecurity, preTaxDeduction, fedOpts,
+      }) : 0;
+      yearBracketFill = { bracket: fillBracket, room: bracketFillRoom };
+
       // ── WITHDRAWAL-COMPOSITION ESTIMATOR ────────────────────────────────────────
       // Used by the solver so the tax gross-up reflects the ACTUAL draw (Roth = tax-free,
       // brokerage = mostly basis), not a fixed guess. Mirrors the real Step-2 sequencing.
@@ -9168,15 +9237,21 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           respectFloor ? Math.max(0, simHsaQualified) : Infinity;
         const simAnyHsa = accts.some(a => isHSAAccount(a.type) && (bal[a.id] || 0) > 0);
         let pool = excessReinvestmentPool;
+        // Mirror of the executor's bracket fill: pre-tax first up to the room,
+        // held there for the rest of pass 1, unlimited only in pass 2.
+        let simFillRoom = bracketFillRoom;
+        const simFillCap = (respectFloor) => (fillBracket && respectFloor) ? Math.max(0, simFillRoom) : Infinity;
         for (const respectFloor of [true, false]) {
         if (need <= 0) break;
-        if (!respectFloor && preTaxFloorAdj <= 0 && !simAnyHsa) break;
-        for (const category of solverPriority) {
+        if (!respectFloor && preTaxFloorAdj <= 0 && !simAnyHsa && !fillBracket) break;
+        const passOrder = (fillBracket && respectFloor)
+          ? ['pretax', ...solverPriority.filter(c => c !== 'pretax')] : solverPriority;
+        for (const category of passOrder) {
           if (need <= 0) break;
           const types = solverAccountTypes(category);
           accts.forEach(a => {
             if (types.includes(a.type) && need > 0) {
-              const cap = isPreTaxAccount(a.type) ? simAllowance(respectFloor)
+              const cap = isPreTaxAccount(a.type) ? Math.min(simAllowance(respectFloor), simFillCap(respectFloor))
                         : isHSAAccount(a.type) ? simHsaAllowance(respectFloor)
                         : Infinity;
               const w = Math.min(bal[a.id], need, cap);
@@ -9184,6 +9259,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
               bal[a.id] -= w; need -= w;
               if (isPreTaxAccount(a.type)) {
                 preTax += w;
+                simFillRoom -= w;
                 // §72(t): the solver must gross up for the penalty, or an early
                 // retiree's spending target is silently missed by 10% of the draw.
                 penalized += w * penaltyShareFor(a);
@@ -9466,6 +9542,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     const hsaDrawAllowance = (respectFloor) =>
       respectFloor ? Math.max(0, hsaQualifiedRemaining) : Infinity;
     const anyHsaBalance = accts.some(a => isHSAAccount(a.type) && (accountBalances[a.id] || 0) > 0);
+    // Bracket-fill order (see yearBracketFill above the solver). Pass 1 spends
+    // pre-tax first up to the room and then holds it there; pass 2 lifts the
+    // cap, because a bracket top is a preference and an unfunded year is not.
+    const fillBracket = yearBracketFill.bracket;
+    let bracketFillRoomLeft = yearBracketFill.room;
+    let bracketFillDraw = 0;
+    const bracketFillCap = (respectFloor) => (fillBracket && respectFloor) ? Math.max(0, bracketFillRoomLeft) : Infinity;
 
     // Pass 1 honours the floor and the HSA's qualified-expense limit; pass 2 only
     // runs if pass 1 left the year short. Deferring non-qualified HSA money to
@@ -9474,13 +9557,15 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // HSA intact for the medical costs it exists to cover.
     for (const respectFloor of [true, false]) {
       if (additionalNeeded <= 0) break;
-      if (!respectFloor && preTaxFloorAdj <= 0 && !anyHsaBalance) break; // nothing held back -> nothing to retry
-    for (const category of priority) {
+      if (!respectFloor && preTaxFloorAdj <= 0 && !anyHsaBalance && !fillBracket) break; // nothing held back -> nothing to retry
+    const passOrder = (fillBracket && respectFloor)
+      ? ['pretax', ...priority.filter(c => c !== 'pretax')] : priority;
+    for (const category of passOrder) {
       if (additionalNeeded <= 0) break;
       const categoryAccountTypes = getAccountTypes(category);
       accts.forEach(account => {
         if (categoryAccountTypes.includes(account.type) && additionalNeeded > 0) {
-          const cap = isPreTaxAccount(account.type) ? preTaxDrawAllowance(respectFloor)
+          const cap = isPreTaxAccount(account.type) ? Math.min(preTaxDrawAllowance(respectFloor), bracketFillCap(respectFloor))
                     : isHSAAccount(account.type) ? hsaDrawAllowance(respectFloor)
                     : Infinity;
           const withdrawal = Math.min(accountBalances[account.id], additionalNeeded, cap);
@@ -9492,6 +9577,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // HSA withdrawals for qualified medical expenses are tax-free
           if (isPreTaxAccount(account.type)) {
             preTaxWithdrawals += withdrawal;
+            if (fillBracket && respectFloor) { bracketFillDraw += withdrawal; bracketFillRoomLeft -= withdrawal; }
             penalizedWithdrawals += withdrawal * penaltyShareFor(account);
           } else if (isBrokerageAccount(account.type)) {
             brokerageWithdrawals += withdrawal;
@@ -10678,6 +10764,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // counting the Roth as spendable.
       rothUnseasonedDrawn: Math.round(rothUnseasonedDrawn),
       rothTaxableEarnings: Math.round(rothTaxableEarnings),
+      // Bracket-fill withdrawal order: the bracket in force, the pre-tax room
+      // it had this year, and the pre-tax spending actually drawn inside it.
+      bracketFillBracket: fillBracket,
+      bracketFillRoom: Math.round(yearBracketFill.room),
+      bracketFillDraw: Math.round(bracketFillDraw),
       rothUnseasoned: Math.round(accts.reduce((t, a) => isRothAccount(a.type)
         ? t + Math.min(accountBalances[a.id] || 0,
             rothUnseasonedTotal(rothLayers[a.id], year, a.owner === 'spouse' ? spouseAge : myAge)) : t, 0)),
@@ -11234,7 +11325,7 @@ const describePlanPatch = (state, patch) => {
     getACAApplicablePercentage, calculateACAPremiumCredit,
     getSpendingPhaseMultiplier, scoreRothStrategy, afterTaxLegacyValue, rowAtOrLast,
     deflateProjections, realDeflator, REAL_DOLLAR_FIELDS, claimingComparison,
-    sanitizePlanInputs, rothLayersFor, rothDrawFromLayers, rothUnseasonedTotal,
+    sanitizePlanInputs, rothLayersFor, rothDrawFromLayers, rothUnseasonedTotal, ordinaryBracketRoom,
     ROTH_CONVERSION_SEASONING_YEARS,
     reindexSSForInflation, compareClaimingScenarios,
     conversionCostComponents, conversionCostAudit, topMarginalBracket,

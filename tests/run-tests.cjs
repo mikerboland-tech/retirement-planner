@@ -12860,6 +12860,156 @@ section('P108 — the Roth 5-year conversion clock');
     ok(engine.REAL_DOLLAR_FIELDS.includes(f), `${f} is on the today’s-dollars whitelist`));
 }
 
+section('P109 — bracket-fill withdrawal order');
+
+{
+  // Bracket management as a withdrawal order: spend pre-tax up to the top of a
+  // chosen bracket, then the rest of the priority order, and past the bracket
+  // only when nothing else can fund the year. The room is sized by the same
+  // rules the Roth-conversion fill uses, and the solver draws against the same
+  // room as the executor.
+  const MFJ = engine.FEDERAL_TAX_BRACKETS_2026.married_joint;
+  const SD = engine.STANDARD_DEDUCTION_2026.married_joint;
+  const room = (bracket, o = {}) => engine.ordinaryBracketRoom(bracket, { filingStatus: 'married_joint', inflationFactor: 1, taxIndexYears: 0, ...o });
+
+  // ── the room itself ──────────────────────────────────────────────────────
+  eq(room('12%'), MFJ[1].max + SD, 'with nothing booked, the 12% room is the bracket top grossed up by the deduction', 0.01);
+  eq(room('22%'), MFJ[2].max + SD, 'and likewise for 22%', 0.01);
+  eq(room('12%', { ordinaryBase: 50000 }), MFJ[1].max + SD - 50000, 'income already booked comes straight off the room', 0.01);
+  eq(room('12%', { ordinaryBase: 500000 }), 0, 'a year already past the bracket has no room');
+  eq(room('12%', { ordinaryBase: 500000, capitalGains: 0 }), 0, 'and never a negative one');
+  eq(room('37%'), 0, 'the top bracket has no top, so no room');
+  eq(room('99%'), 0, 'an unknown label is no room rather than a guess');
+  eq(room(''), 0, 'and so is no label');
+  {
+    // Social Security shrinks the room: each pre-tax dollar drags up to $0.85
+    // of SS into income, and the answer must land ON the bracket top, not a
+    // taxable-SS amount past it (the one-pass mistake the conversion fill made).
+    const ss = 40000;
+    const r = room('12%', { totalSocialSecurity: ss });
+    lt(r, MFJ[1].max + SD, 'Social Security shrinks the room');
+    const ssT = engine.calculateSocialSecurityTaxableAmount(ss, r, 'married_joint');
+    const taxable = r + ssT - engine.getFederalDeduction('married_joint', 0, 0.03, { magi: r + ssT });
+    eq(taxable, MFJ[1].max, 'and the room lands ordinary taxable income exactly on the bracket top', 0.5);
+  }
+  {
+    // Capital gains stack above ordinary income and take no bracket room, but
+    // they are in the Pub 915 base, so with SS present they still cost some.
+    eq(room('12%', { capitalGains: 20000 }), MFJ[1].max + SD, 'gains alone consume no ordinary room', 0.01);
+    // (At $40k of SS the room already has 85% of it taxed, so gains change
+    // nothing; at $80k there is still SS left to drag in.)
+    eq(room('12%', { capitalGains: 20000, totalSocialSecurity: 40000 }), room('12%', { totalSocialSecurity: 40000 }),
+      'with SS already 85% taxable, gains still cost no room', 0.01);
+    lt(room('12%', { capitalGains: 20000, totalSocialSecurity: 80000 }), room('12%', { totalSocialSecurity: 80000 }),
+      'but while SS is still partly untaxed they raise taxable SS and cost a little');
+  }
+
+  // ── end to end ───────────────────────────────────────────────────────────
+  // A couple retiring at 62 with a large pre-tax pile, a Roth, and a
+  // Roth-first order: the worst order there is, unless the bracket is filled.
+  // No brokerage account, so no dividends muddy the tax arithmetic.
+  const pi = { myAge: 62, spouseAge: 60, myRetirementAge: 62, spouseRetirementAge: 60, filingStatus: 'married_joint', state: 'TX',
+    inflationRate: 0.03, desiredRetirementIncome: 200000, legacyAge: 90, myBirthYear: 1964, spouseBirthYear: 1966,
+    mySSClaimAge: 70, spouseSSClaimAge: 70, withdrawalPriority: ['roth', 'brokerage', 'pretax'] };
+  const acct = (id, type, balance) => ({ id, name: type, type, balance, contribution: 0, cagr: 0.05, startAge: 62, stopAge: 62, owner: 'me', contributor: 'me' });
+  const accts = [acct(1, 'traditional_ira', 1500000), acct(2, 'roth_ira', 900000)];
+  const streams = [
+    { id: 1, type: 'social_security', owner: 'me', amount: 40000, startAge: 70, endAge: 90, cola: 0.025 },
+    { id: 2, type: 'social_security', owner: 'spouse', amount: 25000, startAge: 70, endAge: 90, cola: 0.025 },
+  ];
+  const run = (over = {}, a = accts) => computeProjections({ ...pi, ...over }, a, streams, [], [], []);
+  const off = run();
+  const fill = run({ withdrawalBracketFill: '12%' });
+  const y1 = (p) => p.find(r => r.myAge === 62);
+
+  // off: unchanged plans
+  eq(y1(off).bracketFillBracket, '', 'with the setting off the row says so');
+  eq(y1(off).bracketFillDraw, 0, 'and no fill is drawn');
+  eq(y1(off).preTaxWithdrawals, 0, 'Roth-first spends no pre-tax at 62');
+  const legacy = run({ withdrawalBracketFill: undefined });
+  ok(off.every((r, i) => r.federalTax === legacy[i].federalTax && r.rothWithdrawals === legacy[i].rothWithdrawals),
+    'a saved plan without the field projects exactly as before');
+
+  // on: the first year fills to the bracket top and takes the rest from Roth
+  {
+    const r = y1(fill);
+    eq(r.bracketFillBracket, '12%', 'the row names the bracket in force');
+    eq(r.bracketFillRoom, MFJ[1].max + SD, 'the room is the bracket top plus the deduction', 1);
+    eq(r.bracketFillDraw, r.bracketFillRoom, 'spending needs more than the room, so the room is used in full', 1);
+    eq(r.preTaxWithdrawals, r.bracketFillDraw, 'and no pre-tax beyond it', 1);
+    gt(r.rothWithdrawals, 0, 'the rest of the year comes from the Roth');
+    // 10% × 24,800 + 12% × (100,800 − 24,800) = 11,600 — the whole 12% bracket, and not a dollar of 22%.
+    const bracketTax = MFJ[0].max * 0.10 + (MFJ[1].max - MFJ[0].max) * 0.12;
+    eq(r.federalTax, bracketTax, 'federal tax is exactly the filled 12% bracket', 5);
+    lt(Math.abs(r.solverResidual), 100, 'and the solver, drawing against the same room, still lands the year');
+  }
+  // every filled year: never past the room in pass 1, always converged
+  const filledYears = fill.filter(r => r.bracketFillDraw > 0);
+  gt(filledYears.length, 10, 'the fill runs for the whole retirement');
+  ok(filledYears.every(r => r.bracketFillDraw <= r.bracketFillRoom + 1), 'no year draws past its room under the fill');
+  ok(filledYears.every(r => Math.abs(r.solverResidual) < 100), 'every filled year lands its spending target');
+  // it is cheaper: the same spending, less lifetime tax, more left over
+  const lifetimeTax = (p) => p.reduce((s, r) => s + r.totalTax, 0);
+  lt(lifetimeTax(fill), lifetimeTax(off) * 0.8, 'lifetime tax falls by more than a fifth against the Roth-first order');
+  // $200k a year on $2.4M runs dry either way; the fill runs dry later.
+  const dryAge = (p) => { const d = p.find(r => r.totalPortfolio <= 0); return d ? d.myAge : Infinity; };
+  // Nominal balances run LOWER for the first decade — pre-tax draws pay their
+  // tax now where Roth draws defer it — and pull ahead as the deferred bill on
+  // the Roth-first plan's untouched pre-tax pile comes due through RMDs.
+  ok(dryAge(fill) >= dryAge(off), 'and the portfolio lasts at least as long');
+  gt(fill.find(r => r.myAge === 73).totalPortfolio, off.find(r => r.myAge === 73).totalPortfolio * 1.5, 'with half again as much left at 73');
+  // Social Security years: the room shrinks once SS is in the base
+  {
+    const before = fill.find(r => r.myAge === 69), after = fill.find(r => r.myAge === 70);
+    lt(after.bracketFillRoom, before.bracketFillRoom * 1.03, 'once Social Security starts the room shrinks, indexing notwithstanding');
+  }
+
+  // ── past the bracket only when nothing else can pay ──────────────────────
+  {
+    const thin = run({ withdrawalBracketFill: '12%' }, [acct(1, 'traditional_ira', 1500000), acct(2, 'roth_ira', 20000)]);
+    const r = y1(thin);
+    gt(r.preTaxWithdrawals, r.bracketFillRoom + 1000, 'with a Roth too small to cover the year, pre-tax is drawn past the bracket');
+    eq(r.bracketFillDraw, r.bracketFillRoom, 'the fill itself still stops at the room', 1);
+    eq(r.unfundedShortfall, 0, 'and the year is funded rather than left short at the bracket top');
+    lt(Math.abs(r.solverResidual), 100, 'with the solver agreeing');
+  }
+
+  // ── order-neutral when pre-tax already leads ─────────────────────────────
+  {
+    const a = run({ withdrawalPriority: ['pretax', 'roth', 'brokerage'], desiredRetirementIncome: 90000 });
+    const b = run({ withdrawalPriority: ['pretax', 'roth', 'brokerage'], desiredRetirementIncome: 90000, withdrawalBracketFill: '22%' });
+    eq(y1(b).preTaxWithdrawals, y1(a).preTaxWithdrawals, 'pre-tax-first spending inside the room is unchanged by the fill', 1);
+    eq(y1(b).federalTax, y1(a).federalTax, 'and so is its tax', 1);
+  }
+
+  // ── composes with a conversion to a higher bracket ───────────────────────
+  {
+    const both = run({ withdrawalBracketFill: '12%', rothConversionBracket: '22%', rothConversionStartAge: 62, rothConversionEndAge: 69 });
+    const r = y1(both);
+    eq(r.bracketFillDraw, r.bracketFillRoom, 'spending fills the 12% bracket', 1);
+    gt(r.rothConversion, 0, 'and the conversion still finds room above it');
+    // Ordinary income = fill + conversion (the conversion tax is paid from the
+    // Roth, first in the order), and together they reach the 22% top.
+    eq(r.bracketFillDraw + r.rothConversion, MFJ[2].max + SD, 'together they land on the top of the 22% bracket', 50);
+    const same = run({ withdrawalBracketFill: '22%', rothConversionBracket: '22%', rothConversionStartAge: 62, rothConversionEndAge: 69 });
+    // Spending here does not reach the 22% top, so the conversion fills the rest.
+    gt(y1(same).rothConversion, 0, 'a conversion to the SAME bracket converts whatever spending left');
+    eq(y1(same).preTaxWithdrawals + y1(same).rothConversion - y1(same).preTaxWithdrawals + y1(same).bracketFillDraw,
+      MFJ[2].max + SD, 'and the pair still ends on the bracket top', 50);
+  }
+
+  // ── pre-retirement: no fill ──────────────────────────────────────────────
+  {
+    const working = run({ myAge: 58, spouseAge: 56, withdrawalBracketFill: '12%' });
+    const w = working.find(r => r.myAge === 58);
+    eq(w.bracketFillDraw, 0, 'nothing is drawn to fill a bracket while still working');
+    eq(w.bracketFillBracket, '', 'and the row does not claim a fill is in force');
+  }
+
+  ['bracketFillRoom', 'bracketFillDraw'].forEach(f =>
+    ok(engine.REAL_DOLLAR_FIELDS.includes(f), `${f} is on the today’s-dollars whitelist`));
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

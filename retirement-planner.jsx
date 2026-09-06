@@ -668,6 +668,10 @@ const DEFAULT_PERSONAL_INFO = {
   desiredRetirementIncome: 110000,
   inflationRate: 0.03,
   withdrawalPriority: ['pretax', 'brokerage', 'roth'], // Order: first to last
+  // Bracket-fill withdrawal order: '' (off) or a bracket label such as '12%'.
+  // When set, retirement spending comes from pre-tax first up to the top of
+  // that bracket, then follows the priority order with pre-tax held back.
+  withdrawalBracketFill: '',
   charitableGivingPercent: 0, // Percentage of retirement spending donated to charity (enables QCD strategy)
   // Planned Roth conversions: move this much per year from largest pre-tax account to largest Roth account.
   // Conversions are treated as ordinary income in the projection engine (affects taxes and SS taxation).
@@ -1988,7 +1992,7 @@ function FAQTab() {
         },
         {
           q: "What happens if I retire before 59½?",
-          a: "Pre-tax withdrawals (401k, Traditional IRA, 403b) taken before age 59½ normally carry a 10% federal penalty on top of ordinary income tax — IRC §72(t). The projection applies it, and the withdrawal solver grosses up for it, so your spending target is still met (you just deplete the portfolio faster). Three exceptions are modeled: (1) Governmental 457(b) plans are exempt at any age, so 457(b) withdrawals are never penalized. (2) The 'rule of 55' — if you separate from your employer in or after the year you turn 55, distributions from THAT employer's 401(k)/403(b) are exempt; the projection applies this automatically when your retirement age is 55+ and the account type is 401k or 403b. Note it does NOT apply to IRAs, so if you rolled the money to an IRA, enter it as a Traditional IRA and the penalty will correctly apply. (3) A 72(t) SEPP plan — check the box under Withdrawal Priority. Because ages are whole years while the threshold falls mid-year, the year you are 59 is treated as half penalized. Not modeled: exceptions for disability, death, large medical expenses, health insurance while unemployed, first home, education, or birth/adoption; the Roth 5-year conversion clock; and state-level early-distribution penalties such as California's extra 2.5%."
+          a: "Pre-tax withdrawals (401k, Traditional IRA, 403b) taken before age 59½ normally carry a 10% federal penalty on top of ordinary income tax — IRC §72(t). The projection applies it, and the withdrawal solver grosses up for it, so your spending target is still met (you just deplete the portfolio faster). Three exceptions are modeled: (1) Governmental 457(b) plans are exempt at any age, so 457(b) withdrawals are never penalized. (2) The 'rule of 55' — if you separate from your employer in or after the year you turn 55, distributions from THAT employer's 401(k)/403(b) are exempt; the projection applies this automatically when your retirement age is 55+ and the account type is 401k or 403b. Note it does NOT apply to IRAs, so if you rolled the money to an IRA, enter it as a Traditional IRA and the penalty will correctly apply. (3) A 72(t) SEPP plan — check the box under Withdrawal Priority. Because ages are whole years while the threshold falls mid-year, the year you are 59 is treated as half penalized. The Roth 5-year conversion clock is modeled too: converted dollars drawn within five tax years of the conversion, before 59½, carry the same 10% additional tax. Not modeled: exceptions for disability, death, large medical expenses, health insurance while unemployed, first home, education, or birth/adoption; and state-level early-distribution penalties such as California's extra 2.5%."
         },
         {
           q: "What is the standard deduction?",
@@ -2037,7 +2041,7 @@ function FAQTab() {
         },
         {
           q: "Which accounts are withdrawals taken from?",
-          a: "Withdrawals follow the priority order you set in Personal Info (under Withdrawal Priority). The default is: Pre-Tax first, then Brokerage & HSA, then Roth. Pre-tax withdrawals are fully taxable, brokerage withdrawals use a 50% cost basis estimate taxed at capital gains rates, and Roth withdrawals are tax-free. You can drag to reorder the priority — for example, drawing from Roth first to keep taxable income low in early retirement."
+          a: "Withdrawals follow the priority order you set in Personal Info (under Withdrawal Priority). The default is: Pre-Tax first, then Brokerage & HSA, then Roth. Pre-tax withdrawals are fully taxable, brokerage withdrawals use a 50% cost basis estimate taxed at capital gains rates, and Roth withdrawals are tax-free. You can drag to reorder the priority — for example, drawing from Roth first to keep taxable income low in early retirement. The 'Fill a tax bracket' setting under the same heading layers bracket management on top of the order: each retirement year, spending comes from pre-tax first until ordinary taxable income reaches the top of the bracket you chose, then from the rest of the order, and pre-tax is drawn past the bracket only if the other accounts run out. A Roth conversion set to fill a higher bracket picks up from where those withdrawals stop."
         },
         {
           q: "How are expenses dated before I retire handled?",
@@ -2368,7 +2372,7 @@ function FAQTab() {
       items: [
         {
           q: "What are the main limitations of this tool?",
-          a: "This is a comprehensive but simplified planning tool. Key limitations: Uses standard deduction only (no itemized — so the engine doesn't model the 2026 OBBBA changes that capped charitable deductions at 35% for high earners or imposed the 0.5%-of-AGI floor for itemizers; QCDs are modeled separately as an above-the-line exclusion). Most states use simplified flat tax rates (Alabama has a full progressive engine with federal deductibility — other states use flat rate approximations). No tax-loss harvesting, no estate planning, brokerage cost basis defaults to 50% per account but is editable on each account (actual depends on your purchase history), no contribution limit enforcement, no tracking of Roth contribution-vs-earnings basis or the 5-year conversion clock, and no state-level early-distribution penalties. Features included: the 10% early withdrawal penalty before 59.5 with the 457(b), rule-of-55 and 72(t) SEPP exceptions, the age-65 additional standard deduction and the 2025-2028 OBBBA senior deduction, annual taxable dividends on brokerage balances, configurable withdrawal priority ordering, Roth conversion modeling (fixed-amount and bracket-fill, with smart defaults for bridge-year windows), QCD optimization, FICA payroll taxes on earned income, tiered capital gains rates (0%/15%/20%), NIIT surtax, Medicare IRMAA surcharges (Part B + Part D based on MAGI), Social Security earnings test for early claimers still working, survivor modeling with SS benefit inheritance, one-time events (expenses and income), healthcare expense modeling (pre-65, Medicare, long-term care), charitable giving, non-liquid asset tracking, full-plan SS claiming age analysis with CAGR sensitivity and Monte Carlo stress testing, sequence-of-returns stress testing with historical scenarios, and dedicated Monte Carlo simulation. Results are estimates for planning purposes only."
+          a: "This is a comprehensive but simplified planning tool. Key limitations: Uses standard deduction only (no itemized — so the engine doesn't model the 2026 OBBBA changes that capped charitable deductions at 35% for high earners or imposed the 0.5%-of-AGI floor for itemizers; QCDs are modeled separately as an above-the-line exclusion). Most states use simplified flat tax rates (Alabama has a full progressive engine with federal deductibility — other states use flat rate approximations). No tax-loss harvesting, no estate planning, brokerage cost basis defaults to 50% per account but is editable on each account (actual depends on your purchase history), no contribution limit enforcement, and no state-level early-distribution penalties. Roth accounts are tracked in layers (contributions, each year's conversion, earnings) so the 5-year conversion clock and the ordering rules for Roth withdrawals are applied. Features included: the 10% early withdrawal penalty before 59.5 with the 457(b), rule-of-55 and 72(t) SEPP exceptions, the age-65 additional standard deduction and the 2025-2028 OBBBA senior deduction, annual taxable dividends on brokerage balances, configurable withdrawal priority ordering with an optional bracket-fill order, Roth conversion modeling (fixed-amount and bracket-fill, with smart defaults for bridge-year windows), QCD optimization, FICA payroll taxes on earned income, tiered capital gains rates (0%/15%/20%), NIIT surtax, Medicare IRMAA surcharges (Part B + Part D based on MAGI), Social Security earnings test for early claimers still working, survivor modeling with SS benefit inheritance, one-time events (expenses and income), healthcare expense modeling (pre-65, Medicare, long-term care), charitable giving, non-liquid asset tracking, full-plan SS claiming age analysis with CAGR sensitivity and Monte Carlo stress testing, sequence-of-returns stress testing with historical scenarios, and dedicated Monte Carlo simulation. Results are estimates for planning purposes only."
         },
         {
           q: "Should I use this for actual financial decisions?",
@@ -2930,6 +2934,11 @@ function IncomeStreamsTab({ detailLevel, sectionVisibility, setDetailLevel, setS
                     {row.unfundedShortfall > 0 && (
                       <div className="text-xs text-red-400" title="Spending this year's portfolio could not fund — the plan is short by this much">
                         short {formatCurrency(row.unfundedShortfall)}
+                      </div>
+                    )}
+                    {row.bracketFillBracket && row.bracketFillDraw > 0 && row.bracketFillDraw >= row.bracketFillRoom - 1 && (
+                      <div className="text-xs text-slate-400" title={`Pre-tax withdrawals stopped at the top of the ${row.bracketFillBracket} bracket; the rest of the year's spending came from the accounts next in your withdrawal order`}>
+                        {row.bracketFillBracket} bracket: {formatCurrency(row.bracketFillDraw)}
                       </div>
                     )}
                   </td>
@@ -11050,6 +11059,26 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
       }
     }
 
+    // ── A bracket-fill order that leaves the conversion nothing to fill ───────
+    // Withdrawals run before the conversion and the conversion prices its room
+    // from what they already booked, so a fill bracket at or above the
+    // conversion bracket means the conversion converts nothing in any year
+    // spending reaches the bracket top.
+    {
+      const fill = info.withdrawalBracketFill || '';
+      const conv = info.rothConversionBracket || '';
+      const rank = { '10%': 0, '12%': 1, '22%': 2, '24%': 3, '32%': 4, '35%': 5, '37%': 6 };
+      if (fill && conv && rank[fill] !== undefined && rank[conv] !== undefined && rank[fill] >= rank[conv]) {
+        warnings.push({
+          type: 'bracket_fill_vs_conversion',
+          severity: 'info',
+          message: `Spending fills the ${fill} bracket from pre-tax, but the Roth conversion is set to fill only the ${conv} bracket.`,
+          details: ['Withdrawals come first and the conversion fills whatever bracket room they leave, so in any year spending reaches the top of the ' + fill + ' bracket the conversion has nothing left to fill and converts $0.'],
+          action: 'Set the conversion to a higher bracket than the withdrawal fill, or lower the withdrawal fill, so each has its own room.'
+        });
+      }
+    }
+
     // ── A pre-tax floor that spending will fight ──────────────────────────────
     // The floor now holds spending back, but if pre-tax is FIRST in the priority
     // order the two settings are working against each other every single year.
@@ -11101,7 +11130,7 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
     personalInfo.spouseRetirementAge, personalInfo.filingStatus, personalInfo.legacyAge,
     personalInfo.myLifeExpectancy, personalInfo.spouseLifeExpectancy,
     personalInfo.healthcareModel, personalInfo.pre65HealthcareAnnual,
-    personalInfo.rothConversionPreTaxFloor, personalInfo.withdrawalPriority,
+    personalInfo.rothConversionPreTaxFloor, personalInfo.withdrawalPriority, personalInfo.withdrawalBracketFill,
     accounts.map(a => [a.id, a.type, a.owner, a.stopAge, a.contribution]),
     incomeStreams.map(s => [s.id, s.type, s.owner, s.endAge, s.amount]),
   ]);
@@ -11839,7 +11868,9 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
             })}
           </div>
           <p className="text-xs text-slate-500 mt-3">
-            <strong className="text-slate-400">Current strategy:</strong> After mandatory RMDs, withdraw from {
+            <strong className="text-slate-400">Current strategy:</strong> After mandatory RMDs, {
+              localInfo.withdrawalBracketFill ? `fill the ${localInfo.withdrawalBracketFill} bracket from Pre-Tax, then withdraw from ` : 'withdraw from '
+            }{
               (localInfo.withdrawalPriority || ['pretax', 'brokerage', 'roth']).map((item, idx, arr) => {
                 const labels = { pretax: 'Pre-Tax', brokerage: 'Brokerage', roth: 'Roth' };
                 if (idx === arr.length - 1) return labels[item];
@@ -11848,6 +11879,32 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
               }).join('')
             } last.
           </p>
+
+          {/* Bracket-fill withdrawal order */}
+          <div className="mt-4 p-3 bg-slate-800/40 border border-slate-700/50 rounded-lg">
+            <label className="block text-sm text-slate-300 mb-1">
+              Fill a tax bracket with pre-tax money first
+            </label>
+            <select
+              value={localInfo.withdrawalBracketFill || ''}
+              onChange={e => handleChange('withdrawalBracketFill', e.target.value)}
+              className={inputStyle}
+            >
+              <option value="">Off — follow the order above only</option>
+              <option value="10%">Up to the top of the 10% bracket</option>
+              <option value="12%">Up to the top of the 12% bracket</option>
+              <option value="22%">Up to the top of the 22% bracket</option>
+              <option value="24%">Up to the top of the 24% bracket</option>
+            </select>
+            <p className="text-xs text-slate-500 mt-2">
+              Bracket management: each retirement year, spending comes from pre-tax accounts until
+              ordinary taxable income reaches the top of the chosen bracket, and only then from the
+              order above. Pre-tax is drawn past the bracket only if the other accounts cannot cover
+              the year. Turn this on when Roth or brokerage sits ahead of pre-tax in the order — it
+              stops cheap bracket room going unused while tax-free money is spent. A Roth conversion
+              set to fill a higher bracket picks up from where these withdrawals leave off.
+            </p>
+          </div>
 
           {/* §72(t) early withdrawal penalty — only relevant if you retire before 59½ */}
           {(localInfo.myRetirementAge < 60 || localInfo.spouseRetirementAge < 60) && (
@@ -17501,7 +17558,8 @@ function PlanSummaryReport({ projections, personalInfo, accounts, incomeStreams,
   const statValue = { fontSize: 17, fontWeight: 700, margin: '2px 0 0' };
 
   const priorityLabels = { pretax: 'Pre-Tax', brokerage: 'Brokerage & HSA', roth: 'Roth' };
-  const priority = (pi.withdrawalPriority || ['pretax', 'brokerage', 'roth']).map(k => priorityLabels[k] || k).join(' → ');
+  const priority = (pi.withdrawalBracketFill ? `Pre-Tax to the top of the ${pi.withdrawalBracketFill} bracket, then ` : '')
+    + (pi.withdrawalPriority || ['pretax', 'brokerage', 'roth']).map(k => priorityLabels[k] || k).join(' → ');
   // Three modes to describe. Testing for a bracket and then an amount reported
   // "None planned" for an IRMAA-tier strategy — while the Key Outcomes section
   // of the same report correctly showed $1.3M converted, because that reads the
@@ -19483,6 +19541,7 @@ function BreakingPointReport({ projections, personalInfo, accounts, incomeStream
         </table>
         <p style={note}>
           The order here is your withdrawal priority playing out —{' '}
+          {pi.withdrawalBracketFill ? `pre-tax to the top of the ${pi.withdrawalBracketFill} bracket, then ` : ''}
           {(pi.withdrawalPriority || ['pretax', 'brokerage', 'roth'])
             .map(k => ({ pretax: 'pre-tax', brokerage: 'brokerage & HSA', roth: 'Roth' })[k] || k).join(' → ')}
           {' '}— against required distributions, which force pre-tax money out whether or not it is wanted.
