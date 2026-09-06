@@ -170,6 +170,35 @@ function runMonteCarlo(jobId, payload) {
   // same ~70 sequences (which burned ~15x the compute for identical results).
   const totalSims = isHistorical ? historicalStartYears.length : simSettings.numSimulations;
 
+  // ── RETURN MODEL ────────────────────────────────────────────────────────────
+  // 'perAccount': each account is drawn around its OWN CAGR with the volatility
+  // that CAGR implies (engine.accountReturnModel), all moved by one market shock
+  // per year. 'portfolio' (the original): one mean and one volatility for every
+  // account, the plan's CAGRs ignored in every simulated year. Absent → the
+  // original, so callers that never heard of the setting get what they had.
+  const perAccount = simSettings.returnModel === 'perAccount';
+  const returnModel = perAccount
+    ? E.accountReturnModel(accounts, { stockVol: simSettings.stdDev ?? E.RETURN_MODEL_DEFAULTS.stockVol })
+    : null;
+  // Opening balances as weights for the single blended figure reported as the
+  // year's marketReturn (guardrail floors and the row read it). An
+  // approximation — balances drift — used for reporting only, never for growth.
+  const acctWeights = {};
+  if (perAccount) {
+    const tot = accounts.reduce((t, a) => t + Math.max(0, a.balance || 0), 0);
+    accounts.forEach(a => { acctWeights[a.id] = tot > 0 ? Math.max(0, a.balance || 0) / tot : 1 / Math.max(1, accounts.length); });
+  }
+  const perAccountYear = (retFor) => {
+    const accountReturns = {};
+    let blended = 0;
+    accounts.forEach(a => {
+      const r = retFor(returnModel.byId[a.id]);
+      accountReturns[a.id] = r;
+      blended += r * acctWeights[a.id];
+    });
+    return { accountReturns, blended };
+  };
+
   const BATCH = 50;
   const numPathsToStore = 100;
   const results = [];
@@ -198,7 +227,27 @@ function runMonteCarlo(jobId, payload) {
     for (let y = walkUpYears; y < yearsFromCurrent; y++) {
       const idx = y - walkUpYears;
       if (isHistorical) {
-        overrides[y] = { marketReturn: histSeq[idx].blendedReturn, inflation: histSeq[idx].cpi };
+        if (perAccount) {
+          // Each account replays the year's stock and bond returns in the
+          // blend its CAGR implies — a bond-heavy account lives through 1966
+          // as a bond-heavy account, not as the 70/30 fund every account used
+          // to be.
+          const h = histSeq[idx];
+          const yr = perAccountYear(m => m.weight * h.stockReturn + (1 - m.weight) * h.bondReturn);
+          overrides[y] = { marketReturn: yr.blended, inflation: h.cpi, accountReturns: yr.accountReturns };
+        } else {
+          overrides[y] = { marketReturn: histSeq[idx].blendedReturn, inflation: histSeq[idx].cpi };
+        }
+      } else if (perAccount) {
+        // One standard-normal shock for the year, scaled by each account's own
+        // volatility around its own arithmetic mean.
+        const z = randomNormalMC(0, 1);
+        const yr = perAccountYear(m => m.mean + m.sigma * z);
+        overrides[y] = {
+          marketReturn: yr.blended,
+          inflation:    randomNormalMC(simSettings.inflationMean, simSettings.inflationStdDev),
+          accountReturns: yr.accountReturns,
+        };
       } else {
         overrides[y] = {
           marketReturn: randomNormalMC(simSettings.meanReturn, simSettings.stdDev),
@@ -412,6 +461,10 @@ function runMonteCarlo(jobId, payload) {
       successRate,
       successCount,
       totalSimulations: totalSims,
+      returnModel: perAccount ? 'perAccount' : 'portfolio',
+      // The per-account figures the sims were drawn from, so the tab can show
+      // exactly what each account was simulated as.
+      accountReturnModel: returnModel ? { byId: returnModel.byId, portfolio: returnModel.portfolio } : null,
       startAge: simSettings.startAge,
       startingPortfolio,
       longevityEnabled: longevity,

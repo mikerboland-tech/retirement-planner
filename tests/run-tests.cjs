@@ -13010,6 +13010,139 @@ section('P109 — bracket-fill withdrawal order');
     ok(engine.REAL_DOLLAR_FIELDS.includes(f), `${f} is on the today’s-dollars whitelist`));
 }
 
+section('P110 — Monte Carlo: each account at its own rate');
+
+{
+  // The simulation used to shock every account with one random return around
+  // one mean, ignoring the plan's own account CAGRs in every simulated year.
+  // Now each account is drawn around its own CAGR with the volatility that
+  // CAGR implies on a stock/bond line, moved together by one shock a year.
+  const D = engine.RETURN_MODEL_DEFAULTS;
+
+  // ── the line the CAGRs are read against ──────────────────────────────────
+  eq(engine.impliedStockWeight(D.stockCagr), 1, 'the stock CAGR reads as all stock');
+  eq(engine.impliedStockWeight(D.bondCagr), 0, 'the bond CAGR reads as all bond');
+  approx(engine.impliedStockWeight((D.stockCagr + D.bondCagr) / 2), 0.5, 'halfway between reads as half and half', 1e-9);
+  eq(engine.impliedStockWeight(0.12), 1, 'a CAGR above the stock end is clamped to all stock');
+  eq(engine.impliedStockWeight(0.01), 0, 'and one below the bond end to all bond');
+  eq(engine.impliedStockWeight(undefined), 0, 'a missing CAGR reads as all bond rather than NaN');
+  approx(engine.blendVolatility(1), D.stockVol, 'all-stock volatility is the stock fund’s', 1e-12);
+  approx(engine.blendVolatility(0), D.bondVol, 'all-bond volatility is the bond fund’s', 1e-12);
+  approx(engine.blendVolatility(0.5), Math.sqrt(0.25 * D.stockVol ** 2 + 0.25 * D.bondVol ** 2),
+    'a 50/50 blend with uncorrelated assets has the quadrature volatility', 1e-12);
+  lt(engine.blendVolatility(0.5), (D.stockVol + D.bondVol) / 2, 'which is less than the average of the two — the diversification the blend earns');
+
+  // ── the model over a plan ────────────────────────────────────────────────
+  {
+    const m = engine.accountReturnModel([
+      { id: 1, cagr: 0.07, balance: 300000 }, { id: 2, cagr: 0.035, balance: 100000 } ], { stockVol: 0.18 });
+    approx(m.byId[1].sigma, 0.18, 'the stock volatility can be overridden', 1e-12);
+    approx(m.byId[1].mean, 0.07 + 0.18 * 0.18 / 2, 'each account is drawn around its CAGR plus σ²/2, so it compounds at its CAGR', 1e-12);
+    // the one input scales the whole line: bonds move to 0.05 × 0.18 / 0.15
+    approx(m.byId[2].sigma, D.bondVol * 0.18 / D.stockVol, 'and the bond volatility scales with it', 1e-12);
+    approx(m.byId[2].mean, 0.035 + m.byId[2].sigma ** 2 / 2, 'the bond account likewise, around a much smaller σ', 1e-12);
+    eq(engine.accountReturnModel([{ id: 9, cagr: 0.035, balance: 1 }], { stockVol: 0 }).byId[9].sigma, 0, 'and zero switches every account’s volatility off');
+    approx(m.portfolio.weight, 0.75, 'the portfolio blend is balance-weighted', 1e-12);
+    approx(m.portfolio.cagr, (0.07 * 3 + 0.035) / 4, 'and so is its CAGR', 1e-12);
+  }
+
+  // ── the engine honours a per-account override ────────────────────────────
+  {
+    const s = baseScenario({ myAge: 60, myRetirementAge: 70, legacyAge: 75 });
+    s.accts = [
+      { id: 1, name: 'A', type: '401k', balance: 100000, contribution: 0, cagr: 0.06, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me' },
+      { id: 2, name: 'B', type: 'roth_ira', balance: 100000, contribution: 0, cagr: 0.06, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me' },
+      { id: 3, name: 'C', type: 'brokerage', balance: 100000, contribution: 0, cagr: 0.06, startAge: 60, stopAge: 60, owner: 'me', contributor: 'me' },
+    ];
+    const ov = [];
+    ov[1] = { marketReturn: 0.10, inflation: 0.03, accountReturns: { 1: 0.20, 2: -0.10 } };
+    const p = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR, { yearOverrides: ov });
+    const y0 = p[0].perAccountBalances, y1 = p[1].perAccountBalances;
+    const bal = (row, id) => (Array.isArray(row) ? row.find(x => x.id === id) : row[id]);
+    const b0 = bal(y0, 1), b1 = bal(y1, 1);
+    ok(b0 !== undefined && b1 !== undefined, 'per-account balances are on the row');
+    const g = (id) => { const a = bal(y0, id), b = bal(y1, id); const va = typeof a === 'number' ? a : (a.balance ?? a.value ?? a.endBalance); const vb = typeof b === 'number' ? b : (b.balance ?? b.value ?? b.endBalance); return vb / va - 1; };
+    approx(g(1), 0.20, 'account A grows at its own override', 0.01);
+    approx(g(2), -0.10, 'account B shrinks at its own', 0.01);
+    approx(g(3), 0.10, 'and an account without an entry falls back to the year’s marketReturn', 0.01);
+    approx(p[1].marketReturn, 0.10, 'the row reports the blended marketReturn it was given', 1e-9);
+    // An override without the map still moves everything together.
+    const ov2 = []; ov2[1] = { marketReturn: 0.10, inflation: 0.03 };
+    const q = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR, { yearOverrides: ov2 });
+    const gq = (id) => { const a = bal(q[0].perAccountBalances, id), b = bal(q[1].perAccountBalances, id); const va = typeof a === 'number' ? a : (a.balance ?? a.value ?? a.endBalance); const vb = typeof b === 'number' ? b : (b.balance ?? b.value ?? b.endBalance); return vb / va - 1; };
+    approx(gq(1), 0.10, 'the original single-shock override form is unchanged', 0.01);
+  }
+
+  // ── the worker, end to end ───────────────────────────────────────────────
+  {
+    const vmMod = require('vm'), fs = require('fs'), pathMod = require('path');
+    const ROOT = pathMod.resolve(__dirname, '..');
+    const runJob = (type, payload) => {
+      const sb = { console, Math, Date, JSON, Object, Array, Number, String, Boolean, Set, Map,
+        Infinity, NaN, isNaN, parseFloat, parseInt, Error, RegExp, Promise, undefined, URLSearchParams, __out: [] };
+      sb.self = sb; sb.globalThis = sb; sb.location = { search: '?v=test' };
+      sb.importScripts = (spec) => vmMod.runInContext(fs.readFileSync(pathMod.join(ROOT, spec.split('?')[0]), 'utf8'), sb);
+      sb.postMessage = (m) => { if (m.type !== 'progress') sb.__out.push(m); };
+      vmMod.createContext(sb);
+      vmMod.runInContext(fs.readFileSync(pathMod.join(ROOT, 'worker.js'), 'utf8'), sb);
+      sb.onmessage({ data: { jobId: 1, type, payload } });
+      const err = sb.__out.find(m => m.type === 'error');
+      if (err) throw new Error(type + ': ' + err.error);
+      return sb.__out.find(m => m.type === 'result').data;
+    };
+    const s = baseScenario({ myAge: 60, spouseAge: 58, myBirthYear: TODAY_YEAR - 60, spouseBirthYear: TODAY_YEAR - 58,
+      myRetirementAge: 62, spouseRetirementAge: 62, legacyAge: 90, state: 'Florida', desiredRetirementIncome: 90000 });
+    // Two accounts on very different rates — the case the single-mean model got wrong.
+    s.accts = [
+      { id: 1, name: 'stock 401k', type: '401k', balance: 1600000, contribution: 0, contributionGrowth: 0, cagr: 0.07, startAge: 60, stopAge: 62, owner: 'me', contributor: 'me' },
+      { id: 2, name: 'bond brokerage', type: 'brokerage', balance: 1000000, contribution: 0, contributionGrowth: 0, cagr: 0.035, startAge: 60, stopAge: 62, owner: 'me', contributor: 'me' },
+    ];
+    s.streams = [{ id: 2, name: 'SS', type: 'social_security', amount: 42000, startAge: 67, endAge: 95, cola: 0.025, owner: 'me', pia: 3500, todaysDollars: true }];
+    const common = { personalInfo: s.pi, accounts: s.accts, incomeStreams: s.streams, assets: [], oneTimeEvents: [], recurringExpenses: [] };
+    const base = { startAge: 62, numSimulations: 5, method: 'random', meanReturn: 0.07, inflationMean: 0.03, inflationStdDev: 0 };
+    const det = computeProjections(s.pi, s.accts, s.streams, [], [], [], TODAY_YEAR);
+    const detEnd = det[det.length - 1].totalPortfolio;
+
+    // Zero volatility: the per-account model collapses onto the plan itself.
+    const per0 = runJob('monteCarlo', { ...common, simSettings: { ...base, returnModel: 'perAccount', stdDev: 0 } });
+    eq(per0.returnModel, 'perAccount', 'the result names the model it ran');
+    ok(per0.accountReturnModel && per0.accountReturnModel.byId[2], 'and carries the per-account figures it drew from');
+    approx(per0.percentile50, detEnd, 'at zero volatility the per-account median IS the straight-line plan', 0.02);
+    // The single-mean model at the same "7%" does not: it grows the bond account at 7%.
+    const one0 = runJob('monteCarlo', { ...common, simSettings: { ...base, returnModel: 'portfolio', stdDev: 0 } });
+    eq(one0.returnModel, 'portfolio', 'the original model is still available');
+    gt(one0.percentile50, detEnd * 1.15, 'the single-mean model at 7% grows the bond account at 7% too, and overshoots the plan by well over 15%');
+    // Absent setting → the original behaviour, exactly.
+    const legacy = runJob('monteCarlo', { ...common, simSettings: { ...base, stdDev: 0 } });
+    eq(legacy.returnModel, 'portfolio', 'a caller that never heard of the setting gets the original model');
+    approx(legacy.percentile50, one0.percentile50, 'with identical results', 1e-9);
+
+    // With volatility, the bond-heavy plan spreads less than the stock-heavy one.
+    // Compared on a plan neither can sink ($40k on $2.6M), so the fan is about
+    // returns and not about how many paths ran dry, and in absolute dollars,
+    // since the bond plan's median is the smaller base.
+    const funded = { ...common, personalInfo: { ...s.pi, desiredRetirementIncome: 40000 } };
+    const spread = (accts) => {
+      const d = runJob('monteCarlo', { ...funded, accounts: accts, simSettings: { ...base, returnModel: 'perAccount', numSimulations: 400, stdDev: 0.15 } });
+      return d.percentile95 - d.percentile5;
+    };
+    const allStock = s.accts.map(a => ({ ...a, cagr: 0.07 }));
+    const allBond = s.accts.map(a => ({ ...a, cagr: 0.035 }));
+    lt(spread(allBond), spread(allStock) * 0.5, 'an all-bond plan fans out far less than an all-stock one — it used to fan out identically');
+
+    // Historical mode: each account replays its own blend, and the pooled
+    // result is still ordered and finite.
+    const hist = runJob('monteCarlo', { ...common, simSettings: { ...base, returnModel: 'perAccount', method: 'historical', historicalStartYear: 'all', stdDev: 0.15 } });
+    ok(Number.isFinite(hist.percentile50) && hist.percentile5 <= hist.percentile50 && hist.percentile50 <= hist.percentile95,
+      'historical replay per account produces ordered, finite percentiles');
+    const histBond = runJob('monteCarlo', { ...funded, accounts: allBond, simSettings: { ...base, returnModel: 'perAccount', method: 'historical', historicalStartYear: 'all' } });
+    const histStock = runJob('monteCarlo', { ...funded, accounts: allStock, simSettings: { ...base, returnModel: 'perAccount', method: 'historical', historicalStartYear: 'all' } });
+    lt(histBond.percentile95 - histBond.percentile5, (histStock.percentile95 - histStock.percentile5) * 0.6,
+       'and an all-bond plan replays history with a far narrower fan than an all-stock one — they used to be the same 70/30 fund');
+    lt(histBond.percentile50, histStock.percentile50, 'and a lower median, as bonds do');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

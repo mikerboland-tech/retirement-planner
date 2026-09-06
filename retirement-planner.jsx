@@ -41,6 +41,7 @@ const {
   calculateHealthcareExpenses, calculateRecurringExpenses, healthcareCostsModeled,
   GOV_PENSION_SYSTEMS, estimateGovernmentPension, estimateFersSupplement,
   HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
+  accountReturnModel, RETURN_MODEL_DEFAULTS,
   computeProjections, compareClaimingScenarios,
   conversionCostComponents, conversionCostAudit, topMarginalBracket,
   computeTaxReturn, buildTaxSituation, compareTraditionalVsRoth,
@@ -2214,7 +2215,7 @@ function FAQTab() {
         },
         {
           q: "What are the limitations of Monte Carlo?",
-          a: "The simulation assumes returns follow a normal (bell curve) distribution, but real markets have 'fat tails' - extreme events happen more often than the model predicts. It also assumes returns are independent year-to-year (no momentum or mean reversion). Sequence of returns risk may be underestimated. Use results as a guide, not a guarantee."
+          a: "The simulation assumes returns follow a normal (bell curve) distribution, but real markets have 'fat tails' - extreme events happen more often than the model predicts. It also assumes returns are independent year-to-year (no momentum or mean reversion). Sequence of returns risk may be underestimated. By default each account is simulated around its own CAGR with the volatility that rate implies on a stock/bond line (7% reads as all stock, 3.5% as all bond), and one market shock a year moves every account together — accounts get no diversification credit against each other, which is the conservative reading. Switch to 'One return for every account' to test a single return assumption instead. Use results as a guide, not a guarantee."
         },
         {
           q: "How should I use the percentile bands?",
@@ -6737,8 +6738,12 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
   const [simSettings, setSimSettings] = useState({
     numSimulations: 1000,
     startAge: defaultRetirementAge,
+    // 'perAccount': each account is simulated around its OWN CAGR with the
+    // volatility that CAGR implies, all moved by one market shock a year.
+    // 'portfolio': one mean and one volatility for every account (the original).
+    returnModel: 'perAccount',
     meanReturn: 0.07,
-    stdDev: 0.15,
+    stdDev: 0.15,   // portfolio model: every account's volatility; per-account model: the stock fund's
     inflationMean: 0.03,
     inflationStdDev: 0.01,
     method: 'random',     // 'random' or 'historical'
@@ -6788,6 +6793,10 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
   //    run. deterministicEnd is the plan's own ending portfolio put on WHICHEVER
   //    basis is currently on screen, so the comparison is like for like.
   const impliedCagr = simSettings.meanReturn - (simSettings.stdDev * simSettings.stdDev) / 2;
+  const perAccountModel = simSettings.returnModel === 'perAccount';
+  // The same helper the worker draws from, so the table shows exactly what
+  // each account is simulated as.
+  const acctModel = perAccountModel ? accountReturnModel(accounts || [], { stockVol: simSettings.stdDev }) : null;
   // Balance-weighted, because a 4% brokerage next to a 7% 401(k) is not a 5.5%
   // plan — it is a 7% plan with a rounding error attached.
   const planCagr = (() => {
@@ -6930,7 +6939,8 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
         {simSettings.method === 'historical' && (
           <p className="mt-3 text-xs text-slate-400 leading-relaxed bg-sky-500/5 border border-sky-500/20 rounded-lg p-3">
             Historical replay uses the actual stock, bond and inflation figures for each year, so
-            your Expected Return, Volatility and Inflation settings above do <span className="text-slate-200">not</span> apply here.
+            your Expected Return, Volatility and Inflation settings above do <span className="text-slate-200">not</span> apply here
+            (with the per-account model, each account still replays the stock/bond blend its CAGR implies).
             That usually makes it look kinder than random mode: a 70/30 blend starting in 1966 —
             through stagflation and two crashes — still averaged about 5% a year after inflation,
             because the sequence runs into the 1980s and 90s. Random mode uses whatever real return
@@ -6942,6 +6952,11 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
           <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4 p-4 bg-slate-900/50 rounded-lg border border-slate-700">
             <div>
               <label className="block text-sm text-slate-400 mb-1">Stock / Bond Mix</label>
+              {perAccountModel ? (
+                <p className="text-xs text-slate-400 bg-slate-800 border border-slate-700 rounded px-3 py-2">
+                  Set per account: each replays the stock/bond blend its CAGR implies (see the table above).
+                </p>
+              ) : (
               <select
                 value={simSettings.assetMix}
                 onChange={e => setSimSettings({...simSettings, assetMix: Number(e.target.value)})}
@@ -6956,7 +6971,8 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
                 <option value={0.4}>40 / 60</option>
                 <option value={0.3}>30 / 70 (conservative)</option>
               </select>
-              <p className="text-xs text-slate-500 mt-1">Asset allocation for the historical replay.</p>
+              )}
+              {!perAccountModel && <p className="text-xs text-slate-500 mt-1">Asset allocation for the historical replay.</p>}
             </div>
             <div>
               <label className="block text-sm text-slate-400 mb-1">Starting Year</label>
@@ -7028,6 +7044,35 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
           </div>
         </div>
         
+        {/* Return model */}
+        <div className="mb-4">
+          <label className="block text-sm text-slate-400 mb-2">How each account is simulated</label>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <button
+              onClick={() => setSimSettings({ ...simSettings, returnModel: 'perAccount' })}
+              className={`p-3 rounded-lg border text-left transition-all ${perAccountModel ? 'border-amber-500 bg-amber-500/10' : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'}`}
+            >
+              <div className="font-medium text-slate-100 text-sm">Each account at its own rate <span className="text-xs text-amber-400 ml-1">recommended</span></div>
+              <p className="text-xs text-slate-400 mt-1">
+                Every account is centred on the CAGR you gave it, with the volatility that rate implies
+                on a stock/bond line, and one market shock a year moves them all together. A bond-heavy
+                brokerage stays bond-heavy; the median agrees with the plan by construction.
+              </p>
+            </button>
+            <button
+              onClick={() => setSimSettings({ ...simSettings, returnModel: 'portfolio' })}
+              className={`p-3 rounded-lg border text-left transition-all ${!perAccountModel ? 'border-amber-500 bg-amber-500/10' : 'border-slate-700 bg-slate-800/50 hover:border-slate-600'}`}
+            >
+              <div className="font-medium text-slate-100 text-sm">One return for every account</div>
+              <p className="text-xs text-slate-400 mt-1">
+                A single mean and volatility applied to every account alike; your account CAGRs are
+                ignored in the simulated years. Simpler, and the right choice when you want to test
+                a return assumption that differs from the plan's.
+              </p>
+            </button>
+          </div>
+        </div>
+
         {/* Market Parameters */}
         <div className={`grid grid-cols-2 md:grid-cols-5 gap-4 mb-4 ${simSettings.method === 'historical' ? 'opacity-50 pointer-events-none' : ''}`}>
           {simSettings.method === 'historical' && (
@@ -7048,6 +7093,7 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
               <option value={5000}>5,000</option>
             </select>
           </div>
+          {!perAccountModel && (
           <div>
             <label className="block text-sm text-slate-400 mb-1">Mean Return (%)</label>
             <input 
@@ -7082,8 +7128,9 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
               </button>
             )}
           </div>
+          )}
           <div>
-            <label className="block text-sm text-slate-400 mb-1">Volatility/Std Dev (%)</label>
+            <label className="block text-sm text-slate-400 mb-1">{perAccountModel ? 'Stock Volatility (%)' : 'Volatility/Std Dev (%)'}</label>
             <input 
               type="number" 
               step="0.5"
@@ -7091,6 +7138,11 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
               onChange={e => setSimSettings({...simSettings, stdDev: Number(e.target.value) / 100})}
               className="w-full bg-slate-800 border border-slate-600 rounded px-3 py-2 text-slate-100"
             />
+            {perAccountModel && (
+              <div className="text-[11px] text-slate-500 mt-1 leading-snug">
+                the all-stock end of the line; bonds at {(RETURN_MODEL_DEFAULTS.bondVol * 100).toFixed(0)}%, uncorrelated
+              </div>
+            )}
           </div>
           <div>
             <label className="block text-sm text-slate-400 mb-1">Inflation Mean (%)</label>
@@ -7113,6 +7165,50 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
             />
           </div>
         </div>
+        {acctModel && (accounts || []).length > 0 && (
+          <div className="mb-4 p-3 bg-slate-900/50 rounded-lg border border-slate-700">
+            <div className="text-xs text-slate-400 mb-2">
+              What each account is simulated as. A CAGR of {(RETURN_MODEL_DEFAULTS.stockCagr * 100).toFixed(1)}% reads as all stock,
+              {' '}{(RETURN_MODEL_DEFAULTS.bondCagr * 100).toFixed(1)}% as all bond, and rates between as the blend; volatility follows the blend.
+              {simSettings.method === 'historical' && ' In historical mode each account replays the real stock and bond returns in that blend.'}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="text-xs w-full">
+                <thead>
+                  <tr className="text-slate-500">
+                    <th className="text-left py-1 pr-3 font-medium">Account</th>
+                    <th className="text-right py-1 px-2 font-medium">CAGR</th>
+                    <th className="text-right py-1 px-2 font-medium">Reads as</th>
+                    <th className="text-right py-1 px-2 font-medium">Volatility</th>
+                    {simSettings.method !== 'historical' && <th className="text-right py-1 pl-2 font-medium">Drawn around</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(accounts || []).map(a => {
+                    const m = acctModel.byId[a.id];
+                    if (!m) return null;
+                    return (
+                      <tr key={a.id} className="border-t border-slate-800">
+                        <td className="py-1 pr-3 text-slate-300">{a.name}</td>
+                        <td className="py-1 px-2 text-right text-slate-300">{(m.cagr * 100).toFixed(1)}%</td>
+                        <td className="py-1 px-2 text-right text-slate-400">{Math.round(m.weight * 100)}% stock / {Math.round((1 - m.weight) * 100)}% bond</td>
+                        <td className="py-1 px-2 text-right text-slate-400">{(m.sigma * 100).toFixed(1)}%</td>
+                        {simSettings.method !== 'historical' && <td className="py-1 pl-2 text-right text-slate-400">{(m.mean * 100).toFixed(2)}%</td>}
+                      </tr>
+                    );
+                  })}
+                  <tr className="border-t border-slate-700 text-slate-500">
+                    <td className="py-1 pr-3">Balance-weighted</td>
+                    <td className="py-1 px-2 text-right">{(acctModel.portfolio.cagr * 100).toFixed(1)}%</td>
+                    <td className="py-1 px-2 text-right">{Math.round(acctModel.portfolio.weight * 100)}% stock</td>
+                    <td className="py-1 px-2 text-right">{(acctModel.portfolio.sigma * 100).toFixed(1)}%</td>
+                    {simSettings.method !== 'historical' && <td className="py-1 pl-2 text-right">{(acctModel.portfolio.mean * 100).toFixed(2)}%</td>}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
         {/* Dynamic spending guardrails (Guyton-Klinger style) */}
         <div className="flex flex-wrap items-center gap-4 mb-4 p-3 bg-slate-800/40 border border-slate-700/50 rounded-lg">
           <label className="flex items-center gap-2 cursor-pointer">

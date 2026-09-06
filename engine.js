@@ -3632,6 +3632,68 @@ const HISTORICAL_RETURNS = [
   { year: 2024, stock:  0.2502, bond:  0.0098, cpi:  0.0290 },
 ];
 
+// ── PER-ACCOUNT RETURN MODEL ─────────────────────────────────────────────────
+// The Monte Carlo used to shock every account with ONE random return drawn
+// around ONE mean, so a 4% bond-heavy brokerage and an 8% all-stock 401(k)
+// were both simulated as the same 7% / 15% fund. The plan's own account CAGRs
+// were ignored in every simulated year, and the median disagreed with the
+// straight-line projection for a reason that had nothing to do with risk.
+//
+// This model keeps each account centred on its own CAGR and gives it the
+// volatility that CAGR implies. The only extra assumption is the two-asset
+// line the CAGRs are read against: a stock fund and a bond fund with a
+// long-run CAGR and volatility each. An account's CAGR places it on that line
+// (7% → all stock, 3.5% → all bond, 5.25% → half and half; outside the line it
+// is clamped), and its volatility is the blend's, with the assets' historical
+// near-zero correlation. One market shock per simulated year moves every
+// account together, scaled by its own volatility — accounts are not
+// diversified against each other, which is the conservative reading.
+//
+// The arithmetic mean each account is drawn around is its CAGR plus σ²/2, so
+// the simulation compounds at the plan's own rate (see the Monte Carlo tab's
+// note on arithmetic vs geometric means).
+const RETURN_MODEL_DEFAULTS = Object.freeze({
+  stockCagr: 0.07, stockVol: 0.15, bondCagr: 0.035, bondVol: 0.05, correlation: 0,
+});
+const impliedStockWeight = (cagr, a = RETURN_MODEL_DEFAULTS) => {
+  const span = a.stockCagr - a.bondCagr;
+  if (!(span > 0)) return 1;
+  const w = ((Number(cagr) || 0) - a.bondCagr) / span;
+  return Math.max(0, Math.min(1, w));
+};
+const blendVolatility = (w, a = RETURN_MODEL_DEFAULTS) =>
+  Math.sqrt(Math.max(0,
+    w * w * a.stockVol * a.stockVol
+    + (1 - w) * (1 - w) * a.bondVol * a.bondVol
+    + 2 * w * (1 - w) * (a.correlation || 0) * a.stockVol * a.bondVol));
+// → { byId: { [id]: { cagr, weight, sigma, mean } }, portfolio: { weight, sigma, cagr, mean } }
+// portfolio figures are balance-weighted, for the single blended number a
+// guardrail or a chart needs.
+const accountReturnModel = (accts, overrides = {}) => {
+  const a = { ...RETURN_MODEL_DEFAULTS, ...overrides };
+  // One volatility input scales the whole line: a stock volatility of 10%
+  // (two-thirds of the default) brings the bond fund to two-thirds of its
+  // default too, and zero switches every account's volatility off — which is
+  // what a user typing 0 means, and what the zero-volatility tests rely on.
+  if (overrides.stockVol !== undefined && overrides.bondVol === undefined && RETURN_MODEL_DEFAULTS.stockVol > 0) {
+    a.bondVol = RETURN_MODEL_DEFAULTS.bondVol * (Number(overrides.stockVol) || 0) / RETURN_MODEL_DEFAULTS.stockVol;
+  }
+  const byId = {};
+  let bal = 0, wSum = 0, cSum = 0;
+  (accts || []).forEach(acct => {
+    const cagr = Number(acct.cagr) || 0;
+    const weight = impliedStockWeight(cagr, a);
+    const sigma = blendVolatility(weight, a);
+    byId[acct.id] = { cagr, weight, sigma, mean: cagr + sigma * sigma / 2 };
+    const b = Math.max(0, Number(acct.balance) || 0);
+    bal += b; wSum += b * weight; cSum += b * cagr;
+  });
+  const pw = bal > 0 ? wSum / bal : 1;
+  const pc = bal > 0 ? cSum / bal : a.stockCagr;
+  const ps = blendVolatility(pw, a);
+  return { byId, portfolio: { weight: pw, sigma: ps, cagr: pc, mean: pc + ps * ps / 2 }, assumptions: a };
+};
+
 // Build a sequence of N years of returns starting at the given calendar year.
 // For an N-year retirement starting in startYear, returns the N consecutive
 // historical returns. If we'd run past the end of the dataset, we wrap by
@@ -8997,15 +9059,24 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // funds that were withdrawn mid-year (rather than crediting nothing).
     // Note: RMDs were already computed on post-contribution balances above
     // (consistent with prior behavior — IRS technically uses prior year-end).
-    // Per-year market-return override (Monte Carlo / historical sequence). When
-    // set, ALL accounts grow at the same marketReturn for this year — matching
-    // the prior worker MC's behavior of a single market shock per sim-year.
+    // Per-year market-return override (Monte Carlo / historical sequence).
+    // An override may carry accountReturns — one return per account id, from
+    // the per-account return model — in which case each account grows at its
+    // own; an account without an entry, or an override without the map, grows
+    // at the single marketReturn (the original one-shock-for-everything form,
+    // which the stress test and the sequence-risk replay still use).
     const yrOverride = (yearOverrides && yearOverrides[yearsFromNow]) || null;
+    const overrideRateFor = (account) => {
+      if (!yrOverride) return account.cagr || 0;
+      const per = yrOverride.accountReturns;
+      const r = per && per[account.id];
+      return (typeof r === 'number' && Number.isFinite(r)) ? r : yrOverride.marketReturn;
+    };
     accts.forEach(account => {
       // Clamp at -1: a return below -100% is impossible for a long-only position
       // and would make Math.pow(1+r, 0.5) NaN, which then silently counts as a
       // surviving portfolio in the Monte Carlo success tally.
-      const growthRate = Math.max(-1, yrOverride ? yrOverride.marketReturn : (account.cagr || 0));
+      const growthRate = Math.max(-1, overrideRateFor(account));
       const halfGrowth = Math.pow(1 + growthRate, 0.5);
       accountBalances[account.id] = Math.max(0, accountBalances[account.id]) * halfGrowth;
     });
@@ -10493,7 +10564,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Clamp at -1: a return below -100% is impossible for a long-only position
       // and would make Math.pow(1+r, 0.5) NaN, which then silently counts as a
       // surviving portfolio in the Monte Carlo success tally.
-      const growthRate = Math.max(-1, yrOverride ? yrOverride.marketReturn : (account.cagr || 0));
+      const growthRate = Math.max(-1, overrideRateFor(account));
       const halfGrowth = Math.pow(1 + growthRate, 0.5);
       accountBalances[account.id] = Math.max(0, accountBalances[account.id]) * halfGrowth;
     });
@@ -11340,6 +11411,7 @@ const describePlanPatch = (state, patch) => {
 
     // ── Historical sequences + main projection entry point ────────────────
     HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
+    RETURN_MODEL_DEFAULTS, impliedStockWeight, blendVolatility, accountReturnModel,
     getPlanningHorizonYears,
     realReturn, inflateToAge, deflateToToday, coastFire,
     LIMIT_402G, LIMIT_415C, LIMIT_IRA, LIMIT_HSA_SELF, LIMIT_HSA_FAMILY,
