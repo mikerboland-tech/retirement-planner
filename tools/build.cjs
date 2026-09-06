@@ -115,5 +115,76 @@ for (const file of ['index.html', 'mobile.html']) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The Content-Security-Policy meta tag.
+//
+// GitHub Pages sends no headers, so the policy is a <meta> at the top of each
+// page. Scripts are allowed from the site itself and from Blob URLs (how the
+// app's code runs — see index.html), never inline and never through eval; the
+// page's own static inline scripts are allowed by SHA-256 hash, computed here
+// from their exact text. Any edit to an inline script changes its hash, and a
+// test regenerates this block and fails the suite if the HTML is stale.
+// connect-src names the one host the AI assistant talks to.
+// ---------------------------------------------------------------------------
+const crypto = require('crypto');
+const CSP_OPEN = '<!-- BEGIN GENERATED CSP (tools/build.cjs) -->';
+const CSP_CLOSE = '<!-- END GENERATED CSP -->';
+const CSP_CONNECT_HOSTS = ['https://api.anthropic.com'];
+function inlineScriptHashes(html) {
+  const out = [];
+  const re = /<script(\s[^>]*)?>([\s\S]*?)<\/script>/g;
+  // Comments first: a "<script>" mentioned in prose inside an HTML comment
+  // would otherwise open a bogus block that swallows the next real script,
+  // whose hash then never appears — and the browser blocks it.
+  const stripped = html.replace(/<!--[\s\S]*?-->/g, '');
+  let m;
+  while ((m = re.exec(stripped))) {
+    const attrs = m[1] || '';
+    if (/\bsrc\s*=/.test(attrs)) continue;          // external — covered by 'self'
+    if (/\btype\s*=\s*["']text\/babel/.test(attrs)) continue; // never executed as-is
+    const body = m[2];
+    if (!body.trim()) continue;
+    out.push("'sha256-" + crypto.createHash('sha256').update(body, 'utf8').digest('base64') + "'");
+  }
+  return out;
+}
+function cspFor(html) {
+  const hashes = inlineScriptHashes(html);
+  return [
+    "default-src 'self'",
+    "script-src 'self' blob: " + hashes.join(' '),
+    "worker-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "connect-src 'self' " + CSP_CONNECT_HOSTS.join(' '),
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join('; ');
+}
+function cspBlock(html) {
+  return CSP_OPEN + '\n  <meta http-equiv="Content-Security-Policy" content="' + cspFor(html) + '">\n  ' + CSP_CLOSE;
+}
+for (const file of ['index.html', 'mobile.html']) {
+  const htmlPath = path.join(ROOT, file);
+  if (!fs.existsSync(htmlPath)) continue;
+  const html = fs.readFileSync(htmlPath, 'utf8');
+  const a = html.indexOf(CSP_OPEN), b = html.indexOf(CSP_CLOSE);
+  if (a === -1 || b === -1) {
+    console.error(`  FAIL  ${file}: CSP markers not found`);
+    failed = true;
+    continue;
+  }
+  const next = html.slice(0, a) + cspBlock(html) + html.slice(b + CSP_CLOSE.length);
+  if (next !== html) {
+    fs.writeFileSync(htmlPath, next);
+    console.log(`  wrote Content-Security-Policy into ${file} (${inlineScriptHashes(html).length} inline script hashes)`);
+  } else {
+    console.log(`  Content-Security-Policy in ${file} already current`);
+  }
+}
+module.exports = { inlineScriptHashes, cspFor, CSP_OPEN, CSP_CLOSE, CSP_CONNECT_HOSTS };
+
 if (failed) process.exit(1);
 console.log('\nDone. Commit the .compiled.js files alongside the source.');

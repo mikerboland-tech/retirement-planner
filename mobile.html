@@ -2,6 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <!-- Content Security Policy — see index.html for the reasoning. Generated
+       by tools/build.cjs; must be the first thing in <head>. -->
+  <!-- BEGIN GENERATED CSP (tools/build.cjs) -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' blob: 'sha256-3DWjAzuqsVSLuea8895XZrlacqVYfTtOSEyDIuZsQNs=' 'sha256-4BwXYwbl6cLzApN/fAzuHQq+QYhCEDf5AT9/BLBSX6U=' 'sha256-Jh7tKM+p6nJg/H9UQXd+3XlgUikHSZtETWz2HijyZhs=' 'sha256-wuJJENNnybVY+HebEod36XkxjajBXi/d3rfMVwxsjqw=' 'sha256-5lHOGe7/Td4Q8wInsClfQHA1pxCBTmTyQcwQpfQIxOY='; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://api.anthropic.com; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <!-- END GENERATED CSP -->
   <!-- viewport-fit=cover lets the page extend under iPhone's notch/safe areas; our CSS uses env() to inset properly -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
   <meta name="theme-color" content="#020617">
@@ -18,7 +23,7 @@
        index.html so desktop and mobile cache-bust to the same version. The body
        IIFE below loads engine.js dynamically using this value (and awaits it
        before touching window.PlannerEngine), so there is no second place to edit. -->
-  <script>window.APP_VERSION = '2.24.0';</script>
+  <script>window.APP_VERSION = '2.25.0';</script>
   <!-- BEGIN GENERATED THEME TOKENS (tools/build.cjs from theme.js) -->
   <script>tailwind.config = { theme: { extend: { colors: {
       "slate": {"50":"rgb(var(--c-slate-50) / <alpha-value>)","100":"rgb(var(--c-slate-100) / <alpha-value>)","200":"rgb(var(--c-slate-200) / <alpha-value>)","300":"rgb(var(--c-slate-300) / <alpha-value>)","400":"rgb(var(--c-slate-400) / <alpha-value>)","500":"rgb(var(--c-slate-500) / <alpha-value>)","600":"rgb(var(--c-slate-600) / <alpha-value>)","700":"rgb(var(--c-slate-700) / <alpha-value>)","800":"rgb(var(--c-slate-800) / <alpha-value>)","900":"rgb(var(--c-slate-900) / <alpha-value>)","950":"rgb(var(--c-slate-950) / <alpha-value>)"},
@@ -146,8 +151,11 @@
     <div class="loading">Loading…</div>
   </div>
 
-  <script type="text/babel" data-type="module" data-presets="env,react" data-plugins="">
+  <script>
     // Provide React globals so the JSX file (which has no imports) can find them.
+    // A plain script, not text/babel: Babel's in-page runner executes such
+    // blocks as injected inline scripts, which the Content-Security-Policy
+    // forbids. There is no JSX here, so it never needed transforming.
     const { useState, useEffect, useMemo, useCallback, useRef, memo, Fragment } = React;
     window.useState = useState;
     window.useEffect = useEffect;
@@ -195,13 +203,13 @@
           presets: ['env', 'react']
         }).code;
 
-        // Evaluate the transformed code — it defines MobilePlanner at the top scope.
-        // We use new Function to keep it out of strict mode and avoid eval restrictions.
-        const factory = new Function('React', 'useState', 'useEffect', 'useMemo', 'useCallback', 'useRef', 'memo', 'Fragment', transformed + '\n; return MobilePlanner;');
-        const MobilePlanner = factory(
-          React, React.useState, React.useEffect, React.useMemo,
-          React.useCallback, React.useRef, React.memo, React.Fragment
-        );
+        // Run the transformed code as a classic script from a Blob URL — not
+        // new Function, which the Content-Security-Policy forbids. It defines
+        // MobilePlanner at the top scope; the hooks it uses are on window.
+        const blobUrl = URL.createObjectURL(new Blob([transformed], { type: 'text/javascript' }));
+        try { await loadScript(blobUrl); } finally { URL.revokeObjectURL(blobUrl); }
+        const MobilePlanner = window.MobilePlanner || (typeof globalThis.MobilePlanner !== 'undefined' ? globalThis.MobilePlanner : undefined);
+        if (typeof MobilePlanner === 'undefined') throw new Error('Mobile app code ran but MobilePlanner is undefined.');
 
         // Top-level error boundary. Without this, any render error in any tab
         // whitescreens the whole app. Catches render/lifecycle errors only —
