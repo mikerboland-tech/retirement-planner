@@ -43,6 +43,7 @@ const {
   GOV_PENSION_SYSTEMS, estimateGovernmentPension, estimateFersSupplement,
   HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
   accountReturnModel, RETURN_MODEL_DEFAULTS,
+  annuityPayoutRate, annuityExclusionRatio, annuityIsQLAC, QLAC_PREMIUM_LIMIT_2025, QLAC_MAX_START_AGE, ANNUITY_PRICING,
   computeProjections, compareClaimingScenarios,
   conversionCostComponents, conversionCostAudit, topMarginalBracket,
   computeTaxReturn, buildTaxSituation, compareTraditionalVsRoth,
@@ -2216,6 +2217,10 @@ function FAQTab() {
           a: "90%+ is considered excellent - your plan can handle most bad scenarios. 75-90% is good but consider having flexibility. 50-75% suggests moderate risk - consider adjustments. Below 50% indicates high risk of running out of money. Many financial planners target 80-90% success rates."
         },
         {
+          q: "Can I model an annuity, a SPIA or a QLAC?",
+          a: "Yes — add an income stream of type Annuity. For one you already own, enter the annual payout and its start and end ages. For one the plan should buy, also enter the premium, the purchase age and where the money comes from: pre-tax money moves as an untaxed rollover and every payment is ordinary income (a deferred start makes it a QLAC, so the premium leaves the RMD base until payments begin and the QLAC premium limit and the age-85 start rule are checked); brokerage money is sold at the account's cost basis with the gain taxed in the purchase year, and each payment then excludes a return-of-premium share until the premium is recovered (the Pub 939 exclusion ratio); Roth money moves tax-free. The modal quotes a representative payout rate for the shape you entered — single or joint life, immediate or deferred, level or escalating — priced from the app's own life table; use it as a starting point and replace it with your insurer's figure. A joint-and-survivor election continues the payout for the surviving spouse at the rate you choose."
+        },
+        {
           q: "How is long-term care modeled?",
           a: "Two ways. The plan itself uses a fixed window: under Personal Info → Long-Term Care, 'Default' bills 28 months of assisted living at the Genworth 2024 median for each of you in the final months before your life expectancy, 'Custom' lets you set the months and monthly cost, and 'Stress' gives whichever of you is planned to live longer five years of nursing-home care and the other none — the worst realistic case. Long-term care is billed whichever healthcare model you chose. The Monte Carlo tab can instead draw a different episode for every run ('Vary long-term care too'): about 70% of people need some paid care after 65, a typical episode is two years, one in five runs past five years, and the setting is drawn between home care, assisted living and a nursing home. The results then show how often care was drawn, what it cost, and the plan's success rate with care against without — the number that says whether long-term care insurance is worth its premium for you."
         },
@@ -2941,6 +2946,11 @@ function IncomeStreamsTab({ detailLevel, sectionVisibility, setDetailLevel, setS
                     {row.unfundedShortfall > 0 && (
                       <div className="text-xs text-red-400" title="Spending this year's portfolio could not fund — the plan is short by this much">
                         short {formatCurrency(row.unfundedShortfall)}
+                      </div>
+                    )}
+                    {row.annuityPremium > 0 && (
+                      <div className="text-xs text-violet-300" title="Premium paid this year to buy an annuity — it leaves the funding account, not the spending target">
+                        {formatCurrency(row.annuityPremium)} annuity premium
                       </div>
                     )}
                     {row.bracketFillBracket && row.bracketFillDraw > 0 && row.bracketFillDraw >= row.bracketFillRoom - 1 && (
@@ -11221,6 +11231,42 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
       }
     }
 
+    // ── Annuity purchases the rules or the balances will not allow ───────────
+    (incomeStreams || []).forEach(st => {
+      if (!st || st.type !== 'annuity' || !(st.premium > 0) || !st.fundedFrom || st.fundedFrom === 'none') return;
+      const purchaseAge = st.purchaseAge ?? st.startAge;
+      if (annuityIsQLAC(st)) {
+        if (st.premium > QLAC_PREMIUM_LIMIT_2025) warnings.push({
+          type: 'qlac_over_limit', severity: 'warning',
+          message: `${st.name || 'Your QLAC'} has a ${formatCurrency(st.premium)} premium, above the ${formatCurrency(QLAC_PREMIUM_LIMIT_2025)} limit on qualifying longevity annuity contracts.`,
+          details: ['Only premiums up to the limit are excluded from the RMD base; the projection removes the whole premium.'],
+          action: 'Lower the premium to the limit, or split the purchase across years.'
+        });
+        if (st.startAge > QLAC_MAX_START_AGE) warnings.push({
+          type: 'qlac_late_start', severity: 'warning',
+          message: `${st.name || 'Your QLAC'} starts paying at ${st.startAge}, but a QLAC must begin by ${QLAC_MAX_START_AGE}.`,
+          details: ['Payments deferred past 85 fall outside the QLAC rules.'],
+          action: `Set the start age to ${QLAC_MAX_START_AGE} or earlier.`
+        });
+      }
+      const typeOk = st.fundedFrom === 'pretax' ? (a) => ['401k', '403b', '457b', 'traditional_ira', 'sep_ira', 'simple_ira'].includes(a.type)
+        : st.fundedFrom === 'roth' ? (a) => String(a.type).startsWith('roth')
+        : (a) => a.type === 'brokerage';
+      const available = (accounts || []).filter(typeOk).reduce((t, a) => t + (a.balance || 0), 0);
+      if (available <= 0) warnings.push({
+        type: 'annuity_no_source', severity: 'warning',
+        message: `${st.name || 'An annuity'} is to be bought from ${st.fundedFrom === 'pretax' ? 'pre-tax' : st.fundedFrom} money at ${purchaseAge}, but the plan has no such account.`,
+        details: ['The purchase will fund nothing and the payout will be scaled to zero.'],
+        action: 'Choose the account type that will pay the premium, or mark the annuity as already owned.'
+      });
+      if (st.startAge < purchaseAge) warnings.push({
+        type: 'annuity_starts_before_purchase', severity: 'warning',
+        message: `${st.name || 'An annuity'} starts paying at ${st.startAge} but is bought at ${purchaseAge}.`,
+        details: ['Payments before the purchase are not paid.'],
+        action: 'Set the start age at or after the purchase age.'
+      });
+    });
+
     // ── A bracket-fill order that leaves the conversion nothing to fill ───────
     // Withdrawals run before the conversion and the conversion prices its room
     // from what they already booked, so a fill bracket at or above the
@@ -16766,7 +16812,7 @@ const INCOME_TYPES = [
   { value: 'pension', label: 'Pension' },
   { value: 'business', label: 'Business Income' },
   { value: 'rental', label: 'Rental Income' },
-  { value: 'annuity', label: 'Annuity' },
+  { value: 'annuity', label: 'Annuity (SPIA, QLAC, deferred)' },
   { value: 'other', label: 'Other Income' }
 ];
 
@@ -17027,7 +17073,7 @@ function IncomeModal({ editingIncome, personalInfo, incomeStreams = [], onClose,
         <h3 className="text-xl font-bold text-slate-100 mb-6">{editingIncome ? 'Edit Income Stream' : 'Add Income Stream'}</h3>
         <div className="space-y-4">
           <div><label className={labelStyle}>Income Name</label><input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className={inputStyle} /></div>
-          <div><label className={labelStyle}>Income Type</label><select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})} className={inputStyle}>{INCOME_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
+          <div><label className={labelStyle}>Income Type</label><select value={formData.type} onChange={e => { const v = e.target.value; setFormData({...formData, type: v, ...(v === 'annuity' && !editingIncome ? { cola: 0 } : {})}); }} className={inputStyle}>{INCOME_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
           <div><label className={labelStyle}>Owner</label><select value={formData.owner} onChange={e => setFormData({...formData, owner: e.target.value})} className={inputStyle}><option value="me">Me</option><option value="spouse">Spouse</option>{formData.type !== 'social_security' && <option value="joint">Joint (continues for the survivor)</option>}</select>
             {formData.owner === 'joint' && (
               <p className="text-xs text-slate-500 mt-1 leading-relaxed">
@@ -17185,7 +17231,78 @@ function IncomeModal({ editingIncome, personalInfo, incomeStreams = [], onClose,
               about the pension, made years before anyone runs a survivor
               projection, and hiding the field until the toggle was flipped meant
               it could not be recorded when it was actually decided. */}
-          {formData.type === 'pension' && personalInfo.hasSpouse && (
+          {formData.type === 'annuity' && (() => {
+            const funded = formData.fundedFrom || 'none';
+            const buys = funded !== 'none' && (formData.premium || 0) > 0;
+            const purchaseAge = formData.purchaseAge || formData.startAge;
+            const joint = !!formData.survivorBenefit;
+            const rate = annuityPayoutRate({ purchaseAge, startAge: formData.startAge, joint, cola: formData.cola || 0 });
+            const estimate = Math.round((formData.premium || 0) * rate);
+            const isQlac = buys && funded === 'pretax' && formData.startAge > purchaseAge;
+            const overCap = isQlac && formData.premium > QLAC_PREMIUM_LIMIT_2025;
+            const lateStart = isQlac && formData.startAge > QLAC_MAX_START_AGE;
+            const exRatio = buys && funded !== 'pretax' && formData.amount > 0
+              ? annuityExclusionRatio(formData.premium, formData.amount, formData.startAge, joint) : null;
+            return (
+              <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg space-y-3">
+                <div className="text-sm text-slate-300">The purchase</div>
+                <p className="text-xs text-slate-500">
+                  Leave the premium at zero for an annuity you already own. Enter a premium and a funding source and
+                  the projection <em>buys</em> it: the premium leaves that account type at the purchase age and the
+                  payout above starts at the start age.
+                </p>
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className={labelStyle}>Premium</label>
+                    <input type="number" value={formData.premium || 0} onChange={e => setFormData({ ...formData, premium: Math.max(0, Number(e.target.value) || 0) })} className={inputStyle} />
+                  </div>
+                  <div>
+                    <label className={labelStyle}>Purchase age</label>
+                    <input type="number" value={purchaseAge || ''} onChange={e => setFormData({ ...formData, purchaseAge: Number(e.target.value) || undefined })} className={inputStyle} />
+                  </div>
+                  <div>
+                    <label className={labelStyle}>Paid from</label>
+                    <select value={funded} onChange={e => setFormData({ ...formData, fundedFrom: e.target.value })} className={inputStyle}>
+                      <option value="none">Already owned</option>
+                      <option value="pretax">Pre-tax (IRA/401k)</option>
+                      <option value="brokerage">Brokerage</option>
+                      <option value="roth">Roth</option>
+                    </select>
+                  </div>
+                </div>
+                {buys && (
+                  <div className="text-xs text-slate-400 space-y-1">
+                    <div>
+                      A representative quote for this shape — bought at {purchaseAge}, paying from {formData.startAge}
+                      {joint ? ', joint life' : ', single life'}{formData.cola > 0 ? `, ${(formData.cola * 100).toFixed(1)}% escalating` : ''} —
+                      is about <span className="text-slate-200 font-medium">{(rate * 100).toFixed(1)}%</span> of premium a year:{' '}
+                      <span className="text-slate-200 font-medium">{formatCurrency(estimate)}</span>/yr.
+                      {' '}<button type="button" onClick={() => setFormData({ ...formData, amount: estimate })} className="text-amber-400 underline decoration-dotted hover:text-amber-300">use it</button>
+                      {' '}or enter your insurer's quote above. Priced from this app's life table at a {(ANNUITY_PRICING.rate * 100).toFixed(1)}% rate with a {(ANNUITY_PRICING.load * 100).toFixed(0)}% load — an estimate, not a quote.
+                    </div>
+                    {funded === 'pretax' && (
+                      <div>
+                        {isQlac
+                          ? <>Pre-tax money with a deferred start makes this a <span className="text-slate-200">QLAC</span>: the premium leaves the RMD base until payments begin, and payments are ordinary income.
+                              {overCap && <span className="text-amber-400"> The premium is above the {formatCurrency(QLAC_PREMIUM_LIMIT_2025)} QLAC limit.</span>}
+                              {lateStart && <span className="text-amber-400"> A QLAC must start paying by {QLAC_MAX_START_AGE}.</span>}</>
+                          : <>Bought from pre-tax money: the rollover is not taxed, and every payment is ordinary income, like a pension.</>}
+                      </div>
+                    )}
+                    {funded === 'brokerage' && (
+                      <div>Bought from brokerage: the account's cost basis sets the gain realized in the purchase year.
+                        {exRatio !== null && <> About <span className="text-slate-200">{(exRatio * 100).toFixed(0)}%</span> of each payment is a tax-free return of premium until the premium is recovered (Pub 939 exclusion ratio), then payments are fully taxable.</>}</div>
+                    )}
+                    {funded === 'roth' && (
+                      <div>Bought from Roth money: the premium moves tax-free.
+                        {exRatio !== null && <> About <span className="text-slate-200">{(exRatio * 100).toFixed(0)}%</span> of each payment is treated as return of premium until it is recovered.</>}</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+          {(formData.type === 'pension' || formData.type === 'annuity') && personalInfo.filingStatus === 'married_joint' && (
             <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg space-y-3">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input

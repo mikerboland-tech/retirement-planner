@@ -13270,6 +13270,127 @@ section('P111 — long-term care: the stress case, the sampled episode, and the 
   }
 }
 
+section('P112 — annuities: the purchase, the tax, the survivor, and the quote');
+
+{
+  const E = engine;
+  // ── the representative quote ─────────────────────────────────────────────
+  const spia65 = E.annuityPayoutRate({ purchaseAge: 65, startAge: 65 });
+  ok(spia65 > 0.062 && spia65 < 0.078, `a 65-year-old immediate annuity quotes near 7% (${(spia65 * 100).toFixed(2)}%)`);
+  const qlac = E.annuityPayoutRate({ purchaseAge: 65, startAge: 85 });
+  ok(qlac > 0.40 && qlac < 0.65, `a 65-to-85 deferred contract quotes several times that (${(qlac * 100).toFixed(1)}%)`);
+  lt(E.annuityPayoutRate({ purchaseAge: 65, startAge: 65, joint: true }), spia65, 'joint life pays less than single life');
+  lt(E.annuityPayoutRate({ purchaseAge: 65, startAge: 65, cola: 0.02 }), spia65, 'an escalating payout starts lower');
+  gt(E.annuityPayoutRate({ purchaseAge: 75, startAge: 75 }), spia65, 'buying later pays more per dollar');
+  gt(E.annuityPayoutRate({ purchaseAge: 65, startAge: 75 }), E.annuityPayoutRate({ purchaseAge: 65, startAge: 70 }), 'and deferring longer pays more');
+  eq(E.annuityPayoutRate({ purchaseAge: 65, startAge: 60 }), spia65, 'a start before the purchase is read as immediate');
+
+  // ── the exclusion ratio ──────────────────────────────────────────────────
+  {
+    const r = E.annuityExclusionRatio(200000, 14000, 65);
+    const yrs = E.lifeExpectancyAt(65);
+    approx(r, 200000 / (14000 * yrs), 'exclusion ratio = premium ÷ (payout × expectancy at the start age)', 1e-9);
+    eq(E.annuityExclusionRatio(0, 14000, 65), 0, 'no premium, nothing excluded');
+    eq(E.annuityExclusionRatio(1e9, 14000, 65), 1, 'and never more than the whole payment');
+  }
+  // ── what counts as a purchase, and a QLAC ────────────────────────────────
+  eq(E.annuityPurchaseOf({ type: 'annuity', amount: 1000, startAge: 70 }), null, 'an annuity without a premium is income already owned');
+  eq(E.annuityPurchaseOf({ type: 'annuity', premium: 100000, fundedFrom: 'none', startAge: 70 }), null, "and so is one marked 'already owned'");
+  eq(E.annuityPurchaseOf({ type: 'annuity', premium: 100000, fundedFrom: 'pretax', startAge: 70 }).purchaseAge, 70, 'purchase age defaults to the start age');
+  ok(E.annuityIsQLAC({ type: 'annuity', premium: 100000, fundedFrom: 'pretax', purchaseAge: 65, startAge: 85 }), 'pre-tax money with a deferred start is a QLAC');
+  ok(!E.annuityIsQLAC({ type: 'annuity', premium: 100000, fundedFrom: 'pretax', purchaseAge: 65, startAge: 65 }), 'an immediate one from an IRA is not');
+  ok(!E.annuityIsQLAC({ type: 'annuity', premium: 100000, fundedFrom: 'brokerage', purchaseAge: 65, startAge: 85 }), 'nor is a deferred one from after-tax money');
+
+  // ── end to end ───────────────────────────────────────────────────────────
+  const pi = { myAge: 64, spouseAge: 64, myRetirementAge: 65, spouseRetirementAge: 65, filingStatus: 'married_joint', state: 'TX', inflationRate: 0.03,
+    desiredRetirementIncome: 80000, legacyAge: 92, myBirthYear: TODAY_YEAR - 64, spouseBirthYear: TODAY_YEAR - 64, mySSClaimAge: 67, spouseSSClaimAge: 67,
+    healthcareModel: 'none', ltcModel: 'none', myLifeExpectancy: 92, spouseLifeExpectancy: 92 };
+  const acct = (id, type, balance, extra = {}) => ({ id, name: type, type, balance, contribution: 0, cagr: 0.05, startAge: 64, stopAge: 64, owner: 'me', contributor: 'me', ...extra });
+  const accts = [acct(1, 'traditional_ira', 1000000), acct(2, 'brokerage', 600000, { costBasisPercent: 0.5 })];
+  const ss = { id: 1, type: 'social_security', owner: 'me', amount: 36000, startAge: 67, endAge: 95, cola: 0.025 };
+  const run = (extraStreams, over = {}) => computeProjections({ ...pi, ...over }, accts, [ss, ...extraStreams], [], [], [], TODAY_YEAR);
+  const at = (p, a) => p.find(r => r.myAge === a);
+  const base = run([]);
+
+  // A QLAC: $200k out of the IRA at 65, $100k a year from 85.
+  {
+    const p = run([{ id: 2, name: 'QLAC', type: 'annuity', owner: 'me', amount: 100000, startAge: 85, endAge: 100, cola: 0, premium: 200000, purchaseAge: 65, fundedFrom: 'pretax' }]);
+    eq(at(p, 65).annuityPremium, 200000, 'the premium is paid at 65');
+    ok((at(p, 65).oneTimeEvents || []).some(e => e.type === 'annuity_purchase'), 'and recorded as an event on the row');
+    eq(at(p, 64).annuityPremium, 0, 'not before');
+    eq(at(p, 66).annuityPremium, 0, 'and only once');
+    approx(at(p, 65).taxableIncome, at(base, 65).taxableIncome, 'the rollover itself is not taxed', 0.02);
+    lt(at(p, 75).rmd, at(base, 75).rmd, 'the RMD at 75 is lower — the premium left the RMD base');
+    eq(at(p, 84).annuityIncome, 0, 'nothing is paid before 85');
+    eq(at(p, 85).annuityIncome, 100000, 'then $100k a year');
+    eq(at(p, 85).pension, 100000, 'reported with pension income');
+    eq(at(p, 85).annuityExcluded, 0, 'all of it taxable — qualified money');
+    // Guaranteed income displaces portfolio draws, so taxable income does not
+    // rise by the payout — the draw falls by most of it instead.
+    lt(at(p, 85).portfolioWithdrawal, at(base, 85).portfolioWithdrawal - 60000, 'and the portfolio draw at 85 falls by most of it');
+    gt(at(p, 85).taxableIncome, at(base, 85).taxableIncome, 'while taxable income still rises — the payout is ordinary income');
+  }
+  // A SPIA from brokerage: gain in the purchase year, exclusion until the basis is recovered.
+  {
+    const p = run([{ id: 3, name: 'SPIA', type: 'annuity', owner: 'me', amount: 14000, startAge: 65, endAge: 100, cola: 0, premium: 200000, purchaseAge: 65, fundedFrom: 'brokerage' }]);
+    eq(at(p, 65).annuityPremium, 200000, 'the premium comes out of the brokerage');
+    eq(at(p, 65).annuityIncome, 14000, 'and an immediate annuity pays in its purchase year');
+    // ~$100k of gain, less the gain the smaller spending draw no longer
+    // realizes and the dividends the smaller balance no longer pays.
+    gt(at(p, 65).realizedCapitalGains, at(base, 65).realizedCapitalGains + 75000, 'selling $200k at 50% basis realizes most of $100k of gain that year');
+    const ratio = E.annuityExclusionRatio(200000, 14000, 65);
+    approx(at(p, 66).annuityExcluded, 14000 * ratio, 'each payment excludes the return-of-premium share', 0.01);
+    // The cleanest reading of the exclusion: the same contract bought with
+    // Roth money (non-qualified, excluded) against pre-tax money (qualified,
+    // fully taxable). Both displace the same spending; the difference in
+    // taxable income is the excluded share, plus the smaller tax gross-up it
+    // earns.
+    {
+      const withRoth = [...accts, acct(9, 'roth_ira', 300000)];
+      const buy = (from) => computeProjections(pi, withRoth, [ss, { id: 3, name: 'SPIA', type: 'annuity', owner: 'me', amount: 14000, startAge: 65, endAge: 100, cola: 0, premium: 200000, purchaseAge: 65, fundedFrom: from }], [], [], [], TODAY_YEAR);
+      const q = buy('pretax'), r = buy('roth');
+      eq(at(q, 66).annuityExcluded, 0, 'the qualified contract excludes nothing');
+      approx(at(q, 66).taxableIncome - at(r, 66).taxableIncome, 14000 * ratio, 'and the non-qualified one taxes that much less', 0.15);
+    }
+    const excludedTotal = p.reduce((t, r) => t + (r.annuityExcluded || 0), 0);
+    approx(excludedTotal, 200000, 'until exactly the premium has been recovered', 0.01);
+    const lastExcluded = p.filter(r => r.annuityExcluded > 0).pop();
+    ok(lastExcluded && at(p, lastExcluded.myAge + 1).annuityExcluded === 0 && at(p, lastExcluded.myAge + 1).annuityIncome === 14000,
+      'after which the full payment is taxable');
+  }
+  // Already owned: no purchase, nothing leaves any account.
+  {
+    const p = run([{ id: 4, name: 'Owned', type: 'annuity', owner: 'me', amount: 12000, startAge: 65, endAge: 100, cola: 0 }]);
+    eq(at(p, 65).annuityPremium, 0, 'an owned annuity buys nothing');
+    eq(at(p, 65).annuityIncome, 12000, 'and just pays');
+    approx(at(p, 65).totalPortfolio, at(base, 65).totalPortfolio + 0, 'the portfolio is untouched by the purchase (only by the smaller draw)', 0.05);
+  }
+  // Underfunded: a $2M premium from a $600k brokerage funds 30% and pays 30%.
+  {
+    const p = run([{ id: 5, name: 'Big', type: 'annuity', owner: 'me', amount: 100000, startAge: 65, endAge: 100, cola: 0, premium: 2000000, purchaseAge: 65, fundedFrom: 'brokerage' }]);
+    lt(at(p, 65).annuityPremium, 700000, 'the premium is capped by what the account holds');
+    approx(at(p, 65).annuityIncome, 100000 * at(p, 65).annuityPremium / 2000000, 'and the payout scales with the funded share', 0.01);
+  }
+  // Survivor: a joint-and-survivor annuity continues at the elected rate.
+  {
+    const st = { id: 6, name: 'Joint', type: 'annuity', owner: 'me', amount: 20000, startAge: 65, endAge: 100, cola: 0, survivorBenefit: true, survivorBenefitRate: 0.75 };
+    const p = run([st], { survivorModelEnabled: true, myLifeExpectancy: 80, spouseLifeExpectancy: 92 });
+    eq(at(p, 79).annuityIncome, 20000, 'paid in full while the owner lives');
+    eq(at(p, 82).annuityIncome, 15000, 'and at 75% to the survivor after');
+    const q = run([{ ...st, survivorBenefit: false }], { survivorModelEnabled: true, myLifeExpectancy: 80, spouseLifeExpectancy: 92 });
+    eq(at(q, 82).annuityIncome, 0, 'a single-life contract stops with the owner');
+  }
+  // Legacy: an annuity stream saved before any of this is unchanged.
+  {
+    const legacy = { id: 7, name: 'Old', type: 'annuity', owner: 'me', amount: 9000, startAge: 66, endAge: 90, cola: 0.01 };
+    const p = run([legacy]);
+    eq(at(p, 70).annuityIncome, Math.round(9000 * Math.pow(1.01, 4)), 'pays its amount with COLA, nothing bought, nothing excluded');
+    eq(at(p, 70).annuityExcluded, 0, 'and fully taxable as it always was');
+  }
+  ['annuityIncome', 'annuityExcluded', 'annuityPremium'].forEach(f =>
+    ok(engine.REAL_DOLLAR_FIELDS.includes(f), `${f} is on the today’s-dollars whitelist`));
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

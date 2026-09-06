@@ -1845,6 +1845,86 @@ const sampleAgeAtDeath = (currentAge, rand, shiftYears = 0) => {
   return Math.max(Math.floor(currentAge) + 1, 200 + Math.round(shiftYears));
 };
 
+// ── ANNUITY PRICING (representative) ────────────────────────────────────────
+// What a single-premium annuity pays per dollar of premium, from this app's
+// own mortality table. Three parameters stand in for an insurer's pricing:
+// a pricing rate, an annuitant-selection factor (people who buy annuities
+// live longer than the population — their mortality is scaled to 70%), and
+// an expense load. Tuned so a 65-year-old immediate annuity lands near 6.9%
+// and a 65-to-85 deferred contract near 54%, inside the range of 2025 quotes.
+// REPRESENTATIVE ONLY: a real quote replaces this figure, and the stream's own
+// payout is what the projection uses.
+const ANNUITY_PRICING = Object.freeze({ rate: 0.045, selection: 0.70, load: 0.06 });
+// SECURE 2.0 §202 dollar limit on premiums for a qualifying longevity annuity
+// contract (2025 figure from IRS Notice 2024-80; indexed — VERIFY the 2026
+// figure against the current notice). A QLAC is a DEFERRED annuity bought with
+// pre-tax money; an immediate annuity bought from an IRA is not capped.
+const QLAC_PREMIUM_LIMIT_2025 = 210000;
+const QLAC_MAX_START_AGE = 85;
+const annuitySurvival = (from, to, sel) => {
+  let p = 1;
+  for (let a = from; a < to; a++) p *= 1 - Math.min(1, mortalityQx(a) * sel);
+  return p;
+};
+// Present value, at `startAge`, of $1 a year for life (joint: for as long as
+// either of two same-age lives survives), with `cola` escalation.
+const annuityFactor = (startAge, { rate, selection }, joint = false, cola = 0) => {
+  let v = 0;
+  for (let t = 0; t < 70; t++) {
+    const p = annuitySurvival(startAge, startAge + t, selection);
+    const pj = joint ? 1 - (1 - p) * (1 - p) : p;
+    if (pj <= 0) break;
+    v += pj * Math.pow(1 + cola, t) / Math.pow(1 + rate, t);
+  }
+  return v;
+};
+// Annual payout per dollar of premium: bought at purchaseAge, paying from
+// startAge for life. Deferral is credited with the pricing rate and with
+// survivorship — the mortality credits that make a QLAC pay several times an
+// immediate annuity.
+const annuityPayoutRate = ({ purchaseAge, startAge, joint = false, cola = 0 }, pricing = ANNUITY_PRICING) => {
+  const p = Math.max(MORTALITY_MIN_AGE, Math.round(Number(purchaseAge) || 0));
+  const st = Math.max(p, Math.round(Number(startAge) || p));
+  const pd = annuitySurvival(p, st, pricing.selection);
+  const pj = joint ? 1 - (1 - pd) * (1 - pd) : pd;
+  const factor = pj * annuityFactor(st, pricing, joint, cola) / Math.pow(1 + pricing.rate, st - p);
+  return factor > 0 ? (1 - pricing.load) / factor : 0;
+};
+// IRS Pub 939 exclusion ratio for a non-qualified annuity: the share of each
+// payment that is a return of after-tax premium. Expected return = annual
+// payout × the Table V expectancy at the start age; this app's life table
+// stands in for Table V.
+const annuityExclusionRatio = (premium, annualPayout, startAge, joint = false) => {
+  if (!(premium > 0) || !(annualPayout > 0)) return 0;
+  const yrs = joint ? lifeExpectancyAt(startAge) + 2 : lifeExpectancyAt(startAge);
+  const expected = annualPayout * Math.max(1, yrs);
+  return Math.max(0, Math.min(1, premium / expected));
+};
+// The excluded (return-of-premium) part of this year's payout on a
+// non-qualified contract, drawing the basis down as it goes. Qualified
+// contracts and streams with no premium exclude nothing.
+const annuityExcludedPortion = (stream, state, payout) => {
+  if (!state || state.qualified || !(state.basisRemaining > 0) || !(payout > 0)) return 0;
+  const ratio = stream.exclusionRatio > 0 ? Math.min(1, stream.exclusionRatio)
+    : annuityExclusionRatio(state.paidPremium || 0, stream.amount * (state.funded || 1), stream.startAge, !!stream.survivorBenefit);
+  const ex = Math.min(payout * ratio, state.basisRemaining);
+  state.basisRemaining -= ex;
+  return ex;
+};
+// The stream's purchase, if it describes one: an annuity with a premium and a
+// funding source is BOUGHT in the projection (the premium leaves the account at
+// purchaseAge); one without is income the household already owns.
+const annuityPurchaseOf = (stream) =>
+  stream && stream.type === 'annuity' && stream.premium > 0 && stream.fundedFrom && stream.fundedFrom !== 'none'
+    ? { premium: stream.premium, fundedFrom: stream.fundedFrom, purchaseAge: stream.purchaseAge ?? stream.startAge }
+    : null;
+// A deferred annuity bought with pre-tax money is a QLAC and carries the
+// premium cap; an immediate one does not.
+const annuityIsQLAC = (stream) => {
+  const p = annuityPurchaseOf(stream);
+  return !!(p && p.fundedFrom === 'pretax' && stream.startAge > p.purchaseAge);
+};
+
 // IRS Pub 590-B, Appendix B, Table II (Joint and Last Survivor Life Expectancy).
 // Governs when the spouse is the sole designated beneficiary AND more than 10
 // years younger. Extracted directly from the publication PDF -- not transcribed
@@ -3202,6 +3282,7 @@ const REAL_DOLLAR_FIELDS = [
   'acaGrossPremium', 'acaNetPremium', 'acaSubsidy', 'solverResidual',
   'rothUnseasonedDrawn', 'rothTaxableEarnings', 'rothUnseasoned',
   'bracketFillRoom', 'bracketFillDraw',
+  'annuityIncome', 'annuityExcluded', 'annuityPremium',
 ];
 // Objects whose VALUES are money and whose keys are ids or category names.
 const REAL_DOLLAR_MAPS = ['perAccountBalances', 'perAccountContributions', 'recurringExpensesByCategory'];
@@ -8464,6 +8545,16 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   // Each Roth as layers — basis, dated conversion tranches, earnings — so a
   // draw can be priced in statutory order. See rothLayersFor.
   const rothLayers = rothLayersFor(accts);
+  // Annuity purchases: what each annuity stream has actually been funded to
+  // (a fraction, 1 when the premium was met in full), and the after-tax basis
+  // still to be recovered on a non-qualified contract.
+  const annuityState = {};
+  streams.forEach(st => {
+    const p = annuityPurchaseOf(st);
+    annuityState[st.id] = p
+      ? { funded: 0, basisRemaining: 0, purchased: false, qualified: p.fundedFrom === 'pretax' }
+      : { funded: 1, basisRemaining: 0, purchased: true, qualified: st.fundedFrom === 'pretax' || st.qualified === true };
+  });
   
   // Track reinvested excess RMDs when no brokerage account exists
   // This prevents excess RMDs from vanishing — they grow at a conservative rate
@@ -8702,6 +8793,49 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     const desiredIncome = pi.desiredRetirementIncome * inflationFactor * spendFactor * phaseMultiplier
       * (spendingRule ? guardrailMultiplier : 1);
     
+    // ── ANNUITY PURCHASES ──────────────────────────────────────────────────────
+    // At the owner's purchase age the premium leaves the chosen account type
+    // (largest balance first). Pre-tax money moves as a rollover — no tax, and
+    // the RMD base shrinks with the balance, which is the point of a QLAC.
+    // Brokerage money is sold at the account's cost basis, and the gain is
+    // taxed with this year's asset sales. Roth money moves tax-free. A premium
+    // the account cannot cover is funded pro rata, and the payout scales with
+    // it. Recorded before the income loop so an immediate annuity pays in its
+    // purchase year.
+    let annuityPremiumThisYear = 0, annuityFundingGain = 0;
+    const annuityEventsThisYear = [];
+    streams.forEach(st => {
+      const p = annuityPurchaseOf(st);
+      const state = annuityState[st.id];
+      if (!p || !state || state.purchased) return;
+      const ownerAge = st.owner === 'spouse' ? spouseAge : myAge;
+      const ownerAlive = st.owner === 'spouse' ? spouseAlive : primaryAlive;
+      if (ownerAge < p.purchaseAge) return;
+      state.purchased = true;
+      if (!ownerAlive) return; // nobody left to buy it
+      const premiumNominal = st.todaysDollars ? p.premium * inflationFactor : p.premium;
+      const isType = p.fundedFrom === 'pretax' ? isPreTaxAccount : p.fundedFrom === 'roth' ? isRothAccount : isBrokerageAccount;
+      const sources = accts.filter(a => isType(a.type) && (accountBalances[a.id] || 0) > 0)
+        .sort((a, b) => (accountBalances[b.id] || 0) - (accountBalances[a.id] || 0));
+      let need = premiumNominal, paid = 0;
+      for (const a of sources) {
+        if (need <= 0) break;
+        const take = Math.min(accountBalances[a.id], need);
+        accountBalances[a.id] -= take; need -= take; paid += take;
+        if (isBrokerageAccount(a.type)) {
+          const basisPct = (a.costBasisPercent !== undefined && a.costBasisPercent !== null) ? a.costBasisPercent : BROKERAGE_COST_BASIS_ESTIMATE;
+          annuityFundingGain += take * (1 - basisPct);
+        }
+      }
+      state.funded = premiumNominal > 0 ? paid / premiumNominal : 1;
+      state.basisRemaining = state.qualified ? 0 : paid;
+      state.paidPremium = paid;
+      annuityPremiumThisYear += paid;
+      annuityEventsThisYear.push({ name: `Bought ${st.name || 'annuity'}`, amount: -paid, type: 'annuity_purchase',
+        note: state.funded < 0.999 ? `only ${Math.round(state.funded * 100)}% funded` : undefined });
+    });
+    let annuityIncome = 0, annuityExcluded = 0;
+
     let totalSocialSecurity = 0, totalPension = 0, totalOtherIncome = 0, earnedIncome = 0;
     let nonSSIncome = 0; // Track non-SS income for calculating SS taxation
     let myEarnedIncome = 0, spouseEarnedIncome = 0; // Per-person for FICA wage base
@@ -8735,7 +8869,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Skip income from deceased owner (survivor modeling)
       // Exception: pensions with survivorBenefit flag continue for the survivor
       if (survivorEnabled && !ownerAlive) {
-        if (stream.type === 'pension' && stream.survivorBenefit) {
+        if ((stream.type === 'pension' || stream.type === 'annuity') && stream.survivorBenefit) {
           // Pension continues at the elected survivor rate. 50% is the common
           // default, but a joint-and-survivor election of 100% is a real option
           // in many systems — Alabama's RSA among them — and is expressed here
@@ -8755,9 +8889,17 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             // COLA keeps accruing on the pension's own clock — the benefit has
             // been indexing since it started, and the death does not reset that.
             const colaYears = streamColaYears(stream, ownerAge, yearsFromNow);
-            const adjustedAmount = stream.amount * Math.pow(1 + (stream.cola || 0), colaYears) * survivorRate;
-            totalPension += adjustedAmount;
-            nonSSIncome += adjustedAmount;
+            const scale = stream.type === 'annuity' ? (annuityState[stream.id] ? annuityState[stream.id].funded : 1) : 1;
+            const adjustedAmount = stream.amount * Math.pow(1 + (stream.cola || 0), colaYears) * survivorRate * scale;
+            if (stream.type === 'annuity') {
+              const ex = annuityExcludedPortion(stream, annuityState[stream.id], adjustedAmount);
+              annuityIncome += adjustedAmount; annuityExcluded += ex;
+              totalPension += adjustedAmount;
+              nonSSIncome += adjustedAmount - ex;
+            } else {
+              totalPension += adjustedAmount;
+              nonSSIncome += adjustedAmount;
+            }
           }
         }
         // Social Security for deceased is handled separately via survivor benefit below
@@ -8794,6 +8936,18 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         } else if (stream.type === 'pension') {
           totalPension += adjustedAmount;
           nonSSIncome += adjustedAmount;
+        } else if (stream.type === 'annuity') {
+          // Payout scaled to what was actually funded. Qualified (pre-tax
+          // money) is ordinary income like a pension, and rides the same
+          // state retirement-income exclusions. Non-qualified excludes the
+          // return of after-tax premium (Pub 939 exclusion ratio) until the
+          // basis is recovered, then is fully taxable.
+          const state = annuityState[stream.id];
+          const scaled = adjustedAmount * (state ? state.funded : 1);
+          const ex = annuityExcludedPortion(stream, state, scaled);
+          annuityIncome += scaled; annuityExcluded += ex;
+          totalPension += scaled;
+          nonSSIncome += scaled - ex;
         } else {
           totalOtherIncome += adjustedAmount;
           nonSSIncome += adjustedAmount;
@@ -8922,7 +9076,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // of basis and excluded gain untaxed while still spendable -- the whole point
     // of §121. Sending the gross through either channel alone would either tax
     // money that is not income or hide income that is.
-    let assetSaleTaxableGain = 0;
+    let assetSaleTaxableGain = annuityFundingGain; // brokerage sold to fund an annuity this year
+    annuityEventsThisYear.forEach(ev => yearEvents.push(ev));
     let assetSaleProceeds = 0;
     let assetSaleExcludedGain = 0;
     assetList.forEach(asset => {
@@ -10748,6 +10903,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       socialSecurity: Math.round(totalSocialSecurity),
       pension: Math.round(totalPension),
       otherIncome: Math.round(totalOtherIncome),
+      // Annuities: payouts received this year (inside pension above), the part
+      // excluded from tax as return of premium, and any premium paid this year.
+      annuityIncome: Math.round(annuityIncome),
+      annuityExcluded: Math.round(annuityExcluded),
+      annuityPremium: Math.round(annuityPremiumThisYear),
       totalGuaranteedIncome: Math.round(totalGuaranteedIncome),
       portfolioWithdrawal: Math.round(portfolioWithdrawal),
       // Spending dollars the portfolio could not supply this year (0 in a funded
@@ -11043,6 +11203,11 @@ const PLAN_COLLECTIONS = {
       taxable: { type: 'boolean' },
       survivorBenefitPercent: { type: 'number', unit: 'rate', note: 'pension only' },
       survivorBenefitAmount: { type: 'number', min: 0, unit: 'dollars/yr', note: 'pension only: flat survivor election' },
+      premium: { type: 'number', min: 0, unit: 'dollars', note: 'annuity only: single premium; with fundedFrom, the projection BUYS the contract at purchaseAge' },
+      purchaseAge: { type: 'number', unit: 'age', note: 'annuity only: owner age the premium is paid (defaults to startAge)' },
+      fundedFrom: { type: 'enum', values: ['pretax', 'brokerage', 'roth', 'none'], note: "annuity only: which account type pays the premium; 'pretax' + a later startAge is a QLAC" },
+      survivorBenefit: { type: 'boolean', note: 'pension or annuity: joint-and-survivor election' },
+      survivorBenefitRate: { type: 'number', unit: 'rate', note: 'pension or annuity: share continuing to the survivor (0.5, 0.75, 1)' },
     },
   },
   assets: {
@@ -11472,6 +11637,8 @@ const describePlanPatch = (state, patch) => {
     calculateSSBenefit, calculateSSEarningsTestReduction, inferPiaFromBenefit,
     calculateSpousalBenefit,
     mortalityQx, lifeExpectancyAt, sampleAgeAtDeath, MORTALITY_MIN_AGE,
+    ANNUITY_PRICING, QLAC_PREMIUM_LIMIT_2025, QLAC_MAX_START_AGE, annuityPayoutRate, annuityFactor,
+    annuityExclusionRatio, annuityPurchaseOf, annuityIsQLAC,
     HSA_NONQUALIFIED_PENALTY_RATE, HSA_PENALTY_END_AGE,
     computeAssetSale, section121Exclusion, remainingMortgageAt,
     SECTION_121_EXCLUSION_SINGLE, SECTION_121_EXCLUSION_JOINT,
