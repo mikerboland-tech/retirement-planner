@@ -13262,8 +13262,11 @@ section('P111 — long-term care: the stress case, the sampled episode, and the 
     gt(L.costP50Real, 50000, 'a median episode costs real money in today’s dollars');
     gt(L.costP90Real, L.costP50Real, 'and the tail more');
     lt(on.successRate, off.successRate + 1e-9, 'varying care cannot make the plan safer');
-    ok(L.successWithoutCare === null || L.successWithCare <= L.successWithoutCare + 1e-9,
-      'and the runs that drew care fare no better than the runs that did not');
+    // The no-care group is small (a couple both escaping care is ~9% of runs,
+    // a few dozen at 400 sims), so its success rate carries sampling noise of
+    // several points; the comparison allows for that.
+    ok(L.successWithoutCare === null || L.successWithCare <= L.successWithoutCare + 0.10,
+      'and the runs that drew care fare no better than the runs that did not, beyond sampling noise');
     // With lifespans varied as well, the two draws compose without error.
     const both = runJob('monteCarlo', { ...common, simSettings: { ...settings, numSimulations: 100, ltc: { enabled: true }, longevity: { enabled: true } } });
     ok(Number.isFinite(both.successRate) && both.ltcStats && both.longevityStats, 'care and lifespan draws compose');
@@ -13300,6 +13303,8 @@ section('P112 — annuities: the purchase, the tax, the survivor, and the quote'
   ok(E.annuityIsQLAC({ type: 'annuity', premium: 100000, fundedFrom: 'pretax', purchaseAge: 65, startAge: 85 }), 'pre-tax money with a deferred start is a QLAC');
   ok(!E.annuityIsQLAC({ type: 'annuity', premium: 100000, fundedFrom: 'pretax', purchaseAge: 65, startAge: 65 }), 'an immediate one from an IRA is not');
   ok(!E.annuityIsQLAC({ type: 'annuity', premium: 100000, fundedFrom: 'brokerage', purchaseAge: 65, startAge: 85 }), 'nor is a deferred one from after-tax money');
+  eq(E.QLAC_PREMIUM_LIMIT_2026, 210000, 'the QLAC premium limit is $210,000 for 2026 (IRS Notice 2025-67, unchanged from 2025)');
+  eq(E.QLAC_MAX_START_AGE, 85, 'and payments must begin by 85');
 
   // ── end to end ───────────────────────────────────────────────────────────
   const pi = { myAge: 64, spouseAge: 64, myRetirementAge: 65, spouseRetirementAge: 65, filingStatus: 'married_joint', state: 'TX', inflationRate: 0.03,

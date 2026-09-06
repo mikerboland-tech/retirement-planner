@@ -43,7 +43,7 @@ const {
   GOV_PENSION_SYSTEMS, estimateGovernmentPension, estimateFersSupplement,
   HISTORICAL_RETURNS, getHistoricalSequence, getValidStartYears,
   accountReturnModel, RETURN_MODEL_DEFAULTS,
-  annuityPayoutRate, annuityExclusionRatio, annuityIsQLAC, QLAC_PREMIUM_LIMIT_2025, QLAC_MAX_START_AGE, ANNUITY_PRICING,
+  annuityPayoutRate, annuityExclusionRatio, annuityIsQLAC, QLAC_PREMIUM_LIMIT_2026, QLAC_MAX_START_AGE, ANNUITY_PRICING,
   computeProjections, compareClaimingScenarios,
   conversionCostComponents, conversionCostAudit, topMarginalBracket,
   computeTaxReturn, buildTaxSituation, compareTraditionalVsRoth,
@@ -11236,9 +11236,9 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
       if (!st || st.type !== 'annuity' || !(st.premium > 0) || !st.fundedFrom || st.fundedFrom === 'none') return;
       const purchaseAge = st.purchaseAge ?? st.startAge;
       if (annuityIsQLAC(st)) {
-        if (st.premium > QLAC_PREMIUM_LIMIT_2025) warnings.push({
+        if (st.premium > QLAC_PREMIUM_LIMIT_2026) warnings.push({
           type: 'qlac_over_limit', severity: 'warning',
-          message: `${st.name || 'Your QLAC'} has a ${formatCurrency(st.premium)} premium, above the ${formatCurrency(QLAC_PREMIUM_LIMIT_2025)} limit on qualifying longevity annuity contracts.`,
+          message: `${st.name || 'Your QLAC'} has a ${formatCurrency(st.premium)} premium, above the ${formatCurrency(QLAC_PREMIUM_LIMIT_2026)} limit on qualifying longevity annuity contracts.`,
           details: ['Only premiums up to the limit are excluded from the RMD base; the projection removes the whole premium.'],
           action: 'Lower the premium to the limit, or split the purchase across years.'
         });
@@ -17239,7 +17239,7 @@ function IncomeModal({ editingIncome, personalInfo, incomeStreams = [], onClose,
             const rate = annuityPayoutRate({ purchaseAge, startAge: formData.startAge, joint, cola: formData.cola || 0 });
             const estimate = Math.round((formData.premium || 0) * rate);
             const isQlac = buys && funded === 'pretax' && formData.startAge > purchaseAge;
-            const overCap = isQlac && formData.premium > QLAC_PREMIUM_LIMIT_2025;
+            const overCap = isQlac && formData.premium > QLAC_PREMIUM_LIMIT_2026;
             const lateStart = isQlac && formData.startAge > QLAC_MAX_START_AGE;
             const exRatio = buys && funded !== 'pretax' && formData.amount > 0
               ? annuityExclusionRatio(formData.premium, formData.amount, formData.startAge, joint) : null;
@@ -17284,7 +17284,7 @@ function IncomeModal({ editingIncome, personalInfo, incomeStreams = [], onClose,
                       <div>
                         {isQlac
                           ? <>Pre-tax money with a deferred start makes this a <span className="text-slate-200">QLAC</span>: the premium leaves the RMD base until payments begin, and payments are ordinary income.
-                              {overCap && <span className="text-amber-400"> The premium is above the {formatCurrency(QLAC_PREMIUM_LIMIT_2025)} QLAC limit.</span>}
+                              {overCap && <span className="text-amber-400"> The premium is above the {formatCurrency(QLAC_PREMIUM_LIMIT_2026)} QLAC limit.</span>}
                               {lateStart && <span className="text-amber-400"> A QLAC must start paying by {QLAC_MAX_START_AGE}.</span>}</>
                           : <>Bought from pre-tax money: the rollover is not taxed, and every payment is ordinary income, like a pension.</>}
                       </div>

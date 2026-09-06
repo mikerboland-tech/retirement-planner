@@ -1856,10 +1856,12 @@ const sampleAgeAtDeath = (currentAge, rand, shiftYears = 0) => {
 // payout is what the projection uses.
 const ANNUITY_PRICING = Object.freeze({ rate: 0.045, selection: 0.70, load: 0.06 });
 // SECURE 2.0 §202 dollar limit on premiums for a qualifying longevity annuity
-// contract (2025 figure from IRS Notice 2024-80; indexed — VERIFY the 2026
-// figure against the current notice). A QLAC is a DEFERRED annuity bought with
-// pre-tax money; an immediate annuity bought from an IRA is not capped.
-const QLAC_PREMIUM_LIMIT_2025 = 210000;
+// contract. $210,000 for 2026 per IRS Notice 2025-67 (the 2026 cost-of-living
+// adjustments), unchanged from 2025 (Notice 2024-80); indexed from the
+// $200,000 statutory base in $10,000 steps, which is why it can hold still
+// for a year. A QLAC is a DEFERRED annuity bought with pre-tax money; an
+// immediate annuity bought from an IRA is not capped.
+const QLAC_PREMIUM_LIMIT_2026 = 210000;
 const QLAC_MAX_START_AGE = 85;
 const annuitySurvival = (from, to, sel) => {
   let p = 1;
@@ -11637,7 +11639,7 @@ const describePlanPatch = (state, patch) => {
     calculateSSBenefit, calculateSSEarningsTestReduction, inferPiaFromBenefit,
     calculateSpousalBenefit,
     mortalityQx, lifeExpectancyAt, sampleAgeAtDeath, MORTALITY_MIN_AGE,
-    ANNUITY_PRICING, QLAC_PREMIUM_LIMIT_2025, QLAC_MAX_START_AGE, annuityPayoutRate, annuityFactor,
+    ANNUITY_PRICING, QLAC_PREMIUM_LIMIT_2026, QLAC_MAX_START_AGE, annuityPayoutRate, annuityFactor,
     annuityExclusionRatio, annuityPurchaseOf, annuityIsQLAC,
     HSA_NONQUALIFIED_PENALTY_RATE, HSA_PENALTY_END_AGE,
     computeAssetSale, section121Exclusion, remainingMortgageAt,
