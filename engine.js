@@ -3394,6 +3394,112 @@ const HEALTHCARE_MODELS_UNPRICED = ['none', 'in_spending'];
 const healthcareCostsModeled = (pi) =>
   !HEALTHCARE_MODELS_UNPRICED.includes((pi && pi.healthcareModel) || 'none');
 
+// ── LONG-TERM CARE ───────────────────────────────────────────────────────────
+// Who is on the household's healthcare bill this year.
+const healthcarePeople = (pi, myAge, spouseAge, primaryAlive, spouseAlive) => {
+  const people = [];
+  if (primaryAlive) people.push({ age: myAge, label: 'me', lifeExp: pi.myLifeExpectancy || 85, retirementAge: pi.myRetirementAge ?? 65 });
+  if (spouseAlive && pi.filingStatus === 'married_joint') people.push({ age: spouseAge, label: 'spouse', lifeExp: pi.spouseLifeExpectancy || 87, retirementAge: pi.spouseRetirementAge ?? 65 });
+  return people;
+};
+
+// Genworth Cost of Care 2024 medians, monthly, today's dollars.
+const LTC_MONTHLY_ASSISTED_LIVING_2025 = 5900; // assisted living
+const LTC_DEFAULT_DURATION_MONTHS = 28;      // the deterministic default: 28 months before death
+const LTC_MONTHLY_HOME_CARE_2025 = 6300;      // home health aide, 44 hrs/week
+const LTC_MONTHLY_NURSING_HOME_2025 = 10600;  // nursing home, private room
+const LTC_STRESS_MONTHS = 60;                 // the stress case: five years
+
+// What the population data say about paid care after 65 (HHS/ASPE, Urban
+// Institute): about 70% will need some, the typical episode is around two
+// years, and one in five who need care need it for more than five years. A
+// lognormal with median 2 years and σ ≈ 1.09 puts 20% of episodes past five
+// years; capped at ten. Care setting is drawn separately, weighted toward
+// home care, which is where most paid care happens. The expected value of
+// this model is close to the 28-month default the deterministic window uses
+// — the default is the average; the simulation shows the spread around it.
+const LTC_EPISODE_MODEL = Object.freeze({
+  pNeed: 0.70,
+  medianYears: 2.0,
+  sigma: 1.09,
+  maxYears: 10,
+  settings: Object.freeze([
+    { key: 'home',     p: 0.45, monthly: LTC_MONTHLY_HOME_CARE_2025 },
+    { key: 'assisted', p: 0.30, monthly: LTC_MONTHLY_ASSISTED_LIVING_2025 },
+    { key: 'nursing',  p: 0.25, monthly: LTC_MONTHLY_NURSING_HOME_2025 },
+  ]),
+});
+
+// One person's episode: { months, monthly, setting }. `rand` is a uniform
+// [0,1) source so a test can script it. Draw order is fixed: need, then two
+// uniforms for the duration, then the setting.
+const sampleLTCEpisode = (rand = Math.random, model = LTC_EPISODE_MODEL) => {
+  if (rand() >= model.pNeed) return { months: 0, monthly: 0, setting: null };
+  let u1 = rand(), u2 = rand();
+  if (u1 <= 0) u1 = 1e-12;
+  const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  const years = Math.min(model.maxYears, model.medianYears * Math.exp(model.sigma * z));
+  const months = Math.max(1, Math.round(years * 12));
+  const u = rand();
+  let acc = 0, setting = model.settings[model.settings.length - 1];
+  for (const st of model.settings) { acc += st.p; if (u < acc) { setting = st; break; } }
+  return { months, monthly: setting.monthly, setting: setting.key };
+};
+
+// The care each person is planned for: { me: {months, monthly}, spouse: {…} }
+// or null when long-term care is off.
+//   'none'    — off
+//   'default' — 28 months of assisted living for each person
+//   'custom'  — the entered months and monthly cost for each person
+//   'stress'  — five years of nursing-home care for the SURVIVOR (the later
+//               life expectancy; the primary when single) and none for the
+//               other. The worst realistic case: no spouse left to give
+//               informal care, and the estate at its lowest.
+//   pi.ltcPerPerson — an explicit per-person plan, which wins over the model;
+//               this is how the Monte Carlo feeds each simulation's draw in.
+// A plan saved before ltcModel existed is read the way it always was: care
+// under the comprehensive healthcare model, none otherwise.
+const ltcPlanFor = (pi) => {
+  if (!pi) return null;
+  const model = pi.ltcModel !== undefined && pi.ltcModel !== null
+    ? pi.ltcModel
+    : (pi.healthcareModel === 'comprehensive' ? 'default' : 'none');
+  if (model === 'none') return null;
+  const per = (p) => ({ months: Math.max(0, Number(p && p.months) || 0), monthly: Math.max(0, Number(p && p.monthly) || 0) });
+  if (pi.ltcPerPerson && typeof pi.ltcPerPerson === 'object') {
+    return { me: per(pi.ltcPerPerson.me), spouse: per(pi.ltcPerPerson.spouse) };
+  }
+  if (model === 'stress') {
+    const married = pi.filingStatus === 'married_joint';
+    const spouseSurvives = married && (pi.spouseLifeExpectancy || 87) > (pi.myLifeExpectancy || 85);
+    const hit = { months: LTC_STRESS_MONTHS, monthly: LTC_MONTHLY_NURSING_HOME_2025 };
+    const none = { months: 0, monthly: 0 };
+    return spouseSurvives ? { me: none, spouse: hit } : { me: hit, spouse: none };
+  }
+  const both = { months: pi.ltcDurationMonths || LTC_DEFAULT_DURATION_MONTHS, monthly: pi.ltcMonthlyAmount || LTC_MONTHLY_ASSISTED_LIVING_2025 };
+  return { me: both, spouse: both };
+};
+
+// This year's LTC bill for the people listed, in nominal dollars. The window
+// is the final `months` of each person's life expectancy, never starting
+// before 65; the year [age, age+1) is billed only for the months that fall
+// inside it, so the lifetime total is exactly `months` of care.
+const ltcCostFor = (pi, people, medInflationFactor) => {
+  const plan = ltcPlanFor(pi);
+  if (!plan) return 0;
+  let cost = 0;
+  people.forEach(person => {
+    const p = plan[person.label];
+    if (!p || !(p.months > 0) || !(p.monthly > 0)) return;
+    const windowStart = Math.max(65, person.lifeExp - p.months / 12);
+    const overlapStart = Math.max(person.age, windowStart);
+    const overlapEnd = Math.min(person.age + 1, person.lifeExp);
+    const monthsThisYear = Math.max(0, (overlapEnd - overlapStart) * 12);
+    if (monthsThisYear > 0) cost += p.monthly * monthsThisYear * medInflationFactor;
+  });
+  return cost;
+};
+
 // ── HEALTHCARE EXPENSE CALCULATOR ───────────────────────────────────────────────
 // Unified function that computes annual healthcare costs for a given year.
 // Called by the projection engine for each year — results flow into the year data.
@@ -3411,7 +3517,12 @@ const calculateHealthcareExpenses = (pi, myAge, spouseAge, yearsFromNow, primary
     if (primaryAlive && myAge >= 65) medicareCost += basePremiumAnnual;
     if (pi.filingStatus === 'married_joint' && spouseAlive && spouseAge >= 65) medicareCost += basePremiumAnnual;
     medicareCost = Math.round(medicareCost);
-    return { total: medicareCost, pre65: 0, medicare: medicareCost, ltc: 0, breakdown: null };
+    // Long-term care is its OWN switch (ltcModel), not part of the healthcare
+    // model — the Personal Info control says so, and until this path billed it
+    // a household with healthcare "in my spending" and LTC set to Default was
+    // quietly projected with no care costs at all.
+    const ltcCost = Math.round(ltcCostFor(pi, healthcarePeople(pi, myAge, spouseAge, primaryAlive, spouseAlive), medInflationFactor));
+    return { total: medicareCost + ltcCost, pre65: 0, medicare: medicareCost, ltc: ltcCost, breakdown: null };
   }
   
   const medInflation = pi.medicalInflation || MEDICAL_INFLATION_RATE;
@@ -3424,9 +3535,7 @@ const calculateHealthcareExpenses = (pi, myAge, spouseAge, yearsFromNow, primary
   const isMarried = pi.filingStatus === 'married_joint';
 
   // Determine who needs healthcare costs modeled
-  const people = [];
-  if (primaryAlive) people.push({ age: myAge, label: 'me', lifeExp: pi.myLifeExpectancy || 85, retirementAge: pi.myRetirementAge ?? 65 });
-  if (spouseAlive && isMarried) people.push({ age: spouseAge, label: 'spouse', lifeExp: pi.spouseLifeExpectancy || 87, retirementAge: pi.spouseRetirementAge ?? 65 });
+  const people = healthcarePeople(pi, myAge, spouseAge, primaryAlive, spouseAlive);
 
   people.forEach(person => {
     if (person.age < 65) {
@@ -3457,25 +3566,10 @@ const calculateHealthcareExpenses = (pi, myAge, spouseAge, yearsFromNow, primary
       medicareCost += annualMedicare * medInflationFactor;
     }
     
-    // LONG-TERM CARE: model the final `ltcDuration` months before death.
-    if (pi.ltcModel !== 'none' && (pi.healthcareModel === 'comprehensive' || pi.ltcModel === 'custom' || pi.ltcModel === 'default')) {
-      const ltcDuration = pi.ltcDurationMonths || LTC_DEFAULT_DURATION_MONTHS;   // total months of LTC
-      const ltcMonthly = pi.ltcMonthlyAmount || LTC_MONTHLY_ASSISTED_LIVING_2025;
-      // The LTC window is the final `ltcDuration` months ending at life expectancy, clamped
-      // so it never begins before age 65. For this projection year [person.age, person.age+1)
-      // we bill only the fraction of months that fall inside the window. Summed across all
-      // years the lifetime total equals exactly `ltcDuration` months (the previous logic
-      // assigned a full 12 months to every overlapping year and then ADDED a partial final
-      // year, over-billing by ~40% for a typical 28-month duration).
-      const ltcWindowStartAge = Math.max(65, person.lifeExp - ltcDuration / 12);
-      const overlapStart = Math.max(person.age, ltcWindowStartAge);
-      const overlapEnd = Math.min(person.age + 1, person.lifeExp);
-      const monthsThisYear = Math.max(0, (overlapEnd - overlapStart) * 12);
-      if (monthsThisYear > 0) {
-        ltcCost += ltcMonthly * monthsThisYear * medInflationFactor;
-      }
-    }
   });
+  // LONG-TERM CARE: each person's window of care in the final months of life
+  // (see ltcPlanFor for how the window is sized).
+  ltcCost += ltcCostFor(pi, people, medInflationFactor);
   
   const total = Math.round(pre65Cost + medicareCost + ltcCost);
   return { total, pre65: Math.round(pre65Cost), medicare: Math.round(medicareCost), ltc: Math.round(ltcCost),
@@ -3529,8 +3623,6 @@ const MEDICARE_OOP_ANNUAL_2025 = 2000;       // Avg annual out-of-pocket (copays
 const PRE_65_HEALTHCARE_ANNUAL_2025 = 12000; // Avg annual ACA/employer premium for one person
 const ACA_BENCHMARK_PREMIUM_2026 = 14000;    // Default unsubsidized silver benchmark (SLCSP) per person/yr — typical for an early retiree in their late 50s/60s; users should replace with their healthcare.gov quote
 const MEDICAL_INFLATION_RATE = 0.05;         // Healthcare cost inflation (higher than general CPI)
-const LTC_MONTHLY_ASSISTED_LIVING_2025 = 5900; // Median monthly assisted living cost (Genworth 2024)
-const LTC_DEFAULT_DURATION_MONTHS = 28;      // Default LTC planning: 28 months before death
 
 const HISTORICAL_RETURNS = [
   { year: 1928, stock:  0.4361, bond:  0.0084, cpi: -0.0117 },
@@ -11391,6 +11483,8 @@ const describePlanPatch = (state, patch) => {
     MEDICARE_SUPPLEMENT_PREMIUM_2025, MEDICARE_OOP_ANNUAL_2025,
     PRE_65_HEALTHCARE_ANNUAL_2025, MEDICAL_INFLATION_RATE,
     LTC_MONTHLY_ASSISTED_LIVING_2025, LTC_DEFAULT_DURATION_MONTHS,
+    LTC_MONTHLY_HOME_CARE_2025, LTC_MONTHLY_NURSING_HOME_2025, LTC_STRESS_MONTHS, LTC_EPISODE_MODEL,
+    ltcPlanFor, ltcCostFor, sampleLTCEpisode,
     ACA_FPL_2025, calculateACASubsidy,
     ACA_APPLICABLE_PCT_2026, ACA_BENCHMARK_PREMIUM_2026,
     getACAApplicablePercentage, calculateACAPremiumCredit,

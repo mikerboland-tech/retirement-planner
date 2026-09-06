@@ -13143,6 +13143,133 @@ section('P110 — Monte Carlo: each account at its own rate');
   }
 }
 
+section('P111 — long-term care: the stress case, the sampled episode, and the gating fix');
+
+{
+  const E = engine;
+  // ── the plan resolver ────────────────────────────────────────────────────
+  eq(E.ltcPlanFor({ ltcModel: 'none' }), null, "'none' is off");
+  {
+    const d = E.ltcPlanFor({ ltcModel: 'default', filingStatus: 'married_joint' });
+    eq(d.me.months, E.LTC_DEFAULT_DURATION_MONTHS, 'default gives each person 28 months');
+    eq(d.spouse.monthly, E.LTC_MONTHLY_ASSISTED_LIVING_2025, 'at the assisted-living median');
+    const c = E.ltcPlanFor({ ltcModel: 'custom', ltcDurationMonths: 40, ltcMonthlyAmount: 8000 });
+    eq(c.me.months, 40, 'custom uses the entered months'); eq(c.me.monthly, 8000, 'and cost');
+  }
+  {
+    const s = E.ltcPlanFor({ ltcModel: 'stress', filingStatus: 'married_joint', myLifeExpectancy: 85, spouseLifeExpectancy: 87 });
+    eq(s.spouse.months, E.LTC_STRESS_MONTHS, 'stress gives the survivor five years');
+    eq(s.spouse.monthly, E.LTC_MONTHLY_NURSING_HOME_2025, 'of nursing-home care');
+    eq(s.me.months, 0, 'and the first to die none');
+    const t = E.ltcPlanFor({ ltcModel: 'stress', filingStatus: 'married_joint', myLifeExpectancy: 90, spouseLifeExpectancy: 87 });
+    eq(t.me.months, E.LTC_STRESS_MONTHS, 'whichever of the two that is');
+    const single = E.ltcPlanFor({ ltcModel: 'stress', filingStatus: 'single', myLifeExpectancy: 85 });
+    eq(single.me.months, E.LTC_STRESS_MONTHS, 'a single filer is the survivor');
+    eq(single.spouse.months, 0, 'with nobody else to plan for');
+  }
+  {
+    const p = E.ltcPlanFor({ ltcModel: 'default', ltcPerPerson: { me: { months: 7, monthly: 1000 }, spouse: null } });
+    eq(p.me.months, 7, 'an explicit per-person plan wins over the model');
+    eq(p.spouse.months, 0, 'and a missing person means no care');
+  }
+  eq(E.ltcPlanFor({ healthcareModel: 'comprehensive' }).me.months, 28, 'a plan saved before ltcModel existed: care under comprehensive healthcare');
+  eq(E.ltcPlanFor({ healthcareModel: 'moderate' }), null, 'and none otherwise — exactly as before');
+
+  // ── the gating fix ───────────────────────────────────────────────────────
+  // With healthcare "none" or "in my spending", LTC set to Default used to be
+  // silently dropped, while the Personal Info control said it was on.
+  {
+    const base = { filingStatus: 'single', myLifeExpectancy: 85, myRetirementAge: 65, ltcModel: 'default', medicalInflation: 0 };
+    const at = (hm, age) => E.calculateHealthcareExpenses({ ...base, healthcareModel: hm }, age, age, 0, true, false);
+    gt(at('none', 84).ltc, 0, "LTC is billed under healthcare 'none'");
+    gt(at('in_spending', 84).ltc, 0, "and under 'in my spending'");
+    eq(at('none', 84).ltc, at('comprehensive', 84).ltc, 'at the same amount comprehensive bills');
+    eq(at('none', 84).total, at('none', 84).medicare + at('none', 84).ltc, 'and it is in the total');
+    eq(at('none', 70).ltc, 0, 'but not outside the window');
+    // The lifetime total is exactly 28 months, whatever the model.
+    let sum = 0; for (let a = 65; a < 86; a++) sum += at('none', a).ltc;
+    approx(sum, 28 * E.LTC_MONTHLY_ASSISTED_LIVING_2025, 'and the lifetime total is exactly 28 months of care', 0.001);
+    eq(E.calculateHealthcareExpenses({ ...base, healthcareModel: 'none', ltcModel: 'none' }, 84, 84, 0, true, false).ltc, 0,
+      "while 'none' stays off");
+  }
+  // stress end to end: one spouse's final five years carry nursing-home cost
+  {
+    const pi = { filingStatus: 'married_joint', myLifeExpectancy: 85, spouseLifeExpectancy: 90, myRetirementAge: 65, spouseRetirementAge: 65,
+      healthcareModel: 'none', ltcModel: 'stress', medicalInflation: 0 };
+    const r = E.calculateHealthcareExpenses(pi, 87, 87, 0, false, true);
+    approx(r.ltc, E.LTC_MONTHLY_NURSING_HOME_2025 * 12, 'a full year inside the survivor’s five-year window bills twelve months of nursing home', 0.001);
+    eq(E.calculateHealthcareExpenses(pi, 84, 82, 0, true, true).ltc, 0, 'and the first to die is never billed');
+  }
+
+  // ── the episode sampler, scripted ────────────────────────────────────────
+  const script = (vals) => { let i = 0; return () => vals[Math.min(i++, vals.length - 1)]; };
+  {
+    const none = E.sampleLTCEpisode(script([0.95]));
+    eq(none.months, 0, 'a draw above the need probability is no care');
+    eq(none.setting, null, 'with no setting');
+    // z = 0 ⇒ the median: u1 → 1 gives ln(u1) = 0. u2 irrelevant at z = 0.
+    const med = E.sampleLTCEpisode(script([0.1, 0.999999999999, 0.25, 0.1]));
+    eq(med.months, Math.round(E.LTC_EPISODE_MODEL.medianYears * 12), 'a zero shock draws the median episode');
+    eq(med.setting, 'home', 'and a low setting draw is home care');
+    eq(med.monthly, E.LTC_MONTHLY_HOME_CARE_2025, 'at the home-care median');
+    eq(E.sampleLTCEpisode(script([0.1, 0.999999999999, 0.25, 0.6])).setting, 'assisted', 'the middle of the setting draw is assisted living');
+    eq(E.sampleLTCEpisode(script([0.1, 0.999999999999, 0.25, 0.9])).setting, 'nursing', 'and the top is a nursing home');
+    const capped = E.sampleLTCEpisode(script([0.1, 1e-9, 0, 0.5]));
+    eq(capped.months, E.LTC_EPISODE_MODEL.maxYears * 12, 'an extreme shock is capped at ten years');
+  }
+  // and statistically, against the population figures it was built from
+  {
+    let need = 0, months = 0, over5 = 0; const N = 40000;
+    for (let i = 0; i < N; i++) { const r = E.sampleLTCEpisode(); if (r.months > 0) { need++; months += r.months; if (r.months > 60) over5++; } }
+    approx(need / N, E.LTC_EPISODE_MODEL.pNeed, 'about 70% draw some care', 0.03);
+    approx(over5 / need, 0.20, 'one in five episodes runs past five years', 0.08);
+    ok(months / N > 22 && months / N < 32, `the expected months across everyone (${(months / N).toFixed(1)}) sit near the 28-month deterministic default`);
+  }
+
+  // ── the worker, end to end ───────────────────────────────────────────────
+  {
+    const vmMod = require('vm'), fs = require('fs'), pathMod = require('path');
+    const ROOT = pathMod.resolve(__dirname, '..');
+    const runJob = (type, payload) => {
+      const sb = { console, Math, Date, JSON, Object, Array, Number, String, Boolean, Set, Map,
+        Infinity, NaN, isNaN, parseFloat, parseInt, Error, RegExp, Promise, undefined, URLSearchParams, __out: [] };
+      sb.self = sb; sb.globalThis = sb; sb.location = { search: '?v=test' };
+      sb.importScripts = (spec) => vmMod.runInContext(fs.readFileSync(pathMod.join(ROOT, spec.split('?')[0]), 'utf8'), sb);
+      sb.postMessage = (m) => { if (m.type !== 'progress') sb.__out.push(m); };
+      vmMod.createContext(sb);
+      vmMod.runInContext(fs.readFileSync(pathMod.join(ROOT, 'worker.js'), 'utf8'), sb);
+      sb.onmessage({ data: { jobId: 1, type, payload } });
+      const err = sb.__out.find(m => m.type === 'error');
+      if (err) throw new Error(type + ': ' + err.error);
+      return sb.__out.find(m => m.type === 'result').data;
+    };
+    const s = baseScenario({ myAge: 64, spouseAge: 62, myBirthYear: TODAY_YEAR - 64, spouseBirthYear: TODAY_YEAR - 62,
+      myRetirementAge: 65, spouseRetirementAge: 65, legacyAge: 92, state: 'Florida', desiredRetirementIncome: 95000,
+      healthcareModel: 'none', ltcModel: 'none' });
+    // Tight enough that care matters: a plan that would sail through regardless
+    // cannot show a difference.
+    s.accts = [{ id: 1, name: '401k', type: '401k', balance: 1500000, contribution: 0, contributionGrowth: 0, cagr: 0.05, startAge: 64, stopAge: 65, owner: 'me', contributor: 'me' }];
+    s.streams = [{ id: 2, name: 'SS', type: 'social_security', amount: 40000, startAge: 67, endAge: 95, cola: 0.025, owner: 'me', pia: 3300, todaysDollars: true }];
+    const common = { personalInfo: s.pi, accounts: s.accts, incomeStreams: s.streams, assets: [], oneTimeEvents: [], recurringExpenses: [] };
+    const settings = { startAge: 65, numSimulations: 400, method: 'random', returnModel: 'perAccount', meanReturn: 0.05, stdDev: 0.10, inflationMean: 0.03, inflationStdDev: 0.005 };
+    const off = runJob('monteCarlo', { ...common, simSettings: settings });
+    const on = runJob('monteCarlo', { ...common, simSettings: { ...settings, ltc: { enabled: true } } });
+    eq(off.ltcEnabled, false, 'off by default'); eq(off.ltcStats, null, 'with no stats');
+    eq(on.ltcEnabled, true, 'the result says care was varied');
+    const L = on.ltcStats;
+    ok(L && L.share > 0.75 && L.share < 0.97, `a couple draws some care in most runs (${(L.share * 100).toFixed(0)}%) — either of two people`);
+    gt(L.monthsP90, L.monthsP50, 'the tail is longer than the median');
+    gt(L.costP50Real, 50000, 'a median episode costs real money in today’s dollars');
+    gt(L.costP90Real, L.costP50Real, 'and the tail more');
+    lt(on.successRate, off.successRate + 1e-9, 'varying care cannot make the plan safer');
+    ok(L.successWithoutCare === null || L.successWithCare <= L.successWithoutCare + 1e-9,
+      'and the runs that drew care fare no better than the runs that did not');
+    // With lifespans varied as well, the two draws compose without error.
+    const both = runJob('monteCarlo', { ...common, simSettings: { ...settings, numSimulations: 100, ltc: { enabled: true }, longevity: { enabled: true } } });
+    ok(Number.isFinite(both.successRate) && both.ltcStats && both.longevityStats, 'care and lifespan draws compose');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

@@ -37,6 +37,7 @@ const {
   MEDICARE_SUPPLEMENT_PREMIUM_2025, MEDICARE_OOP_ANNUAL_2025,
   PRE_65_HEALTHCARE_ANNUAL_2025, MEDICAL_INFLATION_RATE,
   LTC_MONTHLY_ASSISTED_LIVING_2025, LTC_DEFAULT_DURATION_MONTHS, ACA_FPL_2025,
+  LTC_MONTHLY_NURSING_HOME_2025, LTC_STRESS_MONTHS, LTC_EPISODE_MODEL,
   calculateACASubsidy, calculateACAPremiumCredit, ACA_BENCHMARK_PREMIUM_2026,
   calculateHealthcareExpenses, calculateRecurringExpenses, healthcareCostsModeled,
   GOV_PENSION_SYSTEMS, estimateGovernmentPension, estimateFersSupplement,
@@ -574,6 +575,7 @@ const SECTION_MANIFEST = {
     // The outcome distribution is the answer the tab exists to give, so it has no
     // toggle; everything around it does.
     { id: 'longevity',     label: 'How Long the Money Had to Last', level: 'advanced' },
+    { id: 'ltc',           label: 'Long-Term Care Outcomes',        level: 'advanced' },
     { id: 'guardrails',    label: 'Spending Guardrail Outcomes',   level: 'advanced' },
     { id: 'perYear',       label: 'Per-Year Historical Outcomes',  level: 'advanced' },
     { id: 'bands',         label: 'Portfolio Projection Bands',    level: 'essential' },
@@ -2212,6 +2214,10 @@ function FAQTab() {
         {
           q: "What is a good success rate?",
           a: "90%+ is considered excellent - your plan can handle most bad scenarios. 75-90% is good but consider having flexibility. 50-75% suggests moderate risk - consider adjustments. Below 50% indicates high risk of running out of money. Many financial planners target 80-90% success rates."
+        },
+        {
+          q: "How is long-term care modeled?",
+          a: "Two ways. The plan itself uses a fixed window: under Personal Info → Long-Term Care, 'Default' bills 28 months of assisted living at the Genworth 2024 median for each of you in the final months before your life expectancy, 'Custom' lets you set the months and monthly cost, and 'Stress' gives whichever of you is planned to live longer five years of nursing-home care and the other none — the worst realistic case. Long-term care is billed whichever healthcare model you chose. The Monte Carlo tab can instead draw a different episode for every run ('Vary long-term care too'): about 70% of people need some paid care after 65, a typical episode is two years, one in five runs past five years, and the setting is drawn between home care, assisted living and a nursing home. The results then show how often care was drawn, what it cost, and the plan's success rate with care against without — the number that says whether long-term care insurance is worth its premium for you."
         },
         {
           q: "What are the limitations of Monte Carlo?",
@@ -6755,6 +6761,7 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
     // spending flexibility keeps this plan alive."
     guardrails: { enabled: false, bandPct: 0.20, adjustPct: 0.10 },
     longevity: { enabled: false },
+    ltc: { enabled: false },
   });
   const [simResults, setSimResults] = useState(null);
   // Nominal vs today's dollars. Each sim draws its own inflation path, so pooled
@@ -7266,6 +7273,27 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
             Running out of money after you have died stops counting as a failure, and living to 100 starts counting as a risk.
           </span>
         </div>
+        {/* Long-term care sampling — vary the care episode, not just markets */}
+        <div className="flex flex-wrap items-center gap-4 mb-4 p-3 bg-slate-800/40 border border-slate-700/50 rounded-lg">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={simSettings.ltc?.enabled || false}
+              onChange={e => setSimSettings({ ...simSettings, ltc: { enabled: e.target.checked } })}
+              className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-emerald-500 focus:ring-emerald-500/50"
+            />
+            <span className="text-sm text-slate-300">Vary long-term care too</span>
+          </label>
+          <span className="text-xs text-slate-500 max-w-2xl">
+            The plan gives everyone the same window of care. Each run instead draws, per person, whether paid care is
+            needed at all (about {Math.round(LTC_EPISODE_MODEL.pNeed * 100)}% after 65), for how long (a typical episode
+            is two years; one in five runs past five), and in what setting — home care, assisted living or a nursing
+            home. Care lands in the final months of that run's life, so it composes with the lifespan draw above.
+            {personalInfo.ltcModel === 'none' || !personalInfo.ltcModel
+              ? ' Your plan has long-term care switched off, so this is the only place it is priced.'
+              : ' It replaces the plan\'s fixed window for the simulation only.'}
+          </span>
+        </div>
         <div className="flex items-center gap-4">
           {isRunning ? (
             <button
@@ -7497,6 +7525,44 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
                   In <span className="text-amber-400 font-medium">{Math.round(L.beyondPlanned * 100)}%</span> of scenarios
                   the household outlived the fixed planning horizon this plan uses everywhere else — those are years the
                   ordinary projection never models at all.
+                </p>
+              </Section>
+            );
+          })()}
+
+          {simResults.ltcEnabled && simResults.ltcStats && (() => {
+            const L = simResults.ltcStats;
+            const pct = (v) => v === null || v === undefined ? '—' : `${(v * 100).toFixed(1)}%`;
+            const cell = (label, value, sub) => (
+              <div className="bg-slate-800/60 rounded-lg p-3">
+                <div className="text-xs text-slate-400">{label}</div>
+                <div className="text-xl font-semibold text-slate-100">{value}</div>
+                {sub && <div className="text-xs text-slate-500 mt-0.5">{sub}</div>}
+              </div>
+            );
+            const gap = (L.successWithCare !== null && L.successWithoutCare !== null)
+              ? L.successWithoutCare - L.successWithCare : null;
+            return (
+              <Section tab="montecarlo" id="ltc" title={<>🏥 Long-Term Care Outcomes</>} vis={sectionVisibility} level={detailLevel} setVis={setSectionVisibility}>
+                <p className="text-xs text-slate-400 mb-3">
+                  What the simulation drew for care, and what it did to the plan. Costs are lifetime, in today's dollars,
+                  across the household.
+                </p>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  {cell('Runs with paid care', pct(L.share), `${pct(L.nursingShare)} included a nursing home`)}
+                  {cell('Care drawn, median', `${L.monthsP50} mo`, `1 in 10 drew ${L.monthsP90}+ mo; longest ${L.monthsMax}`)}
+                  {cell('Lifetime cost, median', formatCurrency(L.costP50Real), `1 in 10 cost ${formatCurrency(L.costP90Real)}+`)}
+                  {cell('Success with care', pct(L.successWithCare), `vs ${pct(L.successWithoutCare)} without`)}
+                </div>
+                <p className="text-xs text-slate-400 mt-3">
+                  {gap !== null && gap > 0.02
+                    ? <>Care costs this plan <span className="text-amber-400 font-medium">{(gap * 100).toFixed(1)} points</span> of success rate. </>
+                    : <>Care barely moves this plan's success rate. </>}
+                  {L.overFiveYearsCount > 0 && (
+                    <>In the {L.overFiveYearsCount} runs with more than five years of care, the plan held up{' '}
+                    <span className="text-slate-200 font-medium">{pct(L.successOverFiveYears)}</span> of the time — that is the
+                    tail long-term care insurance exists for.</>
+                  )}
                 </p>
               </Section>
             );
@@ -12311,6 +12377,7 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
                 <option value="none">None</option>
                 <option value="default">Default (28 months, median cost)</option>
                 <option value="custom">Custom</option>
+                <option value="stress">Stress: 5 years of nursing home for the survivor</option>
               </select>
             </div>
             {(localInfo.ltcModel === 'custom') && (
@@ -12335,7 +12402,10 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
               </div>
             )}
             <p className="text-xs text-slate-500 mt-2">
-              Default models ${LTC_MONTHLY_ASSISTED_LIVING_2025.toLocaleString()}/mo assisted living for {LTC_DEFAULT_DURATION_MONTHS} months before death (Genworth 2024 median). Cost compounds at the medical inflation rate and appears as a spike in the final years before each spouse's life expectancy.
+              {localInfo.ltcModel === 'stress'
+                ? `Stress case: ${LTC_STRESS_MONTHS / 12} years of nursing-home care at $${LTC_MONTHLY_NURSING_HOME_2025.toLocaleString()}/mo (Genworth 2024 private-room median) for whichever of you is planned to live longer, and none for the other — the case with no spouse left to give informal care and the estate at its lowest. Roughly 1 in 7 people who need care need it this long.`
+                : `Default models $${LTC_MONTHLY_ASSISTED_LIVING_2025.toLocaleString()}/mo assisted living for ${LTC_DEFAULT_DURATION_MONTHS} months before death (Genworth 2024 median) — about the average across everyone, including the 30% who never need paid care. Cost compounds at the medical inflation rate and appears as a spike in the final years before each spouse's life expectancy.`}
+              {' '}Long-term care is billed whichever healthcare model is chosen above. The Monte Carlo tab can draw a different episode for every run instead.
             </p>
           </div>
         </div>

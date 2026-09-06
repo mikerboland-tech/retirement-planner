@@ -119,6 +119,14 @@ function runMonteCarlo(jobId, payload) {
   // the engine reads -- so enabling longevity implies it.
   const longevity = !!(simSettings.longevity && simSettings.longevity.enabled);
   const isMarried = piWithLifeExp.filingStatus === 'married_joint';
+  // ── LONG-TERM CARE SAMPLING ─────────────────────────────────────────────────
+  // The deterministic plan gives everyone the same window of care. Each run
+  // instead draws, per person, whether paid care is needed at all, for how
+  // long, and in what setting (engine.sampleLTCEpisode), and feeds it in as an
+  // explicit per-person plan. Care lands in the final months before that
+  // run's death, so with longevity on the two draws compose.
+  const ltcVary = !!(simSettings.ltc && simSettings.ltc.enabled);
+  const ltcDraws = [];
   // Slide the sampled distribution so the plan's own life-expectancy input keeps
   // setting the central tendency; only the SHAPE comes from population data.
   const myShift = longevity
@@ -274,6 +282,13 @@ function runMonteCarlo(jobId, payload) {
           E.sampleAgeAtDeath(piWithLifeExp.spouseAge, Math.random, spouseShift);
       }
     }
+    let ltcDraw = null;
+    if (ltcVary) {
+      const mine = E.sampleLTCEpisode(Math.random);
+      const sp = isMarried ? E.sampleLTCEpisode(Math.random) : { months: 0, monthly: 0, setting: null };
+      ltcDraw = { me: mine, spouse: sp };
+      piForSim = { ...piForSim, ltcModel: 'custom', ltcPerPerson: { me: mine, spouse: sp } };
+    }
 
     const proj = computeProjections(
       piForSim, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
@@ -289,12 +304,14 @@ function runMonteCarlo(jobId, payload) {
     // figure a user can actually reason about.
     const path = [];
     let cumInflation = 1;
+    let ltcCostReal = 0;
     for (let y = 0; y < proj.length; y++) {
       const p = proj[y];
       if (y > 0) {
         const prev = overrides[y - 1];
         cumInflation *= (1 + (prev ? prev.inflation : piWithLifeExp.inflationRate));
       }
+      if (ltcVary && p.healthcareLTC > 0) ltcCostReal += p.healthcareLTC / cumInflation;
       if (p.myAge >= simSettings.startAge) {
         path.push({ age: p.myAge, portfolio: p.totalPortfolio, real: p.totalPortfolio / cumInflation });
       }
@@ -320,6 +337,15 @@ function runMonteCarlo(jobId, payload) {
       if (pt.portfolio <= 0) { portfolioSurvived = false; failureAge = pt.age; break; }
     }
 
+    if (ltcVary) {
+      ltcDraws.push({
+        months: ltcDraw.me.months + ltcDraw.spouse.months,
+        anyCare: ltcDraw.me.months > 0 || ltcDraw.spouse.months > 0,
+        nursing: ltcDraw.me.setting === 'nursing' || ltcDraw.spouse.setting === 'nursing',
+        costReal: ltcCostReal,
+        survived: portfolioSurvived,
+      });
+    }
     results.push({
       finalPortfolio: path.length > 0 ? path[path.length - 1].portfolio : 0,
       finalPortfolioReal: path.length > 0 ? path[path.length - 1].real : 0,
@@ -388,6 +414,28 @@ function runMonteCarlo(jobId, payload) {
         beyondPlanned: lastAges.filter(a => a > (deterministicYears - 1 + piWithLifeExp.myAge)).length / lastAges.length,
       };
     }
+  }
+
+  // Long-term care outcomes: how often care was drawn, how long, what it cost
+  // in today's dollars, and — the figure that matters — how the plan fared in
+  // the runs that drew care against the runs that did not.
+  let ltcStats = null;
+  if (ltcVary && ltcDraws.length) {
+    const q = (arr, p) => arr.length ? arr[Math.min(arr.length - 1, Math.floor(arr.length * p))] : 0;
+    const withCare = ltcDraws.filter(d => d.anyCare);
+    const without = ltcDraws.filter(d => !d.anyCare);
+    const months = withCare.map(d => d.months).sort((a, b) => a - b);
+    const costs = withCare.map(d => d.costReal).sort((a, b) => a - b);
+    const rate = (arr) => arr.length ? arr.filter(d => d.survived).length / arr.length : null;
+    ltcStats = {
+      share: withCare.length / ltcDraws.length,
+      nursingShare: ltcDraws.filter(d => d.nursing).length / ltcDraws.length,
+      monthsP50: q(months, 0.5), monthsP90: q(months, 0.9), monthsMax: months.length ? months[months.length - 1] : 0,
+      costP50Real: q(costs, 0.5), costP90Real: q(costs, 0.9), costMaxReal: costs.length ? costs[costs.length - 1] : 0,
+      successWithCare: rate(withCare), successWithoutCare: rate(without),
+      successOverFiveYears: rate(withCare.filter(d => d.months > 60)),
+      overFiveYearsCount: withCare.filter(d => d.months > 60).length,
+    };
   }
 
   // Percentile fan chart from ALL sims (bandData), not just the stored sample paths.
@@ -469,6 +517,8 @@ function runMonteCarlo(jobId, payload) {
       startingPortfolio,
       longevityEnabled: longevity,
       longevityStats,
+      ltcEnabled: ltcVary,
+      ltcStats,
       percentile5: percentile(finalPortfolios, 0.05),
       percentile25: percentile(finalPortfolios, 0.25),
       percentile50: percentile(finalPortfolios, 0.50),
