@@ -13501,33 +13501,7 @@ section('P115 — every report component declares the plan it reads');
     const body = lines.slice(s.at + 1, nextTop(s.at)).join('\n');
     const stripped = body.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
     // A bare identifier: not `.pi`, not the object key `pi:`, not a string.
-    const usesPi = /(^|[^A-Za-z0-9_.
-    if (!usesPi) continue;
-    checked++;
-    // Declared as the component's own parameter or const, or as a parameter
-    // of an inner function — (pi) =>, (pi, x) =>, function f(pi), ({ pi }) =>.
-    const declares = /\bpi\b/.test(s.params)
-      || /\bconst pi\b|\blet pi\b|\bpi\s*=\s*personalInfo/.test(stripped)
-      || /\(\s*\{[^}]*\bpi\b[^}]*\}[^)]*\)\s*=>|\(\s*pi\b[^)]*\)\s*=>|\bpi\s*=>|function\s*[A-Za-z0-9_]*\s*\([^)]*\bpi\b[^)]*\)/.test(stripped);
-    if (!declares) offenders.push(s.name);
-  }
-  gt(checked, 5, `components that read a bare pi were found (${checked})`);
-  eq(offenders.length, 0, `every one of them declares it${offenders.length ? ' — offenders: ' + offenders.join(', ') : ''}`);
-  ok(/function NextYearReport[\s\S]*?<ReportBasisLine pi=\{personalInfo\}/.test(src), 'and the Next 12 Months report passes the plan it was given');
-}
-
-// ── Summary ──────────────────────────────────────────────────────────────────
-console.log(`\n${'─'.repeat(60)}`);
-if (fail === 0) {
-  console.log(`✓ ALL ${pass} ASSERTIONS PASSED`);
-  process.exit(0);
-} else {
-  console.log(`✗ ${fail} FAILED, ${pass} passed`);
-  console.log('\nFailures:');
-  for (const f of failures) console.log(f);
-  process.exit(1);
-}
-"`])pi(?=[.\s,)}\];])(?!\s*:)/.test(stripped);
+    const usesPi = /(^|[^A-Za-z0-9_.$'"`])pi(?=[.\s,)}\];])(?!\s*:)/.test(stripped);
     if (!usesPi) continue;
     checked++;
     // Declared as the component's own parameter or const, or as a parameter
