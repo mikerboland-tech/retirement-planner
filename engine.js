@@ -184,10 +184,10 @@ const SENIOR_DEDUCTION_PHASEOUT_START = {
 // NOT modeled (each requires inputs the planner doesn't collect): disability,
 // death, unreimbursed medical above 7.5% of AGI, health insurance while
 // unemployed, first-home ($10k) and higher-education IRA exceptions, birth or
-// adoption ($5k), qualified disaster and public-safety-employee rules. Also not
-// modeled: the Roth 5-year conversion clock (converted dollars withdrawn within
-// five years are penalized) — the engine does not track Roth basis vintages, so
-// Roth withdrawals are always treated as penalty-free.
+// adoption ($5k), qualified disaster and public-safety-employee rules.
+// The Roth 5-year CONVERSION clock IS modeled — see the Roth layers block
+// below: each conversion is a dated tranche, and a draw that reaches one under
+// five tax years old while the owner is under 59½ carries this penalty.
 // State-level early-distribution penalties (e.g. California's extra 2.5%) are
 // not modeled either; this is federal only.
 const EARLY_WITHDRAWAL_PENALTY_RATE = 0.10;
@@ -210,6 +210,85 @@ const earlyWithdrawalPenaltyFraction = (ownerAge) => {
 
 // Penalized share of a distribution from `account` by an owner aged `ownerAge`.
 // ownerRetirementAge drives the rule-of-55 test; sepp72t exempts everything.
+// ── ROTH LAYERS: THE 5-YEAR CONVERSION CLOCK ─────────────────────────────────
+// IRC §408A(d)(3)(F) and (d)(4). A Roth is not one pot; a distribution comes
+// out in a fixed order — regular contributions first, then conversions oldest
+// first, then earnings — and each conversion carries its own clock: converted
+// dollars drawn within five tax years of the conversion, by an owner under 59½,
+// owe the 10% additional tax (the income tax was paid at conversion). After
+// 59½ the clock is irrelevant. Earnings drawn before 59½ are ordinary income
+// AND penalised; after 59½ they are tax-free once the account itself is five
+// years old.
+//
+// This is THE rule for a Roth ladder — retire at 55, convert each year, live on
+// the conversions from 60 — and it was the one thing this planner did not
+// model while making conversions central to everything else. A plan that
+// draws on a two-year-old conversion at 57 was reported as penalty-free.
+//
+// The entered opening balance is treated as seasoned basis. Its composition is
+// unknowable from a balance, and contributions come out first anyway, so the
+// only case this understates is an account opened within five years that is
+// drawn on for earnings before 59½ — stated here rather than guessed at. Only
+// conversions the PLAN makes get a clock, which is exactly the case that
+// matters.
+const ROTH_CONVERSION_SEASONING_YEARS = 5;
+const ROTH_ACCOUNT_SEASONING_YEARS = 5;
+
+const rothLayersFor = (accts) => {
+  const layers = {};
+  (accts || []).forEach(a => {
+    if (isRothAccount(a.type)) {
+      layers[a.id] = { basis: Math.max(0, a.balance || 0), tranches: [], opened: null };
+    }
+  });
+  return layers;
+};
+
+// Draw `amount` from a layer in statutory order. `commit` false previews for
+// the solver without mutating. Returns the slices and what they cost.
+const rothDrawFromLayers = (layer, amount, ownerAge, year, commit = true) => {
+  const out = { basis: 0, seasonedConv: 0, unseasonedConv: 0, earnings: 0, penalized: 0, taxable: 0 };
+  if (!layer || !(amount > 0)) return out;
+  const fraction = earlyWithdrawalPenaltyFraction(ownerAge);   // 0 at 59½+, ½ in the straddle year
+  let need = amount;
+  // 1. contributions — always free
+  const b = Math.min(layer.basis, need);
+  out.basis = b; need -= b;
+  if (commit) layer.basis -= b;
+  // 2. conversions, oldest first
+  const tranches = commit ? layer.tranches : layer.tranches.map(t => ({ ...t }));
+  for (const t of tranches) {
+    if (need <= 0) break;
+    const w = Math.min(t.remaining, need);
+    if (w <= 0) continue;
+    const seasoned = (year - t.year) >= ROTH_CONVERSION_SEASONING_YEARS || fraction === 0;
+    if (seasoned) out.seasonedConv += w;
+    else { out.unseasonedConv += w; out.penalized += w * fraction; }
+    t.remaining -= w; need -= w;
+  }
+  if (commit) layer.tranches = layer.tranches.filter(t => t.remaining > 0.005);
+  // 3. earnings — whatever is left
+  if (need > 0) {
+    out.earnings = need;
+    const accountSeasoned = layer.opened === null || (year - layer.opened) >= ROTH_ACCOUNT_SEASONING_YEARS;
+    if (fraction > 0 || !accountSeasoned) {
+      out.taxable += need;
+      out.penalized += need * fraction;
+    }
+  }
+  return out;
+};
+
+// Converted dollars still inside their five-year clock AND still costly to
+// reach — what a reader would want to know before counting the Roth as
+// spendable. Past 59½ the clock is a fact with no consequence, so nothing is
+// reported as locked.
+const rothUnseasonedTotal = (layer, year, ownerAge = 0) => {
+  if (earlyWithdrawalPenaltyFraction(ownerAge) === 0) return 0;
+  return (layer ? layer.tranches : []).reduce((t, x) =>
+    t + ((year - x.year) < ROTH_CONVERSION_SEASONING_YEARS ? x.remaining : 0), 0);
+};
+
 const earlyWithdrawalPenaltyShare = (account, ownerAge, ownerRetirementAge, sepp72t) => {
   if (!isPreTaxAccount(account.type)) return 0;         // Roth/HSA/brokerage: not §72(t)
   if (sepp72t) return 0;
@@ -3121,6 +3200,7 @@ const REAL_DOLLAR_FIELDS = [
   'stateTax', 'stateTaxableIncome', 'taxableIncome', 'taxableSS', 'totalGuaranteedIncome',
   'totalIncome', 'totalNetWorth', 'totalPortfolio', 'totalTax', 'unfundedShortfall',
   'acaGrossPremium', 'acaNetPremium', 'acaSubsidy', 'solverResidual',
+  'rothUnseasonedDrawn', 'rothTaxableEarnings', 'rothUnseasoned',
 ];
 // Objects whose VALUES are money and whose keys are ids or category names.
 const REAL_DOLLAR_MAPS = ['perAccountBalances', 'perAccountContributions', 'recurringExpensesByCategory'];
@@ -8183,6 +8263,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   accts = normalizeContributionWindow(accts, pi);
   const years = [];
   let accountBalances = accts.reduce((acc, account) => ({ ...acc, [account.id]: account.balance }), {});
+  // Each Roth as layers — basis, dated conversion tranches, earnings — so a
+  // draw can be priced in statutory order. See rothLayersFor.
+  const rothLayers = rothLayersFor(accts);
   
   // Track reinvested excess RMDs when no brokerage account exists
   // This prevents excess RMDs from vanishing — they grow at a conservative rate
@@ -8743,6 +8826,12 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           : baseContribution * Math.pow(1 + contributionGrowth, Math.max(0, yearsContributing));
         accountBalances[account.id] += adjustedContribution;
         accountContributions[account.id] = Math.round(adjustedContribution);
+        // A Roth contribution is basis: it comes out first and is never taxed
+        // or penalised again.
+        if (isRothAccount(account.type) && rothLayers[account.id]) {
+          rothLayers[account.id].basis += adjustedContribution;
+          if (rothLayers[account.id].opened === null && adjustedContribution > 0) rothLayers[account.id].opened = year;
+        }
         
         // Pre-tax contributions reduce AGI (above-the-line deduction).
         // 401k, 403b, 457b, Traditional IRA contributions are tax-deductible.
@@ -9052,6 +9141,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       const estimateDrawComposition = (gross) => {
         let need = Math.max(0, gross - totalRMD); // voluntary draw beyond the mandatory RMD
         let preTax = 0, gains = 0, penalized = 0, hsaNonQual = 0;
+        const simRoth = {};
+        Object.keys(rothLayers).forEach(id => {
+          simRoth[id] = { basis: rothLayers[id].basis, opened: rothLayers[id].opened,
+                          tranches: rothLayers[id].tranches.map(t => ({ ...t })) };
+        });
         const bal = {};
         accts.forEach(a => {
           bal[a.id] = accountBalances[a.id];
@@ -9107,7 +9201,18 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
                 const basisPct = (a.costBasisPercent !== undefined && a.costBasisPercent !== null) ? a.costBasisPercent : BROKERAGE_COST_BASIS_ESTIMATE;
                 gains += w * (1 - basisPct);
               }
-              // roth: tax-free, contributes nothing to taxable income
+              else if (isRothAccount(a.type)) {
+                // Not simply tax-free any more: a draw that reaches an unseasoned
+                // conversion before 59½ owes the penalty, and one that reaches
+                // earnings owes income tax too. Previewed against a per-pass copy
+                // so the solver's iterations cannot drain the real layers.
+                const lay = simRoth[a.id];
+                if (lay) {
+                  const rd = rothDrawFromLayers(lay, w, a.owner === 'spouse' ? spouseAge : myAge, year, true);
+                  penalized += rd.penalized;
+                  preTax += rd.taxable;
+                }
+              }
             }
           });
           if (category === 'brokerage' && need > 0 && pool > 0) {
@@ -9315,6 +9420,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // distribution and is not penalized — but pre-tax dollars pulled out to PAY
     // the conversion's tax bill are, and are booked below.
     let penalizedWithdrawals = 0;
+    // Roth draws priced through the layers: dollars that hit an unseasoned
+    // conversion, and earnings drawn while still taxable.
+    let rothUnseasonedDrawn = 0, rothTaxableEarnings = 0;
     // Per-account cost-basis tracking: each brokerage account can have its own
     // costBasisPercent (e.g. 0.30 for an old account with deep gains, 0.95 for a new one).
     // We accumulate the actual capital gains and basis recovered to use them in tax calc.
@@ -9407,6 +9515,14 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             }
           } else if (isRothAccount(account.type)) {
             rothWithdrawals += withdrawal;
+            // Statutory order: basis, then conversions oldest-first (penalised
+            // inside their five-year clock before 59½), then earnings.
+            const rd = rothDrawFromLayers(rothLayers[account.id], withdrawal,
+              account.owner === 'spouse' ? spouseAge : myAge, year, true);
+            rothUnseasonedDrawn += rd.unseasonedConv;
+            rothTaxableEarnings += rd.taxable;
+            penalizedWithdrawals += rd.penalized;
+            preTaxWithdrawals += rd.taxable;   // non-qualified earnings: ordinary income, same as an IRA draw
           }
         }
       });
@@ -9793,6 +9909,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // Move the money: reduce pre-tax, increase Roth
           accountBalances[sourceAccount.id] -= rothConversionThisYear;
           accountBalances[destAccount.id] = (accountBalances[destAccount.id] || 0) + rothConversionThisYear;
+          // Every conversion is its own dated tranche with its own five-year clock.
+          if (rothLayers[destAccount.id]) {
+            rothLayers[destAccount.id].tranches.push({ year, remaining: rothConversionThisYear });
+            if (rothLayers[destAccount.id].opened === null) rothLayers[destAccount.id].opened = year;
+          }
           // The converted amount is ordinary income — add to pre-tax withdrawals for tax calculation
           preTaxWithdrawals += rothConversionThisYear;
           
@@ -9945,6 +10066,12 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
                     brokerageCapitalGains += w * (1 - basisPct);
                   } else if (isRothAccount(account.type)) {
                     rothWithdrawals += w;
+                    const rd = rothDrawFromLayers(rothLayers[account.id], w,
+                      account.owner === 'spouse' ? spouseAge : myAge, year, true);
+                    rothUnseasonedDrawn += rd.unseasonedConv;
+                    rothTaxableEarnings += rd.taxable;
+                    penalizedWithdrawals += rd.penalized;
+                    preTaxWithdrawals += rd.taxable;
                   } else if (isHSAAccount(account.type)) {
                     // NOTE: unlike the spending path above, this conversion-tax
                     // draw does not split at the qualified-expense line — it
@@ -10544,6 +10671,16 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       solverResidual: Math.round(solverResidual),
       solverIterations,
       solverConverged: Math.abs(solverResidual) < 100,
+      // Roth 5-year clock. Dollars this year's draws took from conversions still
+      // inside their clock (each penalised, already inside
+      // earlyWithdrawalPenalty), non-qualified earnings drawn (ordinary income),
+      // and what remains locked at year end — the figure to read before
+      // counting the Roth as spendable.
+      rothUnseasonedDrawn: Math.round(rothUnseasonedDrawn),
+      rothTaxableEarnings: Math.round(rothTaxableEarnings),
+      rothUnseasoned: Math.round(accts.reduce((t, a) => isRothAccount(a.type)
+        ? t + Math.min(accountBalances[a.id] || 0,
+            rothUnseasonedTotal(rothLayers[a.id], year, a.owner === 'spouse' ? spouseAge : myAge)) : t, 0)),
     });
 
     // Guardrails bookkeeping: remember this row for next year's rate check, and
@@ -11097,7 +11234,8 @@ const describePlanPatch = (state, patch) => {
     getACAApplicablePercentage, calculateACAPremiumCredit,
     getSpendingPhaseMultiplier, scoreRothStrategy, afterTaxLegacyValue, rowAtOrLast,
     deflateProjections, realDeflator, REAL_DOLLAR_FIELDS, claimingComparison,
-    sanitizePlanInputs,
+    sanitizePlanInputs, rothLayersFor, rothDrawFromLayers, rothUnseasonedTotal,
+    ROTH_CONVERSION_SEASONING_YEARS,
     reindexSSForInflation, compareClaimingScenarios,
     conversionCostComponents, conversionCostAudit, topMarginalBracket,
     SEQUENCE_RISK_RETURNS, SEQUENCE_RISK_YEARS, sequenceRiskOverrides,

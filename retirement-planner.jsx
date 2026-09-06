@@ -2945,6 +2945,11 @@ function IncomeStreamsTab({ detailLevel, sectionVisibility, setDetailLevel, setS
                         incl. {formatCurrency(row.earlyWithdrawalPenalty)} 72(t)
                       </div>
                     )}
+                    {row.rothUnseasonedDrawn > 0 && (
+                      <div className="text-xs text-red-300" title="Converted dollars drawn within five tax years of the conversion, before 59½ — penalised under the Roth 5-year rule (§408A(d)(3)(F)); the penalty is inside the 72(t) figure above">
+                        {formatCurrency(row.rothUnseasonedDrawn)} from a Roth conversion under 5 yrs old
+                      </div>
+                    )}
                   </td>
                   <td className="py-2 px-2 text-right text-amber-400">{formatCurrency(row.stateTaxableIncome)}</td>
                   <td className="py-2 px-2 text-right text-red-400">({formatCurrency(row.stateTax)})</td>

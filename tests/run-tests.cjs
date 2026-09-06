@@ -12741,6 +12741,125 @@ section('P107 — the review release: RMD timing, boundary coercion, solver visi
   });
 }
 
+section('P108 — the Roth 5-year conversion clock');
+
+{
+  // §408A(d)(4) ordering and the §408A(d)(3)(F) clock, tested first against the
+  // pure layer function with published-style cases, then end to end through a
+  // Roth ladder — retire at 55, convert yearly, draw on the conversions — which
+  // is the plan this rule exists for and the one the engine used to report as
+  // penalty-free.
+  const L = () => ({ basis: 20000, opened: 2020, tranches: [
+    { year: 2024, remaining: 30000 }, { year: 2027, remaining: 40000 } ] });
+  const draw = (amt, age, year) => engine.rothDrawFromLayers(L(), amt, age, year, false);
+
+  // ── ordering ─────────────────────────────────────────────────────────────
+  {
+    const r = draw(15000, 57, 2029);
+    eq(r.basis, 15000, 'a draw inside basis is all basis');
+    eq(r.penalized, 0, 'and basis is never penalised');
+    eq(r.taxable, 0, 'nor taxed');
+  }
+  {
+    const r = draw(35000, 57, 2029);
+    eq(r.basis, 20000, 'basis comes out first, all of it');
+    eq(r.seasonedConv, 15000, 'then the OLDEST conversion — 2024, five years seasoned by 2029');
+    eq(r.unseasonedConv, 0, 'the 2027 tranche is untouched');
+    eq(r.penalized, 0, 'so nothing is penalised');
+  }
+  {
+    const r = draw(60000, 57, 2029);
+    eq(r.seasonedConv, 30000, 'the 2024 tranche is exhausted');
+    eq(r.unseasonedConv, 10000, 'and the draw reaches the 2027 tranche, two years old');
+    approx(r.penalized, 10000, 'which is penalised in full — the owner is 57', 1e-9);
+    eq(r.taxable, 0, 'but not taxed: the income tax was paid at conversion');
+  }
+  {
+    const r = draw(100000, 57, 2029);
+    eq(r.earnings, 10000, 'past both tranches the draw is earnings');
+    eq(r.taxable, 10000, 'which are ordinary income before 59½');
+    approx(r.penalized, 40000 + 10000, 'and penalised, alongside the unseasoned tranche', 1e-9);
+  }
+
+  // ── the clock stops at 59½ ───────────────────────────────────────────────
+  {
+    // "Unseasoned" here means penalised conversion dollars, not merely young
+    // ones: the clock is a fact about the tranche, but it only COSTS anything
+    // before 59½. At 62 the same two-year-old tranche is drawn and it counts as
+    // seasoned, because that is what the reader needs to know.
+    const r = draw(60000, 62, 2029);
+    eq(r.seasonedConv, 40000, 'at 62 the two-year-old tranche is drawn and counts as seasoned');
+    eq(r.unseasonedConv, 0, 'so nothing is reported as unseasoned');
+    eq(r.penalized, 0, 'and nothing is penalised — the clock only bites before 59½');
+    const e = draw(100000, 62, 2029);
+    eq(e.taxable, 0, 'earnings are tax-free at 62 on an account opened in 2020');
+  }
+  {
+    // an account opened by its FIRST conversion, drawn for earnings at 62 but
+    // only three years later: earnings still taxable, no penalty.
+    const young = { basis: 0, opened: 2027, tranches: [{ year: 2027, remaining: 40000 }] };
+    const r = engine.rothDrawFromLayers(young, 50000, 62, 2030, false);
+    eq(r.taxable, 10000, 'earnings on an account under five years old are taxable even after 59½');
+    eq(r.penalized, 0, 'with no penalty');
+  }
+  // the straddle year: 59 for part of it, penalised at half
+  {
+    const r = draw(60000, 59, 2029);
+    approx(r.penalized, 5000, 'in the year spanning 59½ the penalty is on half the unseasoned slice', 1e-9);
+  }
+
+  // ── preview vs commit ────────────────────────────────────────────────────
+  {
+    const lay = L();
+    engine.rothDrawFromLayers(lay, 60000, 57, 2029, false);
+    eq(lay.basis, 20000, 'a preview leaves basis alone');
+    eq(lay.tranches.length, 2, 'and the tranches');
+    engine.rothDrawFromLayers(lay, 60000, 57, 2029, true);
+    eq(lay.basis, 0, 'a committed draw consumes basis');
+    eq(lay.tranches.length, 1, 'drops the exhausted tranche');
+    eq(lay.tranches[0].remaining, 30000, 'and leaves the rest of the young one');
+  }
+  eq(engine.rothUnseasonedTotal(L(), 2029, 57), 40000, 'unseasoned total counts only tranches inside the clock');
+  eq(engine.rothUnseasonedTotal(L(), 2033, 57), 0, 'and nothing once they are all five years old');
+  eq(engine.rothUnseasonedTotal(L(), 2029, 62), 0, 'and nothing at all once the owner is past 59½ — no lock remains');
+
+  // ── end to end: a Roth ladder ────────────────────────────────────────────
+  // Retire at 55 with $1.2M pre-tax and a $50k Roth; convert to the top of the
+  // 12% bracket each year from 55; spending is taken Roth-first. By 57 the plan
+  // is drawing on two-year-old conversions.
+  {
+    const pi = { myAge: 55, myRetirementAge: 55, filingStatus: 'single', state: 'TX', inflationRate: 0.03,
+      desiredRetirementIncome: 60000, legacyAge: 90, myBirthYear: 1971, mySSClaimAge: 67,
+      rothConversionBracket: '12%', rothConversionStartAge: 55, rothConversionEndAge: 65,
+      withdrawalPriority: ['roth', 'brokerage', 'pretax'] };
+    const accts = [
+      { id: 1, name: '401k', type: 'traditional_ira', balance: 1200000, contribution: 0, cagr: 0.05, startAge: 55, stopAge: 55, owner: 'me', contributor: 'me' },
+      { id: 2, name: 'Roth', type: 'roth_ira', balance: 50000, contribution: 0, cagr: 0.05, startAge: 55, stopAge: 55, owner: 'me', contributor: 'me' },
+    ];
+    const streams = [{ id: 1, type: 'social_security', owner: 'me', amount: 30000, startAge: 67, endAge: 90, cola: 0.025 }];
+    const p = computeProjections(pi, accts, streams, [], [], []);
+    const at = (a) => p.find(r => r.myAge === a);
+    gt(at(55).rothConversion, 0, 'the ladder converts in year one');
+    // The opening $50k is basis and covers the first draws; by 57 the plan is
+    // into conversions still inside their clock.
+    const early = p.filter(r => r.myAge >= 56 && r.myAge < 59.5 && r.rothUnseasonedDrawn > 0);
+    gt(early.length, 0, 'before 59½ the plan draws on conversions under five years old');
+    ok(early.every(r => r.earlyWithdrawalPenalty > 0),
+      'and every such year carries the 10% additional tax — it used to report zero');
+    const late = p.filter(r => r.myAge >= 60);
+    ok(late.every(r => r.rothUnseasonedDrawn === 0 || r.earlyWithdrawalPenalty === 0 || r.myAge < 60),
+      'from 60 the same draws carry no penalty');
+    gt(at(56).rothUnseasoned, 0, 'and the row reports how much of the Roth is still locked');
+    // The solver grossed up for it: the year still lands.
+    ok(early.every(r => Math.abs(r.solverResidual) < 100),
+      'the withdrawal solver priced the penalty in, so those years still deliver their target');
+  }
+
+  // ── the fields restate with the row ──────────────────────────────────────
+  ['rothUnseasonedDrawn', 'rothTaxableEarnings', 'rothUnseasoned'].forEach(f =>
+    ok(engine.REAL_DOLLAR_FIELDS.includes(f), `${f} is on the today’s-dollars whitelist`));
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
