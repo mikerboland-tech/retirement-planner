@@ -14311,19 +14311,34 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
   // ── The strategy levers ───────────────────────────────────────────────────
   // Each is 'plan' until the reader picks something, and 'plan' means the
   // control sends nothing at all to the scenario engine.
-  // One value for both kinds of conversion target: 'plan', a bracket label, or
-  // 'irmaa<N>'. Reading the older 'rothConversionBracket' key too, so a Sandbox
-  // saved before IRMAA tiers were offered still restores what it was set to.
-  const convTarget = val('rothConversionTarget', val('rothConversionBracket', 'plan'));
-  const convIrmaaTier = /^irmaa(\d+)$/.test(convTarget) ? Number(convTarget.slice(5)) : null;
-  const convBracket = convIrmaaTier === null ? convTarget : 'plan';
+  // The conversion strategy is a MODE plus its parameters, not one flat list:
+  // three targets that take different arguments do not belong in a single row,
+  // and the two-stage schedule needs both a bracket and a tier at once.
+  //   'plan'    follow the plan, send nothing
+  //   'bracket' fill one bracket for the whole window
+  //   'irmaa'   hold one IRMAA tier for the whole window
+  //   'staged'  fill a bracket while Medicare cannot see the income, then hold
+  //             a tier once it can — the engine has always run this; nothing
+  //             could ask for it.
+  // The older single-value keys are read on the way in so a Sandbox saved
+  // before this still restores what it was set to.
+  const savedTarget = val('rothConversionTarget', val('rothConversionBracket', 'plan'));
+  const convMode = val('convMode', savedTarget === 'plan' ? 'plan'
+    : /^irmaa\d+$/.test(savedTarget) ? 'irmaa' : 'bracket');
+  const convBracketPick = val('convBracket', /%$/.test(savedTarget) ? savedTarget : '24%');
+  const convTierPick = val('convTier',
+    /^irmaa(\d+)$/.test(savedTarget) ? Number(savedTarget.slice(5)) : 1);
+  // The last age whose income never reaches an IRMAA calculation. Derived by
+  // the engine from the Medicare age and the lookback, so the caption cannot
+  // drift from the schedule the engine actually builds.
+  const hingeAge = irmaaLastFreeAge();
   // Priced per household, the way the Tax Planning picker prices them, so the
   // choice is a quantified one rather than a tier number.
   const irmaaChoices = useMemo(() => irmaaTierOptions(
       personalInfo.filingStatus, personalInfo.filingStatus === 'married_joint' ? 2 : 1)
     .filter(o => !o.isTop)
     .map(o => ({
-      value: `irmaa${o.index}`,
+      value: o.index,
       // The ceiling in short form: it is the number the reader is steering by,
       // and the full figure plus the price of crossing it is in the tooltip.
       label: o.ceiling >= 1000000
@@ -14358,7 +14373,7 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
     || Math.abs(savingsRate - planSavingsRate) > 0.05 || spend !== planSpend
     || rothOn !== rothConversionIsPlanned(personalInfo)
     || survivorOn !== planSurvivor || guardrailsOn || !qcdOn
-    || convTarget !== 'plan' || wdFill !== 'plan' || wdOrder !== 'plan' || ltcChoice !== 'plan';
+    || convMode !== 'plan' || wdFill !== 'plan' || wdOrder !== 'plan' || ltcChoice !== 'plan';
 
   const scenario = useMemo(() => {
     if (!touched) return null;
@@ -14376,8 +14391,10 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
         // A bracket only means anything while conversions are on; switching them
         // off and naming a bracket in the same breath is a contradiction, and
         // the switch is the blunter instrument, so it wins.
-        rothConversionBracket: (rothOn && convBracket !== 'plan') ? convBracket : undefined,
-        rothConversionIrmaaTier: (rothOn && convIrmaaTier !== null) ? convIrmaaTier : undefined,
+        rothConversionBracket: (rothOn && convMode === 'bracket') ? convBracketPick : undefined,
+        rothConversionIrmaaTier: (rothOn && convMode === 'irmaa') ? convTierPick : undefined,
+        rothConversionStaged: (rothOn && convMode === 'staged')
+          ? { freeBracket: convBracketPick, chargedTier: convTierPick } : undefined,
         withdrawalBracketFill: wdFill === 'plan' ? undefined : (wdFill === 'off' ? '' : wdFill),
         withdrawalPriority: wdOrder === 'plan' ? undefined : WD_ORDERS[wdOrder],
         ltcModel: ltcChoice === 'plan' ? undefined : ltcChoice,
@@ -14394,7 +14411,7 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
     } catch (e) { return { error: e.message }; }
   }, [touched, myRet, spRet, claimMe, claimSp, savingsRate, spend, rothOn, married,
       survivorOn, guardrailsOn, qcdOn, planSurvivor,
-      convTarget, convBracket, convIrmaaTier, wdFill, wdOrder, ltcChoice,
+      convMode, convBracketPick, convTierPick, wdFill, wdOrder, ltcChoice,
       personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
       planMyRet, planSpRet, planClaimMe, planClaimSp, planSpend, planSavingsRate,
       baseEarned, basePersonal]);
@@ -14572,30 +14589,55 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
             note={!rothConversionIsPlanned(personalInfo) && rothOn
               ? 'set a strategy on Tax Planning first' : null} />
 
-          {/* Two kinds of conversion target in one control, because the engine
-              treats them as mutually exclusive: a bracket top is TAXABLE income,
-              an IRMAA edge is MAGI, and "fill to 22%" can sail past an IRMAA
-              edge and buy a surcharge for nothing. Offering them as one choice
-              is the only presentation that cannot express a contradiction. */}
-          <SandboxChoice
-            wide
-            label="Convert each year up to"
-            value={convTarget}
-            disabled={!rothOn}
-            onChange={v => setControl('rothConversionTarget', v)}
-            options={[
-              { value: 'plan', label: 'Plan' },
-              { divider: true, label: 'the top of a tax bracket' },
-              { value: '12%', label: '12%', title: 'Fill the 12% bracket each year of the conversion window' },
-              { value: '22%', label: '22%' },
-              { value: '24%', label: '24%' },
-              { value: '32%', label: '32%' },
-              { divider: true, label: `an IRMAA tier — MAGI ceiling, surcharge if crossed` },
-              ...irmaaChoices,
-            ]}
-            planLabel={planConvLabel}
-            note={!rothOn ? 'conversions are off'
-              : convTarget !== 'plan' ? 'replaces the plan’s conversion strategy' : null} />
+          {/* The conversion strategy: a mode, then the arguments that mode
+              takes. Three targets that need different arguments do not belong
+              in one flat row, and the two-stage schedule needs a bracket AND a
+              tier at once, which no single row can express. A bracket top is
+              TAXABLE income and an IRMAA edge is MAGI — different bases, which
+              is exactly why filling a bracket can sail past an edge and buy a
+              surcharge for nothing, and why the staged option exists. */}
+          <div className="min-w-[420px] flex-1 space-y-2">
+            <SandboxChoice
+              label="Roth conversion strategy"
+              value={convMode}
+              disabled={!rothOn}
+              onChange={v => setControl('convMode', v)}
+              options={[
+                { value: 'plan', label: 'Plan' },
+                { value: 'bracket', label: 'Fill a bracket', title: 'Fill to the top of one tax bracket every year of the conversion window' },
+                { value: 'irmaa', label: 'Hold an IRMAA tier', title: 'Keep MAGI under one IRMAA ceiling every year' },
+                { value: 'staged', label: 'Bracket → IRMAA', title: `Fill a bracket while Medicare cannot see the income (through age ${hingeAge}), then hold a tier` },
+              ]}
+              planLabel={planConvLabel}
+              note={!rothOn ? 'conversions are off'
+                : convMode !== 'plan' ? 'replaces the plan’s conversion strategy' : null} />
+
+            {rothOn && (convMode === 'bracket' || convMode === 'staged') && (
+              <SandboxChoice
+                label={convMode === 'staged'
+                  ? `1 · Through age ${hingeAge}, fill to the top of`
+                  : 'Fill to the top of'}
+                value={convBracketPick}
+                onChange={v => setControl('convBracket', v)}
+                options={['12%', '22%', '24%', '32%'].map(b => ({ value: b, label: b }))}
+                planLabel={convMode === 'staged'
+                  ? 'these years never reach an IRMAA calculation, so the ceiling is a bracket'
+                  : 'every year of the conversion window'} />
+            )}
+
+            {rothOn && (convMode === 'irmaa' || convMode === 'staged') && (
+              <SandboxChoice
+                label={convMode === 'staged'
+                  ? `2 · From age ${hingeAge + 1} on, hold MAGI under`
+                  : 'Hold MAGI under'}
+                value={convTierPick}
+                onChange={v => setControl('convTier', v)}
+                options={irmaaChoices}
+                planLabel={convMode === 'staged'
+                  ? `from here a year’s MAGI sets the premium at ${hingeAge + 1 + IRMAA_TIER_LOOKBACK_YEARS}, so the ceiling is a tier`
+                  : 'every year of the conversion window'} />
+            )}
+          </div>
 
           <SandboxChoice
             label="Spend pre-tax up to"
@@ -14609,8 +14651,8 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
               { value: '24%', label: '24%' },
             ]}
             planLabel={planFill ? `plan: fill ${planFill}` : 'plan: off'}
-            note={wdFill !== 'plan' && wdFill !== 'off' && convIrmaaTier === null && convBracket !== 'plan'
-              && ['12%', '22%', '24%', '32%'].indexOf(wdFill) >= ['12%', '22%', '24%', '32%'].indexOf(convBracket)
+            note={wdFill !== 'plan' && wdFill !== 'off' && convMode === 'bracket'
+              && ['12%', '22%', '24%', '32%'].indexOf(wdFill) >= ['12%', '22%', '24%', '32%'].indexOf(convBracketPick)
               ? 'at or above the conversion bracket — spending will leave it nothing to fill' : null} />
 
           <SandboxChoice

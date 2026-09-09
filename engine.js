@@ -8191,6 +8191,22 @@ const sandboxScenario = (base = {}, controls = {}) => {
     pi = withRothConversionTarget(pi, { bracket: controls.rothConversionBracket });
     moved.push({ kind: 'note', name: 'Roth conversions', field: 'fill to',
                  from: wasConv, to: `the ${controls.rothConversionBracket} bracket` });
+  } else if (controls.rothConversionStaged) {
+    // The two-stage strategy the engine has always been able to run but no
+    // control could ask for: fill a bracket while the income is invisible to
+    // Medicare, then hold an IRMAA tier once it is not. The hinge age is
+    // DERIVED from the Medicare age and the lookback, never typed, and the
+    // schedule is built from the plan as it stands AFTER any retirement shift,
+    // so the stages span the window the reader is actually looking at.
+    // Built before withRothConversionTarget, which clears stages on its way in.
+    const st = controls.rothConversionStaged;
+    const stages = irmaaAwareConversionStages(pi, {
+      freeBracket: st.freeBracket || '24%',
+      chargedTier: Number.isInteger(st.chargedTier) ? st.chargedTier : 1,
+    });
+    pi = withRothConversionTarget(pi, { stages });
+    moved.push({ kind: 'note', name: 'Roth conversions', field: 'staged',
+                 from: wasConv, to: rothConversionModeLabel(pi) });
   } else if (Number.isInteger(controls.rothConversionIrmaaTier)) {
     pi = withRothConversionTarget(pi, { irmaaTier: controls.rothConversionIrmaaTier });
     moved.push({ kind: 'note', name: 'Roth conversions', field: 'hold under',

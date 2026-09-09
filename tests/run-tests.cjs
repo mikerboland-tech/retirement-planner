@@ -13788,6 +13788,85 @@ section('P118 — the Sandbox strategy levers');
       'reporting what the plan was holding before');
   }
 
+  // ── the two-stage schedule: a bracket, then a tier ───────────────────────
+  {
+    // The strategy the engine has always been able to run and no control could
+    // ask for: fill a bracket while a year's income never reaches an IRMAA
+    // calculation, then hold a tier once it does. It is not expressible as any
+    // single bracket or tier, which is the whole reason it needs its own mode.
+    const hinge = engine.irmaaLastFreeAge();
+    eq(hinge, engine.MEDICARE_ELIGIBILITY_AGE - engine.IRMAA_TIER_LOOKBACK_YEARS - 1,
+      'the hinge age is derived from the Medicare age and the lookback, never typed');
+    // A window straddling the hinge: retire at 60, RMDs at 75.
+    const early = { pi: { ...sc.pi, myRetirementAge: 60, spouseRetirementAge: 60 }, accts: sc.accts, streams: sc.streams };
+    const st = engine.sandboxScenario(early, { rothConversionStaged: { freeBracket: '24%', chargedTier: 1 } });
+    const stages = st.pi.rothConversionStages;
+    eq(Array.isArray(stages) && stages.length, 2, 'a window straddling the hinge gets two stages');
+    eq(stages[0].bracket, '24%', 'stage one fills the bracket');
+    eq(stages[0].irmaaTier, null, 'and holds no tier');
+    eq(stages[0].endAge, hinge, 'ending on the last year Medicare cannot see');
+    eq(stages[1].startAge, hinge + 1, 'stage two picks up the very next year');
+    eq(stages[1].irmaaTier, 1, 'holding the tier');
+    eq(stages[1].bracket, '', 'and naming no bracket — the two ceilings are measured differently');
+    eq(st.pi.rothConversionBracket, '', 'no scalar bracket is left behind to override the schedule');
+    eq(st.pi.rothConversionIrmaaTier, null, 'nor a scalar tier');
+    ok(st.moved.some(m => m.name === 'Roth conversions' && /2-stage/.test(String(m.to))),
+      'and the change is reported as the schedule it is');
+
+    // It projects, and lands between the two single-target strategies: more
+    // converted than holding the tier throughout, less surcharge than filling
+    // the bracket throughout. That middle is the entire point.
+    const proj = (c) => {
+      const o = engine.sandboxScenario(early, c);
+      return computeProjections(o.pi, o.accts, o.streams, [], [], [], TODAY_YEAR, o.opts);
+    };
+    // Measured on balances big enough for the ceilings to bite: below that,
+    // filling the 24% bracket never reaches an IRMAA edge and the staged plan
+    // is simply identical to it, which proves nothing either way.
+    const big = { pi: early.pi, streams: sc.streams,
+      accts: sc.accts.map(a => ({ ...a, balance: a.balance * 1.7 })) };
+    const projBig = (c) => {
+      const o = engine.sandboxScenario(big, c);
+      return computeProjections(o.pi, o.accts, o.streams, [], [], [], TODAY_YEAR, o.opts);
+    };
+    const pStaged = projBig({ rothConversionStaged: { freeBracket: '24%', chargedTier: 1 } });
+    const pBracket = projBig({ rothConversionBracket: '24%' });
+    const pTier = projBig({ rothConversionIrmaaTier: 1 });
+    gt(total(pStaged, 'rothConversion'), total(pTier, 'rothConversion'),
+      'the staged plan converts more than holding the tier for the whole window');
+    lt(total(pStaged, 'irmaaSurcharge'), total(pBracket, 'irmaaSurcharge'),
+      'and pays less surcharge than filling the bracket for the whole window');
+    lt(total(pStaged, 'totalTax'), total(pBracket, 'totalTax'),
+      'so on this plan it is cheaper than either single-target strategy');
+    lt(total(pStaged, 'totalTax'), total(pTier, 'totalTax'), 'both of them');
+    // Stage one really is free of surcharge: nothing converted at or before the
+    // hinge can reach an IRMAA calculation.
+    const chargedFrom = engine.irmaaChargedAtAge(hinge);
+    ok(pStaged.filter(r => r.myAge <= hinge).every(r => r.rothConversion >= 0),
+      'stage one converts without an IRMAA consequence');
+    gt(chargedFrom, hinge, 'because the year it would be charged in is later still');
+
+    // A window entirely on one side of the hinge collapses to ONE stage — an
+    // empty second stage would look editable and would convert nothing.
+    const late = { pi: { ...sc.pi, myRetirementAge: 66, spouseRetirementAge: 66 }, accts: sc.accts, streams: sc.streams };
+    const lateSt = engine.sandboxScenario(late, { rothConversionStaged: { freeBracket: '22%', chargedTier: 0 } });
+    eq(lateSt.pi.rothConversionStages.length, 1, 'a window starting after the hinge is a one-stage plan');
+    eq(lateSt.pi.rothConversionStages[0].irmaaTier, 0, 'and it is the tier stage');
+
+    // The schedule is built from the plan AFTER a retirement shift in the same
+    // scenario, not before it.
+    const shifted = engine.sandboxScenario(early, { myRetirementAge: 66,
+      rothConversionStaged: { freeBracket: '22%', chargedTier: 0 } });
+    eq(shifted.pi.rothConversionStages[0].startAge, 66,
+      'the schedule spans the window the reader is actually looking at');
+
+    // A bracket given alongside wins, the same way it beats a tier.
+    const both = engine.sandboxScenario(early, { rothConversionBracket: '12%',
+      rothConversionStaged: { freeBracket: '24%', chargedTier: 1 } });
+    eq(both.pi.rothConversionBracket, '12%', 'a scalar bracket outranks the staged schedule');
+    eq(both.pi.rothConversionStages, null, 'which is cleared rather than left to override it');
+  }
+
   // ── the withdrawal levers ────────────────────────────────────────────────
   {
     const orders = {
