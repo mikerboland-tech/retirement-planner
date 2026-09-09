@@ -8104,9 +8104,12 @@ const normalizeContributionWindow = (accts, pi = {}) => {
 //   the plan works to 70, and using the pre-shift figure would quietly fill a
 //   different number of years than the reader is looking at.
 //
-//   Spending and the conversion switch last: neither depends on the others, and
-//   clearing conversions has to happen after the retirement shift, or the shift
-//   would carefully move a window that is about to be deleted.
+//   Spending and the strategy levers last: none depends on the others, and both
+//   conversion levers have to come after the retirement shift — clearing a
+//   conversion before the shift would carefully move a window that is about to
+//   be deleted, and SETTING a bracket before it would size the default window
+//   (retirement age to the year before RMDs) against the old retirement age
+//   rather than the one the reader just chose.
 //
 // Every lever is optional. An absent one means "leave the plan alone", so a
 // Sandbox with nothing touched returns the plan unchanged — asserted, not
@@ -8164,6 +8167,59 @@ const sandboxScenario = (base = {}, controls = {}) => {
   }
 
   if (controls.rothConversions === false) pi = withoutRothConversions(pi);
+
+  // The conversion TARGET, not just the switch. "Fill to the top of the 22%
+  // bracket" is the decision people actually weigh, and it was only reachable
+  // by editing the plan on Tax Planning — so the one lever most worth trying
+  // three ways was the one the Sandbox could not touch.
+  //
+  // withRothConversionTarget clears the plan's other conversion modes (a fixed
+  // amount, an IRMAA tier, a staged schedule) before applying the bracket,
+  // because conversionStagesOf consults a schedule BEFORE any scalar mode: a
+  // staged plan left intact would silently override every bracket the reader
+  // picked and show them one projection wearing four different labels. It
+  // leaves the window alone, so a plan with explicit start/end ages keeps them
+  // and a plan without gets the default window measured from whatever
+  // retirement age is now in force.
+  if (controls.rothConversionBracket) {
+    const was = pi.rothConversionBracket || (rothConversionIsPlanned(pi) ? 'other strategy' : 'none');
+    pi = withRothConversionTarget(pi, { bracket: controls.rothConversionBracket });
+    moved.push({ kind: 'note', name: 'Roth conversions', field: 'fill to',
+                 from: was, to: controls.rothConversionBracket });
+  }
+
+  // The withdrawal-side levers. Both are plan facts (they change what the plan
+  // says to do), so they belong on pi rather than in opts.
+  //   withdrawalBracketFill — spend pre-tax up to the top of a bracket before
+  //     touching anything else. '' switches it off, which is a real answer and
+  //     therefore distinguished from "leave the plan alone" (undefined).
+  //   withdrawalPriority — the order the categories are drawn in.
+  if (typeof controls.withdrawalBracketFill === 'string'
+      && controls.withdrawalBracketFill !== (pi.withdrawalBracketFill || '')) {
+    moved.push({ kind: 'note', name: 'Spend pre-tax up to', field: 'bracket',
+                 from: pi.withdrawalBracketFill || 'off', to: controls.withdrawalBracketFill || 'off' });
+    pi = { ...pi, withdrawalBracketFill: controls.withdrawalBracketFill };
+  }
+  if (Array.isArray(controls.withdrawalPriority) && controls.withdrawalPriority.length) {
+    const words = { pretax: 'pre-tax', brokerage: 'brokerage', roth: 'Roth' };
+    const say = (o) => o.map(k => words[k] || k).join(' → ');
+    const was = pi.withdrawalPriority || ['pretax', 'brokerage', 'roth'];
+    if (say(was) !== say(controls.withdrawalPriority)) {
+      moved.push({ kind: 'note', name: 'Withdrawal order', field: '',
+                   from: say(was), to: say(controls.withdrawalPriority) });
+    }
+    pi = { ...pi, withdrawalPriority: controls.withdrawalPriority.slice() };
+  }
+
+  // Long-term care. Not a decision anyone makes, but the plan's single largest
+  // tail risk, and 'stress' exists precisely to be tried against a plan that
+  // looks comfortable without it.
+  if (typeof controls.ltcModel === 'string' && controls.ltcModel
+      && controls.ltcModel !== (pi.ltcModel || 'none')) {
+    moved.push({ kind: 'note', name: 'Long-term care', field: '',
+                 from: pi.ltcModel || 'none', to: controls.ltcModel });
+    pi = { ...pi, ltcModel: controls.ltcModel };
+  }
 
   // Survivor modelling is a property of the PLAN — it decides whether the
   // projection runs a death at all — so it belongs on pi. It is inert unless

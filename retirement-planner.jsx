@@ -14205,6 +14205,41 @@ const SandboxSwitch = ({ label, on, onChange, planLabel, note, disabled }) => (
   </div>
 );
 
+// A row of mutually exclusive options, for the levers that are a CHOICE rather
+// than a number or a switch — which bracket to fill, which account to spend
+// first. Every one of them offers "Plan" as its first option and starts there,
+// because a Sandbox that silently substitutes its own default for the reader's
+// plan is answering a question nobody asked. Disabled options still render, with
+// the reason, rather than vanishing.
+const SandboxChoice = ({ label, value, options, onChange, planLabel, note, disabled }) => (
+  <div className="min-w-[230px]">
+    <label className="text-xs text-slate-400 block mb-1.5">{label}</label>
+    <div className="flex flex-wrap gap-1">
+      {options.map(o => {
+        const active = value === o.value;
+        return (
+          <button
+            key={o.value}
+            onClick={() => !disabled && onChange(o.value)}
+            disabled={disabled}
+            title={o.title || ''}
+            className={`px-2.5 py-1 rounded-lg border text-xs transition-colors ${
+              disabled ? 'bg-slate-800/40 border-slate-700 text-slate-600 cursor-not-allowed'
+                : active ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
+                         : 'bg-slate-700/50 border-slate-600 text-slate-400 hover:text-slate-200'}`}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+    <div className="text-[11px] text-slate-500 mt-1">
+      {planLabel}
+      {note && <span className="text-amber-500/80"> · {note}</span>}
+    </div>
+  </div>
+);
+
 function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, computeProjections,
                       createScenarioFrom, deleteScenario, incomeStreams, loadScenario, oneTimeEvents,
                       personalInfo, projections, recurringExpenses, sandboxConfig, scenarios,
@@ -14265,11 +14300,37 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
   const givingPct = personalInfo.charitableGivingPercent || 0;
   const qcdOn = controls.qcdOn === undefined || controls.qcdOn === null ? true : controls.qcdOn;
 
+  // ── The strategy levers ───────────────────────────────────────────────────
+  // Each is 'plan' until the reader picks something, and 'plan' means the
+  // control sends nothing at all to the scenario engine.
+  const convBracket = val('rothConversionBracket', 'plan');
+  const wdFill = val('withdrawalBracketFill', 'plan');
+  const wdOrder = val('withdrawalOrder', 'plan');
+  const ltcChoice = val('ltcModel', 'plan');
+
+  // The plan's own settings, so every control can say what it is departing from.
+  const planConvLabel = rothConversionIsPlanned(personalInfo)
+    ? `plan: ${conversionModeLabel(personalInfo)}` : 'plan: no conversions';
+  const planFill = personalInfo.withdrawalBracketFill || '';
+  const WD_ORDERS = {
+    pretax:    ['pretax', 'brokerage', 'roth'],
+    brokerage: ['brokerage', 'pretax', 'roth'],
+    roth:      ['roth', 'brokerage', 'pretax'],
+  };
+  const planOrderArr = personalInfo.withdrawalPriority || WD_ORDERS.pretax;
+  const planOrderKey = Object.keys(WD_ORDERS).find(
+    k => WD_ORDERS[k].join() === planOrderArr.join()) || null;
+  const orderWords = { pretax: 'Pre-tax', brokerage: 'Brokerage', roth: 'Roth' };
+  const planOrderLabel = 'plan: ' + planOrderArr.map(k => orderWords[k] || k).join(' → ');
+  const planLtc = personalInfo.ltcModel || 'none';
+  const LTC_WORDS = { none: 'none', default: '28 months', custom: 'custom', stress: '5-year stress' };
+
   const touched = myRet !== planMyRet || spRet !== planSpRet
     || claimMe !== planClaimMe || claimSp !== planClaimSp
     || Math.abs(savingsRate - planSavingsRate) > 0.05 || spend !== planSpend
     || rothOn !== rothConversionIsPlanned(personalInfo)
-    || survivorOn !== planSurvivor || guardrailsOn || !qcdOn;
+    || survivorOn !== planSurvivor || guardrailsOn || !qcdOn
+    || convBracket !== 'plan' || wdFill !== 'plan' || wdOrder !== 'plan' || ltcChoice !== 'plan';
 
   const scenario = useMemo(() => {
     if (!touched) return null;
@@ -14284,6 +14345,13 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
           : undefined,
         desiredRetirementIncome: spend !== planSpend ? spend : undefined,
         rothConversions: rothOn === rothConversionIsPlanned(personalInfo) ? undefined : rothOn,
+        // A bracket only means anything while conversions are on; switching them
+        // off and naming a bracket in the same breath is a contradiction, and
+        // the switch is the blunter instrument, so it wins.
+        rothConversionBracket: (rothOn && convBracket !== 'plan') ? convBracket : undefined,
+        withdrawalBracketFill: wdFill === 'plan' ? undefined : (wdFill === 'off' ? '' : wdFill),
+        withdrawalPriority: wdOrder === 'plan' ? undefined : WD_ORDERS[wdOrder],
+        ltcModel: ltcChoice === 'plan' ? undefined : ltcChoice,
         survivorModel: married && survivorOn !== planSurvivor ? survivorOn : undefined,
         spendingGuardrails: guardrailsOn ? true : undefined,
         qcd: qcdOn ? undefined : false,
@@ -14297,6 +14365,7 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
     } catch (e) { return { error: e.message }; }
   }, [touched, myRet, spRet, claimMe, claimSp, savingsRate, spend, rothOn, married,
       survivorOn, guardrailsOn, qcdOn, planSurvivor,
+      convBracket, wdFill, wdOrder, ltcChoice,
       personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
       planMyRet, planSpRet, planClaimMe, planClaimSp, planSpend, planSavingsRate,
       baseEarned, basePersonal]);
@@ -14474,6 +14543,64 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
             note={!rothConversionIsPlanned(personalInfo) && rothOn
               ? 'set a strategy on Tax Planning first' : null} />
 
+          <SandboxChoice
+            label="Convert up to the top of"
+            value={convBracket}
+            disabled={!rothOn}
+            onChange={v => setControl('rothConversionBracket', v)}
+            options={[
+              { value: 'plan', label: 'Plan' },
+              { value: '12%', label: '12%', title: 'Fill the 12% bracket each year of the conversion window' },
+              { value: '22%', label: '22%' },
+              { value: '24%', label: '24%' },
+              { value: '32%', label: '32%' },
+            ]}
+            planLabel={planConvLabel}
+            note={!rothOn ? 'conversions are off'
+              : convBracket !== 'plan' ? 'replaces the plan’s conversion strategy' : null} />
+
+          <SandboxChoice
+            label="Spend pre-tax up to"
+            value={wdFill}
+            onChange={v => setControl('withdrawalBracketFill', v)}
+            options={[
+              { value: 'plan', label: 'Plan' },
+              { value: 'off', label: 'Off' },
+              { value: '12%', label: '12%', title: 'Draw pre-tax until taxable income reaches the top of the 12% bracket, then follow the order below' },
+              { value: '22%', label: '22%' },
+              { value: '24%', label: '24%' },
+            ]}
+            planLabel={planFill ? `plan: fill ${planFill}` : 'plan: off'}
+            note={wdFill !== 'plan' && wdFill !== 'off' && convBracket !== 'plan'
+              && ['12%', '22%', '24%', '32%'].indexOf(wdFill) >= ['12%', '22%', '24%', '32%'].indexOf(convBracket)
+              ? 'at or above the conversion bracket — spending will leave it nothing to fill' : null} />
+
+          <SandboxChoice
+            label="Spend accounts in this order"
+            value={wdOrder}
+            onChange={v => setControl('withdrawalOrder', v)}
+            options={[
+              { value: 'plan', label: 'Plan' },
+              { value: 'pretax', label: 'Pre-tax first', title: 'Pre-tax → brokerage → Roth' },
+              { value: 'brokerage', label: 'Brokerage first', title: 'Brokerage → pre-tax → Roth' },
+              { value: 'roth', label: 'Roth first', title: 'Roth → brokerage → pre-tax' },
+            ]}
+            planLabel={planOrderLabel}
+            note={wdOrder !== 'plan' && wdOrder === planOrderKey ? 'same as your plan' : null} />
+
+          <SandboxChoice
+            label="Long-term care"
+            value={ltcChoice}
+            onChange={v => setControl('ltcModel', v)}
+            options={[
+              { value: 'plan', label: 'Plan' },
+              { value: 'none', label: 'None' },
+              { value: 'default', label: '28 months', title: 'The average: 28 months of assisted living for each of you' },
+              { value: 'stress', label: '5-yr stress', title: 'Five years of nursing-home care for whichever of you lives longer, and none for the other' },
+            ]}
+            planLabel={`plan: ${LTC_WORDS[planLtc] || planLtc}`}
+            note={ltcChoice === 'stress' ? 'the tail long-term care insurance exists for' : null} />
+
           <SandboxSwitch
             label="Survivor modelling" on={married && survivorOn}
             onChange={v => setControl('survivorOn', v)} disabled={!married}
@@ -14642,7 +14769,14 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
           <div className={cardStyle}>
             <div className="text-xs text-slate-500">Money lasts</div>
             <div className={`font-bold text-lg ${(thenM || nowM).fails ? 'text-red-400' : 'text-emerald-400'}`}>
-              {(thenM || nowM).fails ? `Runs out ${(thenM || nowM).depletedYear || ''}` : 'Through the plan'}
+              {/* depletedYear is a projection ROW, not a number — every other
+                  reader of it takes .myAge, and this one interpolated the row
+                  itself, which rendered as "[object Object]" in the one tile a
+                  reader looks at to find out whether the plan survives. */}
+              {(thenM || nowM).fails
+                ? `Runs out at ${((thenM || nowM).depletedYear || {}).myAge != null
+                    ? 'age ' + (thenM || nowM).depletedYear.myAge : 'some point'}`
+                : 'Through the plan'}
             </div>
             {thenM && thenM.fails !== nowM.fails && (
               <div className={`text-xs ${thenM.fails ? 'text-red-400' : 'text-emerald-400'}`}>

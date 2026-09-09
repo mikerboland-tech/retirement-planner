@@ -13675,6 +13675,175 @@ section('P117 — the 2026 Medicare figures, pinned, and the one boundary CMS re
   eq(engine.IRMAA_TIER_LOOKBACK_YEARS, 2, '2026 IRMAA is set by 2024 MAGI — a two-year lookback');
 }
 
+section('P118 — the Sandbox strategy levers');
+
+{
+  // Four decisions the app could model but the Sandbox could not reach: which
+  // bracket a Roth conversion fills, which bracket spending fills from pre-tax,
+  // which account is spent first, and what long-term care to assume. Each is
+  // 'plan' until the reader picks, and 'plan' sends nothing at all.
+  const sc = baseScenario({ myAge: 60, spouseAge: 60, myRetirementAge: 63, spouseRetirementAge: 63,
+    legacyAge: 92, state: 'Florida', desiredRetirementIncome: 110000, healthcareModel: 'none', ltcModel: 'none' });
+  sc.pi.withdrawalPriority = ['pretax', 'brokerage', 'roth'];
+  sc.accts = [
+    { id: 1, name: 'IRA', type: 'traditional_ira', balance: 1400000, contribution: 0, contributionGrowth: 0, cagr: 0.05, startAge: 60, stopAge: 63, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Brok', type: 'brokerage', balance: 500000, contribution: 0, contributionGrowth: 0, cagr: 0.05, costBasisPercent: 0.6, startAge: 60, stopAge: 63, owner: 'me', contributor: 'me' },
+    { id: 3, name: 'Roth', type: 'roth_ira', balance: 300000, contribution: 0, contributionGrowth: 0, cagr: 0.05, startAge: 60, stopAge: 63, owner: 'me', contributor: 'me' },
+  ];
+  sc.streams = [{ id: 1, name: 'SS', type: 'social_security', owner: 'me', amount: 40000, startAge: 67, endAge: 95, cola: 0.025, pia: 2800 }];
+  const base = { pi: sc.pi, accts: sc.accts, streams: sc.streams };
+  const run = (controls) => {
+    const out = engine.sandboxScenario(base, controls);
+    return { ...out, proj: computeProjections(out.pi, out.accts, out.streams, [], [], [], TODAY_YEAR, out.opts) };
+  };
+  const total = (p, f) => Math.round(p.reduce((t, r) => t + (r[f] || 0), 0));
+
+  // ── nothing touched changes nothing ──────────────────────────────────────
+  {
+    const r = run({});
+    eq(JSON.stringify(r.pi), JSON.stringify(sc.pi), 'an untouched Sandbox returns the plan itself');
+    eq(r.moved.length, 0, 'and reports nothing moved');
+  }
+
+  // ── the conversion bracket ───────────────────────────────────────────────
+  {
+    const plain = run({});
+    eq(total(plain.proj, 'rothConversion'), 0, 'the plan converts nothing to begin with');
+    const filled = {};
+    ['12%', '22%', '24%'].forEach(b => { filled[b] = run({ rothConversionBracket: b }); });
+    ['12%', '22%', '24%'].forEach(b => {
+      eq(filled[b].pi.rothConversionBracket, b, `${b}: the bracket reaches the plan`);
+      gt(total(filled[b].proj, 'rothConversion'), 0, `${b}: and the projection converts`);
+    });
+    gt(total(filled['22%'].proj, 'rothConversion'), total(filled['12%'].proj, 'rothConversion'),
+      'a higher bracket converts more');
+    gt(total(filled['24%'].proj, 'rothConversion'), total(filled['22%'].proj, 'rothConversion'), 'and more again');
+    ok(filled['22%'].moved.some(m => m.name === 'Roth conversions' && m.to === '22%'),
+      'and the change is reported, so the panel does not claim nothing happened');
+  }
+  // The window follows a retirement age moved in the SAME scenario — the reason
+  // the bracket has to be applied after the retirement shift, not before.
+  {
+    const r = run({ myRetirementAge: 67, rothConversionBracket: '22%' });
+    const first = r.proj.find(x => x.rothConversion > 0);
+    ok(first && first.myAge === 67,
+      `converting starts at the retirement age the reader just chose (got ${first && first.myAge})`);
+    const early = run({ rothConversionBracket: '22%' }).proj.find(x => x.rothConversion > 0);
+    eq(early.myAge, 63, 'and at the plan’s own retirement age when it is left alone');
+  }
+  // A staged schedule cannot outrank the bracket the reader picked.
+  {
+    const staged = { ...sc.pi, rothConversionStages: [
+      { label: 'S1', startAge: 63, endAge: 70, amount: 25000 }] };
+    const r = engine.sandboxScenario({ ...base, pi: staged }, { rothConversionBracket: '24%' });
+    eq(r.pi.rothConversionStages, null, 'the plan’s staged schedule is cleared');
+    eq(r.pi.rothConversionAmount, 0, 'along with any fixed amount');
+    eq(r.pi.rothConversionBracket, '24%', 'leaving only the bracket the Sandbox asked for');
+  }
+  // An explicit window survives; the switch beats the bracket.
+  {
+    const windowed = { ...sc.pi, rothConversionStartAge: 64, rothConversionEndAge: 71 };
+    const r = engine.sandboxScenario({ ...base, pi: windowed }, { rothConversionBracket: '22%' });
+    eq(r.pi.rothConversionStartAge, 64, 'an explicit conversion window is kept');
+    eq(r.pi.rothConversionEndAge, 71, 'both ends of it');
+    const off = engine.sandboxScenario(base, { rothConversions: false, rothConversionBracket: '22%' });
+    eq(off.pi.rothConversionBracket, '22%',
+      'switching conversions off and naming a bracket is a contradiction the UI prevents; the engine applies the bracket last');
+  }
+
+  // ── the withdrawal levers ────────────────────────────────────────────────
+  {
+    const orders = {
+      pretax: ['pretax', 'brokerage', 'roth'],
+      brokerage: ['brokerage', 'pretax', 'roth'],
+      roth: ['roth', 'brokerage', 'pretax'],
+    };
+    const out = {};
+    Object.keys(orders).forEach(k => { out[k] = run({ withdrawalPriority: orders[k] }); });
+    Object.keys(orders).forEach(k => {
+      eq(out[k].pi.withdrawalPriority.join(), orders[k].join(), `${k}-first order reaches the plan`);
+    });
+    // Roth-first defers tax and pays more of it later; the orders must not all
+    // produce one projection wearing three labels.
+    const tax = (k) => total(out[k].proj, 'totalTax');
+    ok(tax('pretax') !== tax('roth') && tax('brokerage') !== tax('roth'),
+      'the three orders produce genuinely different lifetime tax');
+    eq(run({ withdrawalPriority: orders.pretax }).moved.length, 0,
+      'choosing the order the plan already uses reports no change');
+  }
+  {
+    // Bracket-fill bites hardest against a Roth-first order, which is the
+    // combination it exists to rescue.
+    const rothFirst = ['roth', 'brokerage', 'pretax'];
+    const off = run({ withdrawalPriority: rothFirst, withdrawalBracketFill: '' });
+    const on = run({ withdrawalPriority: rothFirst, withdrawalBracketFill: '12%' });
+    eq(on.pi.withdrawalBracketFill, '12%', 'the fill bracket reaches the plan');
+    // '' means OFF, which is only distinguishable from "leave the plan alone"
+    // on a plan that already fills a bracket. On a plan with no fill the two
+    // agree, and the engine leaves the field untouched rather than writing a
+    // value that changes nothing.
+    eq(off.pi.withdrawalBracketFill || '', '', 'and the plan without a fill stays without one');
+    {
+      const filling = { ...sc.pi, withdrawalBracketFill: '22%' };
+      const cleared = engine.sandboxScenario({ ...base, pi: filling }, { withdrawalBracketFill: '' });
+      eq(cleared.pi.withdrawalBracketFill, '', "'' switches OFF a plan that was filling a bracket");
+      ok(cleared.moved.some(m => m.name === 'Spend pre-tax up to' && m.to === 'off'), 'and says so');
+      const untouched = engine.sandboxScenario({ ...base, pi: filling }, {});
+      eq(untouched.pi.withdrawalBracketFill, '22%', 'while leaving it alone keeps the plan’s own fill');
+    }
+    lt(total(on.proj, 'totalTax'), total(off.proj, 'totalTax'),
+      'filling the 12% bracket from pre-tax beats spending the Roth first');
+    gt(on.proj.filter(r => r.bracketFillDraw > 0).length, 5, 'and the fill runs for many years');
+  }
+
+  // ── long-term care ───────────────────────────────────────────────────────
+  {
+    const none = run({ ltcModel: 'none' });
+    const def = run({ ltcModel: 'default' });
+    const stress = run({ ltcModel: 'stress' });
+    eq(total(none.proj, 'healthcareLTC'), 0, 'no care, no cost');
+    gt(total(def.proj, 'healthcareLTC'), 0, 'the 28-month default bills something');
+    gt(total(stress.proj, 'healthcareLTC'), total(def.proj, 'healthcareLTC'),
+      'and the five-year stress case bills more than the average');
+    ok(stress.moved.some(m => m.name === 'Long-term care' && m.to === 'stress'), 'reported as a change');
+  }
+
+  // ── the Money-lasts tile reads the row, not the object ───────────────────
+  {
+    // planShortfall.depletedYear is a projection ROW. The Sandbox's headline
+    // tile interpolated it straight into a template string and rendered
+    // "Runs out [object Object]" — in the one place a reader looks to find out
+    // whether the plan survives.
+    const fsMod = require('fs'), pathMod = require('path');
+    const src = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+    const flat = src.replace(/\s+/g, ' ');
+    ok(!/depletedYear \|\| ''/.test(flat),
+      "no reader falls back to '' on the depletion row — that is what printed [object Object]");
+    ok(/depletedYear \|\| \{\}\)\.myAge/.test(flat), 'the Sandbox tile takes .myAge off it');
+    // Every other consumer already did this; assert they still do.
+    ok(/depletedYear \? short\.depletedYear\.myAge/.test(flat) || /depletedYear\.myAge/.test(flat),
+      'and the other consumers read a field off the row too');
+  }
+
+  // ── they compose ─────────────────────────────────────────────────────────
+  {
+    const r = run({ myRetirementAge: 67, claimAges: { me: 70 }, rothConversionBracket: '22%',
+                    withdrawalPriority: ['roth', 'brokerage', 'pretax'], withdrawalBracketFill: '12%',
+                    ltcModel: 'stress', spendingGuardrails: true });
+    eq(r.pi.myRetirementAge, 67, 'retirement age');
+    eq(r.pi.rothConversionBracket, '22%', 'conversion bracket');
+    eq(r.pi.withdrawalBracketFill, '12%', 'withdrawal fill');
+    eq(r.pi.withdrawalPriority.join(), 'roth,brokerage,pretax', 'withdrawal order');
+    eq(r.pi.ltcModel, 'stress', 'and long-term care all survive together');
+    ok(r.opts && r.opts.spendingRule, 'guardrails still arrive as a projection option, not a plan edit');
+    ok(r.proj.length > 0 && Number.isFinite(r.proj[r.proj.length - 1].totalPortfolio),
+      'and the combined scenario projects a finite plan');
+    const ss = r.streams.find(s => s.type === 'social_security');
+    eq(ss.startAge, 70, 'the claim age moved too');
+    gt(ss.amount, 40000, 'and the benefit was repriced upward for claiming later');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
