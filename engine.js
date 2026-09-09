@@ -8181,11 +8181,20 @@ const sandboxScenario = (base = {}, controls = {}) => {
   // leaves the window alone, so a plan with explicit start/end ages keeps them
   // and a plan without gets the default window measured from whatever
   // retirement age is now in force.
+  // A bracket and an IRMAA tier are different targets measured on different
+  // bases — a bracket top is TAXABLE income, an IRMAA edge is MAGI — so they
+  // cannot both be in force. The UI offers them as one control for that reason;
+  // if both arrive anyway the bracket wins, matching the engine's own rule
+  // wherever the two meet.
+  const wasConv = rothConversionIsPlanned(pi) ? rothConversionModeLabel(pi) : 'none';
   if (controls.rothConversionBracket) {
-    const was = pi.rothConversionBracket || (rothConversionIsPlanned(pi) ? 'other strategy' : 'none');
     pi = withRothConversionTarget(pi, { bracket: controls.rothConversionBracket });
     moved.push({ kind: 'note', name: 'Roth conversions', field: 'fill to',
-                 from: was, to: controls.rothConversionBracket });
+                 from: wasConv, to: `the ${controls.rothConversionBracket} bracket` });
+  } else if (Number.isInteger(controls.rothConversionIrmaaTier)) {
+    pi = withRothConversionTarget(pi, { irmaaTier: controls.rothConversionIrmaaTier });
+    moved.push({ kind: 'note', name: 'Roth conversions', field: 'hold under',
+                 from: wasConv, to: rothConversionModeLabel(pi) });
   }
 
   // The withdrawal-side levers. Both are plan facts (they change what the plan

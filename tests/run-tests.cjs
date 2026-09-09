@@ -13718,7 +13718,7 @@ section('P118 — the Sandbox strategy levers');
     gt(total(filled['22%'].proj, 'rothConversion'), total(filled['12%'].proj, 'rothConversion'),
       'a higher bracket converts more');
     gt(total(filled['24%'].proj, 'rothConversion'), total(filled['22%'].proj, 'rothConversion'), 'and more again');
-    ok(filled['22%'].moved.some(m => m.name === 'Roth conversions' && m.to === '22%'),
+    ok(filled['22%'].moved.some(m => m.name === 'Roth conversions' && /22%/.test(String(m.to))),
       'and the change is reported, so the panel does not claim nothing happened');
   }
   // The window follows a retirement age moved in the SAME scenario — the reason
@@ -13749,6 +13749,43 @@ section('P118 — the Sandbox strategy levers');
     const off = engine.sandboxScenario(base, { rothConversions: false, rothConversionBracket: '22%' });
     eq(off.pi.rothConversionBracket, '22%',
       'switching conversions off and naming a bracket is a contradiction the UI prevents; the engine applies the bracket last');
+  }
+
+  // ── the conversion target can also be an IRMAA tier ──────────────────────
+  {
+    // A bracket top is TAXABLE income; an IRMAA edge is MAGI. They are
+    // different targets on different bases, and a plan built around holding a
+    // tier could not be expressed by a bracket-only control at all.
+    const opts = engine.irmaaTierOptions('married_joint', 2).filter(o => !o.isTop);
+    gt(opts.length, 3, 'there are several tiers to choose between');
+    const byTier = {};
+    opts.forEach(o => { byTier[o.index] = run({ rothConversionIrmaaTier: o.index }); });
+    opts.forEach(o => {
+      eq(byTier[o.index].pi.rothConversionIrmaaTier, o.index, `tier ${o.index} reaches the plan`);
+      eq(byTier[o.index].pi.rothConversionBracket, '', `and clears any bracket target`);
+      gt(total(byTier[o.index].proj, 'rothConversion'), 0, `tier ${o.index} converts something`);
+    });
+    // The whole point of the lever: a higher ceiling converts more and pays
+    // more surcharge, and the lowest tier pays none at all.
+    gt(total(byTier[2].proj, 'rothConversion'), total(byTier[0].proj, 'rothConversion'),
+      'a higher tier ceiling converts more');
+    eq(total(byTier[0].proj, 'irmaaSurcharge'), 0,
+      'holding under the first edge pays no surcharge — that is what makes it worth choosing');
+    gt(total(byTier[2].proj, 'irmaaSurcharge'), 0, 'while a higher tier accepts one');
+    ok(byTier[1].moved.some(m => m.name === 'Roth conversions' && /IRMAA tier 1/.test(String(m.to))),
+      'and the change is reported in the reader’s own terms, not as a tier number alone');
+    // A bracket and a tier cannot both be in force; the bracket wins.
+    const both = engine.sandboxScenario(base, { rothConversionBracket: '22%', rothConversionIrmaaTier: 1 });
+    eq(both.pi.rothConversionBracket, '22%', 'given both, the bracket wins');
+    eq(both.pi.rothConversionIrmaaTier, null, 'and the tier is cleared rather than left to fight it');
+    // A plan already holding a tier is what 'Plan' has to preserve.
+    const tiered = { ...sc.pi, rothConversionIrmaaTier: 1, rothConversionStartAge: 0, rothConversionEndAge: 0 };
+    const untouched = engine.sandboxScenario({ ...base, pi: tiered }, {});
+    eq(untouched.pi.rothConversionIrmaaTier, 1, 'an untouched Sandbox keeps a plan built on an IRMAA tier');
+    const moved = engine.sandboxScenario({ ...base, pi: tiered }, { rothConversionIrmaaTier: 3 });
+    eq(moved.pi.rothConversionIrmaaTier, 3, 'and moving the tier replaces it');
+    ok(moved.moved.some(m => /IRMAA tier 1/.test(String(m.from))),
+      'reporting what the plan was holding before');
   }
 
   // ── the withdrawal levers ────────────────────────────────────────────────
