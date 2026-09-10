@@ -13960,6 +13960,62 @@ section('P118 — the Sandbox strategy levers');
   }
 }
 
+section('P119 — the Sandbox strategy drawer hides controls without hiding their effect');
+
+{
+  // The controls card is sticky, so the strategy levers fold away to keep it
+  // short. Folding a control away that is CHANGING THE NUMBERS is only
+  // acceptable while the reader can still see that it is — so every lever the
+  // drawer holds must be named in the collapsed summary. This is exactly the
+  // coupling that rots: add a lever, wire it into the scenario, forget the
+  // summary, and it goes on quietly moving the answer from behind a closed
+  // drawer.
+  const fsMod = require('fs'), pathMod = require('path');
+  const src = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+
+  const summaryBlock = /const strategySummary = \[([\s\S]*?)\]\.filter\(Boolean\);/.exec(src);
+  ok(summaryBlock, 'the collapsed summary is built in one place');
+  const summary = summaryBlock ? summaryBlock[1] : '';
+
+  // The strategy half of `touched` — everything after the sliders — names the
+  // levers the drawer is responsible for.
+  const touchedBlock = /const touched = myRet !== planMyRet([\s\S]*?);\n/.exec(src);
+  ok(touchedBlock, 'the touched test is built in one place too');
+  const drawerLevers = ['rothOn', 'convMode', 'wdFill', 'wdOrder', 'ltcChoice', 'survivorOn', 'guardrailsOn', 'qcdOn'];
+  drawerLevers.forEach(v => {
+    ok(new RegExp('\\b' + v + '\\b').test(touchedBlock ? touchedBlock[1] : ''),
+      `${v} counts as a change to the plan`);
+    ok(new RegExp('\\b' + v + '\\b').test(summary),
+      `${v} is named in the collapsed summary, so it cannot act invisibly`);
+  });
+  // The two conversion parameters ride along with convMode and must appear too,
+  // or the summary would say 'convert' without saying to what.
+  ok(/convBracketPick/.test(summary), 'the chosen bracket appears in the summary');
+  ok(/convTierPick|tierWord/.test(summary), 'and the chosen IRMAA ceiling');
+
+  // The drawer is shut by default and its state is persisted, not per-render.
+  ok(/const strategyOpen = !!cfg\.strategyOpen;/.test(src),
+    'the drawer reads its state from the saved Sandbox config, so it survives a reload');
+  ok(/setCfg\(\{ strategyOpen: !strategyOpen \}\)/.test(src), 'and the toggle writes it back');
+  // setCfg must preserve the other two config keys — a setter that forgot one
+  // would reset the reader's panels or levers every time they opened the drawer.
+  const setCfgBlock = /const setCfg = \(patch\) => setSandboxConfig\(prev => \(\{([\s\S]*?)\}\)\);/.exec(src);
+  ok(setCfgBlock, 'setCfg is defined once');
+  ok(/controls:/.test(setCfgBlock ? setCfgBlock[1] : ''), 'and preserves the controls');
+  ok(/panels:/.test(setCfgBlock ? setCfgBlock[1] : ''), 'and the panels');
+
+  // The sliders stay OUT of the drawer: they are what a reader moves
+  // constantly, and the whole point is that they remain visible.
+  const drawerAt = src.indexOf('{strategyOpen && (');
+  gt(drawerAt, 0, 'the drawer exists');
+  const beforeDrawer = src.slice(0, drawerAt);
+  ['My retirement age', 'My SS claim age', 'Savings rate while working', 'Spending in retirement']
+    .forEach(lbl => ok(beforeDrawer.includes(lbl), `the "${lbl}" slider stays outside the drawer`));
+  const afterDrawer = src.slice(drawerAt);
+  ['Roth conversion strategy', 'Spend pre-tax up to', 'Spend accounts in this order', 'Long-term care']
+    .forEach(lbl => ok(afterDrawer.includes(lbl), `the "${lbl}" control is inside it`));
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

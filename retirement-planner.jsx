@@ -14262,6 +14262,15 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
   const setControl = (k, v) => setSandboxConfig(prev => ({
     ...(prev || {}), controls: { ...((prev || {}).controls || {}), [k]: v },
     panels: Array.isArray((prev || {}).panels) ? prev.panels : DEFAULT_SANDBOX_PANELS }));
+  // Writes a top-level config key (not a control) while preserving the rest —
+  // setControl and togglePanel each rebuild the object, and a third one that
+  // forgot a key would silently reset the reader's panels or levers.
+  const setCfg = (patch) => setSandboxConfig(prev => ({
+    ...(prev || {}),
+    controls: (prev || {}).controls || {},
+    panels: Array.isArray((prev || {}).panels) ? prev.panels : DEFAULT_SANDBOX_PANELS,
+    ...patch,
+  }));
   const togglePanel = (id) => setSandboxConfig(prev => {
     const cur = Array.isArray((prev || {}).panels) ? prev.panels : DEFAULT_SANDBOX_PANELS;
     return { ...(prev || {}), controls: (prev || {}).controls || {},
@@ -14367,6 +14376,30 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
   const planOrderLabel = 'plan: ' + planOrderArr.map(k => orderWords[k] || k).join(' → ');
   const planLtc = personalInfo.ltcModel || 'none';
   const LTC_WORDS = { none: 'none', default: '28 months', custom: 'custom', stress: '5-year stress' };
+
+  // ── The strategy drawer ───────────────────────────────────────────────────
+  // The controls card is sticky, so everything in it follows the reader down
+  // the page. The sliders are what people move constantly and they stay; the
+  // strategy levers are set once and then read, so they fold away. Closed is
+  // the default because the clutter is the complaint being answered.
+  //
+  // Nothing hides SILENTLY: while the drawer is shut, every lever that is off
+  // its plan value is named on the toggle. A control that is doing something
+  // to the numbers and cannot be seen is worse than a crowded panel.
+  const strategyOpen = !!cfg.strategyOpen;
+  const tierWord = (i) => (irmaaChoices.find(o => o.value === i) || {}).label || `tier ${i}`;
+  const strategySummary = [
+    rothOn !== rothConversionIsPlanned(personalInfo) && (rothOn ? 'conversions on' : 'conversions off'),
+    rothOn && convMode === 'bracket' && `convert to ${convBracketPick}`,
+    rothOn && convMode === 'irmaa' && `convert under ${tierWord(convTierPick)}`,
+    rothOn && convMode === 'staged' && `convert ${convBracketPick} → ${tierWord(convTierPick)}`,
+    wdFill !== 'plan' && (wdFill === 'off' ? 'no pre-tax fill' : `spend pre-tax to ${wdFill}`),
+    wdOrder !== 'plan' && `${({ pretax: 'pre-tax', brokerage: 'brokerage', roth: 'Roth' })[wdOrder]} first`,
+    ltcChoice !== 'plan' && `care: ${({ none: 'none', default: '28 months', stress: '5-yr stress' })[ltcChoice] || ltcChoice}`,
+    married && survivorOn !== planSurvivor && `survivor ${survivorOn ? 'on' : 'off'}`,
+    guardrailsOn && 'guardrails',
+    givingPct > 0 && !qcdOn && 'no QCD',
+  ].filter(Boolean);
 
   const touched = myRet !== planMyRet || spRet !== planSpRet
     || claimMe !== planClaimMe || claimSp !== planClaimSp
@@ -14583,6 +14616,28 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
                   onChange={v => setControl('spending', v)} min={0}
                   max={Math.max(300000, Math.round((planSpend || 100000) * 2))} step={2500}
                   planValue={planSpend} format={money} />
+        </div>
+
+        {/* ── Strategy drawer ─────────────────────────────────────────── */}
+        <div className="mt-3 pt-3 border-t border-slate-700/50">
+          <button
+            onClick={() => setCfg({ strategyOpen: !strategyOpen })}
+            aria-expanded={strategyOpen}
+            className="flex items-center gap-2 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            <span className="text-[10px] text-slate-500">{strategyOpen ? '▾' : '▸'}</span>
+            <span className="uppercase tracking-wide">Strategy</span>
+            {!strategyOpen && strategySummary.length > 0 && (
+              <span className="text-amber-400/90 normal-case">{strategySummary.join(' · ')}</span>
+            )}
+            {!strategyOpen && strategySummary.length === 0 && (
+              <span className="text-slate-600 normal-case">following your plan</span>
+            )}
+          </button>
+        </div>
+
+        {strategyOpen && (
+        <div className="flex flex-wrap gap-x-6 gap-y-4 mt-3">
           <SandboxSwitch
             label="Roth conversions" on={rothOn} onChange={v => setControl('rothOn', v)}
             planLabel={`plan: ${rothConversionIsPlanned(personalInfo) ? 'on' : 'off'}`}
@@ -14699,6 +14754,7 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
             planLabel={givingPct > 0 ? `giving ${givingPct}% of spending` : 'no charitable giving set'}
             note={givingPct > 0 ? null : 'set a % on Personal Info'} />
         </div>
+        )}
         {scenario && scenario.error && (
           <p className="text-sm text-red-400 mt-3">Could not run that scenario: {scenario.error}</p>
         )}
