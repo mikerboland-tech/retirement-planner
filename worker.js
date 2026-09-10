@@ -1191,13 +1191,15 @@ function runMarginalRateCurve(jobId, payload) {
 
   // One baseline, conversions off. Every series is measured against it so the
   // chart answers a single coherent question instead of mixing yardsticks.
+  // Cleared through the engine's own helper, never by hand. The hand-rolled
+  // version listed the conversion fields it knew about and was not updated when
+  // staged schedules were added — so on a staged plan this 'no conversions'
+  // baseline went on converting the whole schedule, and every rate on the curve
+  // was measured against a baseline that was already converting. The helper is
+  // the one place that knows the full list; adding a mode there fixes every
+  // caller at once.
   const basePI = {
-    ...personalInfo,
-    rothConversionAmount: 0,
-    rothConversionBracket: '',
-    // Cleared too, or a plan filling to an IRMAA tier keeps converting in the
-    // baseline and the probe measures a difference that is not the probe.
-    rothConversionIrmaaTier: null,
+    ...E.withoutRothConversions(personalInfo),
     rothConversionStartAge: 0,
     rothConversionEndAge: 0,
     rothConversionPreTaxFloor: 0,
@@ -1213,9 +1215,9 @@ function runMarginalRateCurve(jobId, payload) {
     // Probe confined to this one year.
     const probePI = {
       ...basePI,
+      // basePI is already cleared through the helper, so the probe only has to
+      // name the one-year conversion it is measuring.
       rothConversionAmount: probe,
-      rothConversionBracket: '',
-      rothConversionIrmaaTier: null,
       rothConversionStartAge: age,
       rothConversionEndAge: age,
       // Fixed nominal, NOT inflation-indexed. This is a derivative, so every

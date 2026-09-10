@@ -3823,17 +3823,33 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
   const planToSettings = (pi) => {
     const dw = getDefaultRothConversionWindow(pi);
     return {
-      // Three constraints now. IRMAA is checked first because a plan set to fill
-      // an IRMAA tier carries no bracket label and no fixed amount, so testing
-      // for the bracket first would seed the simulator as 'fixed' at $0 and
-      // silently show the user a do-nothing strategy instead of their own.
-      mode: Number.isInteger(pi.rothConversionIrmaaTier) ? 'irmaa'
+      // Four constraints now, tested in the order the ENGINE resolves them.
+      // conversionStagesOf consults an explicit schedule before any scalar
+      // mode, so a staged plan must be recognised first — testing IRMAA first
+      // seeded a staged plan as 'IRMAA tier 0' (the stale scalar left beside
+      // the schedule) and opened the simulator on a strategy the plan was not
+      // running. IRMAA still precedes the bracket for the reason below.
+      mode: rothConversionModeOf(pi) === 'staged' ? 'staged'
+          : Number.isInteger(pi.rothConversionIrmaaTier) ? 'irmaa'
           : (pi.rothConversionBracket ? 'bracket' : 'fixed'),
       startAge: pi.rothConversionStartAge || dw.startAge,
       endAge: pi.rothConversionEndAge || dw.endAge,
       targetBracket: pi.rothConversionBracket || '22%',
       irmaaTier: Number.isInteger(pi.rothConversionIrmaaTier) ? pi.rothConversionIrmaaTier : 0,
       fixedAmount: pi.rothConversionAmount || 0,
+      // The staged schedule, kept verbatim when the plan already has one so the
+      // simulator opens on the reader's OWN stages rather than a rebuilt
+      // approximation of them. The two knobs are seeded from it: the bracket the
+      // free years fill, and the tier the charged years hold.
+      stages: Array.isArray(pi.rothConversionStages) && pi.rothConversionStages.length
+        ? pi.rothConversionStages.map(x => ({ ...x })) : null,
+      freeBracket: (Array.isArray(pi.rothConversionStages) && pi.rothConversionStages.length
+        ? (pi.rothConversionStages.find(x => x.bracket) || {}).bracket : '') || '24%',
+      chargedTier: (() => {
+        const st = Array.isArray(pi.rothConversionStages) ? pi.rothConversionStages : [];
+        const withTier = st.filter(x => Number.isInteger(x.irmaaTier));
+        return withTier.length ? withTier[withTier.length - 1].irmaaTier : 1;
+      })(),
       taxSource: pi.rothConversionTaxSource || 'withdrawal',
       preTaxFloor: pi.rothConversionPreTaxFloor || 0,
     };
@@ -3843,6 +3859,36 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
   const [auditAge, setAuditAge] = useState(null);
 
   const [conversionSettings, setConversionSettings] = useState(() => planToSettings(personalInfo));
+
+  // ── SETTINGS → PLAN ────────────────────────────────────────────────────────
+  // One conversion of the panel's settings into a plan, used by the projection
+  // this panel draws AND by Save. They used to be two hand-written copies of the
+  // same field list, and neither knew about staged schedules: both set the
+  // scalar fields and left pi.rothConversionStages untouched. Since the engine
+  // reads an explicit schedule BEFORE any scalar mode, a reader with a staged
+  // plan got the same projection whatever they chose here — every control on
+  // this panel was inert — and Save wrote a mode the schedule then overrode.
+  //
+  // withRothConversionTarget clears every mode before applying the one asked
+  // for, so it cannot happen again by omission.
+  const settingsToPI = (pi, s) => ({
+    ...withRothConversionTarget(pi, {
+      ...(s.mode === 'fixed' ? { amount: s.fixedAmount } : {}),
+      ...(s.mode === 'bracket' ? { bracket: s.targetBracket } : {}),
+      ...(s.mode === 'irmaa' ? { irmaaTier: s.irmaaTier } : {}),
+      ...(s.mode === 'staged' ? { stages: stagesFor(pi, s) } : {}),
+      startAge: s.startAge,
+      endAge: s.endAge,
+    }),
+    rothConversionTaxSource: s.taxSource,
+    rothConversionPreTaxFloor: s.preTaxFloor,
+  });
+  // The schedule a staged setting means. The reader's own stages are kept while
+  // they are untouched; changing either knob rebuilds the canonical two-stage
+  // schedule over the chosen window, with the hinge derived by the engine.
+  const stagesFor = (pi, s) => (s.stages && s.stages.length ? s.stages
+    : irmaaAwareConversionStages(pi, { freeBracket: s.freeBracket, chargedTier: s.chargedTier,
+                                       startAge: s.startAge, endAge: s.endAge }));
   const [savedFlash, setSavedFlash] = useState(false);
 
   // ── LIFETIME RATE CURVE ────────────────────────────────────────────────────
@@ -3916,16 +3962,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
   // The difference between them IS the impact of conversions.
   const { conversionProj, baselineProj, conversionAnalysis, totals } = useMemo(() => {
     // Projection WITH the simulator's conversion settings
-    const withPI = {
-      ...personalInfo,
-      rothConversionAmount: conversionSettings.mode === 'fixed' ? conversionSettings.fixedAmount : 0,
-      rothConversionStartAge: conversionSettings.startAge,
-      rothConversionEndAge: conversionSettings.endAge,
-      rothConversionBracket: conversionSettings.mode === 'bracket' ? conversionSettings.targetBracket : '',
-      rothConversionIrmaaTier: conversionSettings.mode === 'irmaa' ? conversionSettings.irmaaTier : null,
-      rothConversionTaxSource: conversionSettings.taxSource,
-      rothConversionPreTaxFloor: conversionSettings.preTaxFloor
-    };
+    const withPI = settingsToPI(personalInfo, conversionSettings);
     const withProj = computeProjections(withPI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
 
     // Projection WITHOUT any conversions (baseline)
@@ -4023,13 +4060,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
   const saveToPlan = () => {
     setPersonalInfo(prev => ({
       ...prev,
-      rothConversionAmount: conversionSettings.mode === 'fixed' ? conversionSettings.fixedAmount : 0,
-      rothConversionBracket: conversionSettings.mode === 'bracket' ? conversionSettings.targetBracket : '',
-      rothConversionIrmaaTier: conversionSettings.mode === 'irmaa' ? conversionSettings.irmaaTier : null,
-      rothConversionStartAge: conversionSettings.startAge,
-      rothConversionEndAge: conversionSettings.endAge,
-      rothConversionTaxSource: conversionSettings.taxSource,
-      rothConversionPreTaxFloor: conversionSettings.preTaxFloor,
+      ...settingsToPI(prev, conversionSettings),
     }));
     setSavedFlash(true);
     setTimeout(() => setSavedFlash(false), 2500);
@@ -4049,11 +4080,18 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
           <label className="block text-sm text-slate-400 mb-1">Mode</label>
           <select
             value={conversionSettings.mode}
-            onChange={e => setConversionSettings({...conversionSettings, mode: e.target.value})}
+            onChange={e => setConversionSettings({
+              ...conversionSettings, mode: e.target.value,
+              // Leaving staged mode drops the carried schedule. Keeping it
+              // would let the panel go on running stages while displaying a
+              // scalar mode — the exact mismatch this rewrite removes.
+              ...(e.target.value === 'staged' ? {} : { stages: null }),
+            })}
             className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
           >
             <option value="bracket">Fill to Bracket</option>
             <option value="irmaa">Fill to IRMAA Tier</option>
+            <option value="staged">Bracket, then IRMAA Tier</option>
             <option value="fixed">Fixed Amount</option>
           </select>
         </div>
@@ -4092,6 +4130,41 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                   </option>
                 ))}
             </select>
+          </div>
+        ) : conversionSettings.mode === 'staged' ? (
+          <div className="col-span-2">
+            <label className="block text-sm text-slate-400 mb-1">Two stages</label>
+            <div className="grid grid-cols-2 gap-2">
+              <select
+                value={conversionSettings.freeBracket}
+                onChange={e => setConversionSettings({ ...conversionSettings, freeBracket: e.target.value, stages: null })}
+                className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
+              >
+                {bracketOptions.map(b => <option key={b.value} value={b.value}>Fill {b.value}</option>)}
+              </select>
+              <select
+                value={conversionSettings.chargedTier}
+                onChange={e => setConversionSettings({ ...conversionSettings, chargedTier: Number(e.target.value), stages: null })}
+                className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
+              >
+                {irmaaTierOptions(personalInfo.filingStatus,
+                    personalInfo.filingStatus === 'married_joint' ? 2 : 1)
+                  .filter(o => !o.isTop)
+                  .map(o => (
+                    <option key={o.index} value={o.index}>Then under {formatCurrency(o.ceiling)} MAGI</option>
+                  ))}
+              </select>
+            </div>
+            {(() => {
+              const st = stagesFor(personalInfo, conversionSettings);
+              return (
+                <p className="text-[11px] text-slate-500 mt-1 leading-snug">
+                  {st.map(x => `${x.label}: ages ${x.startAge}–${x.endAge} — ${x.bracket ? 'fill ' + x.bracket : 'hold IRMAA tier ' + x.irmaaTier}`).join(' · ')}
+                  {' '}IRMAA reads the MAGI from {IRMAA_TIER_LOOKBACK_YEARS} years earlier and Medicare starts at
+                  {' '}{MEDICARE_ELIGIBILITY_AGE}, so a conversion at {irmaaLastFreeAge()} or earlier never reaches an IRMAA calculation at all.
+                </p>
+              );
+            })()}
           </div>
         ) : conversionSettings.mode === 'bracket' ? (
           <div>
@@ -4854,7 +4927,7 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
               <tr className="text-left text-slate-400 border-b border-slate-700">
                 <th className="py-2 pr-3">Strategy</th>
                 <th className="py-2 pr-3">Total Converted</th>
-                <th className="py-2 pr-3">After-Tax Legacy (vs none)</th>
+                <th className="py-2 pr-3">After-Tax Legacy — portfolio (vs none)</th>
                 <th className="py-2 pr-3">Lifetime Tax (vs none)</th>
                 <th className="py-2 pr-3">Lifetime IRMAA</th>
                 {goal === 'balanced' && <th className="py-2 pr-3">If the first decade is bad</th>}
@@ -4943,6 +5016,9 @@ function RothConversionOptimizer({ personalInfo, accounts, incomeStreams, assets
             ★ = best for "{GOALS[goal].label}". After-tax legacy values pre-tax balances at {Math.round(heirTaxRate * 100)}¢ on
             the dollar (your heirs' rate under the SECURE Act 10-year rule); Roth and brokerage pass at face value.
             Change the goal to re-rank without re-running.
+            {' '}These figures are <strong className="text-slate-400">portfolio only</strong> — every strategy here differs in
+            its accounts, not in your house — so they read lower than the Dashboard's "Legacy" tile, which is the whole
+            estate. The gap between the two is your non-portfolio assets, and it is the same on every row.
           </p>
         </div>
       )}
@@ -15403,6 +15479,17 @@ return (
                 after tax · heirs at {Math.round(legacy.heirTaxRate * 100)}%
                 {legacy.taxOnPreTax > 0 && <> · −{formatCurrency(legacy.taxOnPreTax)}</>}
               </div>
+              {/* The Roth optimizer ranks strategies on the PORTFOLIO slice of
+                  this figure, because two conversion strategies differ in their
+                  accounts and not in the house. Naming the difference here is
+                  what lets a reader hold the two screens side by side instead of
+                  concluding one of them is broken. */}
+              {legacy.nonPortfolio > 0 && (
+                <div className="text-[11px] text-slate-600 mt-0.5">
+                  includes {formatCurrency(legacy.nonPortfolio)} of property and other assets;
+                  the Roth optimizer ranks on the portfolio alone
+                </div>
+              )}
             </div>
           )}
         </div>

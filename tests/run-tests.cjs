@@ -14016,6 +14016,135 @@ section('P119 — the Sandbox strategy drawer hides controls without hiding thei
     .forEach(lbl => ok(afterDrawer.includes(lbl), `the "${lbl}" control is inside it`));
 }
 
+section('P120 — a staged schedule outranks every scalar mode, and every caller must honour that');
+
+{
+  // ONE rule in the engine: conversionStagesOf consults an explicit schedule
+  // BEFORE any scalar mode. Any code that builds a conversion scenario by
+  // setting rothConversionAmount / Bracket / IrmaaTier and leaving
+  // rothConversionStages in place is therefore building a scenario that does
+  // something else entirely — silently, because the projection still runs.
+  //
+  // Three call sites had done exactly that, each written before stages existed:
+  // the Tax Planning simulator's projection, its Save, and the worker's
+  // marginal-rate curve baseline. On a staged plan the simulator's every
+  // control was inert and the curve's 'no conversions' baseline went on
+  // converting the whole schedule.
+  const staged = baseScenario({ myAge: 55, spouseAge: 55, myRetirementAge: 60, spouseRetirementAge: 60,
+    legacyAge: 90, state: 'Florida', desiredRetirementIncome: 120000, healthcareModel: 'none', ltcModel: 'none' });
+  staged.accts = [
+    { id: 1, name: 'IRA', type: 'traditional_ira', balance: 1600000, contribution: 0, contributionGrowth: 0, cagr: 0.06, startAge: 55, stopAge: 60, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Brok', type: 'brokerage', balance: 400000, contribution: 0, contributionGrowth: 0, cagr: 0.06, costBasisPercent: 0.6, startAge: 55, stopAge: 60, owner: 'me', contributor: 'me' },
+    { id: 3, name: 'Roth', type: 'roth_ira', balance: 200000, contribution: 0, contributionGrowth: 0, cagr: 0.06, startAge: 55, stopAge: 60, owner: 'me', contributor: 'me' },
+  ];
+  staged.streams = [{ id: 1, name: 'SS', type: 'social_security', owner: 'me', amount: 40000, startAge: 67, endAge: 95, cola: 0.025, pia: 2800 }];
+  // A plan carrying BOTH a staged schedule and a stale scalar tier beside it —
+  // exactly what the Personal Info tab leaves behind when a reader switches
+  // modes, and the shape that made the simulator open on the wrong strategy.
+  staged.pi = { ...staged.pi, rothConversionIrmaaTier: 0, rothConversionBracket: '', rothConversionAmount: 0,
+    rothConversionStartAge: 60, rothConversionEndAge: 74,
+    rothConversionStages: [
+      { label: 'Before IRMAA', startAge: 60, endAge: 62, bracket: '24%', amount: 0, irmaaTier: null },
+      { label: 'IRMAA applies', startAge: 63, endAge: 74, bracket: '', amount: 0, irmaaTier: 1 },
+    ] };
+  const convOf = (p) => Math.round(computeProjections(p, staged.accts, staged.streams, [], [], [], TODAY_YEAR)
+    .reduce((t, r) => t + (r.rothConversion || 0), 0));
+
+  eq(engine.rothConversionModeOf(staged.pi), 'staged',
+    'the schedule wins over the stale scalar tier sitting beside it');
+  const planConverts = convOf(staged.pi);
+  gt(planConverts, 0, 'and the plan converts on that schedule');
+
+  // ── the hazard, stated as a test ─────────────────────────────────────────
+  {
+    // Setting the scalars by hand and leaving the schedule: every setting
+    // produces the plan's own projection.
+    const handRolled = (patch) => ({ ...staged.pi, rothConversionAmount: 0, rothConversionBracket: '',
+      rothConversionIrmaaTier: null, ...patch });
+    const outcomes = new Set([
+      convOf(handRolled({ rothConversionAmount: 250000 })),
+      convOf(handRolled({ rothConversionBracket: '12%' })),
+      convOf(handRolled({ rothConversionIrmaaTier: 4 })),
+      convOf(handRolled({})),
+    ]);
+    eq(outcomes.size, 1, 'hand-rolled clearing leaves the schedule in charge: every setting gives one projection');
+    eq([...outcomes][0], planConverts, 'and that projection is the plan itself, whatever was asked for');
+  }
+  // Cleared through the helper instead, the same settings behave.
+  {
+    const viaHelper = (target) => convOf(engine.withRothConversionTarget(staged.pi, { ...target, startAge: 60, endAge: 74 }));
+    const fixed = viaHelper({ amount: 250000 });
+    const tier4 = viaHelper({ irmaaTier: 4 });
+    const tier0 = viaHelper({ irmaaTier: 0 });
+    gt(fixed, 0, 'a fixed amount converts');
+    gt(tier4, tier0, 'a higher IRMAA ceiling converts more than a lower one');
+    ok(new Set([fixed, tier4, tier0]).size === 3, 'and the three targets are genuinely three projections');
+    eq(convOf(engine.withoutRothConversions(staged.pi)), 0,
+      'while withoutRothConversions really does stop every conversion, schedule included');
+  }
+  // Round trip: the helper handed the plan's own stages reproduces the plan.
+  {
+    const same = engine.withRothConversionTarget(staged.pi, { stages: staged.pi.rothConversionStages, startAge: 60, endAge: 74 });
+    eq(convOf(same), planConverts, 'the plan’s own schedule, applied through the helper, reproduces the plan exactly');
+    eq(same.rothConversionIrmaaTier, null, 'and the stale scalar beside it is cleared on the way through');
+  }
+
+  // ── the call sites ───────────────────────────────────────────────────────
+  {
+    const fsMod = require('fs'), pathMod = require('path');
+    const ROOT = pathMod.resolve(__dirname, '..');
+    const jsx = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner.jsx'), 'utf8');
+    const wrk = fsMod.readFileSync(pathMod.join(ROOT, 'worker.js'), 'utf8');
+    // The simulator builds its plan in ONE place now, through the helper.
+    ok(/const settingsToPI = \(pi, s\) => \(\{\s*\.\.\.withRothConversionTarget\(/.test(jsx.replace(/\n/g, ' ')),
+      'the simulator converts its settings to a plan through the engine helper');
+    ok(/const withPI = settingsToPI\(personalInfo, conversionSettings\);/.test(jsx),
+      'its projection uses that one conversion');
+    ok(/\.\.\.settingsToPI\(prev, conversionSettings\),/.test(jsx),
+      'and so does its Save, so the two cannot drift apart again');
+    ok(/\.\.\.E\.withoutRothConversions\(personalInfo\)/.test(wrk),
+      'the marginal-rate curve clears through the helper rather than by hand');
+    // Nobody hand-rolls the clearing any more. Only DERIVED plans matter: the
+    // literal DEFAULT_PERSONAL_INFO also names these fields, but it describes a
+    // brand-new plan that has no schedule to leave behind. A clearing site is
+    // one that spreads an existing plan and then empties the scalar modes.
+    const offenders = [];
+    [['retirement-planner.jsx', jsx], ['worker.js', wrk]].forEach(([name, raw]) => {
+      const src = raw.replace(/\/\/[^\n]*/g, '');
+      const re = /rothConversionAmount: 0,[\s\S]{0,400}?rothConversionBracket: '',[\s\S]{0,400}?rothConversionIrmaaTier: null/g;
+      let m;
+      while ((m = re.exec(src))) {
+        const before = src.slice(Math.max(0, m.index - 220), m.index);
+        if (/\.\.\.\s*(personalInfo|prev|pi|p)\b/.test(before)) offenders.push(name + '@' + src.slice(0, m.index).split('\n').length);
+      }
+    });
+    eq(offenders.length, 0,
+      `no site clears an existing plan's conversion modes by hand${offenders.length ? ': ' + offenders.join(', ') : ''}`);
+  }
+
+  // ── the two after-tax legacy figures ─────────────────────────────────────
+  {
+    // They are different measures with the same name, and the difference is
+    // exactly the non-portfolio estate. Neither is wrong; a reader comparing
+    // the Roth optimizer against the Dashboard tile needs to be told which is
+    // which, so both now say so on screen.
+    const withHouse = computeProjections(staged.pi, staged.accts, staged.streams,
+      [{ id: 1, name: 'House', type: 'real_estate', value: 500000, appreciationRate: 0.02, mortgage: 0 }],
+      [], [], TODAY_YEAR);
+    const opts = { legacyAge: staged.pi.legacyAge, retirementAge: staged.pi.myRetirementAge, heirTaxRate: 0.25 };
+    const score = engine.scoreRothStrategy(withHouse, opts);
+    const tile = engine.afterTaxLegacyValue(withHouse, opts);
+    gt(tile.nonPortfolio, 0, 'the plan owns something outside the portfolio');
+    approx(tile.afterTax - score.afterTaxLegacy, tile.nonPortfolio,
+      'the optimizer and the Dashboard tile differ by exactly the non-portfolio estate', 1.5);
+    const fsMod = require('fs'), pathMod = require('path');
+    const jsx = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+    ok(/After-Tax Legacy — portfolio/.test(jsx), 'the optimizer column says it is portfolio only');
+    ok(/the Roth optimizer ranks on the portfolio alone/.test(jsx),
+      'and the Dashboard tile names the assets it adds on top');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
