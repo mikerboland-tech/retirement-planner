@@ -8860,7 +8860,18 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // modeling, the household spends a fraction of the couple's target (default 75%).
     // A single person's fixed costs don't halve, so this is a haircut, not a split.
     const survivorActive = survivorEnabled && (primaryAlive !== spouseAlive);
-    const spendFactor = survivorActive ? (pi.survivorSpendingFactor ?? 0.75) : 1;
+    // Nobody left. The only reason a year with no living member exists at all is
+    // to record the second death, and a household with no members has no
+    // spending target. survivorActive asks whether EXACTLY ONE spouse is alive,
+    // so an empty household answered 'no' and fell through to the couple's FULL
+    // target: the final year restored the quarter the survivor factor had taken
+    // off and drew it from the portfolio, spending a year's money on nobody. It
+    // inflated lifetime tax and lifetime withdrawals and showed in the table as
+    // a real spending year. Both flags only ever flip under survivor modelling,
+    // so this cannot fire on a plan that does not model deaths.
+    const householdAlive = primaryAlive || spouseAlive;
+    const spendFactor = !householdAlive ? 0
+      : survivorActive ? (pi.survivorSpendingFactor ?? 0.75) : 1;
     // Spending-phase multiplier (go-go/slow-go/no-go) applies to BASE spending
     // only — recurring expense items carry their own age windows, and healthcare
     // is modeled separately (and typically rises while discretionary falls).

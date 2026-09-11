@@ -14145,6 +14145,90 @@ section('P120 — a staged schedule outranks every scalar mode, and every caller
   }
 }
 
+section('P121 — the user sweep: six things that were wrong, incomplete or missing');
+
+{
+  // ── 1. A household with no members has no spending target ────────────────
+  {
+    // survivorActive asks whether EXACTLY ONE spouse is alive. An empty
+    // household answered 'no' and fell through to the couple's FULL target, so
+    // the year recording the second death restored the quarter the survivor
+    // factor had taken off and drew it from the portfolio — a year's spending
+    // on nobody, in lifetime tax and in the projection table.
+    const sc = baseScenario({ myAge: 70, spouseAge: 70, myRetirementAge: 70, spouseRetirementAge: 70,
+      legacyAge: 95, state: 'Florida', desiredRetirementIncome: 100000,
+      healthcareModel: 'none', ltcModel: 'none' });
+    sc.pi = { ...sc.pi, survivorModelEnabled: true, survivorSpendingFactor: 0.75,
+      myLifeExpectancy: 78, spouseLifeExpectancy: 80 };
+    sc.accts = [{ id: 1, name: 'IRA', type: 'traditional_ira', balance: 3000000, contribution: 0,
+      contributionGrowth: 0, cagr: 0.05, startAge: 70, stopAge: 70, owner: 'me', contributor: 'me' }];
+    sc.streams = [];
+    const p = computeProjections(sc.pi, sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+    const dead = p.filter(r => r.primaryAlive === false && r.spouseAlive === false);
+    gt(dead.length, 0, 'the projection includes a year recording the second death');
+    dead.forEach(r => {
+      eq(Math.round(r.desiredIncome), 0, `age ${r.myAge}: nobody alive, so nothing is spent`);
+      eq(Math.round(r.portfolioWithdrawal), 0, `age ${r.myAge}: and nothing is withdrawn to spend`);
+    });
+    // The survivor years keep their haircut, and the couple years keep theirs.
+    const survivor = p.filter(r => r.primaryAlive !== r.spouseAlive);
+    gt(survivor.length, 0, 'there are survivor years');
+    ok(survivor.every(r => r.desiredIncome > 0), 'a survivor still spends');
+    const couple = p.find(r => r.primaryAlive && r.spouseAlive && r.myAge >= 70);
+    const solo = survivor[0];
+    lt(solo.desiredIncome, couple.desiredIncome, 'and spends less than the couple did');
+    // A plan that does not model deaths is untouched.
+    const off = computeProjections({ ...sc.pi, survivorModelEnabled: false }, sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+    gt(off[off.length - 1].desiredIncome, 0, 'with survivor modelling off the last year still spends, as before');
+  }
+
+  // ── 2-6. the surfaces ────────────────────────────────────────────────────
+  {
+    const fsMod = require('fs'), pathMod = require('path');
+    const ROOT = pathMod.resolve(__dirname, '..');
+    const jsx = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner.jsx'), 'utf8');
+    const mob = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner-mobile.jsx'), 'utf8');
+    const flat = jsx.replace(/\s+/g, ' ');
+
+    // 2. Personal Info resolves the mode the way the ENGINE does: schedule first.
+    ok(/const stagedMode = Array\.isArray\(localInfo\.rothConversionStages\)/.test(flat),
+      'the conversion mode row knows a staged schedule exists');
+    ok(/const irmaaMode = !stagedMode &&/.test(flat), 'a schedule outranks a stale scalar tier');
+    ok(/const bracketMode = !stagedMode &&/.test(flat), 'and a stale bracket');
+    ok(/staged schedule is in force/.test(jsx), 'and the section says so rather than showing a ceiling it is not using');
+    // Choosing a single target clears the schedule, so the choice is the one that runs.
+    const modeButtons = (jsx.match(/handleChange\('rothConversionStages', null\); handleChange\('rothConversion/g) || []);
+    eq(modeButtons.length, 3, 'all three single-target buttons clear the schedule first');
+
+    // 3. The two ending figures name the row they are read at.
+    ok(/Ending portfolio \(age \$\{nowM\.endingAge\}\)/.test(jsx),
+      'the Sandbox ending figure names its age — it reads the LAST row, not the planning age');
+    ok(/endingAge: last\.myAge,/.test(jsx), 'and that age comes from the row it measured');
+    ok(/Legacy at \{legacy \? legacy\.age/.test(jsx), 'the Dashboard tile already names its own');
+
+    // 4. The Monte Carlo comparison carries its direction in words.
+    ok(/pct > 0 \? 'above' : 'below'/.test(flat),
+      'the median comparison says above or below rather than a bare percentage');
+    ok(!/median is \$\{\(\(\(showRealDollars/.test(flat), 'the unsigned version is gone');
+
+    // 5. The Current Year opt-in is surfaced when there is data behind it.
+    ok(/These figures are not in your plan yet/.test(jsx), 'the tab says when its work is not reaching the plan');
+    ok(/Use them in the plan/.test(jsx), 'and offers the switch there');
+    ok(/if \(!hasData \|\| personalInfo\.useDetailedCurrentYear\) return null;/.test(flat),
+      'staying quiet on an empty tab, and once the switch is on');
+
+    // 6. Mobile says it is not showing the saved plan, and still never reads it.
+    ok(/DESKTOP_STORAGE_KEY = 'retirement_planner_data'/.test(mob), 'mobile can detect a full plan');
+    ok(/You have a full plan saved on this device/.test(mob), 'and says so instead of showing defaults silently');
+    ok(/savedDesktopPlan && \(/.test(mob), 'only when one exists');
+    // It must remain read-only about that key: seeding a married, multi-account
+    // plan into a single-filer model would invent a NEW disagreement.
+    ok(!/setItem\(DESKTOP_STORAGE_KEY/.test(mob), 'mobile never writes the desktop plan');
+    eq((mob.match(/DESKTOP_STORAGE_KEY/g) || []).length, 2,
+      'and touches that key only to define it and read it');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

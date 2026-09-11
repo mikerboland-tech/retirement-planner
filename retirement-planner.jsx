@@ -5551,6 +5551,35 @@ function CurrentYearTab({ detailLevel, sectionVisibility, setDetailLevel, setSec
         </div>
       </div>
 
+      {/* The switch at the BOTTOM of this tab decides whether any of this work
+          reaches the 40-year plan, and it is off by default. Someone who has
+          entered a paystub, a K-1 and a deduction has already done the hard
+          part; leaving the one line that says none of it counts at the foot of
+          a long page means the tab quietly does nothing for them. Shown here
+          only when there is real data behind it, so an empty tab stays quiet. */}
+      {(() => {
+        const hasData = (cy.payroll || []).length > 0 || (cy.k1s || []).length > 0
+          || Object.values(cy.otherIncome || {}).some(v => Number(v) > 0);
+        if (!hasData || personalInfo.useDetailedCurrentYear) return null;
+        return (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 rounded-lg
+                          bg-amber-500/10 border border-amber-500/35">
+            <div className="text-sm text-amber-200">
+              <strong>These figures are not in your plan yet.</strong>
+              <span className="block text-xs text-amber-200/75 mt-0.5">
+                Year one of the long-range projection is still a synthetic year built from a salary figure.
+                It cannot see your paystubs, your K-1 or your deductions until you switch this on.
+              </span>
+            </div>
+            <button
+              onClick={() => setPersonalInfo({ ...personalInfo, useDetailedCurrentYear: true })}
+              className="px-3 py-1.5 rounded-lg text-sm font-medium bg-amber-500/20 text-amber-200
+                         border border-amber-500/50 hover:bg-amber-500/30 transition-colors shrink-0"
+            >Use them in the plan</button>
+          </div>
+        );
+      })()}
+
       <SectionControls tab="currentyear" vis={sectionVisibility} setVis={setSectionVisibility}
                        level={detailLevel} setLevel={setDetailLevel} />
       <HideableBlock tab="currentyear" id="payroll" level={detailLevel}
@@ -7504,9 +7533,17 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
                   <div className="text-slate-500">your plan, same basis</div>
                   <div className="text-slate-300 font-semibold">{formatCurrency(deterministicEnd)}</div>
                   <div className="text-slate-500">
-                    median is {deterministicEnd > 0
-                      ? `${(((showRealDollars && simResults.real ? simResults.real.percentile50 : simResults.percentile50) / deterministicEnd - 1) * 100).toFixed(0)}%`
-                      : '—'} vs the straight-line run
+                    {/* Signed, and said in words. A bare "19%" next to "vs the
+                        straight-line run" reads as "19% OF it" — a catastrophe —
+                        when it means 19% ABOVE it. Losses carried a minus sign
+                        and read correctly; gains did not. */}
+                    {(() => {
+                      if (!(deterministicEnd > 0)) return 'no straight-line figure to compare';
+                      const med = showRealDollars && simResults.real ? simResults.real.percentile50 : simResults.percentile50;
+                      const pct = (med / deterministicEnd - 1) * 100;
+                      if (Math.abs(pct) < 0.5) return 'median matches the straight-line run';
+                      return `median is ${Math.abs(pct).toFixed(0)}% ${pct > 0 ? 'above' : 'below'} the straight-line run`;
+                    })()}
                   </div>
                 </div>
               )}
@@ -11703,32 +11740,53 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
           {/* Mode toggle. Three modes, mutually exclusive — switching one clears
               the others, or the engine would see two ceilings at once. */}
           {(() => {
-            const irmaaMode = Number.isInteger(localInfo.rothConversionIrmaaTier);
-            const bracketMode = !!localInfo.rothConversionBracket && !irmaaMode;
+            // The ENGINE resolves an explicit schedule before any scalar mode
+            // (conversionStagesOf), so this row has to as well. It used to read
+            // the scalar fields alone: a staged plan carrying a stale tier
+            // beside its schedule lit up 'Fill to IRMAA Tier' and rendered that
+            // tier's ceiling, while the schedule below actually governed. Two
+            // contradictory strategies on one screen, with the wrong one on top.
+            const stagedMode = Array.isArray(localInfo.rothConversionStages)
+              && localInfo.rothConversionStages.length > 0;
+            const irmaaMode = !stagedMode && Number.isInteger(localInfo.rothConversionIrmaaTier);
+            const bracketMode = !stagedMode && !!localInfo.rothConversionBracket && !irmaaMode;
             const btn = (active) => `px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
               active ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
                      : 'text-slate-400 border-slate-600/50 hover:text-slate-200 hover:bg-slate-700/50'}`;
             return (
               <div className="flex flex-wrap gap-2 mb-4">
                 <button
-                  onClick={() => { handleChange('rothConversionBracket', ''); handleChange('rothConversionIrmaaTier', null); }}
-                  className={btn(!bracketMode && !irmaaMode)}
+                  onClick={() => { handleChange('rothConversionStages', null); handleChange('rothConversionBracket', ''); handleChange('rothConversionIrmaaTier', null); }}
+                  className={btn(!stagedMode && !bracketMode && !irmaaMode)}
                 >Fixed Amount</button>
                 <button
-                  onClick={() => { handleChange('rothConversionAmount', 0); handleChange('rothConversionIrmaaTier', null); handleChange('rothConversionBracket', '22%'); }}
+                  onClick={() => { handleChange('rothConversionStages', null); handleChange('rothConversionAmount', 0); handleChange('rothConversionIrmaaTier', null); handleChange('rothConversionBracket', '22%'); }}
                   className={btn(bracketMode)}
                 >Fill to Bracket</button>
                 <button
-                  onClick={() => { handleChange('rothConversionAmount', 0); handleChange('rothConversionBracket', ''); handleChange('rothConversionIrmaaTier', 0); }}
+                  onClick={() => { handleChange('rothConversionStages', null); handleChange('rothConversionAmount', 0); handleChange('rothConversionBracket', ''); handleChange('rothConversionIrmaaTier', 0); }}
                   className={btn(irmaaMode)}
                 >Fill to IRMAA Tier</button>
+                {stagedMode && (
+                  <span className={btn(true) + ' cursor-default'}>Staged schedule</span>
+                )}
               </div>
             );
           })()}
 
+          {Array.isArray(localInfo.rothConversionStages) && localInfo.rothConversionStages.length > 0 && (
+            <p className="text-[11px] text-purple-300/80 mb-3 leading-snug">
+              A staged schedule is in force, and the engine runs it ahead of any single target.
+              {' '}Edit the stages below; the single-target fields are hidden while it applies.
+              {' '}Choosing one of the three modes above replaces the schedule.
+            </p>
+          )}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            {/* Fixed amount input OR bracket selector */}
-            {Number.isInteger(localInfo.rothConversionIrmaaTier) ? (
+            {/* Fixed amount input OR bracket selector. Hidden entirely while a
+                staged schedule governs — showing a ceiling the plan is not using
+                is what made this section contradict itself. */}
+            {Array.isArray(localInfo.rothConversionStages) && localInfo.rothConversionStages.length > 0 ? null
+             : Number.isInteger(localInfo.rothConversionIrmaaTier) ? (
               <div className="col-span-2">
                 <label className={compactLabelStyle}>Stay Within IRMAA Tier</label>
                 <select
@@ -14587,7 +14645,12 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
     const short = planShortfall(proj, { retirementAge: retAge });
     return {
       atRetirement: (proj.find(p => p.myAge === retAge) || {}).totalPortfolio || 0,
+      // The LAST row, which is not the planning age: the projection runs to
+      // cover a younger spouse, so this can sit years past it. The Dashboard's
+      // Legacy tile reads the planning age instead, and the two were showing
+      // millions apart with neither saying which year it meant.
       ending: last.totalPortfolio || 0,
+      endingAge: last.myAge,
       lifetimeTax: proj.reduce((s, p) => s + (p.totalTax || 0), 0),
       conversions: proj.reduce((s, p) => s + (p.rothConversion || 0), 0),
       fails: !!short.fails, depletedYear: short.depletedYear || null,
@@ -14959,7 +15022,7 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
           </div>
         <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
           {[['Portfolio at retirement', nowM.atRetirement, thenM && thenM.atRetirement, true],
-            ['Ending portfolio', nowM.ending, thenM && thenM.ending, true],
+            [`Ending portfolio (age ${nowM.endingAge})`, nowM.ending, thenM && thenM.ending, true],
             ['Lifetime tax, all years', nowM.lifetimeTax, thenM && thenM.lifetimeTax, false],
             ['Converted to Roth', nowM.conversions, thenM && thenM.conversions, null]].map(([label, a, b, up]) => {
             const d = (b === null || b === undefined) ? null : b - a;

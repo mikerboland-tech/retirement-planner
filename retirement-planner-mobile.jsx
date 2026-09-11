@@ -37,6 +37,29 @@ const {
 // unavailable (e.g. Safari Private Mode) or the data can't be parsed.
 const MOBILE_STORAGE_KEY = 'retirementWhatIf_mobile_v1';
 
+// The DESKTOP planner's key. This page never reads it — the model here is a
+// single filer with one portfolio, and mapping a married plan with eight
+// accounts into that would produce figures that disagree with the plan itself,
+// which is worse than not showing them. But phones are redirected here
+// automatically from the main address, so someone who built a full plan on a
+// laptop arrived to a generic scenario with nothing saying it was not theirs.
+// Detected, and said out loud.
+const DESKTOP_STORAGE_KEY = 'retirement_planner_data';
+const desktopPlanSummary = () => {
+  try {
+    const raw = localStorage.getItem(DESKTOP_STORAGE_KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    const pi = d && d.personalInfo;
+    if (!pi) return null;
+    return {
+      retirementAge: pi.myRetirementAge,
+      accounts: Array.isArray(d.accounts) ? d.accounts.length : 0,
+      married: pi.filingStatus === 'married_joint',
+    };
+  } catch (e) { return null; }
+};
+
 // Schema version for the persisted mobile state. Bump and add a migration
 // entry whenever the saved shape changes incompatibly.
 const MOBILE_SCHEMA_VERSION = 1;
@@ -407,6 +430,9 @@ function ToggleRow({ label, value, onChange, hint }) {
 }
 
 function MobilePlanner() {
+  // Read once: a plan either exists on this device or it does not, and this
+  // page never writes to that key.
+  const savedDesktopPlan = useMemo(() => desktopPlanSummary(), []);
   // === Inputs (state) ===
   // Restore saved inputs once (synchronous localStorage read) and use each as the initial
   // value, falling back to the default when a field isn't present in saved data.
@@ -698,6 +724,20 @@ function MobilePlanner() {
           </div>
         </div>
         <p className="text-xs text-slate-500">Quick gut-check using the full engine</p>
+        {savedDesktopPlan && (
+          <div className="mt-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/35">
+            <p className="text-[11px] text-amber-200 leading-snug">
+              <strong>You have a full plan saved on this device.</strong> This page is not using it.
+              {" "}It is a separate what-if with one portfolio and one person, so the numbers below are
+              {" "}not your plan's{savedDesktopPlan.married ? " — which is a couple" : ""}
+              {savedDesktopPlan.accounts ? ` and has ${savedDesktopPlan.accounts} accounts` : ""}.
+            </p>
+            <a href="index.html?desktop=1"
+               className="inline-block mt-1.5 text-[11px] font-medium text-amber-300 underline">
+              Open my real plan
+            </a>
+          </div>
+        )}
       </header>
       
       {/* Results panel — sticky-ish, lives at top of scrolling area */}
