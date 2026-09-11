@@ -7046,9 +7046,15 @@ section('P59 — the starter plan: internally consistent, and not balanced on a 
     // eslint-disable-next-line no-eval
     return eval(src.slice(open, i + 1).replace(/TYPICAL_DEFERRAL_RATE/g, '0.08').replace(/TYPICAL_MATCH_RATE/g, '0.03'));
   };
+  // The plan defaults moved into the engine so the desktop and the phone start
+  // and normalise a plan from one object. The assertions below are about how
+  // they are WRITTEN — derived from the clock rather than typed as a year — so
+  // they still read source, just the engine's.
+  const engSrc = require('fs').readFileSync(
+    require('path').resolve(__dirname, '..', 'engine.js'), 'utf8');
   const piBlock = (() => {
-    const start = src.indexOf('const DEFAULT_PERSONAL_INFO = {');
-    return src.slice(start, src.indexOf('\n};', start));
+    const start = engSrc.indexOf('const DEFAULT_PLAN_INFO = {');
+    return engSrc.slice(start, engSrc.indexOf('\n};', start));
   })();
   const piNum = (key) => {
     const m = piBlock.match(new RegExp(`\\n\\s*${key}:\\s*([-\\d.]+)`));
@@ -11966,11 +11972,16 @@ section('P99 — survivor modelling on by default, and honest about what that mo
   const src = fs9.readFileSync(path9.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
 
   // ── the default ──────────────────────────────────────────────────────────
-  const dStart = src.indexOf('const DEFAULT_PERSONAL_INFO = {');
-  gt(dStart, 0, 'the personal-info defaults are where the test expects them');
-  const dBlock = src.slice(dStart, src.indexOf('\n};', dStart));
-  ok(/survivorModelEnabled:\s*true/.test(dBlock),
+  // Asserted on the exported object rather than by reading the app's source:
+  // the defaults moved into the engine so the desktop and the phone start and
+  // normalise a plan from one set of numbers, and a text search would only have
+  // said where they used to live.
+  ok(engine.DEFAULT_PLAN_INFO && typeof engine.DEFAULT_PLAN_INFO === 'object',
+    'the plan defaults are exported by the engine, where both surfaces can read them');
+  eq(engine.DEFAULT_PLAN_INFO.survivorModelEnabled, true,
     'a new married plan models the first death rather than running two people to the planning age');
+  ok(/const DEFAULT_PERSONAL_INFO = DEFAULT_PLAN_INFO;/.test(src),
+    'and the app aliases them rather than keeping a second copy');
 
   // ── it is inert for a single filer, which is why the migration skips them ──
   {
@@ -14219,8 +14230,10 @@ section('P121 — the user sweep: six things that were wrong, incomplete or miss
 
     // 6. Mobile says it is not showing the saved plan, and still never reads it.
     ok(/DESKTOP_STORAGE_KEY = 'retirement_planner_data'/.test(mob), 'mobile can detect a full plan');
-    ok(/You have a full plan saved on this device/.test(mob), 'and says so instead of showing defaults silently');
-    ok(/savedDesktopPlan && \(/.test(mob), 'only when one exists');
+    // It no longer merely SAYS it is not using the plan — it projects it. The
+    // banner this used to assert was replaced by the real view in v2.38.0.
+    ok(/function MyPlanView/.test(mob), 'and renders that plan rather than a stranger’s numbers');
+    ok(/savedDesktopPlan && \(/.test(mob), 'the mode switch only appears when a plan exists');
     // It must remain read-only about that key: seeding a married, multi-account
     // plan into a single-filer model would invent a NEW disagreement.
     ok(!/setItem\(DESKTOP_STORAGE_KEY/.test(mob), 'mobile never writes the desktop plan');
@@ -14338,6 +14351,153 @@ section('P123 — long-term care is billed whatever the healthcare model says, a
     ok(/set Long-Term Care to None on this tab/.test(jsx), 'telling the reader how to switch it off');
     ok(/personalInfo\.ltcModel, personalInfo\.ltcMonthlyAmount/.test(jsx),
       'and the care fields are in the signature, so changing them re-runs the checks');
+  }
+}
+
+
+section('P124 — the phone reads the plan the desktop saved, and gets the same numbers');
+
+{
+  // Mobile used to carry its own single-filer toy model, so a married,
+  // eight-account plan could not be shown on a phone at all — and any attempt to
+  // MAP it into that model would have invented a fourth set of numbers to
+  // disagree with the other three. Instead the phone now loads the real saved
+  // plan through normalizeSavedPlan and calls the same engine functions the
+  // desktop does. These tests pin the two halves of that claim: the reader is
+  // faithful to the app's own loader, and the projection is byte-identical.
+
+  const fsMod = require('fs'), pathMod = require('path');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const { normalizeSavedPlan, PLAN_SCHEMA_VERSION, DEFAULT_PLAN_INFO, sandboxScenario } = engine;
+
+  // ── the reader refuses what it cannot understand ─────────────────────────
+  {
+    eq(normalizeSavedPlan(null), null, 'nothing saved reads as no plan');
+    eq(normalizeSavedPlan('{}'), null, 'a string is not a plan');
+    eq(normalizeSavedPlan({ schemaVersion: PLAN_SCHEMA_VERSION + 1, accounts: [] }), null,
+      'a file from a newer build is refused rather than half-understood');
+    ok(normalizeSavedPlan({ schemaVersion: PLAN_SCHEMA_VERSION, accounts: [] }) !== null,
+      'and this build’s own version is accepted');
+  }
+
+  // ── it agrees with the app's migrations on everything that moves a number ──
+  {
+    const jsx = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner.jsx'), 'utf8');
+    const declared = /const SCHEMA_VERSION = (\d+);/.exec(jsx);
+    ok(declared, 'the app declares a schema version');
+    eq(Number(declared[1]), PLAN_SCHEMA_VERSION,
+      'and the engine’s reader is pinned to the same version, so a bump cannot land in only one of them');
+    // Every migration the app runs is accounted for here. A new one appearing in
+    // the table is the signal to decide whether it changes a projected number.
+    const table = jsx.slice(jsx.indexOf('const migrations = {'));
+    const versions = [...table.slice(0, table.indexOf('\n};')).matchAll(/^  (\d+): \(data\)/gm)].map(m => Number(m[1]));
+    eq(JSON.stringify(versions), JSON.stringify([3, 4, 5, 6]),
+      'the app’s migration table is the four the reader was written against');
+
+    // v3 → v4: contributor 'both' is split, because the tax engine deducted none of it.
+    {
+      const both = { schemaVersion: 3, personalInfo: { filingStatus: 'single' },
+        accounts: [{ id: 1, name: '401k', type: '401k', balance: 100000, contribution: 11000,
+          contributionGrowth: 0, cagr: 0.06, startAge: 50, stopAge: 65, owner: 'me', contributor: 'both' }] };
+      const norm = normalizeSavedPlan(both);
+      eq(norm.accts.length, 2, 'a legacy ‘both’ row is split into an employee row and an employer row');
+      eq(norm.accts.filter(a => a.contributor === 'both').length, 0, 'and no unattributed row survives');
+      eq(Math.round(norm.accts.reduce((t, a) => t + a.contribution, 0)), 11000,
+        'the dollars are unchanged — only who they belong to');
+      // A file already at v4 is left alone.
+      const at4 = normalizeSavedPlan({ ...both, schemaVersion: 4 });
+      eq(at4.accts.length, 1, 'a v4 file is not re-split');
+    }
+
+    // v5 → v6: married plans are FORCED on, even if they saved false. This is the
+    // easy one to get wrong — a nullish default would leave an explicit false in
+    // place and the phone would then project a plan the desktop does not have.
+    {
+      eq(normalizeSavedPlan({ schemaVersion: 5, personalInfo: { filingStatus: 'married_joint' } }).pi.survivorModelEnabled,
+        true, 'a pre-v6 married plan gets survivor modelling, as the app’s migration gives it');
+      eq(normalizeSavedPlan({ schemaVersion: 5, personalInfo: { filingStatus: 'married_joint', survivorModelEnabled: false } }).pi.survivorModelEnabled,
+        true, 'including one that explicitly saved false, because before v6 that was not a considered choice');
+      eq(normalizeSavedPlan({ schemaVersion: 6, personalInfo: { filingStatus: 'married_joint', survivorModelEnabled: false } }).pi.survivorModelEnabled,
+        false, 'while a v6 file’s explicit false is a real choice and is kept');
+      eq(normalizeSavedPlan({ schemaVersion: 5, personalInfo: { filingStatus: 'single' } }).pi.survivorModelEnabled,
+        false, 'a single filer is unaffected — the flag is inert there');
+    }
+
+    // Missing fields take the plan default rather than undefined.
+    {
+      const bare = normalizeSavedPlan({ schemaVersion: 6, personalInfo: { myAge: 55 } });
+      eq(bare.pi.myAge, 55, 'what the file says wins');
+      eq(bare.pi.inflationRate, DEFAULT_PLAN_INFO.inflationRate, 'and what it omits takes the plan default');
+      eq(bare.pi.ltcModel, DEFAULT_PLAN_INFO.ltcModel, 'including the ones that would otherwise bill six figures');
+      ['accts', 'streams', 'assets', 'events', 'recurring'].forEach(k =>
+        ok(Array.isArray(bare[k]), `a missing ${k} reads as an empty list, not undefined`));
+    }
+  }
+
+  // ── the phone at rest projects exactly what the desktop projects ──────────
+  {
+    // MyPlanView runs the plan through sandboxScenario with every lever
+    // untouched before projecting, so that moving one later is the same code
+    // path as not moving it. That has to be a no-op, row for row — otherwise
+    // the phone shows a what-if the moment it opens.
+    const sc0 = baseScenario({ myAge: 58, myRetirementAge: 63, spouseRetirementAge: 63,
+      desiredRetirementIncome: 90000, rothConversionAmount: 50000,
+      rothConversionStartAge: 63, rothConversionEndAge: 70 });
+    const saved = { schemaVersion: 6, personalInfo: sc0.pi, accounts: sc0.accts,
+      incomeStreams: sc0.streams, assets: [], oneTimeEvents: [], recurringExpenses: [] };
+    const plan = normalizeSavedPlan(saved);
+
+    const desktop = computeProjections(plan.pi, plan.accts, plan.streams,
+      plan.assets, plan.events, plan.recurring);
+    const sc = sandboxScenario({ pi: plan.pi, accts: plan.accts, streams: plan.streams },
+      { myRetirementAge: undefined, spouseRetirementAge: undefined,
+        desiredRetirementIncome: undefined, claimAges: { me: undefined } });
+    const phone = computeProjections(sc.pi, sc.accts, sc.streams,
+      plan.assets, plan.events, plan.recurring, undefined, sc.opts);
+
+    eq(phone.length, desktop.length, 'the phone projects the same number of years');
+    eq((sc.moved || []).length, 0, 'and reports no change, because nothing was moved');
+    let drift = 0;
+    for (let i = 0; i < Math.min(desktop.length, phone.length); i++) {
+      ['totalPortfolio', 'totalTax', 'rothConversion', 'totalIncome', 'rmd', 'desiredIncome']
+        .forEach(f => { if (Math.abs((desktop[i][f] || 0) - (phone[i][f] || 0)) > 0.01) drift++; });
+    }
+    eq(drift, 0, 'every row matches the desktop on portfolio, tax, conversions, income, RMD and spending');
+
+    const sum = (p, f) => p.reduce((t, r) => t + (r[f] || 0), 0);
+    approx(sum(phone, 'totalTax'), sum(desktop, 'totalTax'), 'lifetime tax agrees', 0);
+    approx(sum(phone, 'rothConversion'), sum(desktop, 'rothConversion'), 'converted dollars agree', 0);
+    const L = (p) => engine.afterTaxLegacyValue(p, { legacyAge: plan.pi.legacyAge, heirTaxRate: 0.25 });
+    approx(L(phone).afterTax, L(desktop).afterTax, 'and so does after-tax legacy, which is the figure that disagreed before', 0);
+
+    // Moving a lever is still a what-if, not a no-op — the control is live.
+    const later = sandboxScenario({ pi: plan.pi, accts: plan.accts, streams: plan.streams },
+      { myRetirementAge: 68, spouseRetirementAge: 68 });
+    gt((later.moved || []).length, 0, 'moving retirement age reports a change');
+    const shifted = computeProjections(later.pi, later.accts, later.streams,
+      plan.assets, plan.events, plan.recurring, undefined, later.opts);
+    gt(shifted[shifted.length - 1].totalPortfolio, phone[phone.length - 1].totalPortfolio,
+      'and five more working years leave more behind');
+  }
+
+  // ── the phone never writes to the plan it is reading ──────────────────────
+  {
+    const mob = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner-mobile.jsx'), 'utf8');
+    ok(/function MyPlanView/.test(mob), 'the phone has a view for the saved plan');
+    ok(/normalizeSavedPlan\(JSON\.parse\(raw\)\)/.test(mob), 'which reads it through the shared reader');
+    ok(/computeProjections\(sc\.pi, sc\.accts, sc\.streams/.test(mob),
+      'and projects it with the engine, not a second model');
+    const desktopKeyWrites = mob.match(/setItem\(\s*DESKTOP_STORAGE_KEY/g);
+    eq(desktopKeyWrites, null, 'and never writes back to the desktop’s saved plan');
+    ok(/never writes to it/.test(mob), 'the page says so on screen');
+    // The sparkline is fed rows, not bare numbers: it reads d.totalPortfolio and
+    // d.myAge off each element, and handing it a number array drew a flat line.
+    ok(/<Sparkline data=\{proj\}/.test(mob), 'the sparkline is handed projection rows, which is what it reads');
+    // One slider, two people. The control names must be the ones sandboxScenario
+    // actually reads — a plausible-looking `retirementAge` is silently ignored,
+    // and the slider then moves nothing at all.
+    ok(/myRetirementAge: retAge !== planRetAge/.test(mob), 'the retirement slider uses the control name the engine reads');
+    ok(/spouseRetirementAge: \(retAge !== planRetAge/.test(mob), 'and moves the spouse by the same number of years');
   }
 }
 

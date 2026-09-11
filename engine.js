@@ -8084,6 +8084,162 @@ const normalizeContributionWindow = (accts, pi = {}) => {
   });
 };
 
+// ── THE PLAN A NEW USER STARTS FROM ─────────────────────────────────────────
+// Lives here rather than in the app because it is plan DATA, not presentation,
+// and because two surfaces read it: the desktop builds a new plan from it, and
+// both it and the phone merge a SAVED plan over it so a file missing a field
+// projects identically on either. A second copy of this object is how the two
+// would quietly diverge — a plan with no ltcModel, say, would bill care on one
+// and not the other.
+// One read of the clock for every derived default below, so ages and birth years
+// cannot disagree with each other.
+const DEFAULT_TODAY_YEAR = new Date().getFullYear();
+
+const DEFAULT_PLAN_INFO = {
+  myAge: 35,
+  spouseAge: 33,
+  myRetirementAge: 65,
+  spouseRetirementAge: 65,
+  // Derived, never hardcoded. These were literal 1991/1993, which agreed with
+  // myAge/spouseAge only during the year they were written — every year after,
+  // the starter plan claimed to be 35 while the RMD and FRA math ran off a
+  // birth year that made them older.
+  myBirthYear: DEFAULT_TODAY_YEAR - 35,
+  spouseBirthYear: DEFAULT_TODAY_YEAR - 33,
+  filingStatus: 'married_joint',
+  state: 'Alabama',
+  // 61% of the $180,000 household gross below. The familiar "70-80% of
+  // pre-retirement income" rule is quoted on GROSS pay, which for this couple
+  // still contains 7.65% FICA and an 11%-of-pay savings rate — both of which
+  // stop at retirement. Netting those out, 61% of gross is roughly 75% of what
+  // they actually live on today, which is the middle of the conventional range.
+  // It is also what this savings rate genuinely supports over a 33-year
+  // retirement: the plan clears it with ~16% of spending headroom, where 70% of
+  // gross would leave under 2%. A starter scenario should be comfortable, not
+  // balanced on a knife edge — but it must not be a fantasy either.
+  desiredRetirementIncome: 110000,
+  inflationRate: 0.03,
+  withdrawalPriority: ['pretax', 'brokerage', 'roth'], // Order: first to last
+  // Bracket-fill withdrawal order: '' (off) or a bracket label such as '12%'.
+  // When set, retirement spending comes from pre-tax first up to the top of
+  // that bracket, then follows the priority order with pre-tax held back.
+  withdrawalBracketFill: '',
+  charitableGivingPercent: 0, // Percentage of retirement spending donated to charity (enables QCD strategy)
+  // Planned Roth conversions: move this much per year from largest pre-tax account to largest Roth account.
+  // Conversions are treated as ordinary income in the projection engine (affects taxes and SS taxation).
+  rothConversionAmount: 0,       // Annual conversion amount (0 = disabled)
+  rothConversionInflationAdjust: true, // true: amount is today's $, indexed each year; false: same nominal amount every year
+  rothConversionStartAge: 0,     // Age to begin converting (0 = use smart default: myRetirementAge)
+  rothConversionEndAge: 0,       // Age to stop converting (0 = use smart default: rmdStartAge - 1)
+  rothConversionBracket: '',     // If set ('22%','24%','32%'), fill to this bracket instead of fixed amount
+  rothConversionIrmaaTier: null, // If an integer, fill to that IRMAA tier's MAGI edge instead. Mutually
+                                 // exclusive with the two above; null means "not this mode". Listed here
+                                 // so the third mode is discoverable next to the other two rather than
+                                 // existing only where it happens to be read.
+  rothConversionTaxSource: 'withdrawal', // 'withdrawal' = tax paid via normal withdrawal priority, 'brokerage' = tax paid from brokerage account
+  rothConversionPreTaxFloor: 0,  // Preserve this much pre-tax balance (today's $); stop converting once pre-tax hits it (0 = no floor)
+  // Conversion guardrail: pause or throttle conversions while the portfolio is
+  // materially below where it stood when the programme began, measured in
+  // today's dollars. A conversion is a discretionary, irreversible tax payment
+  // funded by selling assets — making it in a down market sells shares cheap and
+  // removes the ones that would have carried the recovery. Off by default: it
+  // changes an existing plan's behaviour, so it is opt-in.
+  rothConversionGuardrailEnabled: false,
+  rothConversionGuardrailReturnFloor: 0, // pause when LAST year's portfolio return was below this
+  rothConversionGuardrailFloor: 0,    // fraction of the normal conversion still done (0 = pause fully)
+  // §72(t) SEPP: substantially equal periodic payments let you tap a pre-tax
+  // account before 59½ without the 10% penalty, in exchange for locking the
+  // payment schedule until 59½ or 5 years, whichever is longer. Off by default —
+  // it's a deliberate strategy, not something to assume on a user's behalf.
+  // (The 457(b) exemption and the rule of 55 are applied automatically from
+  // account type and retirement age; they need no toggle.)
+  sepp72tEnabled: false,
+  heirTaxRate: 0.25,             // Heirs' assumed ordinary rate on inherited PRE-TAX dollars (SECURE Act 10-year drain) — used by the Roth optimizer's after-tax legacy score
+  displayBasis: 'nominal',       // 'nominal' = future dollars as the engine computes them; 'real' = the same plan restated in today's purchasing power
+  legacyAge: 95,                 // Planning horizon / legacy target age
+  // Spending phases (go-go / slow-go / no-go): staged multipliers on base
+  // retirement spending. Disabled by default — flat spending is the classic
+  // (conservative) assumption; enabling this models the "retirement smile."
+  spendingPhasesEnabled: false,
+  goGoEndAge: 75,                // Last age of the go-go phase (inclusive)
+  slowGoEndAge: 85,              // Last age of the slow-go phase (inclusive); no-go after
+  goGoMultiplier: 1.0,           // Spending multiplier during go-go years
+  slowGoMultiplier: 0.85,        // Spending multiplier during slow-go years
+  noGoMultiplier: 0.75,          // Spending multiplier during no-go years
+  // Survivor modeling: when enabled, models the financial impact of a spouse dying
+  // before the planning horizon ends. Changes filing status, stops income streams,
+  // and applies SS survivor benefit rules.
+  // On by default. A married plan that ignores the first death is not a neutral
+  // simplification — it keeps two Social Security cheques and the joint brackets
+  // running for years after one of them has stopped, which is the single largest
+  // structural error a couple's plan can carry. It is a switch rather than a
+  // constant because it genuinely moves the horizon (see migration 6), and
+  // because a user who wants the simpler view should be able to have it.
+  survivorModelEnabled: true,
+  survivorSpendingFactor: 0.75,  // Surviving spouse spends this fraction of the couple's target income
+  myLifeExpectancy: 85,          // Expected age at death (primary)
+  spouseLifeExpectancy: 87,      // Expected age at death (spouse)
+  // Healthcare expense modeling
+  healthcareModel: 'none',       // 'none','basic','moderate','comprehensive','custom' — default OFF: the engine's modeled costs overestimate for most people, so users should bake healthcare into their desired spending. Opt in on the Personal tab.
+  pre65HealthcareAnnual: 12000,  // Annual healthcare cost per person before Medicare (ACA/employer)
+  // Pre-65 coverage model: 'flat' = fixed annual cost above; 'aca' = retired
+  // under-65 members buy marketplace coverage where the premium is MAGI-driven
+  // (benchmark − premium tax credit, 2026 post-ARPA rules with the 400% FPL cliff).
+  pre65Coverage: 'flat',
+  acaBenchmarkPremium: 14000,    // Unsubsidized silver benchmark (SLCSP) per person/yr — replace with your healthcare.gov quote
+  post65OOPAnnual: 2000,         // Annual out-of-pocket after Medicare (copays, dental, vision)
+  includeMedigap: true,          // Include supplemental/Medigap insurance
+  ltcModel: 'none',              // 'none','default','custom' — LTC off by default so the starter scenario doesn't show two large spike clusters at ages 82–84 (my LTC window) and 86–88 (spouse's). Real risk, but a probabilistic/insurance concern that confuses first-time users looking at point-estimate cash flow. Enable on the Personal tab when ready.
+  ltcMonthlyAmount: 5900,        // Custom LTC monthly cost
+  ltcDurationMonths: 28,         // How many months of LTC to plan for before death
+  medicalInflation: 0.05         // Healthcare-specific inflation rate
+};
+
+// ── READING A SAVED PLAN ────────────────────────────────────────────────────
+// The projection-relevant normalisation of a saved file, in one place, so the
+// desktop and the phone project the same plan identically.
+//
+// The app's own loader also carries migrations for things the projection never
+// sees (which panels are hidden, the current-year slice). Those stay there.
+// What lives here is everything that CHANGES A NUMBER:
+//   • a file from a newer build is refused rather than half-understood
+//   • v3→v4 split contributor:'both' rows, which the tax engine could not deduct
+//   • v5→v6 turned survivor modelling on for married plans, which moves spending,
+//     filing status and Social Security
+//   • a missing field takes the plan default, not undefined
+// A test pins this against the app's loader so the two cannot drift.
+const PLAN_SCHEMA_VERSION = 6;
+const normalizeSavedPlan = (raw) => {
+  if (!raw || typeof raw !== 'object') return null;
+  const version = typeof raw.schemaVersion === 'number' ? raw.schemaVersion : 0;
+  if (version > PLAN_SCHEMA_VERSION) return null;   // newer than this build understands
+  let accts = Array.isArray(raw.accounts) ? raw.accounts : [];
+  if (version < 4) accts = splitBothContributors(accts).accounts;
+  // The app runs its migrations on the RAW file and merges defaults afterwards,
+  // so a migration that asks "did the file say anything here?" must be decided
+  // before the defaults answer for it. Getting that order wrong makes a single
+  // filer's absent flag read as the default's true instead of the migration's
+  // false — a different projection from the same file.
+  let saved = raw.personalInfo || {};
+  if (version < 6) {
+    // Mirrors the app loader's v5→v6 migration exactly, including the part that
+    // is easy to get wrong: a MARRIED plan is forced on even if it explicitly
+    // saved false, because before v6 that flag was not a considered choice. A
+    // single filer keeps whatever it saved (the flag is inert there anyway).
+    const married = saved.filingStatus === 'married_joint';
+    saved = { ...saved, survivorModelEnabled: married ? true : (saved.survivorModelEnabled ?? false) };
+  }
+  const pi = { ...DEFAULT_PLAN_INFO, ...saved };
+  return {
+    pi,
+    accts,
+    streams: Array.isArray(raw.incomeStreams) ? raw.incomeStreams : [],
+    assets: Array.isArray(raw.assets) ? raw.assets : [],
+    events: Array.isArray(raw.oneTimeEvents) ? raw.oneTimeEvents : [],
+    recurring: Array.isArray(raw.recurringExpenses) ? raw.recurringExpenses : [],
+    schemaVersion: version,
+  };
+};
 // ── ONE SCENARIO FROM A PANEL OF CONTROLS ────────────────────────────────────
 // The Sandbox hands a reader several levers at once and has to answer with ONE
 // plan, which means the order the levers are applied in is part of the answer
@@ -11682,6 +11838,7 @@ const describePlanPatch = (state, patch) => {
     detailedCurrentYearDecision, sameCurrentYearBasis, taxFieldsFromReturn, earnedIncomeByOwner,
     retirementMonthOf, retirementAgeForOwner, workedFractionOfYear, retiredFractionOfYear,
     planAtRetirementAge, streamsAtClaimAges, sandboxScenario,
+    DEFAULT_PLAN_INFO, PLAN_SCHEMA_VERSION, normalizeSavedPlan,
     streamPartialYear,
     irmaaTierCeiling, irmaaTierOptions, IRMAA_FILL_SAFETY_MARGIN,
     SS_PROVISIONAL_THRESHOLDS, NIIT_THRESHOLDS, taxBreakpoints,

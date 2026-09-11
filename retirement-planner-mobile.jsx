@@ -1,7 +1,7 @@
 // ── shared calc engine (loaded via <script src="engine.js"> in mobile.html) ──
 const PlannerEngine = (typeof window !== 'undefined' && window.PlannerEngine) || {};
 const {
-  MAX_AGE, BROKERAGE_COST_BASIS_ESTIMATE, MAX_ITERATIONS_FOR_TAX_CALC, MONTE_CARLO_TAX_ESTIMATE, SAVE_DEBOUNCE_MS, PRE_TAX_TYPES, ROTH_TYPES, BROKERAGE_TYPES, HSA_TYPES, isPreTaxAccount, isRothAccount, isBrokerageAccount, isHSAAccount, FEDERAL_TAX_BRACKETS_2026, STANDARD_DEDUCTION_2026, STATE_TAX_RATES, STATES_EXEMPT_RETIREMENT_INCOME, STATES_EXEMPT_ALL_RETIREMENT_DISTRIBUTIONS, STATES_THAT_TAX_SS, ALABAMA_TAX_BRACKETS, ALABAMA_PERSONAL_EXEMPTION, ALABAMA_OVER_65_RETIREMENT_EXCLUSION, getAlabamaStandardDeduction, calculateAlabamaTax, FICA_SS_RATE, FICA_SS_WAGE_BASE_2025, FICA_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_THRESHOLD, calculateFICA, RMD_FACTORS, IRMAA_THRESHOLDS_2025, SS_FULL_RETIREMENT_AGE, ACA_FPL_2025, QCD_ANNUAL_LIMIT, QCD_START_AGE, SS_EARNINGS_TEST_LIMIT_2025, SS_EARNINGS_TEST_FRA_LIMIT_2025, MEDICARE_PART_B_STANDARD_2025, calculateIRMAA, calculateIRMAASurcharge, calculateSSEarningsTestReduction, calculateSSBenefit, getRmdStartAge, getDefaultRothConversionWindow, calculateACASubsidy, calculateHealthcareExpenses, calculateRecurringExpenses, MEDICARE_PART_B_PREMIUM_2025, MEDICARE_PART_D_PREMIUM_2025, MEDICARE_SUPPLEMENT_PREMIUM_2025, MEDICARE_OOP_ANNUAL_2025, PRE_65_HEALTHCARE_ANNUAL_2025, MEDICAL_INFLATION_RATE, LTC_MONTHLY_ASSISTED_LIVING_2025, LTC_DEFAULT_DURATION_MONTHS, calculateFederalTax, calculateStateTax, calculateRMD, calculateSocialSecurityTaxableAmount, CAPITAL_GAINS_THRESHOLDS_2025, calculateCapitalGainsTax, calculateNIIT, computeProjections,
+  MAX_AGE, BROKERAGE_COST_BASIS_ESTIMATE, MAX_ITERATIONS_FOR_TAX_CALC, MONTE_CARLO_TAX_ESTIMATE, SAVE_DEBOUNCE_MS, PRE_TAX_TYPES, ROTH_TYPES, BROKERAGE_TYPES, HSA_TYPES, isPreTaxAccount, isRothAccount, isBrokerageAccount, isHSAAccount, FEDERAL_TAX_BRACKETS_2026, STANDARD_DEDUCTION_2026, STATE_TAX_RATES, STATES_EXEMPT_RETIREMENT_INCOME, STATES_EXEMPT_ALL_RETIREMENT_DISTRIBUTIONS, STATES_THAT_TAX_SS, ALABAMA_TAX_BRACKETS, ALABAMA_PERSONAL_EXEMPTION, ALABAMA_OVER_65_RETIREMENT_EXCLUSION, getAlabamaStandardDeduction, calculateAlabamaTax, FICA_SS_RATE, FICA_SS_WAGE_BASE_2025, FICA_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_RATE, FICA_ADDITIONAL_MEDICARE_THRESHOLD, calculateFICA, RMD_FACTORS, IRMAA_THRESHOLDS_2025, SS_FULL_RETIREMENT_AGE, ACA_FPL_2025, QCD_ANNUAL_LIMIT, QCD_START_AGE, SS_EARNINGS_TEST_LIMIT_2025, SS_EARNINGS_TEST_FRA_LIMIT_2025, MEDICARE_PART_B_STANDARD_2025, calculateIRMAA, calculateIRMAASurcharge, calculateSSEarningsTestReduction, calculateSSBenefit, getRmdStartAge, getDefaultRothConversionWindow, calculateACASubsidy, calculateHealthcareExpenses, calculateRecurringExpenses, MEDICARE_PART_B_PREMIUM_2025, MEDICARE_PART_D_PREMIUM_2025, MEDICARE_SUPPLEMENT_PREMIUM_2025, MEDICARE_OOP_ANNUAL_2025, PRE_65_HEALTHCARE_ANNUAL_2025, MEDICAL_INFLATION_RATE, LTC_MONTHLY_ASSISTED_LIVING_2025, LTC_DEFAULT_DURATION_MONTHS, calculateFederalTax, calculateStateTax, calculateRMD, calculateSocialSecurityTaxableAmount, CAPITAL_GAINS_THRESHOLDS_2025, calculateCapitalGainsTax, calculateNIIT, computeProjections, normalizeSavedPlan, sandboxScenario, afterTaxLegacyValue,
   planShortfall, breakingPoint, STRESS_DIMENSIONS
 } = PlannerEngine;
 
@@ -45,18 +45,18 @@ const MOBILE_STORAGE_KEY = 'retirementWhatIf_mobile_v1';
 // laptop arrived to a generic scenario with nothing saying it was not theirs.
 // Detected, and said out loud.
 const DESKTOP_STORAGE_KEY = 'retirement_planner_data';
-const desktopPlanSummary = () => {
+// Read through the engine's own normaliser, which is what everything that
+// changes a NUMBER goes through: the schema guard, the migrations that split
+// legacy contributor rows and switch survivor modelling on for married plans,
+// and the merge over the plan defaults. Normalising a saved file twice, in two
+// places, is how two surfaces start disagreeing about the same plan.
+const loadDesktopPlan = () => {
   try {
     const raw = localStorage.getItem(DESKTOP_STORAGE_KEY);
     if (!raw) return null;
-    const d = JSON.parse(raw);
-    const pi = d && d.personalInfo;
-    if (!pi) return null;
-    return {
-      retirementAge: pi.myRetirementAge,
-      accounts: Array.isArray(d.accounts) ? d.accounts.length : 0,
-      married: pi.filingStatus === 'married_joint',
-    };
+    const plan = normalizeSavedPlan(JSON.parse(raw));
+    if (!plan || !plan.accts.length) return null;   // nothing to project
+    return plan;
   } catch (e) { return null; }
 };
 
@@ -429,10 +429,171 @@ function ToggleRow({ label, value, onChange, hint }) {
   );
 }
 
+
+// ── YOUR REAL PLAN, ON A PHONE ──────────────────────────────────────────────
+// The what-if below models one person with one portfolio. That is the right
+// shape for a gut-check and the wrong shape for the plan someone actually built
+// on a laptop, so this does not try to squeeze one into the other: it loads the
+// saved plan and runs the SAME engine call the desktop runs, with the same
+// normalisation, so every figure here is the figure there.
+//
+// The levers go through sandboxScenario — the identical function the desktop
+// Sandbox uses — for the same reason. A second implementation of "retire two
+// years later" is how two screens start disagreeing.
+function MyPlanView({ plan, onSwitch }) {
+  const planRetAge = plan.pi.myRetirementAge;
+  const planSpend = plan.pi.desiredRetirementIncome || 0;
+  const ssStream = (plan.streams || []).find(s => s.type === 'social_security' && s.owner !== 'spouse');
+  const planClaim = (ssStream || {}).startAge || 67;
+
+  const [retAge, setRetAge] = useState(planRetAge);
+  const [spend, setSpend] = useState(planSpend);
+  const [claim, setClaim] = useState(planClaim);
+  const [showYears, setShowYears] = useState(false);
+
+  const touched = retAge !== planRetAge || spend !== planSpend || claim !== planClaim;
+
+  // One slider, two people. The desktop Sandbox has a slider each; a phone does
+  // not have room, and forcing both to the SAME age would quietly delete a gap
+  // the plan was built around. So the spouse moves by the same number of years,
+  // which preserves the shape of the plan and is what "retire two years later"
+  // means to a couple. Never earlier than next year for them.
+  const married = plan.pi.filingStatus === 'married_joint';
+  const planSpRet = plan.pi.spouseRetirementAge;
+  const spRet = (married && Number.isFinite(planSpRet))
+    ? Math.max((plan.pi.spouseAge || 0) + 1, planSpRet + (retAge - planRetAge))
+    : undefined;
+
+  const { proj, error } = useMemo(() => {
+    try {
+      const sc = sandboxScenario({ pi: plan.pi, accts: plan.accts, streams: plan.streams }, {
+        myRetirementAge: retAge !== planRetAge ? retAge : undefined,
+        spouseRetirementAge: (retAge !== planRetAge && spRet !== undefined) ? spRet : undefined,
+        desiredRetirementIncome: spend !== planSpend ? spend : undefined,
+        claimAges: { me: claim !== planClaim ? claim : undefined },
+      });
+      return { proj: computeProjections(sc.pi, sc.accts, sc.streams, plan.assets,
+        plan.events, plan.recurring, undefined, sc.opts), error: null };
+    } catch (e) { return { proj: null, error: e.message }; }
+  }, [plan, retAge, spRet, spend, claim, planRetAge, planSpend, planClaim]);
+
+  if (error) {
+    return (
+      <div className="px-4 py-6">
+        <p className="text-sm text-red-400">Could not project your plan: {error}</p>
+        <button onClick={onSwitch} className="mt-3 text-sm text-emerald-400 underline">Use the quick what-if instead</button>
+      </div>
+    );
+  }
+
+  const atRet = proj.find(r => r.myAge === retAge) || proj[0];
+  const last = proj[proj.length - 1];
+  const short = planShortfall(proj, { retirementAge: retAge });
+  const lifetimeTax = proj.reduce((t, r) => t + (r.totalTax || 0), 0);
+  const converted = proj.reduce((t, r) => t + (r.rothConversion || 0), 0);
+  const legacy = afterTaxLegacyValue(proj, {
+    legacyAge: plan.pi.legacyAge || 95, heirTaxRate: plan.pi.heirTaxRate ?? 0.25 });
+
+  return (
+    <div className="px-4 py-4 space-y-4">
+      <div className="grid grid-cols-2 gap-2">
+        <ResultCard label={`At ${retAge}`} value={fmt(atRet.totalPortfolio)} sublabel="portfolio at retirement" />
+        {/* Same shape either way — an age and what happens there. 'Through the
+            plan' wrapped onto two lines on a narrow phone and made the good
+            answer look like the alarming one. */}
+        <ResultCard
+          label="Money lasts"
+          value={`To ${short.fails ? (short.depletedYear ? short.depletedYear.myAge : '—') : last.myAge}`}
+          sublabel={short.fails ? 'then it runs dry' : 'the end of the plan'}
+          color={short.fails ? 'red' : 'emerald'} />
+        <ResultCard label={`Legacy at ${legacy ? legacy.age : plan.pi.legacyAge}`}
+          value={fmt(legacy ? legacy.afterTax : 0)} sublabel="estate after heirs' tax" color="purple" />
+        <ResultCard label="Lifetime tax" value={fmt(lifetimeTax)}
+          sublabel={converted > 0 ? `${fmt(converted)} converted` : 'no conversions'} color="amber" />
+      </div>
+
+      <div>
+        <Sparkline data={proj} retirementAge={retAge} />
+        <div className="flex justify-between text-[10px] text-slate-500 mt-0.5">
+          <span>Age {proj[0].myAge}</span>
+          <span className="text-amber-500">↑ Retire {retAge}</span>
+          <span>Age {last.myAge}</span>
+        </div>
+      </div>
+
+      {/* The three levers worth having on a phone. Same engine call as the
+          desktop Sandbox, so the answers match rather than merely resemble. */}
+      <div className="bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-2">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-xs uppercase tracking-wide text-slate-500">Try a change</span>
+          {touched && (
+            <button onClick={() => { setRetAge(planRetAge); setSpend(planSpend); setClaim(planClaim); }}
+                    className="text-xs text-amber-400">Reset</button>
+          )}
+        </div>
+        <SliderRow label={married ? 'Retirement age (both move together)' : 'Retirement age'}
+                   value={retAge} onChange={setRetAge}
+                   min={Math.max(45, (plan.pi.myAge || 0) + 1)} max={80} />
+        <SliderRow label="Spending in retirement" value={spend} onChange={setSpend}
+                   min={0} max={Math.max(300000, Math.round((planSpend || 100000) * 2))} step={2500} format={fmt} />
+        <SliderRow label="Social Security at" value={claim} onChange={setClaim} min={62} max={70} />
+        {touched && (
+          <p className="text-[11px] text-amber-300/80 mt-1">
+            Showing a what-if. Your saved plan is unchanged — this page never writes to it.
+          </p>
+        )}
+      </div>
+
+      <button onClick={() => setShowYears(v => !v)}
+              className="w-full text-sm text-slate-300 bg-slate-800/60 border border-slate-700 rounded-lg py-2">
+        {showYears ? '▲ Hide the year-by-year' : '▼ Show the year-by-year'}
+      </button>
+      {showYears && (
+        <div className="overflow-x-auto -mx-1">
+          <table className="w-full text-[11px] tabular-nums">
+            <thead>
+              <tr className="text-slate-500 text-left">
+                <th className="py-1 pr-2">Age</th><th className="py-1 pr-2 text-right">Spending</th>
+                <th className="py-1 pr-2 text-right">Draw</th><th className="py-1 pr-2 text-right">RMD</th>
+                <th className="py-1 text-right">Portfolio</th>
+              </tr>
+            </thead>
+            <tbody>
+              {proj.filter(r => r.myAge >= retAge).map(r => (
+                <tr key={r.year} className="border-t border-slate-800">
+                  <td className="py-1 pr-2 text-slate-300">{r.myAge}{r.survivorEvent ? ' 🕊️' : ''}</td>
+                  <td className="py-1 pr-2 text-right text-slate-400">{fmt(r.desiredIncome)}</td>
+                  <td className="py-1 pr-2 text-right text-slate-400">{fmt(r.portfolioWithdrawal)}</td>
+                  <td className="py-1 pr-2 text-right text-slate-500">{r.rmd > 0 ? fmt(r.rmd) : '—'}</td>
+                  <td className="py-1 text-right text-slate-300">{fmt(r.totalPortfolio)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <p className="text-[11px] text-slate-500 leading-snug">
+        Every figure here comes from your saved plan through the same engine the desktop uses, so it
+        matches what you see there. Editing the plan itself, and the twenty-odd analyses that do not
+        fit on a phone, are on the{' '}
+        <a href="index.html?desktop=1" className="text-emerald-400 underline">full version</a>.
+      </p>
+      <button onClick={onSwitch} className="w-full text-sm text-slate-400 py-2">
+        Quick what-if instead →
+      </button>
+    </div>
+  );
+}
+
 function MobilePlanner() {
   // Read once: a plan either exists on this device or it does not, and this
   // page never writes to that key.
-  const savedDesktopPlan = useMemo(() => desktopPlanSummary(), []);
+  const savedDesktopPlan = useMemo(() => loadDesktopPlan(), []);
+  // Default to the real plan when there is one. Someone who built a plan did not
+  // come here to read a stranger's numbers, and the quick what-if is one tap away.
+  const [mobileMode, setMobileMode] = useState(
+    () => (savedDesktopPlan ? (loadMobileState().mode || 'plan') : 'whatif'));
   // === Inputs (state) ===
   // Restore saved inputs once (synchronous localStorage read) and use each as the initial
   // value, falling back to the default when a field isn't present in saved data.
@@ -489,13 +650,23 @@ function MobilePlanner() {
       cagr, inflationRate, ssEnabled, ssMonthly, ssClaimAge, ssCola,
       pensionEnabled, pensionAnnual, pensionStartAge, pensionCola,
       otherEnabled, otherAnnual, otherStartAge, otherEndAge, otherCola,
+      // Which of the two views the reader last chose. Stored with the what-if
+      // inputs rather than beside the plan, because it is a preference about
+      // this page and the plan key stays read-only.
+      //
+      // Only recorded while there IS a plan to choose between. Without this a
+      // visit made before the plan existed saves 'whatif' — the only mode
+      // available then — and that stale preference then wins forever, so the
+      // reader imports a plan on their laptop and the phone still opens on a
+      // stranger's numbers.
+      ...(savedDesktopPlan ? { mode: mobileMode } : {}),
     }), SAVE_DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [currentAge, retirementAge, legacyAge, portfolio, annualContribution, desiredSpending,
       contributionMode, currentSalary, contributionPercent,
       cagr, inflationRate, ssEnabled, ssMonthly, ssClaimAge, ssCola,
       pensionEnabled, pensionAnnual, pensionStartAge, pensionCola,
-      otherEnabled, otherAnnual, otherStartAge, otherEndAge, otherCola]);
+      otherEnabled, otherAnnual, otherStartAge, otherEndAge, otherCola, mobileMode]);
   
   const birthYear = new Date().getFullYear() - currentAge;
   
@@ -699,7 +870,7 @@ function MobilePlanner() {
       {/* Header */}
       <header className="bg-slate-900 border-b border-slate-800 px-4 py-3 sticky top-0 z-10" style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))' }}>
         <div className="flex items-baseline justify-between gap-2">
-          <h1 className="text-lg font-bold text-slate-100">Retirement What-If</h1>
+          <h1 className="text-lg font-bold text-slate-100">{mobileMode === 'plan' ? 'My Plan' : 'Retirement What-If'}</h1>
           <div className="flex items-center gap-2">
             {/* Mobile draws no charts, so the whole theme switch is the CSS
                 variable flip — no JS palette to keep in step. The preference is
@@ -723,22 +894,35 @@ function MobilePlanner() {
             <span className="text-[10px] text-slate-600 tabular-nums">v{typeof window !== 'undefined' && window.APP_VERSION ? window.APP_VERSION : 'dev'}</span>
           </div>
         </div>
-        <p className="text-xs text-slate-500">Quick gut-check using the full engine</p>
+        <p className="text-xs text-slate-500">{mobileMode === 'plan'
+          ? 'Your saved plan, through the same engine the desktop uses'
+          : 'Quick gut-check using the full engine'}</p>
+        {/* Both modes exist for a reason, so the switch is always visible when
+            there is a plan to switch to: the real plan answers "where do I
+            stand", the what-if answers "what if I were someone else". */}
         {savedDesktopPlan && (
-          <div className="mt-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/35">
-            <p className="text-[11px] text-amber-200 leading-snug">
-              <strong>You have a full plan saved on this device.</strong> This page is not using it.
-              {" "}It is a separate what-if with one portfolio and one person, so the numbers below are
-              {" "}not your plan's{savedDesktopPlan.married ? " — which is a couple" : ""}
-              {savedDesktopPlan.accounts ? ` and has ${savedDesktopPlan.accounts} accounts` : ""}.
-            </p>
-            <a href="index.html?desktop=1"
-               className="inline-block mt-1.5 text-[11px] font-medium text-amber-300 underline">
-              Open my real plan
-            </a>
+          <div className="mt-2 flex gap-1">
+            {[['plan', 'My plan'], ['whatif', 'Quick what-if']].map(([m, label]) => (
+              <button
+                key={m}
+                onClick={() => setMobileMode(m)}
+                className={`flex-1 text-xs py-1.5 rounded-lg border transition-colors ${
+                  mobileMode === m
+                    ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
+                    : 'bg-slate-800/60 border-slate-700 text-slate-400'}`}
+              >{label}</button>
+            ))}
           </div>
         )}
       </header>
+
+      {/* The real plan, or the toy. Never both, and never the toy dressed as
+          the real one. */}
+      {mobileMode === 'plan' && savedDesktopPlan && (
+        <MyPlanView plan={savedDesktopPlan} onSwitch={() => setMobileMode('whatif')} />
+      )}
+
+      {(mobileMode !== 'plan' || !savedDesktopPlan) && (<>
       
       {/* Results panel — sticky-ish, lives at top of scrolling area */}
       <section className="px-4 py-3 bg-slate-900/50 border-b border-slate-800">
@@ -997,6 +1181,7 @@ function MobilePlanner() {
           </a>
         </p>
       </section>
+      </>)}
     </div>
   );
 }
