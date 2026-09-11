@@ -11400,6 +11400,41 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
       }
     }
 
+    // ── Healthcare handled yourself, but long-term care still billed ─────
+    // These are two independent controls, and deliberately so: long-term care
+    // is not the kind of cost anyone budgets inside an ordinary spending target.
+    // But a reader who set healthcare to 'none' or 'already in my spending'
+    // reasonably reads that as "I handle my own medical costs", and will not
+    // expect a separate six-figure care bill in the final years on top of the
+    // target. Until v2.23.0 the engine silently ignored the care setting for
+    // exactly these healthcare models, so a plan saved before then had it on in
+    // the control and off in the arithmetic; the fix made the control true and
+    // changed those plans' numbers without anyone touching them. Said out loud
+    // here, with the figure, so the interaction is a choice rather than a
+    // surprise.
+    {
+      const ltc = info.ltcModel || 'none';
+      if (ltc !== 'none' && !healthcareCostsModeled(info)) {
+        const months = ltc === 'custom' ? (info.ltcDurationMonths || LTC_DEFAULT_DURATION_MONTHS)
+          : ltc === 'stress' ? LTC_STRESS_MONTHS : LTC_DEFAULT_DURATION_MONTHS;
+        const monthly = ltc === 'custom' ? (info.ltcMonthlyAmount || LTC_MONTHLY_ASSISTED_LIVING_2025)
+          : ltc === 'stress' ? LTC_MONTHLY_NURSING_HOME_2025 : LTC_MONTHLY_ASSISTED_LIVING_2025;
+        const people = info.filingStatus === 'married_joint' && ltc !== 'stress' ? 2 : 1;
+        warnings.push({
+          type: 'ltc_on_with_unpriced_healthcare',
+          severity: 'info',
+          message: `Healthcare is set to "${info.healthcareModel === 'in_spending' ? 'already in my spending' : 'none'}", but long-term care is still billed separately.`,
+          details: [
+            `${months} months of care at ${formatCurrency(monthly)}/month in today's dollars`
+              + `${people > 1 ? ', for each of you' : ''} — about ${formatCurrency(months * monthly * people)} in today's dollars, `
+              + `charged on top of your spending target in the final years before each life expectancy.`,
+            `It compounds at the medical inflation rate (${Math.round((info.medicalInflation || 0.05) * 100)}%/yr), so the figure shown in the projection table is much larger in future dollars.`,
+          ],
+          action: 'If your spending target already covers care, set Long-Term Care to None on this tab. If it does not, this is the cost to plan for.',
+        });
+      }
+    }
+
     // ── A pre-tax floor that spending will fight ──────────────────────────────
     // The floor now holds spending back, but if pre-tax is FIRST in the priority
     // order the two settings are working against each other every single year.
@@ -11451,6 +11486,7 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
     personalInfo.spouseRetirementAge, personalInfo.filingStatus, personalInfo.legacyAge,
     personalInfo.myLifeExpectancy, personalInfo.spouseLifeExpectancy,
     personalInfo.healthcareModel, personalInfo.pre65HealthcareAnnual,
+    personalInfo.ltcModel, personalInfo.ltcMonthlyAmount, personalInfo.ltcDurationMonths,
     personalInfo.rothConversionPreTaxFloor, personalInfo.withdrawalPriority, personalInfo.withdrawalBracketFill,
     accounts.map(a => [a.id, a.type, a.owner, a.stopAge, a.contribution]),
     incomeStreams.map(s => [s.id, s.type, s.owner, s.endAge, s.amount]),

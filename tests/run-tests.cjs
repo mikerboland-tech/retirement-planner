@@ -14229,6 +14229,118 @@ section('P121 — the user sweep: six things that were wrong, incomplete or miss
   }
 }
 
+section('P122 — an inherited account keeps its required distributions');
+
+{
+  // An account does not stop existing when its owner does. The RMD block used
+  // to skip any account whose owner had died, on the same convention the salary
+  // and Social Security blocks use. That is right for INCOME and wrong for an
+  // ACCOUNT: the balance stayed in the projection and passed to the heirs, but
+  // the obligation to distribute vanished, so a plan whose last pre-tax dollars
+  // sat in the first-to-die's account compounded them untouched and untaxed for
+  // the rest of the survivor's life.
+  const sc = baseScenario({ myAge: 74, spouseAge: 72, myRetirementAge: 74, spouseRetirementAge: 74,
+    legacyAge: 92, state: 'Florida', desiredRetirementIncome: 90000,
+    healthcareModel: 'none', ltcModel: 'none' });
+  sc.pi = { ...sc.pi, survivorModelEnabled: true, myBirthYear: TODAY_YEAR - 74, spouseBirthYear: TODAY_YEAR - 72,
+    myLifeExpectancy: 80, spouseLifeExpectancy: 92, withdrawalPriority: ['brokerage', 'roth', 'pretax'] };
+  // Every pre-tax dollar is owned by the FIRST to die. That is the shape that
+  // made the requirement disappear completely.
+  sc.accts = [
+    { id: 1, name: 'His IRA', type: 'traditional_ira', balance: 2000000, contribution: 0, contributionGrowth: 0,
+      cagr: 0.05, startAge: 74, stopAge: 74, owner: 'me', contributor: 'me' },
+    { id: 2, name: 'Brok', type: 'brokerage', balance: 300000, contribution: 0, contributionGrowth: 0,
+      cagr: 0.05, costBasisPercent: 0.6, startAge: 74, stopAge: 74, owner: 'me', contributor: 'me' },
+  ];
+  sc.streams = [{ id: 1, name: 'SS', type: 'social_security', owner: 'me', amount: 40000, startAge: 74, endAge: 95, cola: 0.025, pia: 2800 }];
+  const p = computeProjections(sc.pi, sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+  const at = (a) => p.find(r => r.myAge === a);
+
+  // ── while the owner lives ────────────────────────────────────────────────
+  gt(at(79).rmd, 0, 'the owner takes distributions while living');
+  eq(at(79).primaryAlive, true, 'and is alive at 79');
+
+  // ── after the owner dies, the survivor inherits ──────────────────────────
+  const after = p.filter(r => r.primaryAlive === false && r.spouseAlive === true);
+  gt(after.length, 3, 'the survivor outlives the owner by several years');
+  ok(after.every(r => r.rmd > 0),
+    'every one of those years still takes a distribution — the account passed to the survivor, not out of existence');
+  ok(after.every(r => r.preTaxBalance > 0), 'and the balance is still there to distribute from');
+  // Priced on the SURVIVOR's age, not the deceased's. The survivor is two years
+  // younger, so their divisor is larger and the distribution smaller than the
+  // owner's would have been on the same balance.
+  {
+    const firstAfter = after[0];
+    const onSurvivor = engine.calculateRMD(at(firstAfter.myAge - 1).preTaxBalance, firstAfter.spouseAge, sc.pi.spouseBirthYear, undefined);
+    const onDeceased = engine.calculateRMD(at(firstAfter.myAge - 1).preTaxBalance, firstAfter.myAge, sc.pi.myBirthYear, undefined);
+    approx(firstAfter.rmd, onSurvivor, 'the distribution is measured on the survivor’s own age', 0.02);
+    lt(onSurvivor, onDeceased, 'which is a smaller figure than the deceased’s age would have given');
+  }
+
+  // ── and stops when there is nobody left ──────────────────────────────────
+  const nobody = p.filter(r => r.primaryAlive === false && r.spouseAlive === false);
+  ok(nobody.every(r => (r.rmd || 0) === 0), 'once nobody is alive there is no distribution to take');
+
+  // ── it costs what it should ──────────────────────────────────────────────
+  {
+    // Against the old behaviour, forced income raises lifetime tax and shrinks
+    // the pre-tax balance the heirs inherit. Measured by comparison with a plan
+    // where the survivor is the OWNER of the account, which is the case the old
+    // code handled correctly — the two should now agree in shape.
+    const spouseOwned = computeProjections(sc.pi,
+      sc.accts.map(a => (a.id === 1 ? { ...a, owner: 'spouse' } : a)), sc.streams, [], [], [], TODAY_YEAR);
+    const sAfter = spouseOwned.filter(r => r.primaryAlive === false && r.spouseAlive === true);
+    ok(sAfter.every(r => r.rmd > 0), 'a spouse-owned account always kept distributing after the other died');
+    // Not the same DOLLARS: a spouse-owned account starts distributing on the
+    // spouse's own clock years earlier, so the two plans arrive at the death
+    // with different balances. What must match is the DIVISOR — same person,
+    // same age, same table — which is what says the inherited account is being
+    // priced as the survivor's own rather than left on the deceased's clock.
+    const divisor = (row, prior) => prior / row.rmd;
+    const mine = divisor(after[0], at(after[0].myAge - 1).preTaxBalance);
+    const theirs = divisor(sAfter[0], spouseOwned.find(r => r.myAge === sAfter[0].myAge - 1).preTaxBalance);
+    approx(mine, theirs,
+      'and an inherited account uses the same divisor as one the survivor owned all along', 0.01);
+  }
+
+  // ── a plan that models no deaths is untouched ────────────────────────────
+  {
+    const off = computeProjections({ ...sc.pi, survivorModelEnabled: false }, sc.accts, sc.streams, [], [], [], TODAY_YEAR);
+    const both = off.filter(r => r.myAge >= 79 && r.myAge <= 85);
+    ok(both.every(r => r.rmd > 0), 'nobody dies, so distributions simply continue');
+  }
+}
+
+section('P123 — long-term care is billed whatever the healthcare model says, and says so');
+
+{
+  // The two controls are independent by design: care is not a cost anyone
+  // budgets inside an ordinary spending target. But a reader who set healthcare
+  // to 'none' or 'already in my spending' will not expect a separate six-figure
+  // bill on top, and before v2.23.0 the engine silently agreed with them — the
+  // care setting was ignored for exactly those healthcare models. Making the
+  // control true changed those plans' numbers without anyone touching them, so
+  // the interaction is now stated.
+  const base = { filingStatus: 'married_joint', myLifeExpectancy: 85, spouseLifeExpectancy: 88,
+    myRetirementAge: 65, spouseRetirementAge: 65, medicalInflation: 0, ltcModel: 'default' };
+  ['none', 'in_spending', 'moderate', 'comprehensive'].forEach(hm => {
+    const r = engine.calculateHealthcareExpenses({ ...base, healthcareModel: hm }, 84, 84, 0, true, true);
+    gt(r.ltc, 0, `care is billed under healthcare model '${hm}'`);
+  });
+  eq(engine.calculateHealthcareExpenses({ ...base, healthcareModel: 'in_spending', ltcModel: 'none' }, 84, 84, 0, true, true).ltc, 0,
+    "and only 'none' switches it off");
+  // The warning that makes it visible.
+  {
+    const fsMod = require('fs'), pathMod = require('path');
+    const jsx = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+    ok(/ltc_on_with_unpriced_healthcare/.test(jsx), 'a warning exists for care billed beside self-handled healthcare');
+    ok(/!healthcareCostsModeled\(info\)/.test(jsx), 'and fires only for the healthcare models that price nothing');
+    ok(/set Long-Term Care to None on this tab/.test(jsx), 'telling the reader how to switch it off');
+    ok(/personalInfo\.ltcModel, personalInfo\.ltcMonthlyAmount/.test(jsx),
+      'and the care fields are in the signature, so changing them re-runs the checks');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

@@ -9331,25 +9331,45 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         }
       }
       
-      // Calculate RMD for pre-tax accts using constant
-      // Skip if the account's owner is deceased — consistent with the engine's "not alive for
-      // income/RMDs/SS in the death year" convention (see survivor-event block above). A
-      // surviving spouse on a joint account still triggers RMDs (ownerAlive uses OR for joint).
-      if (isPreTaxAccount(account.type) && ownerAlive) {
-        // Get birth year based on account owner
-        const ownerBirthYear = account.owner === 'me'
-          ? pi.myBirthYear
-          : account.owner === 'spouse'
-          ? pi.spouseBirthYear
-          : pi.myBirthYear; // Default to primary owner for joint accts
+      // ── REQUIRED DISTRIBUTIONS ────────────────────────────────────────────
+      // An account does not stop existing when its owner does. This used to skip
+      // the RMD whenever the owner was dead, on the same "not alive for income"
+      // convention the salary and Social Security blocks use. That convention is
+      // right for INCOME, which a dead person stops earning, and wrong for an
+      // ACCOUNT, which passes to the beneficiary and keeps its obligations. The
+      // balance stayed in the projection and was handed to the heirs; only the
+      // requirement to distribute disappeared, so a plan whose last pre-tax
+      // dollars sat in the first-to-die's account compounded them untouched and
+      // untaxed for the rest of the survivor's life.
+      //
+      // A surviving spouse who is the beneficiary may treat the account as their
+      // own, which is the usual choice and the one modelled here: the survivor
+      // becomes the owner and distributions run on THEIR age and birth year,
+      // starting when they reach their own required beginning age. Once nobody
+      // is alive there is no distribution to take, and the estate passes with
+      // the heir tax the legacy figures already apply.
+      // (Not modelled: a non-spouse beneficiary's 10-year drain, which the app
+      // prices as a rate on the inherited balance rather than as a schedule.)
+      const householdSurvives = primaryAlive || spouseAlive;
+      if (isPreTaxAccount(account.type) && householdSurvives) {
+        // Whose age governs this year: the owner while living, otherwise the
+        // surviving spouse who inherited it.
+        const rmdOwner = ownerAlive ? account.owner
+          : (primaryAlive ? 'me' : 'spouse');
+        const rmdAge = rmdOwner === 'spouse' ? spouseAge
+          : rmdOwner === 'me' ? myAge : Math.max(myAge, spouseAge);
+        const rmdBirthYear = rmdOwner === 'spouse' ? pi.spouseBirthYear : pi.myBirthYear;
 
         // Table II needs the OTHER spouse's age, and only applies while they are
         // alive to be the beneficiary. Once they have died the account owner is
-        // back on Uniform Lifetime.
+        // back on Uniform Lifetime — which is always the case for an inherited
+        // account, since the spouse who would have been the beneficiary is the
+        // one who died.
         const beneficiaryAge = pi.filingStatus !== 'married_joint' ? undefined
+          : !ownerAlive ? undefined
           : account.owner === 'spouse' ? (primaryAlive ? myAge : undefined)
           : (spouseAlive ? spouseAge : undefined);
-        const rmd = calculateRMD(priorYearEndBalances[account.id] || 0, ownerAge, ownerBirthYear, beneficiaryAge);
+        const rmd = calculateRMD(priorYearEndBalances[account.id] || 0, rmdAge, rmdBirthYear, beneficiaryAge);
         accountRMDs[account.id] = rmd;
         totalRMD += rmd;
       }
