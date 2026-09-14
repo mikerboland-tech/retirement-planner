@@ -7805,6 +7805,73 @@ function MonteCarloTab({ accounts, assets, currentYearReturn, detailLevel, incom
 // Only the tab chrome and the "save the current plan" card were dropped: saving
 // now happens in the Sandbox, from the plan its controls compose, which is the
 // whole reason the two merged. The comparison itself is unchanged.
+// Tooltip for the scenario comparison chart.
+//
+// The stock Recharts tooltip lists series in render order with a dollar figure
+// each, which is the least useful arrangement: the reader is trying to answer
+// "which is ahead, and by how much", and render order answers neither. So the
+// rows are sorted by value at the hovered age, and each carries its gap to the
+// current plan — the comparison the reader is actually making, done for them
+// rather than in their head.
+//
+// The swatch carries identity, including the stroke pattern for scenarios past
+// the eighth; the text stays in ink tokens. A series colour used as text colour
+// is a contrast problem on a raised surface and drops the one WARN the palette
+// carries (slot 6 sits at 2.96:1, fine for a 2px line, not for 12px type).
+function ScenarioComparisonTooltip({ active, payload, label, styleFor }) {
+  if (!active || !payload || !payload.length) return null;
+  const base = payload.find(e => e.dataKey === 'Current Plan');
+  const baseValue = base ? base.value : null;
+  const year = payload[0] && payload[0].payload ? payload[0].payload.year : null;
+  const rows = payload.slice().sort((a, b) => (b.value || 0) - (a.value || 0));
+
+  return (
+    <div style={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}`,
+                  borderRadius: 8, padding: '10px 12px', fontSize: 12,
+                  color: THEME.inkPrimary, minWidth: 250 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>
+        Age {label}{year ? <span style={{ color: THEME.inkMuted, fontWeight: 400 }}> · {year}</span> : null}
+      </div>
+      {rows.map(entry => {
+        const isBase = entry.dataKey === 'Current Plan';
+        const st = isBase ? null : styleFor(entry.dataKey);
+        const delta = (!isBase && baseValue !== null) ? (entry.value || 0) - baseValue : null;
+        return (
+          <div key={entry.dataKey}
+               style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 0' }}>
+            {/* The swatch repeats the line's own pattern, so a dashed series in
+                the chart is a dashed swatch here rather than a solid block that
+                matches three other rows. */}
+            <svg width="18" height="8" style={{ flex: '0 0 auto' }} aria-hidden="true">
+              <line x1="0" y1="4" x2="18" y2="4"
+                    stroke={isBase ? THEME.lines.target : st.stroke}
+                    strokeWidth={isBase ? 3 : 2}
+                    strokeDasharray={isBase ? undefined : st.strokeDasharray} />
+            </svg>
+            <span style={{ flex: 1, color: isBase ? THEME.inkPrimary : THEME.inkSecondary,
+                           fontWeight: isBase ? 600 : 400 }}>
+              {entry.dataKey}
+            </span>
+            <span style={{ fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(entry.value)}</span>
+            {delta !== null && (
+              <span style={{ width: 78, textAlign: 'right', fontVariantNumeric: 'tabular-nums',
+                             color: delta >= 0 ? THEME.status.good : THEME.status.serious }}>
+                {delta >= 0 ? '+' : '-'}{formatCurrency(Math.abs(delta))}
+              </span>
+            )}
+          </div>
+        );
+      })}
+      {baseValue !== null && payload.length > 1 && (
+        <div style={{ color: THEME.inkMuted, fontSize: 11, marginTop: 6,
+                      borderTop: `1px solid ${THEME.grid}`, paddingTop: 5 }}>
+          gap shown against your current plan
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ScenarioComparisonPanel({ activeScenarioId, assets, computeProjections, deleteScenario, loadScenario, oneTimeEvents, personalInfo, projections, recurringExpenses, scenarios, onHide }) {
   const [selectedScenarios, setSelectedScenarios] = useState([]);
   
@@ -7854,20 +7921,78 @@ function ScenarioComparisonPanel({ activeScenarioId, assets, computeProjections,
     setSelectedScenarios(prev => prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]);
   };
   
-  const comparisonChartData = projections.slice(0, 51).map(p => {
-    const dataPoint = { age: p.myAge, 'Current Plan': p.totalPortfolio };
+  // ── WHICH LINE IS WHICH ────────────────────────────────────────────────────
+  // Three rules, and the old code broke all three.
+  //
+  //   1. THE BASELINE IS NOT A SERIES. "Current Plan" is the thing every
+  //      scenario is measured against, so it gets the reference treatment — a
+  //      thick near-white line — rather than a hue competing with the others.
+  //      It used to be hardcoded #f59e0b, which is not a palette colour at all:
+  //      at OKLCH L 0.77 it sits outside the 0.48–0.67 band every validated slot
+  //      lives in, and it was never checked against them because it was not a
+  //      theme token. On screen it read as a third orange next to slot 1
+  //      (orange) and slot 3 (yellow) — the collision that started this.
+  //
+  //   2. COLOUR FOLLOWS THE SCENARIO, NOT ITS POSITION IN THE TICK-LIST. The
+  //      slot came from the index within selectedScenarios, so un-ticking one
+  //      repainted every scenario after it. Learning "the Roth-heavy one is
+  //      green" was impossible. The slot now comes from the scenario's place in
+  //      the saved list, which does not move when you tick a box.
+  //
+  //   3. HUES ARE ASSIGNED IN ORDER FROM SLOT 0 AND NEVER CYCLED. The old
+  //      expression was (idx + 1) % 8: it skipped blue, and past eight
+  //      scenarios it silently handed out a hue that was already on screen.
+  //      The colour-vision separation the palette guarantees is a property of
+  //      consecutive slots, so skipping and wrapping forfeits it.
+  //
+  // Past eight, hue alone is out of road. Rather than repeat one, the stroke
+  // pattern becomes a second channel: eight hues x three patterns = 24 lines
+  // that are still told apart by something other than colour. The legend and
+  // the tick-list both draw the pattern, so the pairing is visible without
+  // hovering anything.
+  const SCENARIO_DASHES = [undefined, '7 4', '2 3'];
+  const scenarioStyle = (orderIndex) => ({
+    stroke: THEME.categorical[orderIndex % THEME.categorical.length],
+    strokeDasharray: SCENARIO_DASHES[Math.floor(orderIndex / THEME.categorical.length) % SCENARIO_DASHES.length],
+  });
+  // Stable per scenario: its position among the SAVED scenarios, not among the
+  // ticked ones.
+  const styleForScenario = (id) => scenarioStyle(Math.max(0, scenarios.findIndex(s => s.id === id)));
+
+  // One projection per scenario, not one per scenario per row. This used to sit
+  // inside the .map over 51 years, so five ticked scenarios re-ran 255 full
+  // projections on every render — the reason the chart felt sluggish.
+  const selectedProjections = useMemo(() => {
+    const out = {};
     selectedScenarios.forEach(id => {
       const scenario = scenarios.find(s => s.id === id);
-      if (scenario) {
-        const proj = generateScenarioProjections(scenario);
-        const yearData = proj.find(pr => pr.myAge === p.myAge);
-        dataPoint[scenario.name] = yearData?.totalPortfolio || 0;
-      }
+      if (!scenario) return;
+      const proj = generateScenarioProjections(scenario);
+      const byAge = {};
+      proj.forEach(r => { byAge[r.myAge] = r.totalPortfolio; });
+      out[id] = byAge;
+    });
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedScenarios, scenarios]);
+
+  const comparisonChartData = projections.slice(0, 51).map(p => {
+    const dataPoint = { age: p.myAge, year: p.year, 'Current Plan': p.totalPortfolio };
+    selectedScenarios.forEach(id => {
+      const scenario = scenarios.find(s => s.id === id);
+      if (scenario) dataPoint[scenario.name] = (selectedProjections[id] || {})[p.myAge] || 0;
     });
     return dataPoint;
   });
-  
-  const chartColors = THEME.categorical;
+
+  const selectedScenarioObjs = selectedScenarios
+    .map(id => scenarios.find(s => s.id === id)).filter(Boolean);
+  // The chart keys series by NAME (that is what goes into the data rows), so the
+  // tooltip has to get back from a name to the scenario that owns it.
+  const nameToStyle = (name) => {
+    const hit = scenarios.find(sc => sc.name === name);
+    return hit ? styleForScenario(hit.id) : { stroke: THEME.inkMuted, strokeDasharray: undefined };
+  };
   
   return (
     <div className="space-y-6">
@@ -7895,6 +8020,16 @@ function ScenarioComparisonPanel({ activeScenarioId, assets, computeProjections,
                     <div className="flex items-center gap-3">
                       <input type="checkbox" checked={selectedScenarios.includes(scenario.id)}
                         onChange={() => toggleScenarioSelection(scenario.id)} className="w-4 h-4" />
+                      {/* The line this scenario will draw, shown before you tick
+                          it. Identity is never colour alone here either — the
+                          swatch repeats the stroke pattern, and the name is
+                          right beside it. */}
+                      {(() => { const st = styleForScenario(scenario.id); return (
+                        <svg width="20" height="8" aria-hidden="true" className="flex-none">
+                          <line x1="0" y1="4" x2="20" y2="4" stroke={st.stroke} strokeWidth="2.5"
+                                strokeDasharray={st.strokeDasharray} />
+                        </svg>
+                      ); })()}
                       <p className="font-medium text-slate-200">{scenario.name}</p>
                       {activeScenarioId === scenario.id && (
                         <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">Active</span>
@@ -7963,23 +8098,63 @@ function ScenarioComparisonPanel({ activeScenarioId, assets, computeProjections,
       
       {selectedScenarios.length > 0 && (
         <div className={cardStyle}>
-          <h4 className="text-lg font-semibold text-amber-400 mb-4">Portfolio Projection Comparison</h4>
-          <ResponsiveContainer width="100%" height={400}>
-            <LineChart data={comparisonChartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
+          <div className="flex items-baseline justify-between gap-3 mb-1">
+            <h4 className="text-lg font-semibold text-amber-400">Portfolio Projection Comparison</h4>
+            <span className="text-xs text-slate-500">{selectedScenarioObjs.length} scenario{selectedScenarioObjs.length === 1 ? '' : 's'} vs your plan</span>
+          </div>
+          <p className="text-xs text-slate-500 mb-4">
+            Your age along the bottom, portfolio value up the side. Your current plan is the thick line —
+            hover anywhere to see every scenario at that age, ranked, with its gap to your plan.
+          </p>
+          <ResponsiveContainer width="100%" height={420}>
+            <LineChart data={comparisonChartData} margin={{ top: 8, right: 16, bottom: 28, left: 8 }}>
+              {/* Solid hairline. A dashed grid reads as "projection" or
+                  "threshold" and competes with the dashed scenario strokes,
+                  which here carry actual meaning. */}
+              <CartesianGrid stroke={THEME.grid} strokeWidth={1} vertical={false} />
+              {/* No axis title. `insideBottom` puts it in the band the legend
+                  already occupies — at every offset tried it landed on top of a
+                  legend entry, and the legend wraps to a second row as soon as
+                  there are more than about eight scenarios, so there is no
+                  offset that is safe at all widths. The caption above the chart
+                  names both axes instead. */}
               <XAxis dataKey="age" stroke={THEME.axis} />
-              <YAxis stroke={THEME.axis} tickFormatter={(v) => `$${(v/1000000).toFixed(1)}M`} />
-              <Tooltip contentStyle={{ backgroundColor: THEME.surfaceRaised, border: `1px solid ${THEME.grid}` }} formatter={(value) => [formatCurrency(value), '']} />
-              <Legend formatter={legendInk} />
-              <Line type="monotone" dataKey="Current Plan" stroke="#f59e0b" strokeWidth={2} dot={false} />
-              {selectedScenarios.map((id, idx) => {
-                const scenario = scenarios.find(s => s.id === id);
-                return scenario ? (
-                  <Line key={id} type="monotone" dataKey={scenario.name} stroke={chartColors[(idx + 1) % chartColors.length]} strokeWidth={2} dot={false} />
-                ) : null;
+              {/* Zero is neither M nor k. Formatting it as '$0k' made the axis
+                  look like it had a rounding bug. */}
+              <YAxis stroke={THEME.axis} width={70}
+                     tickFormatter={(v) => !v ? '$0' : v >= 1000000 ? `$${(v / 1000000).toFixed(1)}M` : `$${Math.round(v / 1000)}k`} />
+              <Tooltip content={<ScenarioComparisonTooltip styleFor={nameToStyle} />}
+                       cursor={{ stroke: THEME.inkMuted, strokeWidth: 1, strokeDasharray: '4 4' }} />
+              <Legend formatter={legendInk} iconType="plainline" wrapperStyle={{ paddingTop: 8 }} />
+              <ReferenceLine x={personalInfo.myRetirementAge} stroke={THEME.reference} strokeDasharray="5 5"
+                             label={{ value: 'Retire', fill: THEME.inkSecondary, fontSize: 11 }} />
+              {/* Drawn FIRST so the scenarios sit on top of it: the baseline is
+                  the thing being measured against, and a 3px line painted last
+                  would hide whichever scenario happens to track it closely. */}
+              {/* Animation off on purpose. Recharts animates a line by driving its
+                  stroke-dasharray, which for a series that CARRIES a dash
+                  pattern rewrites the attribute into a couple of hundred
+                  generated segments — the second identity channel at the mercy
+                  of the animator. The chart also redraws on every tick of a
+                  checkbox, where a 1.5s grow-in is noise rather than delight. */}
+              <Line type="monotone" dataKey="Current Plan" stroke={THEME.lines.target}
+                    strokeWidth={3} dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
+              {selectedScenarioObjs.map(scenario => {
+                const st = styleForScenario(scenario.id);
+                return (
+                  <Line key={scenario.id} type="monotone" dataKey={scenario.name}
+                        stroke={st.stroke} strokeDasharray={st.strokeDasharray}
+                        strokeWidth={2} dot={false} activeDot={{ r: 4 }} isAnimationActive={false} />
+                );
               })}
             </LineChart>
           </ResponsiveContainer>
+          {scenarios.length > THEME.categorical.length * SCENARIO_DASHES.length && (
+            <p className="text-xs text-amber-400/80 mt-2">
+              You have more saved scenarios than there are distinguishable line styles
+              ({THEME.categorical.length * SCENARIO_DASHES.length}). Beyond that the styles repeat — compare in batches.
+            </p>
+          )}
         </div>
       )}
     </div>

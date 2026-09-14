@@ -56,6 +56,52 @@ function approx(actual, expected, label, relTol = 0.01) {
 
 function section(name) { console.log('\n' + name); }
 
+// ── COLOUR MATHS, ONCE ───────────────────────────────────────────────────────
+// sRGB → linear → OKLab, plus Machado/Oliveira/Fernandes (2009) colour-vision
+// simulation at severity 1.0 and the WCAG contrast ratio. Two packs had grown
+// their own byte-identical copies of all of this under different names (dE and
+// dE2, lin and lin2); a third was about to appear. ΔE here is Euclidean
+// distance in OKLab ×100, the same scale the palette's own thresholds use.
+const MACHADO = {
+  protan: [[0.152286, 1.052583, -0.204868], [0.114503, 0.786281, 0.099216], [-0.003882, -0.048116, 1.051998]],
+  deutan: [[0.367322, 0.860646, -0.227968], [0.280085, 0.672501, 0.047413], [-0.011820, 0.042940, 0.968881]],
+};
+const lin = (h) => {
+  const v = String(h).trim().replace(/^#/, '');
+  return [0, 2, 4].map(i => {
+    const c = parseInt(v.slice(i, i + 2), 16) / 255;
+    return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+};
+const oklab = ([r, g, b]) => {
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+          1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+          0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+};
+const sim = (h, kind) => {
+  const [r, g, b] = lin(h), M = MACHADO[kind], cl = (c) => Math.max(0, Math.min(1, c));
+  return [cl(M[0][0]*r + M[0][1]*g + M[0][2]*b), cl(M[1][0]*r + M[1][1]*g + M[1][2]*b), cl(M[2][0]*r + M[2][1]*g + M[2][2]*b)];
+};
+const dE = (h1, h2, kind) => {
+  const a = oklab(kind ? sim(h1, kind) : lin(h1)), b = oklab(kind ? sim(h2, kind) : lin(h2));
+  return 100 * Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+};
+const relLum = (h) => { const [r, g, b] = lin(h); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+const contrast = (a, b) => {
+  const [hi, lo] = [relLum(a), relLum(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+};
+// The worst separation of one colour against a whole set — what a chart that
+// overlays a reference line on N series actually has to survive.
+const worstAgainst = (hex, others) => others.reduce((w, o) => {
+  const v = Math.min(dE(hex, o), dE(hex, o, 'protan'), dE(hex, o, 'deutan'));
+  return v < w.dE ? { dE: v, other: o } : w;
+}, { dE: Infinity, other: null });
+
+
 // ── Scenario factory ─────────────────────────────────────────────────────────
 function baseScenario(overrides = {}) {
   const pi = {
@@ -9077,39 +9123,7 @@ section('P74 — the palette: colour-vision separation, re-derived rather than t
   // tell them apart.
   const theme = require('../theme.js');
 
-  // Machado, Oliveira & Fernandes (2009), severity 1.0, on linear RGB.
-  const MACHADO = {
-    protan: [[0.152286, 1.052583, -0.204868], [0.114503, 0.786281, 0.099216], [-0.003882, -0.048116, 1.051998]],
-    deutan: [[0.367322, 0.860646, -0.227968], [0.280085, 0.672501, 0.047413], [-0.011820, 0.042940, 0.968881]],
-  };
-  const lin = (h) => {
-    const v = h.trim().replace(/^#/, '');
-    return [0, 2, 4].map(i2 => {
-      const c = parseInt(v.slice(i2, i2 + 2), 16) / 255;
-      return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-    });
-  };
-  const oklab = ([r, g, b]) => {
-    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
-    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
-    const s2 = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
-    return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s2,
-            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s2,
-            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s2];
-  };
-  const sim = (h, kind) => {
-    const [r, g, b] = lin(h), M = MACHADO[kind], cl = (c) => Math.max(0, Math.min(1, c));
-    return [cl(M[0][0]*r + M[0][1]*g + M[0][2]*b), cl(M[1][0]*r + M[1][1]*g + M[1][2]*b), cl(M[2][0]*r + M[2][1]*g + M[2][2]*b)];
-  };
-  const dE = (h1, h2, kind) => {
-    const a = oklab(kind ? sim(h1, kind) : lin(h1)), b = oklab(kind ? sim(h2, kind) : lin(h2));
-    return 100 * Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-  };
-  const relLum = (h) => { const [r, g, b] = lin(h); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
-  const contrast = (a, b) => {
-    const [hi, lo] = [relLum(a), relLum(b)].sort((x, y) => y - x);
-    return (hi + 0.05) / (lo + 0.05);
-  };
+  // Colour maths (ΔE, CVD simulation, contrast) is defined once at module scope.
 
   const CVD_FLOOR = 8.0;      // OKLab ΔE ×100, min(protan, deutan)
   const NORMAL_FLOOR = 15.0;  // full-colour-vision floor
@@ -11383,26 +11397,7 @@ section('P76 — the token layer, and a light mode that is measured rather than 
   // The categorical cycle replaced four hand-picked arrays. Its wrap is a real
   // adjacency the moment a table has more rows than the cycle has slots.
   {
-    const MACHADO2 = {
-      protan: [[0.152286, 1.052583, -0.204868], [0.114503, 0.786281, 0.099216], [-0.003882, -0.048116, 1.051998]],
-      deutan: [[0.367322, 0.860646, -0.227968], [0.280085, 0.672501, 0.047413], [-0.011820, 0.042940, 0.968881]],
-    };
-    const oklab2 = ([r, g, b]) => {
-      const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
-      const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
-      const s3 = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
-      return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s3,
-              1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s3,
-              0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s3];
-    };
-    const sim2 = (h, k) => {
-      const [r, g, b] = lin2(h), M = MACHADO2[k], cl = (c) => Math.max(0, Math.min(1, c));
-      return [cl(M[0][0]*r + M[0][1]*g + M[0][2]*b), cl(M[1][0]*r + M[1][1]*g + M[1][2]*b), cl(M[2][0]*r + M[2][1]*g + M[2][2]*b)];
-    };
-    const dE2 = (a, b, k) => {
-      const x = oklab2(k ? sim2(a, k) : lin2(a)), y = oklab2(k ? sim2(b, k) : lin2(b));
-      return 100 * Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
-    };
+    const dE2 = dE;   // module-scope colour maths
     theme.MODES.forEach(mode => {
       const cyc = theme.resolve(mode).categorical;
       eq(cyc.length, 8, `${mode}: the categorical cycle has one entry per slot`);
@@ -14498,6 +14493,137 @@ section('P124 — the phone reads the plan the desktop saved, and gets the same 
     // and the slider then moves nothing at all.
     ok(/myRetirementAge: retAge !== planRetAge/.test(mob), 'the retirement slider uses the control name the engine reads');
     ok(/spouseRetirementAge: \(retAge !== planRetAge/.test(mob), 'and moves the spouse by the same number of years');
+  }
+}
+
+
+section('P125 — every scenario on the comparison chart is a different line');
+
+{
+  // The report: with four or five scenarios ticked, two lines were the same
+  // colour. Three separate faults, and the palette was not one of them.
+  const fsMod = require('fs'), pathMod = require('path');
+  const theme = require('../theme.js');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const jsx = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner.jsx'), 'utf8');
+  const panel = jsx.slice(jsx.indexOf('function ScenarioComparisonPanel'),
+                          jsx.indexOf('// StressTestTab — Lifted to module scope'));
+  ok(panel.length > 1000, 'the comparison panel was located in the source');
+
+  // ── 1. the baseline was a colour nobody had checked ──────────────────────
+  {
+    // Matched as a stroke, not as a string: the comment above the fix names the
+    // old colour on purpose, and a test that cannot tell an explanation from a
+    // usage would punish documenting the bug.
+    eq(/stroke="#f59e0b"/.test(panel), false,
+      'nothing in the comparison panel is stroked with the hardcoded amber any more');
+    ok(/dataKey="Current Plan" stroke=\{THEME\.lines\.target\}/.test(panel),
+      'the baseline wears the reference token instead of a hue of its own');
+
+    // Why it had to go, measured rather than asserted by eye. The old value sits
+    // outside the lightness band every validated slot lives in, and it was never
+    // checked against them because it was not a theme token at all.
+    theme.MODES.forEach(mode => {
+      const t = theme.resolve(mode);
+      const baseline = t.lines.target;
+      const old = worstAgainst('#f59e0b', t.categorical);
+      const now = worstAgainst(baseline, t.categorical);
+      gt(now.dE, old.dE,
+        `${mode}: the reference line separates from the scenario hues better than the amber it replaced`);
+      // The baseline overlays ALL of them at once, so the test is against the
+      // whole set, not against a neighbour in a cycle.
+      gt(now.dE, 15.0,
+        `${mode}: and clears the full-colour floor against every one of the eight (worst ${now.other})`);
+      gt(contrast(baseline, t.surfaceRaised), 3.0,
+        `${mode}: the baseline is visible against the card it is drawn on`);
+    });
+    // The specific complaint: the old baseline against the two warm slots.
+    {
+      const cat = theme.resolve('dark').categorical;
+      lt(dE('#f59e0b', cat[1]), 20.0, 'the old amber really was close to slot 1 (orange) — this is the collision reported');
+      gt(dE(theme.resolve('dark').lines.target, cat[1]), 20.0, 'and the reference line is not');
+    }
+  }
+
+  // ── 2. colour followed the tick-list, not the scenario ───────────────────
+  {
+    eq(/chartColors\[\(idx \+ 1\) % chartColors\.length\]/.test(panel), false,
+      'the rank-based, slot-skipping, wrapping assignment is gone');
+    ok(/const styleForScenario = \(id\) =>/.test(panel),
+      'a scenario is styled by its own identity');
+    ok(/scenarios\.findIndex\(s => s\.id === id\)/.test(panel),
+      'from its place in the SAVED list, which un-ticking another scenario does not change');
+    eq(/selectedScenarios\.map\(\(id, idx\)/.test(panel), false,
+      'and nothing keys a colour off the position within the selection');
+  }
+
+  // ── 3. past eight hues it silently repeated one ──────────────────────────
+  {
+    ok(/const SCENARIO_DASHES = \[undefined, '7 4', '2 3'\]/.test(panel),
+      'a stroke pattern is available as a second identity channel');
+    // Re-derive the assignment the panel does and prove every pair differs.
+    const SLOTS = theme.resolve('dark').categorical;
+    const DASHES = [undefined, '7 4', '2 3'];
+    const styleOf = (i) => ({
+      stroke: SLOTS[i % SLOTS.length],
+      dash: DASHES[Math.floor(i / SLOTS.length) % DASHES.length],
+    });
+    const seen = new Set();
+    const total = SLOTS.length * DASHES.length;
+    for (let i = 0; i < total; i++) {
+      const st = styleOf(i);
+      seen.add(st.stroke + '|' + (st.dash || 'solid'));
+    }
+    eq(seen.size, total, `all ${total} scenario styles are distinct`);
+    eq(styleOf(0).stroke, SLOTS[0], 'the first scenario takes slot 0 — assignment starts at the beginning and never skips');
+    eq(styleOf(8).dash, '7 4', 'the ninth changes pattern rather than reusing a hue');
+    eq(styleOf(8).stroke, SLOTS[0], 'while returning to the first hue, so the pairing stays learnable');
+    ok(/You have more saved scenarios than there are distinguishable line styles/.test(panel),
+      'and past the last distinct style the reader is told, not quietly shown a repeat');
+  }
+
+  // ── the hover layer the chart never had ──────────────────────────────────
+  {
+    ok(/function ScenarioComparisonTooltip/.test(jsx), 'the chart has a real tooltip');
+    ok(/sort\(\(a, b\) => \(b\.value \|\| 0\) - \(a\.value \|\| 0\)\)/.test(jsx),
+      'which ranks the scenarios at the hovered age rather than listing them in render order');
+    ok(/gap shown against your current plan/.test(jsx), 'and states the gap to the current plan');
+    ok(/payload\.find\(e => e\.dataKey === 'Current Plan'\)/.test(jsx),
+      'measured against the baseline, not against whichever series came first');
+    // Identity in the tooltip repeats the line's own pattern, so a dashed series
+    // is a dashed swatch and not a solid block matching three other rows.
+    ok(/strokeDasharray=\{isBase \? undefined : st\.strokeDasharray\}/.test(jsx),
+      'the swatch carries the stroke pattern too');
+    // Text stays in ink tokens: slot 6 sits at 2.96:1 on the raised surface,
+    // fine for a 2px line and not for 12px type.
+    {
+      const t = theme.resolve('dark');
+      lt(contrast(t.categorical[5], t.surfaceRaised), 3.0,
+        'at least one slot is too low-contrast to be used as text — the reason the tooltip labels are ink, not series colour');
+      ok(/color: isBase \? THEME\.inkPrimary : THEME\.inkSecondary/.test(jsx),
+        'so the scenario name is drawn in an ink token');
+    }
+  }
+
+  // ── chrome that was working against the reader ───────────────────────────
+  {
+    ok(/<CartesianGrid stroke=\{THEME\.grid\} strokeWidth=\{1\} vertical=\{false\} \/>/.test(panel),
+      'the grid is a solid hairline — a dashed grid competes with the dashed scenario strokes, which here mean something');
+    ok(/<ReferenceLine x=\{personalInfo\.myRetirementAge\}/.test(panel),
+      'retirement is marked, as it is on every other chart in the app');
+    ok(/isAnimationActive=\{false\}/.test(panel),
+      'line animation is off — Recharts animates by driving stroke-dasharray, which rewrites the second identity channel');
+    ok(/!v \? '\$0'/.test(panel), "and zero on the value axis reads '$0', not '$0k'");
+  }
+
+  // ── one projection per scenario, not one per scenario per row ────────────
+  {
+    ok(/const selectedProjections = useMemo\(/.test(panel),
+      'each ticked scenario is projected once and cached');
+    const chartData = panel.slice(panel.indexOf('const comparisonChartData'),
+                                  panel.indexOf('const selectedScenarioObjs'));
+    eq(/generateScenarioProjections/.test(chartData), false,
+      'and the per-year loop no longer re-runs a full projection for every row it builds');
   }
 }
 
