@@ -788,6 +788,32 @@ const newK1Row = () => ({
 // says. This keeps the swatch coloured and the words readable.
 const legendInk = (value) => <span style={{ color: THEME.inkSecondary }}>{value}</span>;
 
+// ── ONE SCENARIO, ONE LINE STYLE ─────────────────────────────────────────────
+// Shared by the Sandbox comparison chart and the printed Scenarios report, so a
+// scenario that is the green dashed one on screen is the green dashed one on
+// paper. Two implementations of "which colour is scenario six" is how the two
+// surfaces start disagreeing, which is the whole reason this lives here.
+//
+// Hues are taken IN ORDER from slot 0 and never skipped: the palette's
+// colour-vision separation is a property of consecutive slots, so an assignment
+// that jumps around forfeits the guarantee. Past the eighth the stroke pattern
+// becomes a second channel rather than a hue repeating — eight hues x three
+// patterns = 24 lines that are still told apart by something besides colour.
+//
+// `palette` is passed in because the report prints on white whatever theme the
+// app is wearing, so it needs the light column while the screen may be on dark.
+const SCENARIO_DASHES = [undefined, '7 4', '2 3'];
+const scenarioLineStyle = (orderIndex, palette) => {
+  const slots = palette || THEME.categorical;
+  const i = Math.max(0, orderIndex);
+  return {
+    stroke: slots[i % slots.length],
+    strokeDasharray: SCENARIO_DASHES[Math.floor(i / slots.length) % SCENARIO_DASHES.length],
+  };
+};
+const SCENARIO_STYLE_COUNT = 8 * SCENARIO_DASHES.length;
+
+
 const savingsRateStatus = (rate) => rate >= 25 ? 'good' : rate >= 15 ? 'warning' : 'serious';
 
 const formatCurrency = (value) => {
@@ -7950,14 +7976,9 @@ function ScenarioComparisonPanel({ activeScenarioId, assets, computeProjections,
   // that are still told apart by something other than colour. The legend and
   // the tick-list both draw the pattern, so the pairing is visible without
   // hovering anything.
-  const SCENARIO_DASHES = [undefined, '7 4', '2 3'];
-  const scenarioStyle = (orderIndex) => ({
-    stroke: THEME.categorical[orderIndex % THEME.categorical.length],
-    strokeDasharray: SCENARIO_DASHES[Math.floor(orderIndex / THEME.categorical.length) % SCENARIO_DASHES.length],
-  });
   // Stable per scenario: its position among the SAVED scenarios, not among the
   // ticked ones.
-  const styleForScenario = (id) => scenarioStyle(Math.max(0, scenarios.findIndex(s => s.id === id)));
+  const styleForScenario = (id) => scenarioLineStyle(Math.max(0, scenarios.findIndex(s => s.id === id)));
 
   // One projection per scenario, not one per scenario per row. This used to sit
   // inside the .map over 51 years, so five ticked scenarios re-ran 255 full
@@ -8149,10 +8170,10 @@ function ScenarioComparisonPanel({ activeScenarioId, assets, computeProjections,
               })}
             </LineChart>
           </ResponsiveContainer>
-          {scenarios.length > THEME.categorical.length * SCENARIO_DASHES.length && (
+          {scenarios.length > SCENARIO_STYLE_COUNT && (
             <p className="text-xs text-amber-400/80 mt-2">
               You have more saved scenarios than there are distinguishable line styles
-              ({THEME.categorical.length * SCENARIO_DASHES.length}). Beyond that the styles repeat — compare in batches.
+              ({SCENARIO_STYLE_COUNT}). Beyond that the styles repeat — compare in batches.
             </p>
           )}
         </div>
@@ -19613,6 +19634,122 @@ function RothRoadmapReport({ computeProjections, projections, personalInfo, acco
 // taken from each. Comparing a saved scenario's stored summary against a freshly
 // computed baseline is how two columns end up answering slightly different
 // questions.
+// The comparison chart, drawn for paper.
+//
+// Deliberately NOT the Recharts chart from the Sandbox. Three things differ on
+// paper and all three matter:
+//
+//   • There is no hover, so the tooltip that carries identity on screen does not
+//     exist. Every line is labelled at its right-hand end instead, which is also
+//     where the scenarios have spread furthest apart and the labels have room.
+//   • The page is white whatever theme the app is wearing, so the LIGHT palette
+//     is used explicitly rather than whichever one the screen happens to be on.
+//   • ResponsiveContainer measures its parent with a ResizeObserver, which has
+//     no reliable answer during a print layout pass. A fixed viewBox scaled to
+//     100% width prints at whatever size the page gives it.
+//
+// What does NOT differ is which line belongs to which scenario: both call
+// scenarioLineStyle, so the green dashed one is the green dashed one in both
+// places.
+function ScenarioReportChart({ rows, retirementAge, palette, fmtK }) {
+  const W = 720, H = 300;
+  const padL = 58, padR = 132, padT = 12, padB = 30;   // right gutter holds the end labels
+  const withData = rows.filter(r => r.series && r.series.length > 1);
+  if (withData.length < 2) return null;
+
+  const ages = withData.flatMap(r => r.series.map(p => p.age));
+  const minAge = Math.min(...ages), maxAge = Math.max(...ages);
+  const peak = Math.max(1, ...withData.flatMap(r => r.series.map(p => p.v)));
+
+  // Round gridlines, not quarters of the peak. Slicing the maximum into four
+  // gave an axis reading $8.62M / $17.25M / $25.87M — every label a number
+  // nobody would ever choose, and no help at all for reading a value off the
+  // line. Step up through 1/2/2.5/5 x a power of ten until four or five bands
+  // cover the data, then let the top gridline sit above the peak.
+  const niceStep = (span) => {
+    const pow = Math.pow(10, Math.floor(Math.log10(span / 4)));
+    return [1, 2, 2.5, 5, 10].map(m => m * pow).find(st => span / st <= 5) || pow * 10;
+  };
+  const step = niceStep(peak);
+  const maxV = Math.ceil(peak / step) * step;
+  const x = (age) => padL + ((age - minAge) / Math.max(1, maxAge - minAge)) * (W - padL - padR);
+  const y = (v) => padT + (1 - v / maxV) * (H - padT - padB);
+
+  const ticks = [];
+  for (let t = 0; t <= maxV + step / 2; t += step) ticks.push(t);
+  // The report's own money formatter carries two decimals, which is right in a
+  // table cell and noise on a gridline — an axis of $10.00M / $20.00M invites
+  // the reader to look for a precision the gridline does not have.
+  const axisTick = (v) => !v ? '$0'
+    : v >= 1000000 ? '$' + (v / 1000000).toFixed(v % 1000000 ? 1 : 0) + 'M'
+    : '$' + Math.round(v / 1000) + 'K';
+  // End labels stack when two scenarios finish close together, so they are
+  // nudged apart in draw order rather than allowed to overprint.
+  const MIN_GAP = 11;
+  const ends = withData
+    .map((r, i) => ({ r, i, yEnd: y(r.series[r.series.length - 1].v) }))
+    .sort((a, b) => a.yEnd - b.yEnd);
+  let last = -Infinity;
+  ends.forEach(e => { e.labelY = Math.max(e.yEnd, last + MIN_GAP); last = e.labelY; });
+
+  const styleOf = (row, idx) => row.isBase
+    ? { stroke: '#0f172a', strokeDasharray: undefined, width: 2.6 }
+    : { ...scenarioLineStyle(idx - 1, palette), width: 1.6 };
+
+  return (
+    <div style={{ breakInside: 'avoid', margin: '4px 0 2px' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block', maxWidth: '100%' }}
+           role="img" aria-label="Portfolio value by age, your plan against each saved scenario">
+        {ticks.map((t, i) => (
+          <g key={i}>
+            <line x1={padL} y1={y(t)} x2={W - padR} y2={y(t)} stroke="#e2e8f0" strokeWidth="1" />
+            <text x={padL - 6} y={y(t) + 3} textAnchor="end" fontSize="9" fill="#64748b">{axisTick(t)}</text>
+          </g>
+        ))}
+        {/* Retirement, marked as it is on screen. */}
+        {retirementAge >= minAge && retirementAge <= maxAge && (
+          <g>
+            <line x1={x(retirementAge)} y1={padT} x2={x(retirementAge)} y2={H - padB}
+                  stroke="#94a3b8" strokeWidth="1" strokeDasharray="4 3" />
+            <text x={x(retirementAge) + 3} y={padT + 9} fontSize="9" fill="#64748b">Retire {retirementAge}</text>
+          </g>
+        )}
+        <line x1={padL} y1={H - padB} x2={W - padR} y2={H - padB} stroke="#cbd5e1" strokeWidth="1" />
+        {[minAge, Math.round((minAge + maxAge) / 2), maxAge].map((a, i) => (
+          <text key={i} x={x(a)} y={H - padB + 13} textAnchor="middle" fontSize="9" fill="#64748b">{a}</text>
+        ))}
+        <text x={(padL + W - padR) / 2} y={H - 2} textAnchor="middle" fontSize="9" fill="#64748b">Your age</text>
+
+        {withData.map((row, idx) => {
+          const st = styleOf(row, idx);
+          const d = row.series.map((p, i) => `${i ? 'L' : 'M'} ${x(p.age).toFixed(1)} ${y(p.v).toFixed(1)}`).join(' ');
+          return <path key={row.label + idx} d={d} fill="none" stroke={st.stroke}
+                       strokeWidth={st.width} strokeDasharray={st.strokeDasharray}
+                       strokeLinejoin="round" strokeLinecap="round" />;
+        })}
+
+        {/* Direct labels: on paper this is the only thing carrying identity, so
+            it is not optional the way a legend beside a hoverable chart is. */}
+        {ends.map(e => {
+          const st = styleOf(e.r, e.i);
+          const xEnd = x(e.r.series[e.r.series.length - 1].age);
+          return (
+            <g key={'lbl' + e.i}>
+              <line x1={xEnd} y1={e.yEnd} x2={W - padR + 6} y2={e.labelY} stroke={st.stroke}
+                    strokeWidth="0.75" opacity="0.5" />
+              <text x={W - padR + 9} y={e.labelY + 3} fontSize="9.5"
+                    fill={e.r.isBase ? '#0f172a' : '#334155'}
+                    fontWeight={e.r.isBase ? 700 : 400}>
+                {e.r.label.length > 20 ? e.r.label.slice(0, 19) + '…' : e.r.label}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
 function ScenarioComparisonReport({ computeProjections, projections, personalInfo, accounts,
                                     incomeStreams, assets, oneTimeEvents, recurringExpenses,
                                     scenarios, onClose }) {
@@ -19629,6 +19766,9 @@ function ScenarioComparisonReport({ computeProjections, projections, personalInf
 
   const legacyAge = pi.legacyAge || 95;
   const rate = pi.heirTaxRate ?? 0.25;
+  // This page prints on white whatever the app is wearing, so the chart takes
+  // the light column rather than THEME, which follows the screen.
+  const reportPalette = (PlannerTheme.resolve('light') || {}).categorical || THEME.categorical;
 
   // One measurement function, applied to the live plan and to every scenario, so
   // no column can be computed a different way from its neighbours.
@@ -19649,6 +19789,10 @@ function ScenarioComparisonReport({ computeProjections, projections, personalInf
       shortYears: short.shortYearCount || 0,
       depletedAt: short.depletedYear ? short.depletedYear.myAge : null,
       endsAt: proj.length ? proj[proj.length - 1].myAge : null,
+      // The chart is drawn from the SAME projection run that produced this row's
+      // figures. Re-running it separately for the picture is how a chart ends up
+      // telling a different story from the table beneath it.
+      series: proj.map(r => ({ age: r.myAge, v: r.totalPortfolio || 0 })),
     };
   };
 
@@ -19706,6 +19850,15 @@ function ScenarioComparisonReport({ computeProjections, projections, personalInf
               when the scenario was saved. If an assumption changed since, these figures reflect the change.
               Differences are shown against your current plan.
             </p>
+
+            <h2 style={h2}>Every Plan, One Picture</h2>
+            <p style={{ fontSize: 12, color: '#475569', margin: '0 0 6px', lineHeight: 1.5 }}>
+              Portfolio value from today to the end of each plan. Your plan is the heavy dark line; each
+              scenario is labelled at its right-hand end. Drawn from the same projection runs as the tables
+              below, so the picture and the numbers cannot disagree.
+            </p>
+            <ScenarioReportChart rows={rows} retirementAge={pi.myRetirementAge}
+                                 palette={reportPalette} fmtK={fmtK} />
 
             <h2 style={h2}>The Comparison</h2>
             <div style={{ overflowX: 'auto' }}>
@@ -19839,7 +19992,11 @@ function ScenarioComparisonReport({ computeProjections, projections, personalInf
       </div>
     </div>
   );
-  return overlay;
+  // Portalled to body like every other report, and not decoratively: the print
+  // stylesheet hides #root, so a report left inside the app tree renders a blank
+  // page when the reader hits Print / Save as PDF. Two of the seven reports were
+  // returning the overlay directly and had never printed anything.
+  return ReactDOM.createPortal(overlay, document.body);
 }
 
 // ============================================
@@ -20096,7 +20253,11 @@ function ClaimingDecisionReport({ projections, personalInfo, accounts, incomeStr
       </div>
     </div>
   );
-  return overlay;
+  // Portalled to body like every other report, and not decoratively: the print
+  // stylesheet hides #root, so a report left inside the app tree renders a blank
+  // page when the reader hits Print / Save as PDF. Two of the seven reports were
+  // returning the overlay directly and had never printed anything.
+  return ReactDOM.createPortal(overlay, document.body);
 }
 
 // ============================================

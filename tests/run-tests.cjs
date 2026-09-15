@@ -14549,8 +14549,8 @@ section('P125 — every scenario on the comparison chart is a different line');
   {
     eq(/chartColors\[\(idx \+ 1\) % chartColors\.length\]/.test(panel), false,
       'the rank-based, slot-skipping, wrapping assignment is gone');
-    ok(/const styleForScenario = \(id\) =>/.test(panel),
-      'a scenario is styled by its own identity');
+    ok(/const styleForScenario = \(id\) => scenarioLineStyle\(/.test(panel),
+      'a scenario is styled by its own identity, through the shared rule');
     ok(/scenarios\.findIndex\(s => s\.id === id\)/.test(panel),
       'from its place in the SAVED list, which un-ticking another scenario does not change');
     eq(/selectedScenarios\.map\(\(id, idx\)/.test(panel), false,
@@ -14559,8 +14559,12 @@ section('P125 — every scenario on the comparison chart is a different line');
 
   // ── 3. past eight hues it silently repeated one ──────────────────────────
   {
-    ok(/const SCENARIO_DASHES = \[undefined, '7 4', '2 3'\]/.test(panel),
+    ok(/const SCENARIO_DASHES = \[undefined, '7 4', '2 3'\]/.test(jsx),
       'a stroke pattern is available as a second identity channel');
+    // Module scope, not inside the panel: the printed report draws the same
+    // scenarios and has to give them the same lines.
+    ok(/^const scenarioLineStyle = \(orderIndex, palette\) =>/m.test(jsx),
+      'and the assignment rule is defined once, outside any one chart');
     // Re-derive the assignment the panel does and prove every pair differs.
     const SLOTS = theme.resolve('dark').categorical;
     const DASHES = [undefined, '7 4', '2 3'];
@@ -14624,6 +14628,102 @@ section('P125 — every scenario on the comparison chart is a different line');
                                   panel.indexOf('const selectedScenarioObjs'));
     eq(/generateScenarioProjections/.test(chartData), false,
       'and the per-year loop no longer re-runs a full projection for every row it builds');
+  }
+}
+
+
+section('P126 — the scenarios report prints, and prints the same lines the screen draws');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const jsx = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner.jsx'), 'utf8');
+
+  // ── every report is portalled out of #root ───────────────────────────────
+  {
+    // The print stylesheet hides #root so the app chrome does not end up on
+    // paper. A report that returns its overlay into the app tree is hidden by
+    // that same rule: the reader hits "Print / Save as PDF" and gets a blank
+    // page. Two of the seven were doing exactly that, and the only reason it
+    // went unnoticed is that nothing about the screen view looks wrong.
+    const css = fsMod.readFileSync(pathMod.join(ROOT, 'index.html'), 'utf8');
+    ok(/@media print[\s\S]{0,400}#root \{ display: none !important; \}/.test(css),
+      'the print stylesheet hides the app tree');
+    const names = ['NextYearReport', 'PlanSummaryReport', 'SurvivorTaxReport', 'RothRoadmapReport',
+                   'ScenarioComparisonReport', 'ClaimingDecisionReport', 'BreakingPointReport'];
+    names.forEach(n => {
+      const start = jsx.indexOf('function ' + n + '(');
+      gt(start, -1, `${n} exists`);
+      // To the next top-level function, which is where this one ends.
+      const rest = jsx.slice(start + 10);
+      const end = rest.indexOf('\nfunction ');
+      const body = end === -1 ? rest : rest.slice(0, end);
+      ok(/ReactDOM\.createPortal\(overlay, document\.body\)/.test(body),
+        `${n} portals its overlay to body, so Print produces a page rather than a blank sheet`);
+      eq(/\n  return overlay;\n/.test(body), false,
+        `${n} does not return the overlay into the app tree`);
+    });
+  }
+
+  // ── the picture and the numbers come from one projection ─────────────────
+  {
+    const start = jsx.indexOf('function ScenarioComparisonReport(');
+    const report = jsx.slice(start, jsx.indexOf('\nfunction ClaimingDecisionReport'));
+    ok(/series: proj\.map\(r => \(\{ age: r\.myAge, v: r\.totalPortfolio \|\| 0 \}\)\)/.test(report),
+      "the chart's series is built inside measure(), from the run that produced that row's figures");
+    ok(/<ScenarioReportChart rows=\{rows\}/.test(report),
+      'and the chart is handed those same rows, not a second set');
+    // If the chart re-ran the engine itself, the picture could disagree with the
+    // table under it — which is the failure this whole line of work exists to
+    // prevent.
+    const chartFn = jsx.slice(jsx.indexOf('function ScenarioReportChart'),
+                              jsx.indexOf('function ScenarioComparisonReport'));
+    eq(/computeProjections/.test(chartFn), false,
+      'the chart never projects anything itself');
+  }
+
+  // ── one rule for which line is which, on screen and on paper ─────────────
+  {
+    const chartFn = jsx.slice(jsx.indexOf('function ScenarioReportChart'),
+                              jsx.indexOf('function ScenarioComparisonReport'));
+    ok(/scenarioLineStyle\(idx - 1, palette\)/.test(chartFn),
+      'the printed chart assigns hues through the shared rule');
+    // idx - 1 because row 0 is the baseline, which is not a scenario and does
+    // not consume a slot. Off by one here and every scenario prints in the
+    // colour of its neighbour on screen.
+    ok(/isBase\s*\n?\s*\? \{ stroke: '#0f172a'/.test(chartFn),
+      'and the baseline takes ink, not a slot');
+    ok(/PlannerTheme\.resolve\('light'\)/.test(jsx),
+      'the report takes the light palette explicitly, because it prints on white whatever the screen wears');
+  }
+
+  // ── it is drawn for paper, not ported from the screen ────────────────────
+  {
+    const chartFn = jsx.slice(jsx.indexOf('function ScenarioReportChart'),
+                              jsx.indexOf('function ScenarioComparisonReport'));
+    eq(/ResponsiveContainer/.test(chartFn), false,
+      'no ResponsiveContainer — a ResizeObserver has no reliable answer during a print layout pass');
+    eq(/<Tooltip/.test(chartFn), false, 'and no tooltip, because paper has no hover');
+    ok(/labelY/.test(chartFn), 'every line is labelled directly instead');
+    ok(/last \+ MIN_GAP/.test(chartFn),
+      'with labels nudged apart when two scenarios finish close together, rather than overprinting');
+    ok(/breakInside: 'avoid'/.test(chartFn), 'and the figure is not split across a page break');
+
+    // Round gridlines. Quartering the peak produced an axis reading
+    // $8.62M / $17.25M / $25.87M — every label a number nobody would choose.
+    const niceStep = (span) => {
+      const pow = Math.pow(10, Math.floor(Math.log10(span / 4)));
+      return [1, 2, 2.5, 5, 10].map(m => m * pow).find(st => span / st <= 5) || pow * 10;
+    };
+    [[34500000, 10000000], [8200000, 2000000], [960000, 200000], [45000000, 10000000]]
+      .forEach(([peak, want]) => eq(niceStep(peak), want, `a peak of ${peak} steps in ${want}`));
+    [1e5, 1e6, 8.2e6, 3.45e7, 1.2e8].forEach(peak => {
+      const st = niceStep(peak);
+      const maxV = Math.ceil(peak / st) * st;
+      gt(maxV + 1, peak, `the top gridline sits at or above a peak of ${peak}`);
+      const bands = maxV / st;
+      ok(bands >= 3 && bands <= 6, `and a peak of ${peak} gets ${bands} bands — enough to read, not hatching`);
+    });
   }
 }
 
