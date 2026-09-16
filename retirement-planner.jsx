@@ -498,6 +498,7 @@ const migrations = {
 // Transient sections (loading, error, empty states) are deliberately NOT in the
 // manifest: a user must never be able to hide the thing that would have told them
 // why the page is blank.
+const EMPTY_SECTION_VISIBILITY = {};   // stable identity — see simple mode
 const SECTION_LEVELS = ['essentials', 'standard', 'everything'];
 const LEVEL_RANK = { essential: 0, standard: 1, advanced: 2 };
 const LEVEL_SHOWS = { essentials: 0, standard: 1, everything: 2 };
@@ -583,6 +584,27 @@ const SECTION_MANIFEST = {
     { id: 'bands',         label: 'Portfolio Projection Bands',    level: 'essential' },
     { id: 'paths',         label: 'Sample Simulation Paths',       level: 'standard' },
 
+  ],
+  // Personal Info had no manifest, so its detail level did nothing and the tab
+  // stayed 4,400px tall at every setting — the longest page in the app and the
+  // first one a new plan lands on.
+  //
+  // Ages, filing status and the spending target are deliberately absent: they
+  // are the tab's inputs, not its output, and a plan with no way to say how old
+  // you are is not a simpler plan. What is here is everything BELOW those.
+  //
+  // Healthcare and long-term care are essential rather than standard on purpose.
+  // They are the two settings that move a plan by seven figures without the
+  // reader having touched them, and a reader who cannot find the switch that
+  // is billing them $1.7M of care has been hidden from, not simplified for.
+  personal: [
+    { id: 'rothStrategy',       label: 'Planned Roth conversion strategy', level: 'standard' },
+    { id: 'charitable',         label: 'Charitable giving & QCD',          level: 'advanced' },
+    { id: 'withdrawalPriority', label: 'Withdrawal priority',              level: 'advanced' },
+    { id: 'spendingPhases',     label: 'Spending phases',                  level: 'standard' },
+    { id: 'survivor',           label: 'Survivor modelling',               level: 'standard' },
+    { id: 'healthcare',         label: 'Healthcare expenses',              level: 'essential' },
+    { id: 'ltc',                label: 'Long-term care',                   level: 'essential' },
   ],
   socialsecurity: [
     // 'Your Current Plan' and the benefit inputs are deliberately absent: they are
@@ -1231,7 +1253,11 @@ const Section = ({ tab, id, title, vis, level, setVis, actions, children, classN
             : title}
           {actions}
         </div>
-        {entry && (
+        {/* No setter means no Sections strip to restore from, so the control
+            would be one-way: click it and the section is gone for good. That is
+            not a preference, it is a trap — the same reasoning that keeps the
+            +Add and Run buttons out of hideable sections. */}
+        {entry && setVis && (
           <button
             onClick={() => setVis(prev => ({ ...prev, [tab]: { ...(prev[tab] || {}), [id]: false } }))}
             className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors shrink-0"
@@ -1253,6 +1279,9 @@ const Section = ({ tab, id, title, vis, level, setVis, actions, children, classN
 // visibility store, same restore path through SectionControls, no second title.
 const HideableBlock = ({ tab, id, level, vis, setVis, children }) => {
   if (!sectionIsVisible(vis, level, tab, id)) return null;
+  // No setter: see Section above — without the restore strip the Hide button is
+  // one-way, so it is not offered.
+  if (!setVis) return <div>{children}</div>;
   return (
     <div>
       <div className="flex justify-end">
@@ -1378,6 +1407,11 @@ const SectionControls = ({ tab, vis, setVis, level, setLevel }) => {
   const [open, setOpen] = useState(false);
   const entries = SECTION_MANIFEST[tab] || [];
   if (!entries.length) return null;
+  // Simple mode passes no setter: the level is the mode's to choose, and a
+  // control that silently does nothing is worse than no control. The whole
+  // strip goes — including the per-section chips, which are a power-user
+  // override over a level the reader is not currently choosing.
+  if (!setLevel) return null;
   const shown = entries.filter(e => sectionIsVisible(vis, level, tab, e.id)).length;
   return (
     <div className="flex flex-col gap-3">
@@ -11047,7 +11081,7 @@ function SensitivityTab({ detailLevel, sectionVisibility, setDetailLevel, setSec
 // ============================================
 // PersonalInfoTab — Lifted to module scope
 // ============================================
-function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents, personalInfo, recurringExpenses, setDataWarnings, setOneTimeEvents, setPersonalInfo, setRecurringExpenses }) {
+function PersonalInfoTab({ accounts, dataWarnings, detailLevel, incomeStreams, oneTimeEvents, personalInfo, recurringExpenses, sectionVisibility, setDataWarnings, setDetailLevel, setOneTimeEvents, setPersonalInfo, setRecurringExpenses, setSectionVisibility }) {
   const [localInfo, setLocalInfo] = useState(personalInfo);
   const [dirtyPI, setDirtyPI] = useState(false);
   
@@ -11660,6 +11694,8 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
           >Dismiss all warnings</button>
         </div>
       )}
+      <SectionControls tab="personal" vis={sectionVisibility} setVis={setSectionVisibility}
+                       level={detailLevel} setLevel={setDetailLevel} />
       <div className={cardStyle}>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Ages Section */}
@@ -11834,6 +11870,8 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
           <p className="text-xs text-slate-500 mt-2">This is your target annual spending in retirement (in today's dollars). It will be adjusted for inflation each year.</p>
         </div>
         
+        <HideableBlock tab="personal" id="charitable" level={detailLevel}
+                       vis={sectionVisibility} setVis={setSectionVisibility}>
         {/* Charitable Giving / QCD Section */}
         <div className="border-t border-slate-700/50 mt-5 pt-5">
           <h4 className="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wide">Charitable Giving & QCD Strategy</h4>
@@ -11867,7 +11905,10 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
             </p>
           </div>
         </div>
+        </HideableBlock>
         
+        <HideableBlock tab="personal" id="rothStrategy" level={detailLevel}
+                       vis={sectionVisibility} setVis={setSectionVisibility}>
         {/* Roth Conversion Strategy Section */}
         <div className="border-t border-slate-700/50 mt-5 pt-5">
           <h4 className="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wide">Planned Roth Conversion Strategy</h4>
@@ -12290,7 +12331,10 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
             );
           })()}
         </div>
+        </HideableBlock>
         
+        <HideableBlock tab="personal" id="withdrawalPriority" level={detailLevel}
+                       vis={sectionVisibility} setVis={setSectionVisibility}>
         {/* Withdrawal Priority Section */}
         <div className="border-t border-slate-700/50 mt-5 pt-5">
           <h4 className="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wide">Withdrawal Priority</h4>
@@ -12407,7 +12451,10 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
             </div>
           )}
         </div>
+        </HideableBlock>
 
+        <HideableBlock tab="personal" id="spendingPhases" level={detailLevel}
+                       vis={sectionVisibility} setVis={setSectionVisibility}>
         {/* Spending Phases Section (go-go / slow-go / no-go) */}
         <div className="border-t border-slate-700/50 mt-5 pt-5">
           <h4 className="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wide">Spending Phases</h4>
@@ -12486,7 +12533,10 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
             </>
           )}
         </div>
+        </HideableBlock>
 
+        <HideableBlock tab="personal" id="survivor" level={detailLevel}
+                       vis={sectionVisibility} setVis={setSectionVisibility}>
         {/* Survivor Modeling Section */}
         {localInfo.filingStatus === 'married_joint' && (
           <div className="border-t border-slate-700/50 mt-5 pt-5">
@@ -12546,7 +12596,10 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
             )}
           </div>
         )}
+        </HideableBlock>
         
+        <HideableBlock tab="personal" id="healthcare" level={detailLevel}
+                       vis={sectionVisibility} setVis={setSectionVisibility}>
         {/* Healthcare Expense Modeling */}
         <div className="border-t border-slate-700/50 mt-5 pt-5">
           <div className="flex items-center justify-between mb-3">
@@ -12669,7 +12722,10 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
             </div>
           )}
         </div>
+        </HideableBlock>
 
+        <HideableBlock tab="personal" id="ltc" level={detailLevel}
+                       vis={sectionVisibility} setVis={setSectionVisibility}>
         {/* Long-Term Care — separate from Healthcare because the engine bills LTC
             whenever ltcModel !== 'none' regardless of healthcareModel. Keeping
             this control always-visible prevents the bug where users turned off
@@ -12724,6 +12780,7 @@ function PersonalInfoTab({ accounts, dataWarnings, incomeStreams, oneTimeEvents,
             </p>
           </div>
         </div>
+        </HideableBlock>
 
         {/* Recurring Expenses (Categorized) */}
         <div className="border-t border-slate-700/50 mt-5 pt-5">
@@ -17191,11 +17248,16 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
       {/* The section list used to be written out again here, next to a chain of
           `visibilitySettings.x &&` guards that had to agree with it by hand. Both
           now come from SECTION_MANIFEST. */}
+      {/* Simple mode drops the level control, and the flex-1 spacer that used to
+          hold it left an empty card with the basis toggle stranded on the far
+          right. With nothing on the left, the row closes up. */}
       <div className={cardStyle}>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex-1 min-w-[260px]">
-            <SectionControls tab="dashboard" vis={sectionVisibility} setVis={setSectionVisibility} level={detailLevel} setLevel={setDetailLevel} />
-          </div>
+        <div className={`flex flex-wrap items-center gap-3 ${setDetailLevel ? 'justify-between' : 'justify-end'}`}>
+          {setDetailLevel && (
+            <div className="flex-1 min-w-[260px]">
+              <SectionControls tab="dashboard" vis={sectionVisibility} setVis={setSectionVisibility} level={detailLevel} setLevel={setDetailLevel} />
+            </div>
+          )}
           <BasisToggle pi={personalInfo} setPersonalInfo={setPersonalInfo} />
         </div>
       </div>
@@ -20655,15 +20717,16 @@ const NavItem = ({ id, label, icon, activeTab, setActiveTab, sidebarCollapsed })
 
 const NavGroup = ({ group, activeTab, setActiveTab, sidebarCollapsed }) => (
   // data-tour is derived from the group label ('PLAN SETUP' -> 'nav-plan-setup')
-  // and is what GuidedTour's spotlight anchors to.
-  <div className="mb-4" data-tour={`nav-${group.label.toLowerCase().replace(/\s+/g, '-')}`}>
-    {!sidebarCollapsed && (
+  // and is what GuidedTour's spotlight anchors to. Simple mode's single list has
+  // no label, and gets no header and no tour anchor rather than an empty one.
+  <div className="mb-4" data-tour={group.label ? `nav-${group.label.toLowerCase().replace(/\s+/g, '-')}` : undefined}>
+    {!sidebarCollapsed && group.label && (
       <div className="flex items-center gap-2 px-3 py-2 text-xs font-bold text-slate-300 uppercase tracking-wider border-b border-slate-700/50 pb-2 mb-1">
         <span>{group.icon}</span>
         <span>{group.label}</span>
       </div>
     )}
-    {sidebarCollapsed && (
+    {sidebarCollapsed && group.label && (
       <div className="flex justify-center py-2 text-slate-500">
         <span className="text-lg">{group.icon}</span>
       </div>
@@ -22054,6 +22117,44 @@ function RetirementPlanner() {
   // sections are added rather than a frozen snapshot of an old manifest.
   const [sectionVisibility, setSectionVisibility] = useState(() => savedData?.sectionVisibility || {});
   const [detailLevel, setDetailLevel] = useState(() => savedData?.detailLevel || 'standard');
+  // ── SIMPLE MODE ────────────────────────────────────────────────────────────
+  // The full app is fifteen tabs, four nav groups and about four hundred
+  // controls. That is the right shape for someone running conversion ladders
+  // against IRMAA tiers, and the wrong shape for someone who wants to know
+  // whether they can retire at 63.
+  //
+  // Simple mode is PRESENTATIONAL AND NOTHING ELSE. It hides tabs and sections;
+  // it never changes a setting, and the engine never sees it. A plan projects
+  // identically in both modes, including through settings whose control is
+  // hidden — long-term care billed from a Personal Info section you cannot
+  // currently see is still billed. A test pins that, because the alternative —
+  // a mode that quietly plans differently — would be far worse than a busy nav.
+  //
+  // An existing plan opens in the mode it was saved in, defaulting to the full
+  // app so nobody's tabs disappear on upgrade. A plan that does not exist yet
+  // starts simple, because that is the one case where nothing is being taken
+  // away.
+  const [uiMode, setUiMode] = useState(() => savedData?.uiMode || (savedData ? 'advanced' : 'simple'));
+  const simpleMode = uiMode === 'simple';
+  // The reader's own detail preference is kept, not overwritten, so switching
+  // back to the full app restores the level they were working at.
+  const effectiveDetailLevel = simpleMode ? 'essentials' : detailLevel;
+  // Per-section overrides are a power-user control saved against the full app.
+  // Honouring them in simple mode would let a tab the reader once un-hid come
+  // back, which is exactly the surprise this mode exists to avoid.
+  const effectiveSectionVisibility = simpleMode ? EMPTY_SECTION_VISIBILITY : sectionVisibility;
+  // Passing no setter is how a tab is told "the level is not yours to change
+  // here" — it drops the Sections strip AND the per-section Hide buttons that
+  // strip is the only way back from.
+  const effectiveSetSectionVisibility = simpleMode ? null : setSectionVisibility;
+
+  // Switching to simple mode while standing on a tab it does not show would
+  // leave the reader looking at a page with no way back to it in the nav.
+  useEffect(() => {
+    if (simpleMode && !SIMPLE_TABS.includes(activeTab)) setActiveTab('dashboard');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [simpleMode, activeTab]);
+
   // The Sandbox's own configuration: which panels the reader picked and where
   // they left the controls. Persisted like any other plan preference so a page
   // someone built for themselves is still there next visit.
@@ -22174,7 +22275,7 @@ function RetirementPlanner() {
   // Auto-save to localStorage with debouncing to prevent excessive saves
   useEffect(() => {
     const saveTimer = setTimeout(() => {
-      const data = { personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, sectionVisibility, detailLevel, scenarios, currentYear: currentYearData, sandboxConfig, lastSaved: new Date().toISOString() };
+      const data = { personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, sectionVisibility, detailLevel, uiMode, scenarios, currentYear: currentYearData, sandboxConfig, lastSaved: new Date().toISOString() };
       const result = saveToStorage(data);
       if (result.ok) {
         // Order matters: the plan is safely written before anything is spent on
@@ -22199,7 +22300,7 @@ function RetirementPlanner() {
       clearTimeout(saveTimer);
       clearTimeout(clearTimer);
     };
-  }, [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, sectionVisibility, detailLevel, scenarios, currentYearData, sandboxConfig]);
+  }, [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, dashboardVisibility, sectionVisibility, detailLevel, uiMode, scenarios, currentYearData, sandboxConfig]);
   
   // Export data as JSON file
   const handleExport = () => {
@@ -22507,7 +22608,35 @@ function RetirementPlanner() {
     setTimeout(() => setSaveStatus(''), 2000);
   };
 
-  const navGroups = [
+  // ── WHAT SIMPLE MODE KEEPS ─────────────────────────────────────────────────
+  // Chosen by what a plan cannot be made without, not by what is cheap to cut.
+  //
+  //   Dashboard    where the plan stands
+  //   What if      the Sandbox — the question most people actually arrive with
+  //   About you    ages, filing, spending target, healthcare, long-term care
+  //   Accounts     balances and contributions
+  //   Property     the house and anything else that is not a portfolio
+  //   Income       Social Security and pensions
+  //   Taxes & Roth the conversion opportunity, without the optimiser suite
+  //   Claiming     when to take Social Security — a top-two decision, kept
+  //   Will it last Monte Carlo — "it works on average" is not a plan
+  //
+  // Cut: Current Year (a paystub and K-1 ledger), Withdrawals (the Sandbox
+  // carries withdrawal order), Stress Test (Monte Carlo covers the same ground
+  // for this reader), Sensitivity (an analyst's tornado chart), AI Assistant
+  // (wants an API key), Plan history. Nothing is deleted — every one of them is
+  // one click away in the full app, working on the same plan.
+  const SIMPLE_TABS = ['dashboard', 'sandbox', 'personal', 'accounts', 'assets',
+                       'income', 'taxplanning', 'socialsecurity', 'montecarlo'];
+  // Plainer names for the same tabs. "Monte Carlo" names a technique; "Will it
+  // last?" names the question the reader came with.
+  const SIMPLE_LABELS = {
+    sandbox: 'What if', personal: 'About you', assets: 'Property',
+    income: 'Income', taxplanning: 'Taxes & Roth',
+    socialsecurity: 'Claiming', montecarlo: 'Will it last?',
+  };
+
+  const fullNavGroups = [
     {
       label: 'OVERVIEW',
       icon: '📊',
@@ -22553,6 +22682,18 @@ function RetirementPlanner() {
       ]
     }
   ];
+
+  // One flat list, in the order someone works through a plan. Four group headers
+  // over nine items is filing-cabinet furniture: it implies there is more behind
+  // each heading than there is.
+  const simpleNavGroups = [{
+    label: null,
+    items: SIMPLE_TABS.map(id => {
+      const item = fullNavGroups.flatMap(g => g.items).find(it => it.id === id);
+      return item ? { ...item, label: SIMPLE_LABELS[id] || item.label } : null;
+    }).filter(Boolean),
+  }];
+  const navGroups = simpleMode ? simpleNavGroups : fullNavGroups;
   
   // NavItem / NavGroup live at module scope (above RetirementPlanner) so they
   // keep stable component identities across renders. They take the sidebar state
@@ -22675,9 +22816,28 @@ function RetirementPlanner() {
               <p className="text-xs text-slate-500 mt-1">v{typeof window !== 'undefined' && window.APP_VERSION ? window.APP_VERSION : 'dev'}</p>
             </div>
           )}
+          {/* The mode switch sits above everything else in the sidebar because a
+              reader who feels lost needs to find it without reading the nav
+              they are lost in. It says what it will do, not what mode you are
+              in — "Simple view" on a button is ambiguous about which state it
+              names, and this is the one control where guessing wrong means
+              your tabs vanish. */}
+          <button
+            onClick={() => setUiMode(simpleMode ? 'advanced' : 'simple')}
+            className={`mt-2 w-full flex items-center justify-center gap-1.5 text-xs py-1.5 rounded transition-colors border ${
+              simpleMode
+                ? 'text-amber-300 border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20'
+                : 'text-slate-400 border-slate-700/60 hover:text-slate-200 hover:bg-slate-700/50'}`}
+            title={simpleMode
+              ? 'Show every tab and every section — the full planner. Nothing about your plan changes either way.'
+              : 'Hide the advanced tabs and diagnostics, leaving the nine screens a plan is actually built from. Your plan and its numbers are untouched.'}
+          >
+            <span>{simpleMode ? '◇' : '◆'}</span>
+            {!sidebarCollapsed && <span>{simpleMode ? 'Show everything' : 'Simplify'}</span>}
+          </button>
           <button
             onClick={toggleTheme}
-            className={`mt-2 w-full flex items-center justify-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 py-1.5 rounded hover:bg-slate-700/50 transition-colors`}
+            className={`mt-1 w-full flex items-center justify-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 py-1.5 rounded hover:bg-slate-700/50 transition-colors`}
             title={themeMode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
           >
             <span>{themeMode === 'dark' ? '☀️' : '🌙'}</span>
@@ -22778,14 +22938,21 @@ function RetirementPlanner() {
               <span className="text-base">💾</span>
               {!sidebarCollapsed && <span className="text-sm font-medium">Import/Export</span>}
             </button>
-            <button
-              onClick={() => { setSnapshots(readSnapshots()); setShowSnapshots(true); }}
-              className="w-full flex items-center gap-3 px-3 py-2 text-slate-400 hover:text-slate-200 hover:bg-slate-700/50 rounded-lg transition-all"
-              title="Recent copies of this plan, kept in this browser"
-            >
-              <span className="text-base">🕘</span>
-              {!sidebarCollapsed && <span className="text-sm font-medium">Plan history</span>}
-            </button>
+            {/* Plan history is a recovery tool for someone who has been editing
+                hard enough to want an undo across sessions. Reports, Import and
+                Guided Setup all stay — they are how a plan gets built, backed
+                up and shown to someone else, which simple mode needs more than
+                the full app does, not less. */}
+            {!simpleMode && (
+              <button
+                onClick={() => { setSnapshots(readSnapshots()); setShowSnapshots(true); }}
+                className="w-full flex items-center gap-3 px-3 py-2 text-slate-400 hover:text-slate-200 hover:bg-slate-700/50 rounded-lg transition-all"
+                title="Recent copies of this plan, kept in this browser"
+              >
+                <span className="text-base">🕘</span>
+                {!sidebarCollapsed && <span className="text-sm font-medium">Plan history</span>}
+              </button>
+            )}
             <button 
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
               className="w-full flex items-center gap-3 px-3 py-2 mt-1 text-slate-500 hover:text-slate-300 hover:bg-slate-700/50 rounded-lg transition-all"
@@ -22828,19 +22995,19 @@ function RetirementPlanner() {
             sticky work. */}
         <main className="flex-1 p-6">
           <div className="mx-auto w-full" style={{ maxWidth: contentWidthCss(contentWidth) }}>
-            {activeTab === 'dashboard' && <DashboardTab setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
-            {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
-            {activeTab === 'accounts' && <AccountsTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
+            {activeTab === 'dashboard' && <DashboardTab setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={simpleMode ? null : setDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
+            {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={simpleMode ? null : setDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
+            {activeTab === 'accounts' && <AccountsTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={simpleMode ? null : setDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
-            {activeTab === 'income' && <IncomeStreamsTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={displayProjections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
-            {activeTab === 'socialsecurity' && <SocialSecurityTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
+            {activeTab === 'income' && <IncomeStreamsTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={simpleMode ? null : setDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={displayProjections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
+            {activeTab === 'socialsecurity' && <SocialSecurityTab currentYearReturn={currentYearReturn} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={simpleMode ? null : setDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
             {activeTab === 'sandbox' && <SandboxTab accounts={accounts} activeScenarioId={activeScenarioId} applyPlanAsBaseline={applyPlanAsBaseline} createScenarioFrom={createScenarioFrom} deleteScenario={deleteScenario} loadScenario={loadScenario} scenarios={scenarios} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
-            {activeTab === 'taxplanning' && <TaxPlanningTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
-            {activeTab === 'currentyear' && <CurrentYearTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
-            {activeTab === 'withdrawal' && <WithdrawalStrategiesTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={displayProjections} />}
-            {activeTab === 'montecarlo' && <MonteCarloTab currentYearReturn={currentYearReturn} detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
-            {activeTab === 'stresstest' && <StressTestTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} computeProjections={displayComputeProjections} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
-            {activeTab === 'sensitivity' && <SensitivityTab detailLevel={detailLevel} sectionVisibility={sectionVisibility} setDetailLevel={setDetailLevel} setSectionVisibility={setSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'taxplanning' && <TaxPlanningTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={simpleMode ? null : setDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
+            {activeTab === 'currentyear' && <CurrentYearTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={simpleMode ? null : setDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
+            {activeTab === 'withdrawal' && <WithdrawalStrategiesTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={simpleMode ? null : setDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} incomeStreams={incomeStreams} personalInfo={personalInfo} projections={displayProjections} />}
+            {activeTab === 'montecarlo' && <MonteCarloTab currentYearReturn={currentYearReturn} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={simpleMode ? null : setDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'stresstest' && <StressTestTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={simpleMode ? null : setDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} computeProjections={displayComputeProjections} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'sensitivity' && <SensitivityTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={simpleMode ? null : setDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
             {activeTab === 'assistant' && <AiAssistantTab computeProjections={displayComputeProjections} onApply={applyAiPlan} plan={livePlan} projections={displayProjections} />}
             {activeTab === 'faq' && <FAQTab />}
           </div>

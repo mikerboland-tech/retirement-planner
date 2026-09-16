@@ -12215,7 +12215,9 @@ section('P101 — the Sandbox is a primary surface, and charts can be stretched'
   const src = fs11.readFileSync(path11.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
 
   // ── the Sandbox sits under the Dashboard, not seven groups down ──────────
-  const navAt = src.indexOf('const navGroups = [');
+  // Renamed when simple mode arrived: the full app's four groups are
+  // fullNavGroups, and `navGroups` now picks between them and the simple list.
+  const navAt = src.indexOf('const fullNavGroups = [');
   gt(navAt, 0, 'the nav is where the test expects it');
   const nav = src.slice(navAt, src.indexOf('\n  ];', navAt));
   const dashAt = nav.indexOf("id: 'dashboard'");
@@ -12302,7 +12304,9 @@ section('P102 — the Scenarios tab lives inside the Sandbox');
   eq((src.match(/function ScenarioComparisonPanel\(/g) || []).length, 1,
     'and its comparison lives on as a Sandbox panel rather than being rewritten');
   ok(src.indexOf("activeTab === 'scenarios'") < 0, 'nothing routes to it any more');
-  const navAt = src.indexOf('const navGroups = [');
+  // Renamed when simple mode arrived: the full app's four groups are
+  // fullNavGroups, and `navGroups` now picks between them and the simple list.
+  const navAt = src.indexOf('const fullNavGroups = [');
   const nav = src.slice(navAt, src.indexOf('\n  ];', navAt));
   ok(nav.indexOf("id: 'scenarios'") < 0, 'and the nav no longer offers it');
   ok(src.indexOf("{ id: 'scenarios',   label: 'Saved scenarios & comparison' }") > 0,
@@ -12403,18 +12407,25 @@ section('P104 — every tab that has sections can put them away');
   // is explicit rather than derived, because the judgement — which tabs have
   // sections at all — is the part worth writing down.
   ['dashboard', 'accounts', 'income', 'withdrawal', 'stresstest', 'sensitivity',
-   'currentyear', 'taxplanning', 'montecarlo', 'socialsecurity'].forEach(tab => {
+   'currentyear', 'taxplanning', 'montecarlo', 'socialsecurity', 'personal'].forEach(tab => {
     ok(manifest[tab], `the ${tab} tab is in the manifest`);
     gt((manifest[tab] || []).length, 1,
       `and has more than one section, or the control strip manages nothing`);
   });
 
+  // personal USED to be on the absent list, on the reasoning that its fields are
+  // the tab rather than sections of it. Measured, that was wrong in the way that
+  // matters: the tab rendered 4,420px at every detail level, unchanged, making it
+  // the longest page in the app and the only one the level control did nothing
+  // to — and it is the first page a new plan lands on. Its inputs (ages, filing
+  // status, spending target) are still always visible; what is now hideable is
+  // everything below them.
+  //
   // Deliberately absent, each for a reason:
-  //   personal  — a form; its fields are the tab, not sections of it
   //   assets    — one hideable card once the +Add header is excluded
   //   sandbox   — has its own panel picker, which is a better version of this
   //   faq, assistant — reference text and a chat
-  ['personal', 'assets', 'sandbox', 'faq', 'assistant'].forEach(tab => {
+  ['assets', 'sandbox', 'faq', 'assistant'].forEach(tab => {
     ok(!manifest[tab], `${tab} deliberately has no section manifest`);
   });
 
@@ -14724,6 +14735,138 @@ section('P126 — the scenarios report prints, and prints the same lines the scr
       const bands = maxV / st;
       ok(bands >= 3 && bands <= 6, `and a peak of ${peak} gets ${bands} bands — enough to read, not hatching`);
     });
+  }
+}
+
+
+section('P127 — simple mode hides screens, never settings');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const jsx = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner.jsx'), 'utf8');
+
+  // ── it is presentational, and that is the whole safety argument ──────────
+  {
+    // The engine must never learn the mode exists. If uiMode reached a
+    // projection call, the same plan could produce two different answers
+    // depending on which screen the reader happened to be on — far worse than
+    // a busy nav, and the exact class of bug this app keeps finding.
+    const engineSrc = fsMod.readFileSync(pathMod.join(ROOT, 'engine.js'), 'utf8');
+    eq(/uiMode|simpleMode/.test(engineSrc), false, 'the engine has never heard of the mode');
+    const worker = fsMod.readFileSync(pathMod.join(ROOT, 'worker.js'), 'utf8');
+    eq(/uiMode|simpleMode/.test(worker), false, 'nor has the worker');
+    // And it is not reachable from the projection inputs in the app either.
+    const calls = jsx.match(/computeProjections\([^)]*\)/g) || [];
+    gt(calls.length, 0, 'the app calls computeProjections');
+    eq(calls.some(c => /simpleMode|uiMode/.test(c)), false,
+      'and no projection call takes the mode as an argument');
+  }
+
+  // ── what it keeps, and that the list is honest ───────────────────────────
+  {
+    const m = /const SIMPLE_TABS = \[([\s\S]*?)\];/.exec(jsx);
+    ok(m, 'the kept-tab list exists');
+    const kept = [...m[1].matchAll(/'([a-z]+)'/g)].map(x => x[1]);
+    eq(kept.length, 9, 'nine tabs are kept');
+    ['dashboard', 'sandbox', 'personal', 'accounts', 'income'].forEach(t =>
+      ok(kept.includes(t), `${t} is kept — a plan cannot be built without it`));
+    ok(kept.includes('taxplanning'), 'so is tax planning, which is where the biggest lever lives');
+    ok(kept.includes('socialsecurity'), 'and claiming, which is a top-two decision');
+    ok(kept.includes('montecarlo'), "and Monte Carlo — 'it works on average' is not a plan");
+    ['currentyear', 'withdrawal', 'stresstest', 'sensitivity', 'assistant'].forEach(t =>
+      eq(kept.includes(t), false, `${t} is not kept`));
+
+    // Every kept id must be a real tab, or the nav silently renders fewer items
+    // than the list claims.
+    const navAt = jsx.indexOf('const fullNavGroups = [');
+    const nav = jsx.slice(navAt, jsx.indexOf('\n  ];', navAt));
+    kept.forEach(id => ok(nav.includes(`id: '${id}'`), `'${id}' is a real tab in the full nav`));
+    // And the renames must all point at kept tabs.
+    const lm = /const SIMPLE_LABELS = \{([\s\S]*?)\};/.exec(jsx);
+    ok(lm, 'the plain-language labels exist');
+    [...lm[1].matchAll(/(\w+):/g)].map(x => x[1]).forEach(id =>
+      ok(kept.includes(id), `the '${id}' rename applies to a tab simple mode actually shows`));
+  }
+
+  // ── the reader is never stranded ─────────────────────────────────────────
+  {
+    ok(/if \(simpleMode && !SIMPLE_TABS\.includes\(activeTab\)\) setActiveTab\('dashboard'\)/.test(jsx),
+      'switching into simple mode off a hidden tab moves you somewhere the nav can reach');
+    ok(/setUiMode\(simpleMode \? 'advanced' : 'simple'\)/.test(jsx), 'the switch goes both ways');
+    ok(/Show everything/.test(jsx) && /Simplify/.test(jsx),
+      'and it is labelled by what it will do, not by which mode you are in');
+    // A one-way Hide is the trap this file already documents for the +Add and
+    // Run buttons: simple mode drops the Sections strip, so the per-section Hide
+    // buttons that strip is the only way back from must go with it.
+    ok(/\{entry && setVis && \(/.test(jsx), 'Section offers Hide only when there is a way to restore');
+    ok(/if \(!setVis\) return <div>\{children\}<\/div>;/.test(jsx), 'and so does HideableBlock');
+    ok(/if \(!setLevel\) return null;/.test(jsx), 'the level strip is absent when the level is not the reader’s to set');
+    ok(/const effectiveSetSectionVisibility = simpleMode \? null : setSectionVisibility;/.test(jsx),
+      'which is signalled by passing no setter, in one place');
+  }
+
+  // ── a saved override cannot leak a hidden section back in ────────────────
+  {
+    ok(/const effectiveSectionVisibility = simpleMode \? EMPTY_SECTION_VISIBILITY : sectionVisibility;/.test(jsx),
+      'simple mode ignores per-section overrides saved against the full app');
+    ok(/const EMPTY_SECTION_VISIBILITY = \{\};/.test(jsx),
+      'through a stable object, so every tab is not handed a fresh one each render');
+    ok(/const effectiveDetailLevel = simpleMode \? 'essentials' : detailLevel;/.test(jsx),
+      "and pins the detail level without overwriting the reader's own preference");
+    eq(/detailLevel=\{detailLevel\}/.test(jsx), false,
+      'no tab is handed the raw level, which would ignore the mode');
+    eq(/sectionVisibility=\{sectionVisibility\}/.test(jsx), false, 'nor the raw visibility map');
+  }
+
+  // ── an existing plan does not lose its tabs on upgrade ───────────────────
+  {
+    ok(/savedData\?\.uiMode \|\| \(savedData \? 'advanced' : 'simple'\)/.test(jsx),
+      'a saved plan opens in the full app unless it says otherwise; only a brand-new plan starts simple');
+    ok(/detailLevel, uiMode, scenarios,/.test(jsx), 'and the choice is saved with the plan');
+  }
+
+  // ── the level machinery now reaches the longest page in the app ──────────
+  {
+    const mStart = jsx.indexOf('const SECTION_MANIFEST = {');
+    const manifest = eval('(' + jsx.slice(mStart + 'const SECTION_MANIFEST = '.length,
+                                          jsx.indexOf('\n};', mStart) + 2) + ')');
+    ok(manifest.personal, 'Personal Info has a manifest at last');
+    const ids = manifest.personal.map(e => e.id);
+    ['rothStrategy', 'charitable', 'withdrawalPriority', 'spendingPhases', 'survivor', 'healthcare', 'ltc']
+      .forEach(id => ok(ids.includes(id), `its '${id}' section can be put away`));
+    // Healthcare and long-term care stay at essentials on purpose: they are the
+    // two settings that move a plan by seven figures without being touched, and
+    // a reader who cannot find the switch billing them for care has been hidden
+    // from rather than simplified for.
+    eq(manifest.personal.find(e => e.id === 'healthcare').level, 'essential',
+      'healthcare stays visible at every level');
+    eq(manifest.personal.find(e => e.id === 'ltc').level, 'essential',
+      'and so does long-term care, which is the one people are surprised by');
+    // The tab's own inputs are not sections — a plan with no way to say how old
+    // you are is not a simpler plan.
+    ['ages', 'taxSettings', 'spendingGoal'].forEach(id =>
+      eq(ids.includes(id), false, `'${id}' is an input, not a hideable section`));
+    // Every wrapped section must actually be wrapped, or the manifest lists a
+    // control the strip cannot operate.
+    ids.forEach(id => ok(new RegExp(`<HideableBlock tab="personal" id="${id}"`).test(jsx),
+      `'${id}' is wired to a HideableBlock`));
+    // And nothing that operates the tab may sit inside one. Measured by nesting
+    // depth rather than by slicing between the first opening tag and the last
+    // closing one — that span runs off the end of the tab and swallows half the
+    // file, which is how this assertion first "passed" the wrong thing.
+    {
+      const tabStart = jsx.indexOf('function PersonalInfoTab(');
+      const tabEnd = jsx.indexOf('\nfunction ', tabStart + 10);
+      const body = jsx.slice(tabStart, tabEnd === -1 ? jsx.length : tabEnd);
+      const saveAt = body.indexOf('Save Changes');
+      gt(saveAt, -1, 'the tab has a Save control');
+      const before = body.slice(0, saveAt);
+      const opened = (before.match(/<HideableBlock tab="personal"/g) || []).length;
+      const closed = (before.match(/<\/HideableBlock>/g) || []).length;
+      eq(opened - closed, 0,
+        'and it sits outside every hideable section, so no detail level can take away the way to save');
+    }
   }
 }
 
