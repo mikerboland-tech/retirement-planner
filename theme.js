@@ -60,9 +60,12 @@
   // The first pass of this file honoured only constraint 2 and produced blue
   // earned income and orange Social Security — separable, and meaningless.
   //
-  //   Balance sheet   preTax / roth / brokerage / nonLiquid
+  //   Balance sheet   preTax / roth / brokerage / hsa / nonLiquid
   //     worst adjacent pair: yellow↔aqua, CVD ΔE 8.4 dark / 9.1 light,
-  //     normal-vision 19.8 dark / 22.9 light.
+  //     normal-vision 19.3 dark / 19.6 light.
+  //     HSA took magenta after brokerage because it was the only free slot and
+  //     position that passed both modes; every alternative (orange, green, red;
+  //     after roth or after brokerage) failed a check in at least one.
   //
   //   Income and flows  earned → socialSecurity → pension → otherIncome →
   //     withdrawalVoluntary → rmd → rothConversion → conversionTaxDraw
@@ -73,6 +76,7 @@
     preTax:    SLOTS.blue,    // taxed on the way out
     roth:      SLOTS.aqua,    // green — the most prized dollar in the plan
     brokerage: SLOTS.yellow,  // gold, the flexible middle bucket
+    hsa:       SLOTS.magenta, // health savings — taxed to a non-spouse heir, unlike brokerage
     nonLiquid: SLOTS.violet,  // not spendable
 
     // ── Income and flows, in the order they stack ──────────────────────────
@@ -457,7 +461,7 @@
   // The order each chart stacks in. Exported so the chart and the validator
   // cannot drift apart: a test asserts the separation of exactly these pairs.
   const STACKS = {
-    balanceSheet: ['preTax', 'roth', 'brokerage', 'nonLiquid'],
+    balanceSheet: ['preTax', 'roth', 'brokerage', 'hsa', 'nonLiquid'],
     incomeFlows: ['earnedIncome', 'socialSecurity', 'pension', 'otherIncome',
                   'withdrawalVoluntary', 'rmd', 'rothConversion', 'conversionTaxDraw'],
   };

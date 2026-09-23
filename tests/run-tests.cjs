@@ -14932,6 +14932,121 @@ section('P128 — the review of v2.41: every Hide button has a way back, or is n
   }
 }
 
+
+section('P129 — the full review: HSA is its own bucket, and the solver lands on target');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const theme = require('../theme.js');
+  const plan = (o) => ({ ...engine.DEFAULT_PLAN_INFO, myAge: 58, spouseAge: 58,
+    myBirthYear: TODAY_YEAR - 58, spouseBirthYear: TODAY_YEAR - 58, myRetirementAge: 58, spouseRetirementAge: 58,
+    filingStatus: 'single', state: 'Florida', desiredRetirementIncome: 360000, legacyAge: 90,
+    survivorModelEnabled: false, healthcareModel: 'none', ltcModel: 'none',
+    withdrawalPriority: ['pretax', 'brokerage', 'roth'], rothConversionAmount: 0, heirTaxRate: 0.25, ...o });
+  const acct = (id, type, balance, extra = {}) => ({ id, name: type + id, type, owner: 'me', contributor: 'me',
+    balance, contribution: 0, cagr: 0.05, startAge: 58, stopAge: 58, ...extra });
+
+  // ── HSA: its own bucket ──────────────────────────────────────────────────
+  {
+    // It used to fall through to brokerage: withdrawals booked as pre-tax, the
+    // balance booked as brokerage, and the after-tax legacy passing it to heirs
+    // untaxed. A non-spouse beneficiary owes ordinary income tax on the whole
+    // balance in the year of death, IRC §223(f)(8)(B).
+    const pi = plan({ myAge: 62, spouseAge: 62, myBirthYear: TODAY_YEAR - 62, spouseBirthYear: TODAY_YEAR - 62,
+      myRetirementAge: 62, spouseRetirementAge: 62, desiredRetirementIncome: 60000 });
+    const accts = [acct(1, 'traditional_ira', 1500000), acct(2, 'hsa', 500000), acct(3, 'brokerage', 300000, { costBasisPercent: 0.6 })];
+    const p = computeProjections(pi, accts, [], [], [], [], TODAY_YEAR);
+    p.forEach(r => {
+      if (r.myAge % 7) return;
+      // ±$2: each bucket is rounded on its own and the total rounds the
+      // unrounded sum, as it always has with three buckets.
+      eq(r.preTaxBalance + r.rothBalance + r.brokerageBalance + r.hsaBalance, r.totalPortfolio,
+        `age ${r.myAge}: the four buckets add up to the portfolio`, 2);
+      eq(r.hsaBalance, r.perAccountBalances[2], `age ${r.myAge}: the HSA bucket is exactly the HSA account`);
+    });
+    gt(p[p.length - 1].hsaBalance, 0, 'the HSA is reported in its own bucket');
+    const L = engine.afterTaxLegacyValue(p, { legacyAge: 90, heirTaxRate: 0.25 });
+    approx(L.taxOnHSA, L.hsa * 0.25, 'after-tax legacy taxes the HSA at the heir rate', 0.001);
+    eq(L.afterTax, L.estate - L.taxOnPreTax - L.taxOnHSA, 'and subtracts that from the estate, like the pre-tax balance');
+    const S = engine.scoreRothStrategy(p, { legacyAge: 90, heirTaxRate: 0.25 });
+    const at = p.find(r => r.myAge === 90);
+    approx(S.afterTaxLegacy, at.rothBalance + at.brokerageBalance + (at.preTaxBalance + at.hsaBalance) * 0.75,
+      "the optimiser's portfolio measure discounts it the same way", 0.0001);
+    // Moving the same dollars between an HSA and brokerage must now move the
+    // after-tax legacy — it did not, which was the bug.
+    const asBrokerage = computeProjections(pi, [accts[0], acct(2, 'brokerage', 500000, { costBasisPercent: 1 }), accts[2]], [], [], [], [], TODAY_YEAR);
+    lt(L.afterTax, engine.afterTaxLegacyValue(asBrokerage, { legacyAge: 90, heirTaxRate: 0.25 }).afterTax,
+      'an HSA leaves heirs less than the same money in brokerage');
+    // Today's dollars: a money field missing from the whitelist silently stays nominal.
+    ok(engine.REAL_DOLLAR_FIELDS.includes('hsaBalance'), "hsaBalance is converted in today's-dollars mode");
+    // A plan without an HSA is unchanged: the bucket is simply zero.
+    const none = computeProjections(pi, [accts[0], accts[2]], [], [], [], [], TODAY_YEAR);
+    ok(none.every(r => r.hsaBalance === 0), 'a plan with no HSA reports an HSA bucket of zero every year');
+  }
+  {
+    // One formula, not two. The worker re-derived the after-tax legacy inline
+    // with the heir rate hard-coded at 25%, whatever the plan said.
+    const worker = fsMod.readFileSync(pathMod.join(ROOT, 'worker.js'), 'utf8');
+    eq(/HEIR_TAX_RATE\s*=\s*0\.25/.test(worker), false, 'the worker no longer hard-codes the heir tax rate');
+    ok(/E\.scoreRothStrategy\(proj, \{ legacyAge, heirTaxRate: personalInfo\.heirTaxRate \?\? 0\.25 \}\)/.test(worker),
+      "it calls the engine's own measure with the plan's rate");
+  }
+  {
+    // The chart band: validated, not picked. Magenta after brokerage was the only
+    // free slot and position that passed both modes; the STACKS test elsewhere
+    // re-derives every adjacent pair, so this only pins that HSA is in the stack.
+    ok(theme.SERIES.hsa, 'HSA has a series colour');
+    eq(JSON.stringify(theme.STACKS.balanceSheet), JSON.stringify(['preTax', 'roth', 'brokerage', 'hsa', 'nonLiquid']),
+      'and a place in the balance-sheet stack');
+  }
+
+  // ── the solver: one wrong estimate, one wrong yardstick, one slow update ──
+  {
+    // 1. A deduction bigger than ordinary income shelters gains (Qualified
+    //    Dividends worksheet, line 5). The final calculation always applied it;
+    //    the solver did not, priced tax on gains that were never taxable, and
+    //    over-withdrew — -$2,412 on this fixture before the fix.
+    const p = computeProjections(plan({ withdrawalPriority: ['brokerage', 'pretax', 'roth'] }),
+      [acct(1, 'brokerage', 6000000, { costBasisPercent: 0.5 })], [], [], [], [], TODAY_YEAR);
+    eq(p[0].federalOrdinaryTax, 0, 'fixture: a brokerage-funded year with no ordinary income');
+    lt(Math.abs(p[0].solverResidual), 10, 'the year lands on target (it missed by $2,412)');
+    ok(p[0].solverConverged, 'and says so');
+  }
+  {
+    // 2. The residual must be measured against what the solver funds. It left
+    //    out one-time and recurring expenses, so a year that paid for a roof to
+    //    the dollar reported a -$149,991 miss.
+    const p = computeProjections(plan({ desiredRetirementIncome: 80000 }), [acct(1, 'traditional_ira', 3000000)], [], [],
+      [{ id: 1, name: 'Roof', type: 'expense', amount: 150000, age: 60 }], [], TODAY_YEAR);
+    const roof = p.find(r => r.myAge === 60);
+    eq(roof.oneTimeExpense, 150000, 'fixture: a $150,000 one-time expense');
+    lt(Math.abs(roof.solverResidual), 100, 'the year that funds it is measured as on target');
+    ok(roof.solverConverged, 'and is not reported as a solver failure');
+  }
+  {
+    // 3. At a steep all-in marginal rate the plain update (withdrawal +=
+    //    shortfall) closes only (1 - rate) of the gap per pass and ran out of
+    //    passes: $2,856 short here, HSA-only before 65 in California — 37%
+    //    federal, the 20% HSA penalty, state on top. The secant step converges.
+    const p = computeProjections(plan({ state: 'California', desiredRetirementIncome: 700000 }),
+      [acct(1, 'hsa', 20000000)], [], [], [], [], TODAY_YEAR);
+    const pre65 = p.filter(r => r.myAge < 65);
+    gt(pre65[0].hsaPenalty, 0, 'fixture: penalised HSA draws before 65');
+    lt(Math.max(...pre65.map(r => Math.abs(r.solverResidual))), 100, 'every pre-65 year lands on target (it missed by $2,856)');
+    ok(pre65.every(r => r.solverIterations < 15), 'without exhausting the iteration cap');
+  }
+  {
+    // And it did not buy that by making ordinary plans worse: the baseline
+    // fixture converges, with fewer passes than the plain update needed.
+    const sc = baseScenario({ myAge: 65, spouseAge: 65, myRetirementAge: 65, spouseRetirementAge: 65 });
+    const p = run(sc);
+    const engaged = p.filter(r => r.solverIterations > 0);
+    gt(engaged.length, 0, 'the baseline plan exercises the solver');
+    ok(engaged.every(r => Math.abs(r.solverResidual) < 100), 'every solved year lands on target');
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

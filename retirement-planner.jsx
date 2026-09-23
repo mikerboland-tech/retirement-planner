@@ -1371,6 +1371,7 @@ const treatmentInk = (kind) => ({
   pretax: SERIES.preTax, traditional: SERIES.preTax,
   roth: SERIES.roth,
   brokerage: SERIES.brokerage,
+  hsa: SERIES.hsa,
 }[kind] || THEME.inkSecondary);
 
 // The same three as a chip — tint, border and text derived from the one colour
@@ -13035,6 +13036,9 @@ function employerContribShare(account, amount) {
 // those three — the engine reaches them itself.
 
 function AccountsTab({ detailLevel, sectionVisibility, setDetailLevel, setSectionVisibility, accountTypes, accounts, assets, computeProjections, contributorTypes, incomeStreams, oneTimeEvents, personalInfo, projections, recurringExpenses, setAccounts, setEditingAccount, setShowAccountModal }) {
+  // Data-driven, like the charts: the HSA column appears when the plan has HSA
+  // money, so a plan without one sees exactly the table it always did.
+  const planHasHSA = (projections || []).some(p => (p.hsaBalance || 0) > 0);
   const [acctInfoOpen, setAcctInfoOpen] = useState(null);
   const [showIndividualAccounts, setShowIndividualAccounts] = useState(false);
   const [showIndividualContribs, setShowIndividualContribs] = useState(false);
@@ -13545,6 +13549,9 @@ function AccountsTab({ detailLevel, sectionVisibility, setDetailLevel, setSectio
                       <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.preTax }}>Pre-Tax</th>
                       <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.roth }}>Roth</th>
                       <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.brokerage }}>Brokerage</th>
+                      {/* HSA is its own bucket now. Without this column the three
+                          before it stop adding up to Total for any plan with one. */}
+                      {planHasHSA && <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.hsa }}>HSA</th>}
                       <th className="text-right py-2 px-2 text-amber-400 font-medium">Total</th>
                       <th className="text-right py-2 px-2 font-medium" style={{ color: SERIES.rmd }}>RMD</th>
                       <th className="text-right py-2 px-2 text-orange-400 font-medium">Withdrawal</th>
@@ -13565,6 +13572,7 @@ function AccountsTab({ detailLevel, sectionVisibility, setDetailLevel, setSectio
                           <td className="py-1.5 px-2 text-right font-mono" style={{ color: SERIES.preTax }}>{formatCurrency(p.preTaxBalance)}</td>
                           <td className="py-1.5 px-2 text-right font-mono" style={{ color: SERIES.roth }}>{formatCurrency(p.rothBalance)}</td>
                           <td className="py-1.5 px-2 text-right font-mono" style={{ color: SERIES.brokerage }}>{formatCurrency(p.brokerageBalance)}</td>
+                          {planHasHSA && <td className="py-1.5 px-2 text-right font-mono" style={{ color: SERIES.hsa }}>{formatCurrency(p.hsaBalance)}</td>}
                           <td className="py-1.5 px-2 text-right text-amber-400 font-mono font-semibold">{formatCurrency(p.totalPortfolio)}</td>
                           <td className="py-1.5 px-2 text-right font-mono"
                               style={{ color: hasRMD ? SERIES.rmd : THEME.inkMuted }}>
@@ -13595,6 +13603,12 @@ function AccountsTab({ detailLevel, sectionVisibility, setDetailLevel, setSectio
                   <div className="w-3 h-3 rounded" style={{ background: SERIES.brokerage }}></div>
                   <span className="text-slate-400">Brokerage</span>
                 </div>
+                {planHasHSA && (
+                  <div className="flex items-center gap-2">
+                    <div className="w-3 h-3 rounded" style={{ background: SERIES.hsa }}></div>
+                    <span className="text-slate-400">HSA</span>
+                  </div>
+                )}
                 <div className="flex items-center gap-2">
                   <div className="w-3 h-3 rounded" style={{ background: SERIES.rmd }}></div>
                   <span className="text-slate-400">Required Minimum Distribution</span>
@@ -14864,6 +14878,7 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
     preTax: Math.round(p.preTaxBalance || 0),
     roth: Math.round(p.rothBalance || 0),
     brokerage: Math.round(p.brokerageBalance || 0),
+    hsa: Math.round(p.hsaBalance || 0),
     spending: Math.round(p.desiredIncome || 0),
     guaranteed: Math.round(p.totalGuaranteedIncome || 0),
     earned: Math.round(p.earnedIncome || 0),
@@ -15282,6 +15297,7 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
               <Bar dataKey="preTax" name="Pre-tax" stackId="b" fill={SERIES.preTax} />
               <Bar dataKey="roth" name="Roth" stackId="b" fill={SERIES.roth} />
               <Bar dataKey="brokerage" name="Brokerage" stackId="b" fill={SERIES.brokerage} />
+              {chartData.some(d => d.hsa > 0) && <Bar dataKey="hsa" name="HSA" stackId="b" fill={SERIES.hsa} />}
             </ComposedChart>
           </ResponsiveContainer>
         </PanelCard>
@@ -15380,7 +15396,8 @@ function NetWorthProjectionChart({ data, personalInfo, retirementAge, badge, onH
                   items: [
                     { color: SERIES.preTax, label: 'Pre-Tax', desc: '401(k), Traditional IRA, 403(b), 457(b). Contributions reduced your taxable income, but every dollar withdrawn in retirement will be taxed as ordinary income. This is typically your largest bucket during accumulation.' },
                     { color: SERIES.roth, label: 'Roth', desc: 'Roth IRA, Roth 401(k), etc. You paid tax on contributions upfront, so withdrawals in retirement are completely tax-free. This layer growing large is very favorable for retirement flexibility.' },
-                    { color: SERIES.brokerage, label: 'Brokerage', desc: 'Taxable investment accounts and HSAs. Withdrawals may generate capital gains taxes, but there are no age restrictions or required minimum distributions (except HSAs are tax-free for medical expenses).' },
+                    { color: SERIES.brokerage, label: 'Brokerage', desc: 'Taxable investment accounts. Withdrawals may generate capital gains taxes, but there are no age restrictions or required minimum distributions, and heirs inherit with a stepped-up cost basis.' },
+                    { color: SERIES.hsa, label: 'HSA', desc: 'Health Savings Accounts, shown only when you have one. Tax-free for medical expenses at any age; other withdrawals are ordinary income, plus a 20% penalty before 65. A spouse can keep an inherited HSA tax-free, but for anyone else the whole balance becomes taxable income in the year of death — which is why the after-tax legacy discounts it like a pre-tax account.' },
                     { color: SERIES.nonLiquid, label: 'Non-Liquid Assets', desc: 'Real estate, vehicles, business equity — things with value but not easily converted to spending cash. Shown net of any remaining mortgages or debt.' }
                   ]
                 },
@@ -15457,6 +15474,10 @@ function NetWorthProjectionChart({ data, personalInfo, retirementAge, badge, onH
               <Area type="monotone" dataKey="preTaxBalance" stackId="1" fill={SERIES.preTax} stroke={SERIES.preTax} strokeWidth={1.5} fillOpacity={0.72} name="Pre-Tax" />
               <Area type="monotone" dataKey="rothBalance" stackId="1" fill={SERIES.roth} stroke={SERIES.roth} strokeWidth={1.5} fillOpacity={0.72} name="Roth" />
               <Area type="monotone" dataKey="brokerageBalance" stackId="1" fill={SERIES.brokerage} stroke={SERIES.brokerage} strokeWidth={1.5} fillOpacity={0.72} name="Brokerage" />
+              {/* Only when there is one — an empty band still claims a legend entry. */}
+              {(data || []).some(r => (r.hsaBalance || 0) > 0) && (
+                <Area type="monotone" dataKey="hsaBalance" stackId="1" fill={SERIES.hsa} stroke={SERIES.hsa} strokeWidth={1.5} fillOpacity={0.72} name="HSA" />
+              )}
               <Area type="monotone" dataKey="netAssetValue" stackId="1" fill={SERIES.nonLiquid} stroke={SERIES.nonLiquid} strokeWidth={1.5} fillOpacity={0.72} name="Non-Liquid Assets" />
               <Line type="monotone" dataKey="totalNetWorth" stroke={THEME.inkPrimary} strokeWidth={2} dot={false} name="Total Net Worth" />
               <ReferenceLine x={retirementAge} stroke={THEME.reference} strokeDasharray="5 5" />
@@ -20400,6 +20421,7 @@ function BreakingPointReport({ projections, personalInfo, accounts, incomeStream
       { key: 'brokerageBalance', label: 'Taxable / brokerage' },
       { key: 'preTaxBalance', label: 'Pre-tax (401k / IRA)' },
       { key: 'rothBalance', label: 'Roth' },
+      { key: 'hsaBalance', label: 'HSA' },
     ];
     return kinds.map(k => {
       const started = (projections || []).find(p => (p[k.key] || 0) > 0);
@@ -20407,7 +20429,11 @@ function BreakingPointReport({ projections, personalInfo, accounts, incomeStream
       const gone = (projections || []).find(p => p.myAge >= started.myAge && (p[k.key] || 0) <= 0);
       const peak = (projections || []).reduce((a, p) => Math.max(a, p[k.key] || 0), 0);
       return { ...k, everFunded: true, peak, goneYear: gone || null };
-    });
+    })
+    // The three original kinds show a dash when never funded, as they always
+    // have. HSA is dropped instead: most plans do not have one, and a new row of
+    // dashes in every existing report would be noise, not information.
+      .filter(d => d.everFunded || d.key !== 'hsaBalance');
   }, [projections]);
 
   const retired = (projections || []).filter(p => p.myAge >= retirementAge);

@@ -795,10 +795,13 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
       // they drain pre-tax accounts during the bridge years, so two scenarios
       // with equal raw balances can leave materially unequal spendable wealth.
       // Same discount the Roth optimizer uses (engine scoreRothStrategy).
-      const HEIR_TAX_RATE = 0.25;
+      //
+      // It used to re-derive that discount inline, with the heir rate hard-coded
+      // at 25% whatever the plan said — a second copy of the formula that could
+      // (and, when HSAs got their own bucket, would) drift from the first. It
+      // calls the engine's now, with the plan's own rate.
       const afterTaxAtLegacy = atLegacy
-        ? Math.round((atLegacy.rothBalance || 0) + (atLegacy.brokerageBalance || 0)
-            + (atLegacy.preTaxBalance || 0) * (1 - HEIR_TAX_RATE))
+        ? E.scoreRothStrategy(proj, { legacyAge, heirTaxRate: personalInfo.heirTaxRate ?? 0.25 }).afterTaxLegacy
         : 0;
 
       let mcResults = null;

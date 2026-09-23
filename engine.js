@@ -3297,6 +3297,7 @@ const REAL_DOLLAR_FIELDS = [
   'rothUnseasonedDrawn', 'rothTaxableEarnings', 'rothUnseasoned',
   'bracketFillRoom', 'bracketFillDraw',
   'annuityIncome', 'annuityExcluded', 'annuityPremium',
+  'hsaBalance',
 ];
 // Objects whose VALUES are money and whose keys are ids or category names.
 const REAL_DOLLAR_MAPS = ['perAccountBalances', 'perAccountContributions', 'recurringExpensesByCategory'];
@@ -3367,20 +3368,28 @@ const afterTaxLegacyValue = (proj, { legacyAge, heirTaxRate = 0.25 } = {}) => {
   const preTax     = at.preTaxBalance || 0;
   const roth       = at.rothBalance || 0;
   const brokerage  = at.brokerageBalance || 0;
+  const hsa        = at.hsaBalance || 0;
   const estate     = at.totalNetWorth || 0;
-  // Whatever totalNetWorth counts beyond the three portfolio buckets — the house,
+  // Whatever totalNetWorth counts beyond the four portfolio buckets — the house,
   // other assets, net of any debt. Derived rather than re-summed so this cannot
   // drift from the engine's own net-worth line.
-  const nonPortfolio = estate - (preTax + roth + brokerage);
+  const nonPortfolio = estate - (preTax + roth + brokerage + hsa);
+  // An inherited HSA is ordinary income to a non-spouse beneficiary, all of it,
+  // in the year of death — the same treatment as the pre-tax balance, at the
+  // same assumed rate. (A spouse can continue it tax-free; this measure is
+  // "what reaches whoever inherits", which is the non-spouse case.)
   const taxOnPreTax  = preTax * heirTaxRate;
+  const taxOnHSA     = hsa * heirTaxRate;
   return {
     age: at.myAge,
     estate:      Math.round(estate),
-    afterTax:    Math.round(estate - taxOnPreTax),
+    afterTax:    Math.round(estate - taxOnPreTax - taxOnHSA),
     taxOnPreTax: Math.round(taxOnPreTax),
+    taxOnHSA:    Math.round(taxOnHSA),
     preTax:      Math.round(preTax),
     roth:        Math.round(roth),
     brokerage:   Math.round(brokerage),
+    hsa:         Math.round(hsa),
     nonPortfolio: Math.round(nonPortfolio),
     heirTaxRate,
   };
@@ -3395,7 +3404,7 @@ const scoreRothStrategy = (proj, { legacyAge, retirementAge, heirTaxRate = 0.25 
   // strategies differ in their accounts, not in the house. Same discount rule as
   // afterTaxLegacyValue, applied to the portfolio slice of it.
   const afterTaxLegacy = (atLegacy.rothBalance || 0) + (atLegacy.brokerageBalance || 0)
-    + (atLegacy.preTaxBalance || 0) * (1 - heirTaxRate);
+    + ((atLegacy.preTaxBalance || 0) + (atLegacy.hsaBalance || 0)) * (1 - heirTaxRate);
   return {
     afterTaxLegacy: Math.round(afterTaxLegacy),
     lifetimeTax: Math.round(sum('totalTax')),
@@ -9911,6 +9920,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       solverIterations = 0;
       if (afterTaxGap > 0) {
         let testWithdrawal = afterTaxGap; // Start with the gap
+        // The previous pass, for the secant step below.
+        let prevWithdrawal = null, prevNet = null;
         
         for (let i = 0; i < MAX_ITERATIONS_FOR_TAX_CALC; i++) { // Iterate to converge
           // Estimate the ACTUAL draw composition for this test withdrawal by simulating the
@@ -9947,8 +9958,20 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // LTCG tax on realized gains, stacked above ordinary taxable income.
           // The 65+ deductions lower ordinary taxable income, so gains stack lower too.
           const iterAdjDeduction = getFederalDeduction(effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(iterMAGI));
+          // A deduction larger than ordinary income is not lost: the Qualified
+          // Dividends and Capital Gain Tax Worksheet (line 5) applies what is left
+          // of it against the gains. The final calculation has always done this;
+          // the solver clamped ordinary-minus-deduction at zero and then taxed
+          // every dollar of gain on top, so in any low-ordinary-income year — a
+          // brokerage-funded early retirement is the common one — it priced tax
+          // on a slice of gain that was never taxable, grossed the withdrawal up
+          // for it, and over-delivered. Measured: $4,486 in one first-retirement
+          // year, exactly 15% of a $29,951 deduction. Same three lines as the
+          // final calculation now, so the two cannot disagree on this again.
+          const iterUnusedDeduction = Math.max(0, iterAdjDeduction - ordinaryBaseGross);
+          const iterTaxableGains = Math.max(0, estimatedGains - iterUnusedDeduction);
           const estCapGainsTax = calculateCapitalGainsTax(
-            estimatedGains, Math.max(0, ordinaryBaseGross - iterAdjDeduction) + estimatedGains,
+            iterTaxableGains, Math.max(0, ordinaryBaseGross - iterAdjDeduction) + iterTaxableGains,
             effectiveFilingStatus, taxIndexYears, pi.inflationRate
           );
           // NIIT (3.8%) — kicks in when MAGI crosses the filing-status threshold.
@@ -10009,7 +10032,24 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // Adjust withdrawal
           solverIterations = i + 1;
           if (Math.abs(shortfall) < 10) break; // Close enough
-          testWithdrawal += shortfall;
+          // Secant step: scale the correction by how much net a withdrawal
+          // dollar actually delivered on the last pass. The plain update
+          // (withdrawal += shortfall) assumes every extra dollar drawn arrives in
+          // full, so each pass closes only (1 − marginal rate) of the gap. At an
+          // all-in marginal rate of ~62% — 37% federal, the 20% pre-65 HSA
+          // penalty, state on top — that is 38% per pass, and the loop ran out
+          // of passes $300 short. Measuring the slope converges in a few passes
+          // at any rate. First pass, a flat or inverted slope (an IRMAA or ACA
+          // cliff can make one more dollar deliver less), or an implausible one
+          // all fall back to the plain step, which is what ran before.
+          let slope = 1;
+          if (prevWithdrawal !== null && Math.abs(testWithdrawal - prevWithdrawal) > 1) {
+            const measured = (netFromWithdrawal - prevNet) / (testWithdrawal - prevWithdrawal);
+            if (Number.isFinite(measured) && measured > 0.05 && measured <= 1.5) slope = measured;
+          }
+          prevWithdrawal = testWithdrawal;
+          prevNet = netFromWithdrawal;
+          testWithdrawal += shortfall / slope;
           testWithdrawal = Math.max(0, testWithdrawal); // Don't go negative
         }
         
@@ -11102,12 +11142,21 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     excessReinvestmentPool *= Math.pow(1 + poolGrowthRate2, 0.5);
     
     // Calculate final balances (after withdrawals and growth)
-    let finalPreTaxBalance = 0, finalRothBalance = 0, finalBrokerageBalance = 0;
+    // HSA is its own bucket. It used to fall through to the `else` and be
+    // reported as brokerage, which was wrong in two directions at once: its
+    // withdrawals were booked as pre-tax while its balance sat in brokerage, and
+    // the after-tax legacy passed it to heirs at face value like stepped-up
+    // brokerage — when a non-spouse beneficiary owes ordinary income tax on the
+    // entire balance in the year of death (IRC §223(f)(8)(B)). Measured on a
+    // $500K HSA held to 90: after-tax legacy overstated by $677K.
+    let finalPreTaxBalance = 0, finalRothBalance = 0, finalBrokerageBalance = 0, finalHSABalance = 0;
     accts.forEach(account => {
       if (isPreTaxAccount(account.type)) {
         finalPreTaxBalance += accountBalances[account.id];
       } else if (isRothAccount(account.type)) {
         finalRothBalance += accountBalances[account.id];
+      } else if (isHSAAccount(account.type)) {
+        finalHSABalance += accountBalances[account.id];
       } else {
         finalBrokerageBalance += accountBalances[account.id];
       }
@@ -11169,8 +11218,15 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // solver.
     const solverEngaged = isRetired && (portfolioWithdrawal > totalRMD + 1)
       && unfundedShortfall <= 0 && (rothConversionThisYear || 0) <= 0;
+    // Measured against the SAME target the solver funds (adjustedDesiredIncome,
+    // with the ACA premium as finally priced). It used to leave out one-time and
+    // recurring expenses, so a year that funded a $178,000 roof to within $4 was
+    // reported as a $177,996 over-delivery and solverConverged:false — in 8% of
+    // random plans, every one of them a correct year. A yardstick that differs
+    // from the thing being measured reports its own difference as the error.
     solverResidual = solverEngaged
-      ? (desiredIncome + healthcareExpense + Math.round(acaNetPremium)) - deliveredNet
+      ? (desiredIncome + oneTimeExpenseTotal + healthcareExpense + totalRecurringExpenses
+         + Math.round(acaNetPremium)) - deliveredNet
       : 0;
 
     years.push({
@@ -11322,7 +11378,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       preTaxBalance: Math.round(finalPreTaxBalance),
       rothBalance: Math.round(finalRothBalance),
       brokerageBalance: Math.round(finalBrokerageBalance),
-      totalPortfolio: Math.round(finalPreTaxBalance + finalRothBalance + finalBrokerageBalance),
+      hsaBalance: Math.round(finalHSABalance),
+      totalPortfolio: Math.round(finalPreTaxBalance + finalRothBalance + finalBrokerageBalance + finalHSABalance),
       weightedCAGR,
       // The return actually applied to the portfolio this year: the scenario
       // override when one is driving the run (Monte Carlo, a historical
@@ -11334,7 +11391,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       assetValue: Math.round(totalAssetValue),
       assetDebt: Math.round(totalAssetDebt),
       netAssetValue: Math.round(netAssetValue),
-      totalNetWorth: Math.round(finalPreTaxBalance + finalRothBalance + finalBrokerageBalance + netAssetValue),
+      totalNetWorth: Math.round(finalPreTaxBalance + finalRothBalance + finalBrokerageBalance + finalHSABalance + netAssetValue),
       // Per-account balances snapshot (used by individual account view in Accounts tab)
       perAccountBalances: accts.reduce((obj, a) => {
         obj[a.id] = Math.round(accountBalances[a.id] || 0);
