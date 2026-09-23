@@ -8480,6 +8480,48 @@ const sandboxScenario = (base = {}, controls = {}) => {
     });
   }
 
+  // Individual income streams — business, rental, anything whose reliability
+  // is not in the reader's control. Keyed by stream id; each entry may switch
+  // the stream off, scale its amount, or end it earlier (or later).
+  //
+  // After retirement ages and claim ages on purpose: retiring moves salary end
+  // ages and claiming reprices Social Security, and an adjustment the reader
+  // made to a stream has to apply to the stream as those left it — a 50% cut to
+  // a benefit claimed at 70 is half the age-70 benefit, not half the plan's.
+  // Before savings, because the savings lever reads salaries off the streams.
+  //
+  // "Off" removes the stream rather than zeroing it: a zero-dollar stream still
+  // counts as a stream to code that asks whether one exists (a survivor's
+  // benefit choice, an annuity's purchase), and "without this income" means it
+  // is not there at all. Ids no longer in the plan are ignored, so a stream
+  // deleted after a scenario was set up cannot break it.
+  const adj = controls.streamAdjustments;
+  if (adj && typeof adj === 'object') {
+    const money = (v) => '$' + Math.round(v).toLocaleString('en-US');
+    const kept = [];
+    streams.forEach(st => {
+      const a = adj[st.id];
+      if (!a || typeof a !== 'object') { kept.push(st); return; }
+      if (a.off === true) {
+        moved.push({ kind: 'stream', id: st.id, name: st.name, field: 'income', from: 'on', to: 'off' });
+        return;
+      }
+      let next = st;
+      if (Number.isFinite(a.scale) && a.scale >= 0 && Math.abs(a.scale - 1) > 1e-9) {
+        next = { ...next, amount: (st.amount || 0) * a.scale };
+        moved.push({ kind: 'stream', id: st.id, name: st.name, field: 'amount',
+                     from: money(st.amount || 0), to: money(next.amount) });
+      }
+      if (Number.isFinite(a.endAge) && a.endAge !== st.endAge && st.type !== 'social_security') {
+        next = { ...next, endAge: a.endAge };
+        moved.push({ kind: 'stream', id: st.id, name: st.name, field: 'endAge',
+                     from: st.endAge, to: a.endAge });
+      }
+      kept.push(next);
+    });
+    streams = kept;
+  }
+
   const sav = controls.savings;
   if (sav && Number.isFinite(sav.targetDollars) && Number.isFinite(sav.currentPersonal)) {
     // Salaries come from the streams as they now stand, so a retirement age the

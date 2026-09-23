@@ -15267,6 +15267,99 @@ section('P131 — state tables checked against 2026 law: four enacted changes, f
   }
 }
 
+
+section('P132 — Sandbox: income streams you do not control, switched off, scaled or ended early');
+
+{
+  const { sandboxScenario, afterTaxLegacyValue } = engine;
+  const pi = { ...engine.DEFAULT_PLAN_INFO, myAge: 55, spouseAge: 55, myBirthYear: TODAY_YEAR - 55, spouseBirthYear: TODAY_YEAR - 55,
+    myRetirementAge: 60, spouseRetirementAge: 60, filingStatus: 'married_joint', state: 'Florida',
+    desiredRetirementIncome: 120000, legacyAge: 90, survivorModelEnabled: false, healthcareModel: 'none',
+    ltcModel: 'none', rothConversionAmount: 0 };
+  const accts = [{ id: 1, name: '401k', type: '401k', owner: 'me', contributor: 'me', balance: 1500000,
+    contribution: 20000, cagr: 0.06, startAge: 55, stopAge: 60 }];
+  const streams = [
+    { id: 1, name: 'Salary', type: 'earned_income', amount: 150000, startAge: 55, endAge: 59, cola: 0.03, owner: 'me' },
+    { id: 2, name: 'Consulting', type: 'business', amount: 60000, startAge: 55, endAge: 75, cola: 0.02, owner: 'me' },
+    { id: 3, name: 'Rental', type: 'rental', amount: 24000, startAge: 55, endAge: 90, cola: 0.02, owner: 'joint' },
+    { id: 4, name: 'SS', type: 'social_security', amount: 40000, startAge: 67, endAge: 120, cola: 0.02, owner: 'me' },
+  ];
+  const snapshot = JSON.stringify(streams);
+  const sc = (ctl) => sandboxScenario({ pi, accts, streams }, ctl);
+  const run = (ctl) => { const x = sc(ctl); return computeProjections(x.pi, x.accts, x.streams, [], [], [], TODAY_YEAR, x.opts); };
+  const legacy = (p) => afterTaxLegacyValue(p, { legacyAge: 90, heirTaxRate: 0.25 }).afterTax;
+  const base = run({});
+
+  // ── off ──────────────────────────────────────────────────────────────────
+  {
+    const x = sc({ streamAdjustments: { 2: { off: true } } });
+    eq(x.streams.some(st => st.id === 2), false, 'switching a stream off removes it from the what-if');
+    eq(x.streams.length, 3, 'and only that one');
+    ok(x.moved.some(m => m.id === 2 && m.field === 'income' && m.from === 'on' && m.to === 'off'),
+      'and the change is reported, so the reader can see what the what-if assumes');
+    const p = run({ streamAdjustments: { 2: { off: true } } });
+    const age60 = (proj) => proj.find(r => r.myAge === 60);
+    approx(age60(base).otherIncome - age60(p).otherIncome, 60000 * Math.pow(1.02, 5),
+      'the year loses exactly that income, grown at its COLA', 0.01);
+    lt(legacy(p), legacy(base), 'and the plan leaves less without it');
+  }
+
+  // ── scale ────────────────────────────────────────────────────────────────
+  {
+    const x = sc({ streamAdjustments: { 3: { scale: 0.5 } } });
+    eq(x.streams.find(st => st.id === 3).amount, 12000, 'scaling to 50% halves the amount');
+    ok(x.moved.some(m => m.id === 3 && m.field === 'amount' && m.from === '$24,000' && m.to === '$12,000'),
+      'reported in dollars');
+    eq(sc({ streamAdjustments: { 3: { scale: 1 } } }).moved.length, 0, 'a scale of 100% is no change at all');
+    gt(legacy(run({ streamAdjustments: { 3: { scale: 1.5 } } })), legacy(base), 'and above 100% models more income, not only less');
+  }
+
+  // ── end early ────────────────────────────────────────────────────────────
+  {
+    const x = sc({ streamAdjustments: { 2: { endAge: 62 } } });
+    eq(x.streams.find(st => st.id === 2).endAge, 62, 'a business can be ended early');
+    const p = run({ streamAdjustments: { 2: { endAge: 62 } } });
+    gt(p.find(r => r.myAge === 62).otherIncome, p.find(r => r.myAge === 63).otherIncome + 50000,
+      'it pays through 62 and stops');
+    eq(sc({ streamAdjustments: { 4: { endAge: 70 } } }).streams.find(st => st.id === 4).endAge, 120,
+      'Social Security is not ended early — it runs for life; its timing is the claim-age lever');
+  }
+
+  // ── order: an adjustment applies to the stream as claiming left it ──────
+  {
+    const claimed = sc({ claimAges: { me: 70 } }).streams.find(st => st.id === 4);
+    const both = sc({ claimAges: { me: 70 }, streamAdjustments: { 4: { scale: 0.5 } } }).streams.find(st => st.id === 4);
+    gt(claimed.amount, 40000, 'fixture: claiming at 70 raises the benefit');
+    approx(both.amount, claimed.amount * 0.5, "a 50% cut to a benefit claimed at 70 is half the age-70 benefit, not half the plan's", 0.0001);
+  }
+
+  // ── the plan itself is never touched, and stale levers do nothing ──────
+  {
+    sc({ streamAdjustments: { 2: { off: true }, 3: { scale: 0.5 }, 1: { endAge: 57 } } });
+    eq(JSON.stringify(streams), snapshot, "the plan's own streams are not modified by any adjustment");
+    eq(legacy(run({ streamAdjustments: { 999: { off: true } } })), legacy(base),
+      'an adjustment for a stream no longer in the plan is ignored');
+    eq(legacy(run({ streamAdjustments: {} })), legacy(base), 'and an empty set is the plan');
+  }
+
+  // ── the Sandbox wiring ───────────────────────────────────────────────────
+  {
+    const fsMod = require('fs'), pathMod = require('path');
+    const jsx = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+    ok(/\|\| streamAdjCount > 0;/.test(jsx), 'a stream lever makes the Sandbox a what-if');
+    ok(/streamAdjustments: streamAdjCount \? streamAdj : undefined,/.test(jsx), 'and reaches the engine');
+    ok(/ltcChoice, streamAdj, streamAdjCount,/.test(jsx), 'and re-runs the what-if when it changes');
+    ok(/incomeStreams: sc \? sc\.streams : incomeStreams,/.test(jsx),
+      '"Save as scenario" keeps the streams the what-if ran on — so the saved scenario is the tested one');
+    ok(/!streamsOpen && streamSummary\.length > 0/.test(jsx),
+      'a closed drawer still names every stream it is changing');
+    ok(/if \(Object\.keys\(merged\)\.length\) next\[st\.id\] = merged; else delete next\[st\.id\];/.test(jsx),
+      'a stream put back to its plan values stops being a lever, so "following your plan" is exact');
+    ok(/st\.type === 'social_security' \|\| st\.type === 'earned_income'\) delete merged\.endAge;/.test(jsx),
+      "salary's end date stays with the retirement-age slider, so two controls cannot disagree about it");
+  }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

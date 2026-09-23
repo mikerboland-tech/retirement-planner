@@ -14772,6 +14772,48 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
   // its plan value is named on the toggle. A control that is doing something
   // to the numbers and cannot be seen is worse than a crowded panel.
   const strategyOpen = !!cfg.strategyOpen;
+
+  // ── Income streams ────────────────────────────────────────────────────────
+  // Business and rental income, a pension that might be cut, Social Security
+  // after a trust-fund shortfall: income the reader does not control. Each
+  // stream can be switched off, scaled, or ended earlier, and the scenario that
+  // results is the one "Save as scenario" keeps.
+  //
+  // Stored as { [streamId]: { off, scale, endAge } } holding only what departs
+  // from the plan, like every other lever here — an entry put back to its plan
+  // value is deleted, so "following your plan" is literally an empty object.
+  // Ids no longer in the plan are dropped on read, so deleting a stream on the
+  // Income tab cannot leave a lever behind acting on nothing.
+  const streamsOpen = !!cfg.streamsOpen;
+  const rawStreamAdj = (controls.streamAdj && typeof controls.streamAdj === 'object') ? controls.streamAdj : {};
+  const streamAdj = useMemo(() => {
+    const out = {};
+    (incomeStreams || []).forEach(st => {
+      const a = rawStreamAdj[st.id];
+      if (a && typeof a === 'object' && Object.keys(a).length) out[st.id] = a;
+    });
+    return out;
+  }, [rawStreamAdj, incomeStreams]);
+  const streamAdjCount = Object.keys(streamAdj).length;
+  const setStreamAdj = (st, patch) => {
+    const merged = { ...(rawStreamAdj[st.id] || {}), ...patch };
+    if (!merged.off) delete merged.off;
+    if (!Number.isFinite(merged.scale) || Math.abs(merged.scale - 1) < 1e-9) delete merged.scale;
+    if (!Number.isFinite(merged.endAge) || merged.endAge === st.endAge
+        || st.type === 'social_security' || st.type === 'earned_income') delete merged.endAge;
+    const next = { ...rawStreamAdj };
+    if (Object.keys(merged).length) next[st.id] = merged; else delete next[st.id];
+    setControl('streamAdj', next);
+  };
+  const streamSummary = (incomeStreams || []).map(st => {
+    const a = streamAdj[st.id];
+    if (!a) return null;
+    if (a.off) return `${st.name} off`;
+    const bits = [];
+    if (Number.isFinite(a.scale)) bits.push(`${Math.round(a.scale * 100)}%`);
+    if (Number.isFinite(a.endAge)) bits.push(`to ${a.endAge}`);
+    return `${st.name} ${bits.join(', ')}`;
+  }).filter(Boolean);
   const tierWord = (i) => (irmaaChoices.find(o => o.value === i) || {}).label || `tier ${i}`;
   const strategySummary = [
     rothOn !== rothConversionIsPlanned(personalInfo) && (rothOn ? 'conversions on' : 'conversions off'),
@@ -14791,7 +14833,8 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
     || Math.abs(savingsRate - planSavingsRate) > 0.05 || spend !== planSpend
     || rothOn !== rothConversionIsPlanned(personalInfo)
     || survivorOn !== planSurvivor || guardrailsOn || !qcdOn
-    || convMode !== 'plan' || wdFill !== 'plan' || wdOrder !== 'plan' || ltcChoice !== 'plan';
+    || convMode !== 'plan' || wdFill !== 'plan' || wdOrder !== 'plan' || ltcChoice !== 'plan'
+    || streamAdjCount > 0;
 
   const scenario = useMemo(() => {
     if (!touched) return null;
@@ -14819,6 +14862,7 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
         survivorModel: married && survivorOn !== planSurvivor ? survivorOn : undefined,
         spendingGuardrails: guardrailsOn ? true : undefined,
         qcd: qcdOn ? undefined : false,
+        streamAdjustments: streamAdjCount ? streamAdj : undefined,
       });
       // sc.opts carries the guardrail rule and the QCD switch: those are
       // projection options, not plan facts, and the engine keeps them apart so
@@ -14829,7 +14873,7 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
     } catch (e) { return { error: e.message }; }
   }, [touched, myRet, spRet, claimMe, claimSp, savingsRate, spend, rothOn, married,
       survivorOn, guardrailsOn, qcdOn, planSurvivor,
-      convMode, convBracketPick, convTierPick, wdFill, wdOrder, ltcChoice,
+      convMode, convBracketPick, convTierPick, wdFill, wdOrder, ltcChoice, streamAdj, streamAdjCount,
       personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
       planMyRet, planSpRet, planClaimMe, planClaimSp, planSpend, planSavingsRate,
       baseEarned, basePersonal]);
@@ -15145,6 +15189,105 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
             planLabel={givingPct > 0 ? `giving ${givingPct}% of spending` : 'no charitable giving set'}
             note={givingPct > 0 ? null : 'set a % on Personal Info'} />
         </div>
+        )}
+
+        {/* ── Income streams drawer ─────────────────────────────────────── */}
+        {(incomeStreams || []).length > 0 && (
+          <div className="mt-3 pt-3 border-t border-slate-700/50">
+            <button
+              onClick={() => setCfg({ streamsOpen: !streamsOpen })}
+              aria-expanded={streamsOpen}
+              className="flex items-center gap-2 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+            >
+              <span className="text-[10px] text-slate-500">{streamsOpen ? '▾' : '▸'}</span>
+              <span className="uppercase tracking-wide">Income streams</span>
+              {/* Named while shut, like Strategy: a lever changing the numbers
+                  must never be one the reader cannot see. */}
+              {!streamsOpen && streamSummary.length > 0 && (
+                <span className="text-amber-400/90 normal-case">{streamSummary.join(' · ')}</span>
+              )}
+              {!streamsOpen && streamSummary.length === 0 && (
+                <span className="text-slate-600 normal-case">following your plan</span>
+              )}
+            </button>
+
+            {streamsOpen && (
+              <div className="mt-3 space-y-2">
+                <p className="text-[11px] text-slate-500">
+                  Test the plan without income you do not control. Switch a stream off, scale it, or end it
+                  early — your plan is not changed until you save a scenario or make this the plan.
+                </p>
+                {(incomeStreams || []).map(st => {
+                  const a = streamAdj[st.id] || {};
+                  const off = !!a.off;
+                  const scalePct = Math.round((Number.isFinite(a.scale) ? a.scale : 1) * 100);
+                  const isSS = st.type === 'social_security';
+                  // Salary's last year is the retirement-age slider's to move;
+                  // a second control for the same date could contradict it.
+                  const isSalary = st.type === 'earned_income';
+                  const typeLabel = (INCOME_TYPES.find(t => t.value === st.type) || {}).label || st.type;
+                  const endShown = Number.isFinite(a.endAge) ? a.endAge : st.endAge;
+                  const changed = !!streamAdj[st.id];
+                  return (
+                    <div key={st.id}
+                         className={`rounded-lg border px-3 py-2 ${changed ? 'border-amber-500/40 bg-amber-500/5' : 'border-slate-700/60 bg-slate-800/30'}`}>
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                        <div className="min-w-[180px] flex-1">
+                          <div className={`text-sm font-medium ${off ? 'text-slate-500 line-through' : 'text-slate-200'}`}>{st.name}</div>
+                          <div className="text-[11px] text-slate-500">
+                            {typeLabel} · plan {money(st.amount || 0)}/yr, ages {st.startAge}–{isSS ? 'life' : st.endAge}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => setStreamAdj(st, { off: !off })}
+                          aria-pressed={!off}
+                          aria-label={`${st.name}: ${off ? 'excluded' : 'included'}`}
+                          className={`px-3 py-1 rounded-lg border text-xs transition-colors ${off
+                            ? 'bg-slate-700/50 border-slate-600 text-slate-400'
+                            : 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'}`}>
+                          {off ? 'Off' : 'Included'}
+                        </button>
+                        <label className={`flex items-center gap-2 text-xs ${off ? 'opacity-40' : ''}`}>
+                          <span className="text-slate-400">Amount</span>
+                          <input type="range" min={0} max={200} step={5} value={scalePct} disabled={off}
+                                 aria-label={`${st.name} amount, percent of plan`}
+                                 onChange={e => setStreamAdj(st, { scale: Number(e.target.value) / 100 })}
+                                 className="w-28 accent-amber-500" />
+                          <span className={`w-28 tabular-nums ${scalePct !== 100 ? 'text-amber-300' : 'text-slate-400'}`}>
+                            {scalePct}% · {money((st.amount || 0) * scalePct / 100)}
+                          </span>
+                        </label>
+                        {/* Social Security runs for life; its timing is the
+                            claim-age slider above. Salary ends at retirement,
+                            which the retirement-age sliders set. */}
+                        {isSalary && (
+                          <span className="text-[11px] text-slate-500">ends at retirement — use the slider above</span>
+                        )}
+                        {!isSS && !isSalary && (
+                          <label className={`flex items-center gap-2 text-xs ${off ? 'opacity-40' : ''}`}>
+                            <span className="text-slate-400">Ends at</span>
+                            <input type="number" min={st.startAge} max={110} value={endShown} disabled={off}
+                                   aria-label={`${st.name} last year of income, age`}
+                                   onChange={e => {
+                                     const v = Number(e.target.value);
+                                     if (Number.isFinite(v) && v >= st.startAge) setStreamAdj(st, { endAge: v });
+                                   }}
+                                   className={`w-16 bg-slate-800 border rounded px-2 py-0.5 text-center ${Number.isFinite(a.endAge) ? 'border-amber-500/50 text-amber-300' : 'border-slate-600 text-slate-200'}`} />
+                          </label>
+                        )}
+                        {changed && (
+                          <button onClick={() => setStreamAdj(st, { off: false, scale: 1, endAge: st.endAge })}
+                                  className="text-[11px] text-slate-500 hover:text-slate-300 underline decoration-dotted">
+                            back to plan
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         )}
         {scenario && scenario.error && (
           <p className="text-sm text-red-400 mt-3">Could not run that scenario: {scenario.error}</p>
