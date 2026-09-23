@@ -496,9 +496,9 @@ const ALABAMA_OVER_65_RETIREMENT_EXCLUSION = 6000; // Per person
 //   'federal_plus'     — federal standard deduction + a per-state `offset` (MO 2026: +$4,000)
 //   'federal_agi'      — state starts from federal AGI: no state std deduction here (VT, WV)
 //   'none'             — no standard deduction (CT, NJ)
-const resolveStateStdDeduction = (cfg, agi, filingStatus, inf) => {
+const resolveStateStdDeduction = (cfg, agi, filingStatus, inf, extra = {}) => {
   if (!cfg || cfg.mode === 'none') return 0;
-  if (cfg.mode === 'sliding') return cfg.fn(agi, filingStatus, inf);
+  if (cfg.mode === 'sliding') return cfg.fn(agi, filingStatus, inf, extra);
   if (cfg.mode === 'percent') {
     const amt = agi * cfg.rate;
     const lo = (cfg.min && (cfg.min[filingStatus] ?? cfg.min.single) || 0) * inf;
@@ -597,7 +597,9 @@ const njRetirementExclusion = ({ grossIncome, retirementIncome, qualifiedWithdra
 // CAPPED ($8,500 base; $4,250 MFS — 2025, inflation-indexed) and PHASES OUT to
 // $0 over a federal-AGI band (single $125k→$145k; MFJ/HOH $250k→$290k; MFS
 // halved). OR's published table is stepped; we model a linear taper, which is a
-// faithful approximation. Flag VERIFY against Pub OR-17 federal-tax worksheet.
+// faithful approximation (a few dollars at any AGI). Amounts confirmed for 2025
+// against Oregon DOR (OR-40 instructions, Pub OR-17): $8,500 / $4,250 MFS, phase-
+// out $125k–$145k single and $250k–$290k MFJ.
 // Source: https://www.oregon.gov/dor/programs/individuals/pages/pit.aspx
 const OR_FED_SUBTRACTION = {
   single:            { cap: 8500, phaseStart: 125000, phaseEnd: 145000 },
@@ -620,9 +622,12 @@ const orFederalSubtraction = (fed, agi, filingStatus, inf) => {
 // (federal/state/local govt) pension income up to a per-taxpayer cap that is
 // REDUCED dollar-for-dollar by taxable Social Security received. We model the cap
 // against the supplied retirementIncome (pension component) and reduce it by
-// taxableSS. MFJ doubles the cap. 2026 cap ≈ $49,824/taxpayer (indexes ~maximum
-// SS benefit). Private-pension exclusion (income-tested) is omitted — VERIFY
-// against MO-1040 / MO DOR pension worksheet.
+// taxableSS. MFJ doubles the cap. The cap is the maximum SS benefit: MO DOR gives
+// $47,633 for 2025; 2026 is not yet published, and $49,824 (SSA's 2026 maximum
+// at full retirement age) is likely ~1% high — under $30 of tax at the margin.
+// Private-pension exclusion: confirmed at $6,000/taxpayer, reduced dollar for
+// dollar above $25,000 of MO AGI (single) — gone entirely by ~$31,000, so it
+// only reaches very low incomes. Deliberately omitted; not a pending check.
 // Source: https://dor.mo.gov/  (MO §143.124)
 const MO_PUBLIC_PENSION_CAP = 49824;
 const moPublicPensionExclusion = ({ retirementIncome, taxableSS, filingStatus, inf }) => {
@@ -636,9 +641,15 @@ const moPublicPensionExclusion = ({ retirementIncome, taxableSS, filingStatus, i
 // standard deduction. Personal exemption: full below phaseStart, reduced $1,000
 // per $1,000 of CT-AGI over the start, to zero. Pension/IRA exclusion: 100% of
 // retirement income below the lower threshold, tapering linearly to 0% at the
-// upper threshold (CT fully exempts qualifying pension/IRA income for filers
-// under the income limits as of 2025+). Constants approximate 2026 (CT DRS not
-// fetchable on this network) — VERIFY against CT-1040 instructions.
+// upper threshold. CT exempts pension and annuity income in full below $75,000
+// (single / MFS / HOH) and $100,000 (MFJ) of AGI, and IRA distributions on the
+// same thresholds — 75% for 2025, 100% from 2026 (CT General Assembly OLR report
+// 2025-R-0152). The IRA half was never applied: the function excluded only
+// `retirementIncome` (pensions) and ignored `qualifiedWithdrawals`, so every CT
+// retiree drawing from an IRA or 401(k) paid state tax on it — ~$3,000/yr on a
+// $60,000 draw. Both are excluded now.
+// STILL TO VERIFY: the upper end of the phase-out (penHi) and the personal-
+// exemption constants; the lower thresholds are confirmed.
 // Source: https://portal.ct.gov/drs
 const CT_PARAMS = {
   single:            { exBase: 15000, exStart: 30000, penLo: 75000,  penHi: 100000 },
@@ -646,7 +657,7 @@ const CT_PARAMS = {
   married_joint:     { exBase: 24000, exStart: 48000, penLo: 100000, penHi: 150000 },
   head_of_household: { exBase: 19000, exStart: 38000, penLo: 75000,  penHi: 100000 },
 };
-const ctExclusions = ({ retirementIncome, filingStatus, inf, agi }) => {
+const ctExclusions = ({ retirementIncome, qualifiedWithdrawals, filingStatus, inf, agi }) => {
   const p = CT_PARAMS[filingStatus] || CT_PARAMS.single;
   // Personal exemption phaseout: $1,000 reduction per $1,000 over start.
   const exStart = p.exStart * inf;
@@ -661,7 +672,7 @@ const ctExclusions = ({ retirementIncome, filingStatus, inf, agi }) => {
   let penFraction = 1;
   if (agi >= penHi) penFraction = 0;
   else if (agi > penLo) penFraction = (penHi - agi) / (penHi - penLo);
-  const pensionExcl = (retirementIncome || 0) * penFraction;
+  const pensionExcl = ((retirementIncome || 0) + (qualifiedWithdrawals || 0)) * penFraction;
   return exemption + pensionExcl;
 };
 
@@ -709,7 +720,8 @@ const vaAgeDeduction = ({ filingStatus, agi, primaryAge, spouseAge }) => {
 // ── WISCONSIN ── Sliding-Scale Standard Deduction (SSSD): starts at a max, then
 // phases down by a per-status rate once WAGI exceeds a start point, to $0. 2025-ish
 // parameters (WI indexes annually → inflationIndexed handles forward years). Exact
-// table is in Form 1 instructions p.35 — VERIFY max/start/rate against current year.
+// table is in Form 1 instructions p.35. STILL TO VERIFY: max/start/rate — no
+// source reached from here states them, and they are 2025-ish values.
 // Source: https://www.revenue.wi.gov/TaxForms2025/2025-Form1-Inst.pdf
 const WI_SSSD = {
   single:            { max: 13930, start: 19310, rate: 0.12 },
@@ -747,15 +759,20 @@ const getMaineStandardDeduction = (agi, filingStatus, inf) => {
   if (agi >= start + range) return 0;
   return base * (1 - (agi - start) / range);
 };
-// ME pension income deduction: up to $48,216/person (2025), REDUCED by Social
-// Security received, and phased out above $125k single / $187.5k HOH / $250k MFJ.
-// SS itself is exempt in ME. Phaseout range approximated at $25k — VERIFY against
-// Worksheet for Pension Income Deduction. Source: 2025 Schedule 1S instructions.
-const ME_PENSION_CAP = 48216;
-const maineRetirementExclusion = ({ retirementIncome, qualifiedWithdrawals, taxableSS, filingStatus, inf, agi }) => {
+// ME pension income deduction: tied to Social Security's maximum annual benefit —
+// $48,216/person for 2025 (exactly $4,018 × 12, which is what confirms the tie),
+// so $49,824 for 2026 ($4,152 × 12, the figure this file already uses for MO).
+// REDUCED by ALL Social Security and railroad retirement received, taxable and
+// nontaxable (Maine Revenue Services FAQ) — it was being reduced by the taxable
+// slice only. Phased out from $125k single / $187.5k HOH / $250k MFJ of Maine AGI
+// (2025 law; MRS gives the starts). SS itself is exempt in ME.
+// STILL TO VERIFY: the phase-out WIDTH, approximated at $25k — not confirmed by
+// a source reached from here. Source: 2025 Form 1040ME instructions; MRS FAQ.
+const ME_PENSION_CAP = 49824;
+const maineRetirementExclusion = ({ retirementIncome, qualifiedWithdrawals, totalSS, filingStatus, inf, agi }) => {
   const base = (retirementIncome || 0) + (qualifiedWithdrawals || 0);
   const taxpayers = filingStatus === 'married_joint' ? 2 : 1;
-  let cap = Math.max(0, ME_PENSION_CAP * taxpayers * inf - (taxableSS || 0));
+  let cap = Math.max(0, ME_PENSION_CAP * taxpayers * inf - (totalSS || 0));
   const start = (filingStatus === 'married_joint' ? 250000
     : filingStatus === 'head_of_household' ? 187500 : 125000) * inf;
   const range = 25000 * inf;
@@ -767,19 +784,26 @@ const maineRetirementExclusion = ({ retirementIncome, qualifiedWithdrawals, taxa
 };
 
 // ── MARYLAND ── pension exclusion (an `exclusionFn`): age 65+ may exclude up to
-// $41,200/person (2025) of qualifying retirement income, REDUCED by Social
-// Security received. MD does not tax SS. The personal-exemption high-income
-// phaseout is omitted (most retirees are below it) — VERIFY. Local (county)
+// $40,600/person for 2026 ($41,200 for 2025 — the cap FELL, per the Comptroller's
+// published figures), REDUCED dollar-for-dollar by ALL Social Security and
+// railroad retirement received, not just the taxable part. MD does not tax SS.
+// Sources: Comptroller of Maryland pension exclusion guidance (KB0010012);
+// Bloomberg Tax on the 2025/2026 figures.
+// KNOWN LIMITATION: the exclusion covers employer plans (401k/403b/457b and
+// pensions) but NOT IRA distributions. The engine passes all pre-tax
+// withdrawals together, so an IRA-heavy MD plan over-excludes; separating them
+// needs withdrawals by account type carried through the solver's estimate.
+// The personal-exemption high-income phaseout is also omitted. Local (county)
 // income tax and the 2% high-income capital-gains surtax are intentionally NOT
 // modeled (app knows state only). Source: https://www.marylandtaxes.gov
-const MD_PENSION_CAP = 41200;
-const mdPensionExclusion = ({ retirementIncome, qualifiedWithdrawals, taxableSS, filingStatus, primaryAge, spouseAge }) => {
+const MD_PENSION_CAP = 40600;
+const mdPensionExclusion = ({ retirementIncome, qualifiedWithdrawals, totalSS, filingStatus, primaryAge, spouseAge }) => {
   let persons = 0;
   if ((primaryAge || 0) >= 65) persons++;
   if (filingStatus === 'married_joint' && (spouseAge || 0) >= 65) persons++;
   if (persons === 0) return 0;
   const base = (retirementIncome || 0) + (qualifiedWithdrawals || 0);
-  const cap = Math.max(0, MD_PENSION_CAP * persons - (taxableSS || 0));
+  const cap = Math.max(0, MD_PENSION_CAP * persons - (totalSS || 0));
   return Math.min(base, cap);
 };
 
@@ -834,6 +858,29 @@ const okRetirementExclusion = ({ retirementIncome, qualifiedWithdrawals, filingS
 // ── SOUTH CAROLINA ── retirement-income deduction: $10,000/person under 65,
 // $15,000/person at 65+ (an `exclusionFn`). SS exempt. The separate $15k general
 // age-65 deduction is omitted to avoid double-counting. Source: S.C. Code §12-6-1170.
+// ── SOUTH CAROLINA ── H.4216 (Act 110), signed March 30, 2026, effective for tax
+// year 2026: SC decouples from the federal standard and itemized deductions and
+// replaces them with the SC Income Adjusted Deduction. Statute text: $15,000
+// single/MFS, $22,500 HOH, $30,000 MFJ, "reduced by a fraction whereby the
+// numerator is the amount the taxpayer's federal adjusted gross income exceeds
+// forty thousand dollars and the denominator is fifty-five thousand" (single) —
+// $0 at $95,000; HOH $60,000–$142,500; MFJ $80,000–$190,000. The brackets are
+// indexed under §12-6-520; nothing found indexes the SCIAD amounts, so they are
+// held at their statutory dollars (`inf` deliberately unused).
+// Sources: dor.sc.gov "Information about H. 4216"; scstatehouse.gov bill 4216
+// text and RFA fiscal impact statement (2026-02-24); governor.sc.gov (signing).
+const SC_SCIAD = {
+  single:            { max: 15000, start: 40000, span: 55000 },
+  married_separate:  { max: 15000, start: 40000, span: 55000 },
+  head_of_household: { max: 22500, start: 60000, span: 82500 },
+  married_joint:     { max: 30000, start: 80000, span: 110000 },
+};
+const getSouthCarolinaSCIAD = (agi, filingStatus, inf, extra = {}) => {
+  const p = SC_SCIAD[filingStatus] || SC_SCIAD.single;
+  const fedAGI = Number.isFinite(extra.federalAGI) ? extra.federalAGI : agi;
+  if (fedAGI <= p.start) return p.max;
+  return Math.max(0, p.max * (1 - (fedAGI - p.start) / p.span));
+};
 const scRetirementExclusion = ({ retirementIncome, qualifiedWithdrawals, filingStatus, primaryAge, spouseAge }) => {
   const base = (retirementIncome || 0) + (qualifiedWithdrawals || 0);
   let cap = (primaryAge || 0) >= 65 ? 15000 : 10000;
@@ -864,8 +911,12 @@ const STATE_TAX_CONFIG = {
   // indexed (applied as a flat surtax via the recapture hook).
   // Base = 2025 FTB Form 540 schedules (the 2026-indexed schedule publishes ~late
   // 2026; the engine inflates the base forward). MFS shares the single schedule;
-  // MFJ = 2× single. HOH (Schedule Z) upper brackets above $505,462 are
-  // reconstructed — VERIFY against the FTB 540 PDF.
+  // MFJ = 2× single. HOH (Schedule Z) is the FTB's published 2025 schedule —
+  // it was "reconstructed" and every threshold was slightly off. Confirmed from
+  // the FTB 2025 540 rate schedules: 22,173 / 52,530 / 67,716 / 83,805 / 98,990 /
+  // 505,208 / 606,251. The 12.3% threshold (1,010,417) is derived: both confirmed
+  // upper thresholds are exactly 3.00% above 2024, and so is this one. The old
+  // 1,010,924 differed by $5 of tax.
   // Source: https://www.ftb.ca.gov/forms/2025/2025-540-tax-rate-schedules.pdf
   California: {
     inflationIndexed: true,
@@ -892,11 +943,11 @@ const STATE_TAX_CONFIG = {
         { min: 1485906, max: Infinity, rate: 0.123 },
       ],
       head_of_household: [
-        { min: 0, max: 22179, rate: 0.01 }, { min: 22179, max: 52553, rate: 0.02 },
-        { min: 52553, max: 67750, rate: 0.04 }, { min: 67750, max: 83864, rate: 0.06 },
-        { min: 83864, max: 99063, rate: 0.08 }, { min: 99063, max: 505462, rate: 0.093 },
-        { min: 505462, max: 606554, rate: 0.103 }, { min: 606554, max: 1010924, rate: 0.113 },
-        { min: 1010924, max: Infinity, rate: 0.123 },
+        { min: 0, max: 22173, rate: 0.01 }, { min: 22173, max: 52530, rate: 0.02 },
+        { min: 52530, max: 67716, rate: 0.04 }, { min: 67716, max: 83805, rate: 0.06 },
+        { min: 83805, max: 98990, rate: 0.08 }, { min: 98990, max: 505208, rate: 0.093 },
+        { min: 505208, max: 606251, rate: 0.103 }, { min: 606251, max: 1010417, rate: 0.113 },
+        { min: 1010417, max: Infinity, rate: 0.123 },
       ],
     },
     stdDeduction: { mode: 'fixed', single: 5706, married_separate: 5706, married_joint: 11412, head_of_household: 11412 },
@@ -996,7 +1047,10 @@ const STATE_TAX_CONFIG = {
   // ── HAWAII ── 12 brackets (most of any state), 1.4%–11.0% (Act 46, SLH 2024 /
   // GAP II schedule effective 2025; rates unchanged for 2026). MFS shares the
   // single schedule; MFJ = 2× single thresholds; HOH = 1.5× single
-  // (reconstructed — VERIFY against the DOTAX HOH rate schedule). Own standard
+  // (the top HOH threshold, $487,500, and the $12,000 HOH deduction are confirmed
+  // and match this construction; the lower HOH thresholds are not individually
+  // confirmed). Act 46 widens the brackets again in 2027 and 2029 — NOT modeled,
+  // so later projection years overstate HI tax somewhat. Own standard
   // deduction (2026 step-up: single $8,000 / MFJ $16,000 / HOH $12,000) and a
   // $1,144 deduction-mode personal exemption per filer. Exempts SS and
   // employer-funded pensions (pensionExempt); 401k/IRA distributions stay
@@ -1242,26 +1296,29 @@ const STATE_TAX_CONFIG = {
   // band). Sliding-scale standard deduction (getWisconsinStandardDeduction).
   // $700/person personal exemption (deduction). Retirement exclusion $24k/person
   // age 67+ (Act 15) via wiRetirementExclusion. SS exempt; indexed annually.
-  // Top-bracket thresholds vary by source — VERIFY against 2026 Form 1.
+  // 2026 thresholds: single 15,110 / 51,950 / 332,720; MFJ 20,150 / 69,260 /
+  // 443,630 (MFS half of MFJ; HOH shares single, as before). Each is the 2025
+  // figure × 1.0291 — the same single index across all six published numbers,
+  // which is how WI indexes and is what corroborates them.
   // Source: https://www.revenue.wi.gov/Pages/FAQS/pcs-taxrates.aspx
   Wisconsin: {
     inflationIndexed: true,
     brackets: {
       single: [
-        { min: 0, max: 14680, rate: 0.035 }, { min: 14680, max: 50480, rate: 0.044 },
-        { min: 50480, max: 323290, rate: 0.053 }, { min: 323290, max: Infinity, rate: 0.0765 },
+        { min: 0, max: 15110, rate: 0.035 }, { min: 15110, max: 51950, rate: 0.044 },
+        { min: 51950, max: 332720, rate: 0.053 }, { min: 332720, max: Infinity, rate: 0.0765 },
       ],
       head_of_household: [
-        { min: 0, max: 14680, rate: 0.035 }, { min: 14680, max: 50480, rate: 0.044 },
-        { min: 50480, max: 323290, rate: 0.053 }, { min: 323290, max: Infinity, rate: 0.0765 },
+        { min: 0, max: 15110, rate: 0.035 }, { min: 15110, max: 51950, rate: 0.044 },
+        { min: 51950, max: 332720, rate: 0.053 }, { min: 332720, max: Infinity, rate: 0.0765 },
       ],
       married_joint: [
-        { min: 0, max: 19580, rate: 0.035 }, { min: 19580, max: 67300, rate: 0.044 },
-        { min: 67300, max: 431060, rate: 0.053 }, { min: 431060, max: Infinity, rate: 0.0765 },
+        { min: 0, max: 20150, rate: 0.035 }, { min: 20150, max: 69260, rate: 0.044 },
+        { min: 69260, max: 443630, rate: 0.053 }, { min: 443630, max: Infinity, rate: 0.0765 },
       ],
       married_separate: [
-        { min: 0, max: 9790, rate: 0.035 }, { min: 9790, max: 33650, rate: 0.044 },
-        { min: 33650, max: 215530, rate: 0.053 }, { min: 215530, max: Infinity, rate: 0.0765 },
+        { min: 0, max: 10075, rate: 0.035 }, { min: 10075, max: 34630, rate: 0.044 },
+        { min: 34630, max: 221815, rate: 0.053 }, { min: 221815, max: Infinity, rate: 0.0765 },
       ],
     },
     stdDeduction: { mode: 'sliding', fn: getWisconsinStandardDeduction },
@@ -1460,17 +1517,22 @@ const STATE_TAX_CONFIG = {
     recapture: null,
   },
 
-  // ── ARKANSAS ── condensed schedule; top rate 3.9% (2024 cut). Note the AR
-  // quirk: the middle bracket rate (4.0%) exceeds the top (3.9%). Brackets do
-  // NOT vary by filing status. $29/person personal tax CREDIT. SS exempt.
-  // VERIFY 2026 figures vs AR1000F instructions (Tax Foundation 2026).
+  // ── ARKANSAS ── condensed schedule. Top rate 3.7% for 2026: cut from 3.9% in
+  // the May 2026 extraordinary session (HB 1001 / SB 1, signed May 6, 2026),
+  // RETROACTIVE to January 1, 2026. Sources: Arkansas House and Senate releases,
+  // Arkansas Advocate, NTU, Thomson Reuters. Tables printed before May still show
+  // 3.9%. Note the AR quirk: a 4.0% middle bracket above the bottom one. Brackets
+  // do NOT vary by filing status. $29/person personal tax CREDIT. SS exempt.
+  // STILL TO VERIFY: the bracket thresholds and whether the 4% middle bracket
+  // changed — the sources confirm the top rate but describe the schedule
+  // inconsistently. The middle bracket is ~$4,400 wide, so at most ~$13/yr.
   'Arkansas': {
     inflationIndexed: true,
     brackets: {
-      single: [{ min: 0, max: 4500, rate: 0.02 }, { min: 4500, max: 8900, rate: 0.04 }, { min: 8900, max: Infinity, rate: 0.039 }],
-      married_separate: [{ min: 0, max: 4500, rate: 0.02 }, { min: 4500, max: 8900, rate: 0.04 }, { min: 8900, max: Infinity, rate: 0.039 }],
-      married_joint: [{ min: 0, max: 4500, rate: 0.02 }, { min: 4500, max: 8900, rate: 0.04 }, { min: 8900, max: Infinity, rate: 0.039 }],
-      head_of_household: [{ min: 0, max: 4500, rate: 0.02 }, { min: 4500, max: 8900, rate: 0.04 }, { min: 8900, max: Infinity, rate: 0.039 }],
+      single: [{ min: 0, max: 4500, rate: 0.02 }, { min: 4500, max: 8900, rate: 0.04 }, { min: 8900, max: Infinity, rate: 0.037 }],
+      married_separate: [{ min: 0, max: 4500, rate: 0.02 }, { min: 4500, max: 8900, rate: 0.04 }, { min: 8900, max: Infinity, rate: 0.037 }],
+      married_joint: [{ min: 0, max: 4500, rate: 0.02 }, { min: 4500, max: 8900, rate: 0.04 }, { min: 8900, max: Infinity, rate: 0.037 }],
+      head_of_household: [{ min: 0, max: 4500, rate: 0.02 }, { min: 4500, max: 8900, rate: 0.04 }, { min: 8900, max: Infinity, rate: 0.037 }],
     },
     stdDeduction: { mode: 'fixed', single: 2400, married_separate: 2400, married_joint: 4800, head_of_household: 2400 },
     exemption: { mode: 'credit', single: 29, married_separate: 29, married_joint: 58, head_of_household: 29 },
@@ -1482,7 +1544,12 @@ const STATE_TAX_CONFIG = {
   // ── KANSAS ── two brackets (5.2% / 5.58%) per 2024 reform (SB 1). $9,160
   // personal exemption per filer (deduction mode). SS fully exempt 2024+.
   // KS taxes private pensions / IRA / 401k (only KPERS exempt) → no broad
-  // retirement exclusion modeled. VERIFY 2026 thresholds vs K-40 instructions.
+  // retirement exclusion modeled. 2026 confirmed: 5.2% / 5.58% at $23,000 /
+  // $46,000 — KDOR announced no SB 269 trigger cut for 2026 (revenue test not
+  // met). Open point: those thresholds have not moved since 2024, which says the
+  // brackets are not indexed, while this config indexes everything (brackets,
+  // deduction, exemption share one flag). Over a long projection that slowly
+  // widens the 5.2% band; the effect is ~0.38% of the drift, tens of dollars.
   'Kansas': {
     inflationIndexed: true,
     brackets: {
@@ -1501,7 +1568,11 @@ const STATE_TAX_CONFIG = {
   // ── NEBRASKA ── 2026 base year: top marginal 4.55% (LB754 schedule; the
   // further 2027 cut to 3.99% is NOT applied). Lower brackets kept. $157/person
   // personal-exemption CREDIT. SS fully exempt 2025+. NE taxes IRA/401k/pensions
-  // → no broad exclusion. VERIFY 2026 bracket consolidation vs 1040N instructions.
+  // → no broad exclusion. 2026 rates confirmed (2.46 / 3.51 / 4.55%, LB 754).
+  // STILL TO VERIFY: one secondary source gives 2026 thresholds of $4,130 /
+  // $24,760 single and a $8,850 standard deduction, but reports MFJ two different
+  // ways ($49,520 and $49,530); not changed on one source. Worth ~$75/yr at most.
+  // The scheduled 2027 cut to 3.99% is not applied.
   'Nebraska': {
     inflationIndexed: true,
     brackets: {
@@ -1520,14 +1591,25 @@ const STATE_TAX_CONFIG = {
   // ── NEW MEXICO ── taxes SS (binary STATES_THAT_TAX_SS, with statutory low-
   // income SS exemption not modeled). Starts from federal taxable income →
   // federal std deduction subtracted. No separate personal exemption (NM low-
-  // income comprehensive exemption omitted). VERIFY 2026 brackets vs PIT-1.
+  // income comprehensive exemption omitted).
+  // Brackets: HB 252 (Laws 2024, ch. 67), effective tax year 2025 — six rates,
+  // 1.5 / 3.2 / 4.3 / 4.7 / 4.9 / 5.9%, replacing 1.7 / 3.2 / 4.7 / 4.9 / 5.9%
+  // with a new 4.3% band ($16,500–$33,500 single, $25,000–$50,000 MFJ). The old
+  // table was still here. Sources: nmlegis.gov HB 252 (bill and FIR), REDW.
+  // STILL TO VERIFY: the 4.7%→4.9% boundary ($66,500 single / $100,000 MFJ) is
+  // from the enacted schedule as recalled, not confirmed by a source reached from
+  // here; every other threshold and rate is. At most ~$40/yr if it is off.
+  // NOT inflation-indexed: NM brackets are statutory. The old thresholds stood
+  // unchanged from 2005 until HB 252 — impossible had they been indexed — so the
+  // `true` this carried was indexing them forward, widening them every year.
+  // MFS is half of MFJ; HOH uses the MFJ schedule, as before.
   'New Mexico': {
-    inflationIndexed: true,
+    inflationIndexed: false,
     brackets: {
-      single: [{ min: 0, max: 5500, rate: 0.017 }, { min: 5500, max: 11000, rate: 0.032 }, { min: 11000, max: 16000, rate: 0.047 }, { min: 16000, max: 210000, rate: 0.049 }, { min: 210000, max: Infinity, rate: 0.059 }],
-      married_separate: [{ min: 0, max: 4000, rate: 0.017 }, { min: 4000, max: 8000, rate: 0.032 }, { min: 8000, max: 12000, rate: 0.047 }, { min: 12000, max: 157500, rate: 0.049 }, { min: 157500, max: Infinity, rate: 0.059 }],
-      married_joint: [{ min: 0, max: 8000, rate: 0.017 }, { min: 8000, max: 16000, rate: 0.032 }, { min: 16000, max: 24000, rate: 0.047 }, { min: 24000, max: 315000, rate: 0.049 }, { min: 315000, max: Infinity, rate: 0.059 }],
-      head_of_household: [{ min: 0, max: 8000, rate: 0.017 }, { min: 8000, max: 16000, rate: 0.032 }, { min: 16000, max: 24000, rate: 0.047 }, { min: 24000, max: 315000, rate: 0.049 }, { min: 315000, max: Infinity, rate: 0.059 }],
+      single: [{ min: 0, max: 5500, rate: 0.015 }, { min: 5500, max: 16500, rate: 0.032 }, { min: 16500, max: 33500, rate: 0.043 }, { min: 33500, max: 66500, rate: 0.047 }, { min: 66500, max: 210000, rate: 0.049 }, { min: 210000, max: Infinity, rate: 0.059 }],
+      married_separate: [{ min: 0, max: 4000, rate: 0.015 }, { min: 4000, max: 12500, rate: 0.032 }, { min: 12500, max: 25000, rate: 0.043 }, { min: 25000, max: 50000, rate: 0.047 }, { min: 50000, max: 157500, rate: 0.049 }, { min: 157500, max: Infinity, rate: 0.059 }],
+      married_joint: [{ min: 0, max: 8000, rate: 0.015 }, { min: 8000, max: 25000, rate: 0.032 }, { min: 25000, max: 50000, rate: 0.043 }, { min: 50000, max: 100000, rate: 0.047 }, { min: 100000, max: 315000, rate: 0.049 }, { min: 315000, max: Infinity, rate: 0.059 }],
+      head_of_household: [{ min: 0, max: 8000, rate: 0.015 }, { min: 8000, max: 25000, rate: 0.032 }, { min: 25000, max: 50000, rate: 0.043 }, { min: 50000, max: 100000, rate: 0.047 }, { min: 100000, max: 315000, rate: 0.049 }, { min: 315000, max: Infinity, rate: 0.059 }],
     },
     stdDeduction: { mode: 'federal_taxable' },
     exemption: { mode: 'none' },
@@ -1538,7 +1620,12 @@ const STATE_TAX_CONFIG = {
 
   // ── NORTH DAKOTA ── 2023 reform: zero-rate bottom bracket, then 1.95% / 2.50%.
   // Starts from federal taxable income → federal std deduction subtracted. No
-  // separate exemption. SS exempt. VERIFY 2026 thresholds vs ND-1 instructions.
+  // separate exemption. SS exempt.
+  // STILL TO VERIFY: these thresholds are the 2023 figures. Secondary sources give
+  // a 2026 top threshold of $250,400 single / $304,850 MFJ (and $244,825 /
+  // $298,075, apparently 2025), but none gave the whole schedule or where the 0%
+  // band ends, so nothing was changed. The effect is a few hundred dollars at
+  // most — the whole schedule tops out at 2.5%.
   'North Dakota': {
     inflationIndexed: true,
     brackets: {
@@ -1554,16 +1641,21 @@ const STATE_TAX_CONFIG = {
     recapture: null,
   },
 
-  // ── OKLAHOMA ── six fixed brackets (top 4.75%); NOT inflation-indexed.
-  // $1,000/person personal exemption (deduction). $10,000/person retirement-
-  // income exclusion (exclusionFn). SS exempt. VERIFY vs 511 instructions.
+  // ── OKLAHOMA ── HB 2764 (2025), effective tax year 2026: six brackets folded
+  // into three and the top rate cut from 4.75% to 4.5%. The first $3,750 single /
+  // $7,500 MFJ & HOH of taxable income is now taxed at 0%, then 2.5% / 3.5% /
+  // 4.5%. NOT inflation-indexed. (The law allows further 0.25-point cuts on a
+  // revenue trigger; none is applied here.) $1,000/person personal exemption
+  // (deduction). $10,000/person retirement-income exclusion (exclusionFn). SS
+  // exempt. Sources: Oklahoma Tax Commission "Summary of 2025 Tax Legislation"
+  // and 2026 withholding tables (Packet OW-2, rev. 11-2025); OK Senate release.
   'Oklahoma': {
     inflationIndexed: false,
     brackets: {
-      single: [{ min: 0, max: 1000, rate: 0.0025 }, { min: 1000, max: 2500, rate: 0.0075 }, { min: 2500, max: 3750, rate: 0.0175 }, { min: 3750, max: 4900, rate: 0.0275 }, { min: 4900, max: 7200, rate: 0.0375 }, { min: 7200, max: Infinity, rate: 0.0475 }],
-      married_separate: [{ min: 0, max: 1000, rate: 0.0025 }, { min: 1000, max: 2500, rate: 0.0075 }, { min: 2500, max: 3750, rate: 0.0175 }, { min: 3750, max: 4900, rate: 0.0275 }, { min: 4900, max: 7200, rate: 0.0375 }, { min: 7200, max: Infinity, rate: 0.0475 }],
-      married_joint: [{ min: 0, max: 2000, rate: 0.0025 }, { min: 2000, max: 5000, rate: 0.0075 }, { min: 5000, max: 7500, rate: 0.0175 }, { min: 7500, max: 9800, rate: 0.0275 }, { min: 9800, max: 14400, rate: 0.0375 }, { min: 14400, max: Infinity, rate: 0.0475 }],
-      head_of_household: [{ min: 0, max: 2000, rate: 0.0025 }, { min: 2000, max: 5000, rate: 0.0075 }, { min: 5000, max: 7500, rate: 0.0175 }, { min: 7500, max: 9800, rate: 0.0275 }, { min: 9800, max: 14400, rate: 0.0375 }, { min: 14400, max: Infinity, rate: 0.0475 }],
+      single: [{ min: 0, max: 3750, rate: 0 }, { min: 3750, max: 4900, rate: 0.025 }, { min: 4900, max: 7200, rate: 0.035 }, { min: 7200, max: Infinity, rate: 0.045 }],
+      married_separate: [{ min: 0, max: 3750, rate: 0 }, { min: 3750, max: 4900, rate: 0.025 }, { min: 4900, max: 7200, rate: 0.035 }, { min: 7200, max: Infinity, rate: 0.045 }],
+      married_joint: [{ min: 0, max: 7500, rate: 0 }, { min: 7500, max: 9800, rate: 0.025 }, { min: 9800, max: 14400, rate: 0.035 }, { min: 14400, max: Infinity, rate: 0.045 }],
+      head_of_household: [{ min: 0, max: 7500, rate: 0 }, { min: 7500, max: 9800, rate: 0.025 }, { min: 9800, max: 14400, rate: 0.035 }, { min: 14400, max: Infinity, rate: 0.045 }],
     },
     stdDeduction: { mode: 'fixed', single: 6350, married_separate: 6350, married_joint: 12700, head_of_household: 9350 },
     exemption: { mode: 'deduction', single: 1000, married_separate: 1000, married_joint: 2000, head_of_household: 1000 },
@@ -1572,19 +1664,26 @@ const STATE_TAX_CONFIG = {
     recapture: null,
   },
 
-  // ── SOUTH CAROLINA ── 2026 base top rate 6.0% (statutory reduction from 6.2%).
-  // Brackets do NOT vary by filing status. Starts from federal taxable income →
-  // federal std deduction subtracted. $10k/$15k (65+) retirement deduction per
-  // person (exclusionFn). SS exempt. VERIFY vs SC1040 instructions.
+  // ── SOUTH CAROLINA ── H.4216 (Act 110), tax year 2026: two rates — 1.99% below
+  // $30,000 and 5.21% from $30,000 (the statute's "5.21% minus $966" is the same
+  // schedule: 30,000 × (5.21% − 1.99%) = 966). Replaced 0% / 3% / 6.0% on federal
+  // taxable income. Brackets do NOT vary by filing status and are indexed
+  // (§12-6-520). Deduction is the SCIAD (getSouthCarolinaSCIAD), no longer the
+  // federal standard deduction. SS exempt.
+  // STILL TO VERIFY: whether H.4216 changed the retirement-income and age-65
+  // deductions. scRetirementExclusion models $10k under 65 / $15k at 65+ per
+  // person; pre-reform law was $3,000 under 65 and $10,000 at 65+, plus a
+  // separate $15,000 age-65 deduction — none of which the H.4216 sources found
+  // address. Left as it was rather than changed on a guess.
   'South Carolina': {
     inflationIndexed: true,
     brackets: {
-      single: [{ min: 0, max: 3560, rate: 0 }, { min: 3560, max: 17830, rate: 0.03 }, { min: 17830, max: Infinity, rate: 0.06 }],
-      married_separate: [{ min: 0, max: 3560, rate: 0 }, { min: 3560, max: 17830, rate: 0.03 }, { min: 17830, max: Infinity, rate: 0.06 }],
-      married_joint: [{ min: 0, max: 3560, rate: 0 }, { min: 3560, max: 17830, rate: 0.03 }, { min: 17830, max: Infinity, rate: 0.06 }],
-      head_of_household: [{ min: 0, max: 3560, rate: 0 }, { min: 3560, max: 17830, rate: 0.03 }, { min: 17830, max: Infinity, rate: 0.06 }],
+      single: [{ min: 0, max: 30000, rate: 0.0199 }, { min: 30000, max: Infinity, rate: 0.0521 }],
+      married_separate: [{ min: 0, max: 30000, rate: 0.0199 }, { min: 30000, max: Infinity, rate: 0.0521 }],
+      married_joint: [{ min: 0, max: 30000, rate: 0.0199 }, { min: 30000, max: Infinity, rate: 0.0521 }],
+      head_of_household: [{ min: 0, max: 30000, rate: 0.0199 }, { min: 30000, max: Infinity, rate: 0.0521 }],
     },
-    stdDeduction: { mode: 'federal_taxable' },
+    stdDeduction: { mode: 'sliding', fn: getSouthCarolinaSCIAD },
     exemption: { mode: 'none' },
     federalDeductible: false,
     retirement: { exclusionFn: scRetirementExclusion },
@@ -1593,7 +1692,12 @@ const STATE_TAX_CONFIG = {
 
   // ── VERMONT ── taxes SS (binary; statutory income-based SS exclusion not
   // modeled). Own std deduction + $4,850/person personal exemption (deduction).
-  // No broad pension exclusion. VERIFY 2026 brackets vs IN-111 instructions.
+  // No broad pension exclusion.
+  // STILL TO VERIFY: these are the 2024 thresholds. One source citing Vermont's
+  // own 2026 rate schedule gives $49,400 / $119,700 / $249,700 single; another
+  // repeats these 2024 figures as 2026 (and doubles them for MFJ, which VT does
+  // not do); 2026 bill drafts also appeared. Conflicting, so not changed. If the
+  // first is right, the 2024 thresholds overstate VT tax by up to ~$450/yr.
   'Vermont': {
     inflationIndexed: true,
     brackets: {
@@ -1613,14 +1717,20 @@ const STATE_TAX_CONFIG = {
   // from STATES_THAT_TAX_SS. No standard deduction; starts from federal AGI.
   // $2,000/person personal exemption (deduction). $8,000 senior income
   // modification (over-65). Single & MFJ share the schedule; MFS is halved.
-  // NOT inflation-indexed (fixed statutory brackets). VERIFY 2026 rates vs IT-140.
+  // NOT inflation-indexed (fixed statutory brackets).
+  // 2026 rates: a further 5% across-the-board cut, codified at W. Va. Code
+  // §11-21-4j and retroactive to January 1, 2026 — 2.11 / 2.81 / 3.16 / 4.22 /
+  // 4.58%, same thresholds. Sources: WV Tax Division "2026 Income Tax Rate Cut";
+  // Thomson Reuters. Cross-check: each is 95% of the 2025 rate, which also showed
+  // the old table's fourth rate was mistyped — 2025 was 4.44%, not 4.4%
+  // (4.44 × 0.95 = 4.22; 4.40 × 0.95 = 4.18).
   'West Virginia': {
     inflationIndexed: false,
     brackets: {
-      single: [{ min: 0, max: 10000, rate: 0.0222 }, { min: 10000, max: 25000, rate: 0.0296 }, { min: 25000, max: 40000, rate: 0.0333 }, { min: 40000, max: 60000, rate: 0.044 }, { min: 60000, max: Infinity, rate: 0.0482 }],
-      married_separate: [{ min: 0, max: 5000, rate: 0.0222 }, { min: 5000, max: 12500, rate: 0.0296 }, { min: 12500, max: 20000, rate: 0.0333 }, { min: 20000, max: 30000, rate: 0.044 }, { min: 30000, max: Infinity, rate: 0.0482 }],
-      married_joint: [{ min: 0, max: 10000, rate: 0.0222 }, { min: 10000, max: 25000, rate: 0.0296 }, { min: 25000, max: 40000, rate: 0.0333 }, { min: 40000, max: 60000, rate: 0.044 }, { min: 60000, max: Infinity, rate: 0.0482 }],
-      head_of_household: [{ min: 0, max: 10000, rate: 0.0222 }, { min: 10000, max: 25000, rate: 0.0296 }, { min: 25000, max: 40000, rate: 0.0333 }, { min: 40000, max: 60000, rate: 0.044 }, { min: 60000, max: Infinity, rate: 0.0482 }],
+      single: [{ min: 0, max: 10000, rate: 0.0211 }, { min: 10000, max: 25000, rate: 0.0281 }, { min: 25000, max: 40000, rate: 0.0316 }, { min: 40000, max: 60000, rate: 0.0422 }, { min: 60000, max: Infinity, rate: 0.0458 }],
+      married_separate: [{ min: 0, max: 5000, rate: 0.0211 }, { min: 5000, max: 12500, rate: 0.0281 }, { min: 12500, max: 20000, rate: 0.0316 }, { min: 20000, max: 30000, rate: 0.0422 }, { min: 30000, max: Infinity, rate: 0.0458 }],
+      married_joint: [{ min: 0, max: 10000, rate: 0.0211 }, { min: 10000, max: 25000, rate: 0.0281 }, { min: 25000, max: 40000, rate: 0.0316 }, { min: 40000, max: 60000, rate: 0.0422 }, { min: 60000, max: Infinity, rate: 0.0458 }],
+      head_of_household: [{ min: 0, max: 10000, rate: 0.0211 }, { min: 10000, max: 25000, rate: 0.0281 }, { min: 25000, max: 40000, rate: 0.0316 }, { min: 40000, max: 60000, rate: 0.0422 }, { min: 60000, max: Infinity, rate: 0.0458 }],
     },
     stdDeduction: { mode: 'none' },
     exemption: { mode: 'deduction', single: 2000, married_separate: 2000, married_joint: 4000, head_of_household: 2000 },
@@ -1660,6 +1770,11 @@ const calculateStateTaxProgressive = (grossIncome, state, filingStatus, yearsFro
       grossIncome, retirementIncome,
       qualifiedWithdrawals: extraParams.qualifiedRetirementWithdrawals || 0,
       taxableSS, filingStatus,
+      // Total benefits received, taxable or not. Maryland and Maine reduce their
+      // pension caps by ALL Social Security; the taxable slice (≤85%) understated
+      // the reduction. Callers that cannot supply it fall back to taxable SS,
+      // which is what every function received before.
+      totalSS: Number.isFinite(extraParams.totalSS) ? extraParams.totalSS : taxableSS,
       primaryAge: extraParams.primaryAge || 0,
       spouseAge: extraParams.spouseAge || 0,
       agi, inf,
@@ -1699,7 +1814,10 @@ const calculateStateTaxProgressive = (grossIncome, state, filingStatus, yearsFro
   }
 
   // Standard deduction.
-  const stdDed = resolveStateStdDeduction(config.stdDeduction, agi, filingStatus, inf);
+  // `agi` here is after the state's own exclusions. A deduction that phases out
+  // on FEDERAL AGI (South Carolina's SCIAD) needs the pre-exclusion figure, so it
+  // is passed alongside; the other sliding functions ignore it.
+  const stdDed = resolveStateStdDeduction(config.stdDeduction, agi, filingStatus, inf, { federalAGI: grossIncome });
 
   // Personal exemption taken as a deduction (vs. credit-mode handled after brackets).
   let exemptionDeduction = 0;
@@ -5001,7 +5119,7 @@ const computeTaxReturn = (situation = {}) => {
   // would silently deny those exclusions to a household old enough to have them.
   const stateTax = calculateStateTax(
     agi, state, filingStatus, yearsFromNow, inflationRate, taxableSS, pensions,
-    { primaryAge: ageOf(0), spouseAge: ageOf(1),
+    { totalSS: ssBenefits, primaryAge: ageOf(0), spouseAge: ageOf(1),
       qualifiedRetirementWithdrawals: iraDistributions });
   const stateWithheld = n_(w2.stateWithheld);
   const estimatedState = Array.isArray(pay.estimatedState)
@@ -6293,7 +6411,7 @@ const marginalCostOfNextDollar = ({ row, pi = {}, probe = 1000, numMedicareEligi
     const gainsTax = calculateCapitalGainsTax(taxableGains, ordinaryTaxable + taxableGains, fs, idx, infl);
     const niit = calculateNIIT(preferential, magi, fs);
     const stateTax = calculateStateTax(agi, pi.state || 'None', fs, idx, infl, taxableSS,
-      row.pension || 0, { primaryAge: row.myAge || 0, spouseAge: row.spouseAge || 0 });
+      row.pension || 0, { totalSS: ss, primaryAge: row.myAge || 0, spouseAge: row.spouseAge || 0 });
     // The surcharge this dollar triggers TWO YEARS out, priced at that year's
     // thresholds — the same convention the conversion solver uses.
     const irmaa = eligible > 0
@@ -6447,7 +6565,7 @@ const survivorTaxComparison = ({ row, pi = {}, smallerSSBenefit = null, streams 
       + calculateCapitalGainsTax(taxableGains, ordinaryTaxable + taxableGains, filingStatus, idx, infl)
       + calculateNIIT(preferential, magi, filingStatus);
     const stateTax = calculateStateTax(agi, state, filingStatus, idx, infl, taxableSS, pension,
-      { primaryAge: row.myAge || 0, spouseAge: row.spouseAge || 0 });
+      { totalSS: ssAmount, primaryAge: row.myAge || 0, spouseAge: row.spouseAge || 0 });
     // IRMAA is per person, so a survivor pays one surcharge rather than two —
     // but against thresholds that have halved, which usually more than cancels
     // the saving.
@@ -8204,6 +8322,60 @@ const DEFAULT_PLAN_INFO = {
   medicalInflation: 0.05         // Healthcare-specific inflation rate
 };
 
+// ── SETTINGS THAT ARE ON BUT OUT OF SIGHT ────────────────────────────────────
+// Simple mode hides the controls for these, and a hidden setting keeps moving
+// the projection — that is the point of "hides screens, never settings". But a
+// reader who cannot see a conversion strategy or a survivor assumption cannot
+// explain their own numbers, which is the "hidden from, not simplified for" case
+// the mode was built to avoid. So each one that is actually ON is named, in the
+// words the rest of the app uses for it (rothConversionModeLabel is the same
+// describer the Scenarios report prints).
+//
+// Only settings that CHANGE the projection and whose control simple mode hides.
+// Defaults are not listed: a plan that does nothing unusual shows no notice.
+const DEFAULT_WITHDRAWAL_ORDER = ['pretax', 'brokerage', 'roth'];
+const WITHDRAWAL_BUCKET_WORDS = { pretax: 'pre-tax', brokerage: 'brokerage', roth: 'Roth' };
+const activeAdvancedSettings = (pi, fmt = (v) => '$' + Math.round(v).toLocaleString('en-US')) => {
+  if (!pi) return [];
+  const out = [];
+  if (rothConversionIsPlanned(pi)) {
+    const staged = rothConversionModeOf(pi) === 'staged';
+    const ages = !staged && pi.rothConversionStartAge && pi.rothConversionEndAge
+      ? `, ages ${pi.rothConversionStartAge}–${pi.rothConversionEndAge}` : '';
+    const floor = (pi.rothConversionPreTaxFloor || 0) > 0
+      ? `, keeping ${fmt(pi.rothConversionPreTaxFloor)} pre-tax` : '';
+    out.push({ key: 'rothStrategy', label: 'Roth conversions',
+      detail: rothConversionModeLabel(pi, fmt) + ages + floor });
+  }
+  const order = Array.isArray(pi.withdrawalPriority) ? pi.withdrawalPriority : DEFAULT_WITHDRAWAL_ORDER;
+  if (order.join() !== DEFAULT_WITHDRAWAL_ORDER.join()) {
+    out.push({ key: 'withdrawalPriority', label: 'Withdrawal order',
+      detail: order.map(k => WITHDRAWAL_BUCKET_WORDS[k] || k).join(' → ') });
+  }
+  if (pi.withdrawalBracketFill) {
+    out.push({ key: 'withdrawalPriority', label: 'Pre-tax spending',
+      detail: `drawn first, up to the ${pi.withdrawalBracketFill} bracket each year` });
+  }
+  if (pi.spendingPhasesEnabled) {
+    out.push({ key: 'spendingPhases', label: 'Spending phases',
+      detail: 'spending steps down in later retirement' });
+  }
+  if (pi.filingStatus === 'married_joint' && pi.survivorModelEnabled) {
+    const pct = Math.round((pi.survivorSpendingFactor ?? 0.75) * 100);
+    out.push({ key: 'survivor', label: 'Survivor modelling',
+      detail: `after the first death, spending drops to ${pct}% and the survivor files single` });
+  }
+  if ((pi.charitableGivingPercent || 0) > 0) {
+    out.push({ key: 'charitable', label: 'Charitable giving',
+      detail: `${pi.charitableGivingPercent}% of spending, given as QCDs once eligible` });
+  }
+  if (pi.useDetailedCurrentYear) {
+    out.push({ key: 'currentYear', label: 'This year',
+      detail: 'uses your detailed paystub and K-1 figures from the Current Year screen' });
+  }
+  return out;
+};
+
 // ── READING A SAVED PLAN ────────────────────────────────────────────────────
 // The projection-relevant normalisation of a saved file, in one place, so the
 // desktop and the phone project the same plan identically.
@@ -9742,7 +9914,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       const baseFederalTax = calculateFederalTax(baseGrossIncome, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(baseGrossIncome + preTaxDeduction));
       // For state tax, pension is retirement income exempt in some states (e.g., Alabama)
       const baseRetirementIncome = totalPension;
-      const baseStateTax = calculateStateTax(baseGrossIncome, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, taxableSS, baseRetirementIncome, { federalTaxPaid: baseFederalTax, primaryAge: myAge, spouseAge: spouseAge });
+      const baseStateTax = calculateStateTax(baseGrossIncome, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, taxableSS, baseRetirementIncome, { totalSS: totalSocialSecurity, federalTaxPaid: baseFederalTax, primaryAge: myAge, spouseAge: spouseAge });
       
       // Net income from guaranteed sources + earned income + non-taxable one-time income
       const netCurrentIncome = totalGuaranteedIncome + earnedIncome + oneTimeNontaxableIncome - baseFederalTax - baseStateTax - totalFICA;
@@ -9996,7 +10168,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           // for a bill that never arrived and the year over-delivered — by $5,438
           // in Illinois and $2,397 in New York on the P85 fixture. Raw and
           // pre-QCD, mirroring the final call exactly.
-          const totalStateTax = calculateStateTax(adjustedNonSSIncome + adjustedTaxableSS, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, adjustedTaxableSS, iterRetirementIncome, { federalTaxPaid: totalFedOrdinary, primaryAge: myAge, spouseAge: spouseAge, qualifiedRetirementWithdrawals: totalPreTaxFromWithdrawals });
+          const totalStateTax = calculateStateTax(adjustedNonSSIncome + adjustedTaxableSS, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, adjustedTaxableSS, iterRetirementIncome, { totalSS: totalSocialSecurity, federalTaxPaid: totalFedOrdinary, primaryAge: myAge, spouseAge: spouseAge, qualifiedRetirementWithdrawals: totalPreTaxFromWithdrawals });
 
           // Tax attributable to the withdrawal = total tax minus tax on guaranteed income alone.
           const withdrawalFedTax = totalFedTax - baseFederalTax;
@@ -10491,7 +10663,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           const preConvSSForDraw = calculateSocialSecurityTaxableAmount(totalSocialSecurity, preConvNonSSForDraw, effectiveFilingStatus);
           const preConvGrossForDraw = preConvNonSSForDraw + preConvSSForDraw;
           const preConvFedForDraw = calculateFederalTax(preConvGrossForDraw, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(preConvGrossForDraw + preTaxDeduction));
-          const preConvStateForDraw = calculateStateTax(preConvGrossForDraw, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, preConvSSForDraw, totalPension, { federalTaxPaid: preConvFedForDraw, primaryAge: myAge, spouseAge: spouseAge });
+          const preConvStateForDraw = calculateStateTax(preConvGrossForDraw, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, preConvSSForDraw, totalPension, { totalSS: totalSocialSecurity, federalTaxPaid: preConvFedForDraw, primaryAge: myAge, spouseAge: spouseAge });
           // IRMAA moves with the conversion only in the first two projection years,
           // where there is no 2-year MAGI history to look back on. Omitting it made
           // the estimated bill too small by the surcharge, and the shortfall came
@@ -10514,7 +10686,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
               const ssT = calculateSocialSecurityTaxableAmount(totalSocialSecurity, nonSS, effectiveFilingStatus);
               const gross = nonSS + ssT;
               const fed = calculateFederalTax(gross, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(gross + preTaxDeduction));
-              const st = calculateStateTax(gross, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, ssT, totalPension, { federalTaxPaid: fed, primaryAge: myAge, spouseAge: spouseAge });
+              const st = calculateStateTax(gross, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, ssT, totalPension, { totalSS: totalSocialSecurity, federalTaxPaid: fed, primaryAge: myAge, spouseAge: spouseAge });
               const nextBill = Math.max(0, (fed - preConvFedForDraw) + (st - preConvStateForDraw)
                 + (irmaaAt(gross) - preConvIRMAAForDraw));
               const nextOrdinary = preTaxShareOfDraw(nextBill, X);
@@ -10661,7 +10833,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
             const preConvTaxableSS = calculateSocialSecurityTaxableAmount(totalSocialSecurity, preConvNonSS, effectiveFilingStatus);
             const preConvGross = preConvNonSS + preConvTaxableSS;
             const preConvFed = calculateFederalTax(preConvGross, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(preConvGross + preTaxDeduction));
-            const preConvState = calculateStateTax(preConvGross, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, preConvTaxableSS, totalPension, { federalTaxPaid: preConvFed, primaryAge: myAge, spouseAge: spouseAge });
+            const preConvState = calculateStateTax(preConvGross, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, preConvTaxableSS, totalPension, { totalSS: totalSocialSecurity, federalTaxPaid: preConvFed, primaryAge: myAge, spouseAge: spouseAge });
 
             // IRMAA: under the 2-year lookback this year's surcharge is fixed by
             // past MAGI — the conversion's IRMAA impact lands two years from now,
@@ -10725,7 +10897,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
               const postConvTaxableSS = calculateSocialSecurityTaxableAmount(totalSocialSecurity, postConvNonSS, effectiveFilingStatus);
               const postConvGross = postConvNonSS + postConvTaxableSS;
               const postConvFed = calculateFederalTax(postConvGross, effectiveFilingStatus, taxIndexYears, pi.inflationRate, fedOpts(postConvGross + preTaxDeduction));
-              const postConvState = calculateStateTax(postConvGross, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, postConvTaxableSS, totalPension, { federalTaxPaid: postConvFed, primaryAge: myAge, spouseAge: spouseAge });
+              const postConvState = calculateStateTax(postConvGross, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, postConvTaxableSS, totalPension, { totalSS: totalSocialSecurity, federalTaxPaid: postConvFed, primaryAge: myAge, spouseAge: spouseAge });
               const postConvIRMAA = convMedicareEligible > 0
                 ? calculateIRMAASurcharge(postConvGross + preTaxDeduction, effectiveFilingStatus, taxIndexYears, pi.inflationRate, convMedicareEligible).totalSurcharge
                 : 0;
@@ -10916,7 +11088,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // exempt — pass that figure via extraParams so calculateStateTax can subtract it (B9).
     const qualifiedRetirementWithdrawals = preTaxWithdrawals + totalRMD;
     // Pass extraParams for Alabama progressive tax engine (federal deductibility, age-based exclusions)
-    const stateExtraParams = { federalTaxPaid: federalTax, primaryAge: myAge, spouseAge: spouseAge, qualifiedRetirementWithdrawals };
+    const stateExtraParams = { totalSS: totalSocialSecurity, federalTaxPaid: federalTax, primaryAge: myAge, spouseAge: spouseAge, qualifiedRetirementWithdrawals };
     stateTax = calculateStateTax(finalTotalTaxableIncome, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, finalTaxableSS, finalRetirementIncome, stateExtraParams);
     
     // Calculate state taxable income (for display in detailed table)
@@ -11913,6 +12085,7 @@ const describePlanPatch = (state, patch) => {
     convertEverythingAnalysis, levelConversionToDrain, convertEverythingPI,
     qcdTaxSavings,
     rothConversionModeOf, rothConversionIsPlanned, rothConversionModeLabel,
+    activeAdvancedSettings,
     conversionStagesOf, conversionStageAt, conversionStageIsEffective,
     irmaaAwareConversionStages,
     deferralDecision, convertWhileWorking, switchDeferrals,

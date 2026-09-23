@@ -1162,18 +1162,21 @@ section('Unit — Virginia (first-dollar 4 brackets, fixed std ded, age deductio
 section('Unit — Wisconsin (sliding std ded, 4 brackets, Act 15 retirement excl)');
 {
   // Single $50k. SSSD = 13930 - .12*(50000-19310) = 10247.20; exemption 700.
-  // taxable = 39052.80. 14680*.035 + (39052.80-14680)*.044 = 513.80 + 1072.40 = 1586.20
-  approx(calculateStateTax(50000, 'Wisconsin', 'single', 0, 0.03, 0, 0), 1586.20,
-    'WI single $50k → $1,586.20', 0.002);
+  // taxable = 39052.80.
+  // 2026 thresholds 15,110 / 51,950 / 332,720. 15110*.035 + (39052.80-15110)*.044 = 528.85 + 1053.48 = 1582.33
+  approx(calculateStateTax(50000, 'Wisconsin', 'single', 0, 0.03, 0, 0), 1582.33,
+    'WI single $50k → $1,582.33', 0.002);
 
   // MFJ $120k.
-  approx(calculateStateTax(120000, 'Wisconsin', 'married_joint', 0, 0.03, 0, 0), 5108.56,
-    'WI MFJ $120k → $5,108.56', 0.002);
+  // SSSD 25890 - .19778*93190 = 7459.88; exemption 1400; taxable 111140.12. 705.25 + 2160.84 + 2219.65 = 5085.79
+  approx(calculateStateTax(120000, 'Wisconsin', 'married_joint', 0, 0.03, 0, 0), 5085.79,
+    'WI MFJ $120k → $5,085.79', 0.002);
 
   // Retiree MFJ $100k incl $40k pension, both age 68 → $48k Act-15 exclusion caps
   // at the $40k pension. agi 60000.
-  approx(calculateStateTax(100000, 'Wisconsin', 'married_joint', 0, 0.03, 0, 40000, { primaryAge: 68, spouseAge: 68 }), 1551.85,
-    'WI MFJ $100k w/ $40k pension excluded (age 67+) → $1,551.85', 0.002);
+  // 2026 MFJ thresholds 20,150 / 69,260; agi 60000 after the $40k exclusion.
+  approx(calculateStateTax(100000, 'Wisconsin', 'married_joint', 0, 0.03, 0, 40000, { primaryAge: 68, spouseAge: 68 }), 1546.72,
+    'WI MFJ $100k w/ $40k pension excluded (age 67+) → $1,546.72', 0.002);
 }
 
 section('Unit — Maine (3 brackets, federal std ded phaseout, pension deduction)');
@@ -1257,19 +1260,21 @@ section('Unit — Rhode Island (3 brackets, taxes SS, pension modification at FR
 }
 
 // ── 8g. AR / KS / NE / NM / ND / OK / SC / VT / WV progressive engines ───────
-section('Unit — Arkansas (3 brackets w/ 4%>3.9% quirk, $29 credit, $6k retire excl)');
+section('Unit — Arkansas (3 brackets w/ 4%>3.7% quirk, $29 credit, $6k retire excl)');
 {
-  // Single $50k. std 2400; taxable 47600. 90+176+(38700)*.039 = 1775.30 − $29 = 1746.30
-  approx(calculateStateTax(50000, 'Arkansas', 'single', 0, 0.03, 0, 0), 1746.30,
-    'AR single $50k → $1,746.30', 0.002);
+  // Top rate 3.7% for 2026 (May 2026 session, retroactive). 90+176+38700*.037 = 1697.90 − $29 = 1668.90
+  approx(calculateStateTax(50000, 'Arkansas', 'single', 0, 0.03, 0, 0), 1668.90,
+    'AR single $50k → $1,668.90', 0.002);
 
-  approx(calculateStateTax(120000, 'Arkansas', 'married_joint', 0, 0.03, 0, 0), 4353.70,
-    'AR MFJ $120k → $4,353.70', 0.002);
+  // std 4800; taxable 115200. 90+176+106300*.037 = 4199.10 − $58 = 4141.10
+  approx(calculateStateTax(120000, 'Arkansas', 'married_joint', 0, 0.03, 0, 0), 4141.10,
+    'AR MFJ $120k → $4,141.10', 0.002);
 
   // Retiree single $60k incl $10k SS + $20k pension, age 65. SS exempt → 50000;
   // $6k retirement exclusion → agi 44000; taxable 41600.
-  approx(calculateStateTax(60000, 'Arkansas', 'single', 0, 0.03, 10000, 20000, { primaryAge: 65 }), 1512.30,
-    'AR single $60k w/ SS+$6k retire excl → $1,512.30', 0.002);
+  // 90+176+32700*.037 = 1475.90 − $29 = 1446.90
+  approx(calculateStateTax(60000, 'Arkansas', 'single', 0, 0.03, 10000, 20000, { primaryAge: 65 }), 1446.90,
+    'AR single $60k w/ SS+$6k retire excl → $1,446.90', 0.002);
 }
 
 section('Unit — Kansas (2 brackets 5.2/5.58%, $9,160 exemption, SS exempt)');
@@ -1300,18 +1305,20 @@ section('Unit — Nebraska (2026 top 4.55%, $157 credit, SS exempt)');
     'NE single $60k SS-exempt (pension taxed) → $1,489.13', 0.002);
 }
 
-section('Unit — New Mexico (5 brackets, federal std ded, TAXES SS)');
+section('Unit — New Mexico (6 brackets per HB 252, federal std ded, TAXES SS)');
 {
-  // Single $50k. std 16100 (federal); taxable 33900. 93.5+176+235+17900*.049 = 1381.60
-  approx(calculateStateTax(50000, 'New Mexico', 'single', 0, 0.03, 0, 0), 1381.60,
-    'NM single $50k → $1,381.60', 0.002);
+  // HB 252: 1.5/3.2/4.3/4.7/4.9/5.9% at 5.5k/16.5k/33.5k/66.5k/210k. taxable 33900: 82.5+352+731+18.8 = 1184.30
+  approx(calculateStateTax(50000, 'New Mexico', 'single', 0, 0.03, 0, 0), 1184.30,
+    'NM single $50k → $1,184.30', 0.002);
 
-  approx(calculateStateTax(120000, 'New Mexico', 'married_joint', 0, 0.03, 0, 0), 3894.20,
-    'NM MFJ $120k → $3,894.20', 0.002);
+  // MFJ at 8k/25k/50k/100k/315k. std 32200; taxable 87800: 120+544+1075+37800*.047 = 3515.60
+  approx(calculateStateTax(120000, 'New Mexico', 'married_joint', 0, 0.03, 0, 0), 3515.60,
+    'NM MFJ $120k → $3,515.60', 0.002);
 
   // Retiree single $60k incl $10k SS — NM TAXES SS so full $60k less fed std ded.
-  approx(calculateStateTax(60000, 'New Mexico', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 1871.60,
-    'NM single $60k (SS taxed) → $1,871.60', 0.002);
+  // taxable 43900: 82.5+352+731+10400*.047 = 1654.30
+  approx(calculateStateTax(60000, 'New Mexico', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 1654.30,
+    'NM single $60k (SS taxed) → $1,654.30', 0.002);
 }
 
 section('Unit — North Dakota (0% bottom bracket, federal std ded, SS exempt)');
@@ -1328,34 +1335,38 @@ section('Unit — North Dakota (0% bottom bracket, federal std ded, SS exempt)')
     'ND single $80k w/ SS exempt → $178.91', 0.002);
 }
 
-section('Unit — Oklahoma (6 fixed brackets, $1k exemption, $10k retire excl)');
+section('Unit — Oklahoma (3 brackets per HB 2764, $1k exemption, $10k retire excl)');
 {
-  // Single $50k. std 6350 + exemption 1000; taxable 42650. 153.5 + 35450*.0475 = 1837.38
-  approx(calculateStateTax(50000, 'Oklahoma', 'single', 0, 0.03, 0, 0), 1837.38,
-    'OK single $50k → $1,837.38', 0.002);
+  // HB 2764: 0% to 3,750, then 2.5/3.5/4.5% at 3,750/4,900/7,200. taxable 42650: 28.75+80.50+1595.25 = 1704.50
+  approx(calculateStateTax(50000, 'Oklahoma', 'single', 0, 0.03, 0, 0), 1704.50,
+    'OK single $50k → $1,704.50', 0.002);
 
-  approx(calculateStateTax(120000, 'Oklahoma', 'married_joint', 0, 0.03, 0, 0), 4624.75,
-    'OK MFJ $120k → $4,624.75', 0.002);
+  // MFJ doubled (7,500/9,800/14,400). taxable 105300: 57.50+161+4090.50 = 4309.00
+  approx(calculateStateTax(120000, 'Oklahoma', 'married_joint', 0, 0.03, 0, 0), 4309.00,
+    'OK MFJ $120k → $4,309.00', 0.002);
 
   // Retiree single $60k incl $10k SS + $20k pension, age 67. SS exempt → 50000;
   // $10k retirement exclusion → 40000; taxable 32650.
-  approx(calculateStateTax(60000, 'Oklahoma', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 1362.38,
-    'OK single $60k w/ SS+$10k retire excl → $1,362.38', 0.002);
+  // taxable 32650: 28.75+80.50+25450*.045 = 1254.50
+  approx(calculateStateTax(60000, 'Oklahoma', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 1254.50,
+    'OK single $60k w/ SS+$10k retire excl → $1,254.50', 0.002);
 }
 
-section('Unit — South Carolina (top 6%, federal std ded, $10k/$15k retire excl)');
+section('Unit — South Carolina (H.4216: 1.99% / 5.21%, SCIAD, $10k/$15k retire excl)');
 {
-  // Single $50k. std 16100; taxable 33900. 14270*.03 + 16070*.06 = 1392.30
-  approx(calculateStateTax(50000, 'South Carolina', 'single', 0, 0.03, 0, 0), 1392.30,
-    'SC single $50k → $1,392.30', 0.002);
+  // H.4216: SCIAD 15000*(1-10000/55000) = 12272.73; taxable 37727.27. 30000*.0199 + 7727.27*.0521 = 597 + 402.59 = 999.59
+  approx(calculateStateTax(50000, 'South Carolina', 'single', 0, 0.03, 0, 0), 999.59,
+    'SC single $50k → $999.59', 0.002);
 
-  approx(calculateStateTax(120000, 'South Carolina', 'married_joint', 0, 0.03, 0, 0), 4626.30,
-    'SC MFJ $120k → $4,626.30', 0.002);
+  // SCIAD 30000*(1-40000/110000) = 19090.91; taxable 100909.09. 597 + 70909.09*.0521 = 4291.36
+  approx(calculateStateTax(120000, 'South Carolina', 'married_joint', 0, 0.03, 0, 0), 4291.36,
+    'SC MFJ $120k → $4,291.36', 0.002);
 
   // Retiree single $60k incl $10k SS + $20k pension, age 67. SS exempt → 50000;
-  // $15k (65+) retirement exclusion → 35000; taxable 18900.
-  approx(calculateStateTax(60000, 'South Carolina', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 492.30,
-    'SC single $60k w/ SS+$15k retire excl → $492.30', 0.002);
+  // $15k (65+) retirement exclusion → 35000.
+  // Federal AGI 60000 → SCIAD 15000*(1-20000/55000) = 9545.45; after SS and $15k excl, 35000 - 9545.45 = 25454.55 × .0199 = 506.55
+  approx(calculateStateTax(60000, 'South Carolina', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 506.55,
+    'SC single $60k w/ SS+$15k retire excl → $506.55', 0.002);
 }
 
 section('Unit — Vermont (4 brackets, $4,850 exemption, TAXES SS)');
@@ -1374,17 +1385,19 @@ section('Unit — Vermont (4 brackets, $4,850 exemption, TAXES SS)');
 
 section('Unit — West Virginia (no std ded, $2k exemption, SS exempt 2026, $8k 65+)');
 {
-  // Single $50k. exemption 2000; taxable 48000. 222+444+499.5+8000*.044 = 1517.50
-  approx(calculateStateTax(50000, 'West Virginia', 'single', 0, 0.03, 0, 0), 1517.50,
-    'WV single $50k → $1,517.50', 0.002);
+  // 2026 rates 2.11/2.81/3.16/4.22/4.58% (5% cut). taxable 48000: 211+421.5+474+337.6 = 1444.10
+  approx(calculateStateTax(50000, 'West Virginia', 'single', 0, 0.03, 0, 0), 1444.10,
+    'WV single $50k → $1,444.10', 0.002);
 
-  approx(calculateStateTax(120000, 'West Virginia', 'married_joint', 0, 0.03, 0, 0), 4744.70,
-    'WV MFJ $120k → $4,744.70', 0.002);
+  // exemption 4000; taxable 116000: 211+421.5+474+844+56000*.0458 = 4515.30
+  approx(calculateStateTax(120000, 'West Virginia', 'married_joint', 0, 0.03, 0, 0), 4515.30,
+    'WV MFJ $120k → $4,515.30', 0.002);
 
   // Retiree single $60k incl $10k SS + $20k pension, age 67. SS exempt (2026!) →
   // 50000; $8k over-65 exclusion → 42000; exemption 2000; taxable 40000.
-  approx(calculateStateTax(60000, 'West Virginia', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 1165.50,
-    'WV single $60k w/ SS exempt + $8k 65+ → $1,165.50', 0.002);
+  // taxable 40000: 211+421.5+474 = 1106.50
+  approx(calculateStateTax(60000, 'West Virginia', 'single', 0, 0.03, 10000, 20000, { primaryAge: 67 }), 1106.50,
+    'WV single $60k w/ SS exempt + $8k 65+ → $1,106.50', 0.002);
 }
 
 // ── 9. ACA subsidy cliff (2026 post-ARPA law: Rev. Proc. 2025-25) ─────────────
@@ -15044,6 +15057,213 @@ section('P129 — the full review: HSA is its own bucket, and the solver lands o
     const engaged = p.filter(r => r.solverIterations > 0);
     gt(engaged.length, 0, 'the baseline plan exercises the solver');
     ok(engaged.every(r => Math.abs(r.solverResidual) < 100), 'every solved year lands on target');
+  }
+}
+
+
+section('P130 — the rest of the review: the tour, hidden settings, the mode on file, and one sink');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const jsx = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner.jsx'), 'utf8');
+  const { activeAdvancedSettings, rothConversionModeLabel, DEFAULT_PLAN_INFO } = engine;
+  const single = { ...DEFAULT_PLAN_INFO, filingStatus: 'single' };
+
+  // ── a setting that is on but out of sight is named ────────────────────────
+  {
+    eq(JSON.stringify(activeAdvancedSettings(single)), '[]', 'a plan doing nothing unusual shows no notice');
+    eq(JSON.stringify(activeAdvancedSettings(null)), '[]', 'and no plan is not an error');
+    const conv = { ...single, rothConversionBracket: '24%', rothConversionStartAge: 60, rothConversionEndAge: 70 };
+    const c = activeAdvancedSettings(conv).find(x => x.key === 'rothStrategy');
+    ok(c, 'a planned conversion is named');
+    ok(c.detail.startsWith(rothConversionModeLabel(conv)),
+      'in the same words the Scenarios report uses — one describer, not two');
+    ok(/ages 60–70/.test(c.detail), 'with its window');
+    const staged = { ...single, rothConversionStages: [{ bracket: '24%', startAge: 55, endAge: 62 }, { irmaaTier: 1, startAge: 63, endAge: 74 }] };
+    ok(/2-stage schedule/.test((activeAdvancedSettings(staged).find(x => x.key === 'rothStrategy') || {}).detail || ''),
+      'a staged schedule is described as one');
+    ok(activeAdvancedSettings({ ...single, withdrawalPriority: ['roth', 'brokerage', 'pretax'] }).some(x => /Roth → brokerage → pre-tax/.test(x.detail)),
+      'a non-default withdrawal order is spelled out');
+    ok(activeAdvancedSettings({ ...single, withdrawalBracketFill: '22%' }).some(x => /22% bracket/.test(x.detail)), 'as is bracket-fill spending');
+    ok(activeAdvancedSettings({ ...single, spendingPhasesEnabled: true }).some(x => x.key === 'spendingPhases'), 'spending phases');
+    ok(activeAdvancedSettings({ ...single, charitableGivingPercent: 5 }).some(x => /5% of spending/.test(x.detail)), 'charitable giving');
+    ok(activeAdvancedSettings({ ...single, useDetailedCurrentYear: true }).some(x => x.key === 'currentYear'), "this year's detailed figures");
+    // Survivor modelling is inert for a single filer, so naming it would be noise.
+    eq(activeAdvancedSettings({ ...single, survivorModelEnabled: true }).some(x => x.key === 'survivor'), false,
+      'survivor modelling is not named for a single filer, where it does nothing');
+    ok(activeAdvancedSettings({ ...DEFAULT_PLAN_INFO, filingStatus: 'married_joint', survivorModelEnabled: true, survivorSpendingFactor: 0.7 })
+      .some(x => x.key === 'survivor' && /70%/.test(x.detail)), 'but is for a married plan, with its spending factor');
+
+    // Every key names a control simple mode actually hides — and every hidden
+    // Personal Info setting is covered. If a section becomes essential, or a new
+    // one is added, this is where the list has to be revisited.
+    const mStart = jsx.indexOf('const SECTION_MANIFEST = {');
+    const manifest = eval('(' + jsx.slice(mStart + 'const SECTION_MANIFEST = '.length, jsx.indexOf('\n};', mStart) + 2) + ')');
+    const hiddenPersonal = manifest.personal.filter(e => e.level !== 'essential').map(e => e.id);
+    const everything = { ...DEFAULT_PLAN_INFO, filingStatus: 'married_joint', survivorModelEnabled: true,
+      rothConversionAmount: 50000, rothConversionStartAge: 60, rothConversionEndAge: 70,
+      withdrawalPriority: ['roth', 'pretax', 'brokerage'], spendingPhasesEnabled: true,
+      charitableGivingPercent: 5, useDetailedCurrentYear: true };
+    const keys = [...new Set(activeAdvancedSettings(everything).map(x => x.key))];
+    keys.filter(k => k !== 'currentYear').forEach(k =>
+      ok(hiddenPersonal.includes(k), `'${k}' is a Personal Info section simple mode hides`));
+    const simpleTabs = [...(/const SIMPLE_TABS = \[([\s\S]*?)\];/.exec(jsx)[1]).matchAll(/'([a-z]+)'/g)].map(m => m[1]);
+    eq(simpleTabs.includes('currentyear'), false, 'and the Current Year screen is one simple mode does not show');
+    hiddenPersonal.forEach(id => ok(keys.includes(id), `every hidden Personal Info setting is covered — '${id}'`));
+
+    ok(/const HiddenSettingsNotice = \(\{ pi, onShowEverything \}\)/.test(jsx), 'the notice exists');
+    ok(/const items = activeAdvancedSettings\(pi, formatCurrency\);/.test(jsx), 'and takes its list from the engine');
+    eq((jsx.match(/\{onShowEverything && <HiddenSettingsNotice pi=\{personalInfo\} onShowEverything=\{onShowEverything\} \/>\}/g) || []).length, 2,
+      'it appears on the Dashboard and on About you');
+    ok(/const showEverything = simpleMode \? \(\) => setUiMode\('advanced'\) : null;/.test(jsx),
+      'only in simple mode, with a way straight back to the full view');
+  }
+
+  // ── the tour describes the screen the reader is looking at ────────────────
+  {
+    const anchors = new Set([...jsx.matchAll(/data-tour="([a-z-]+)"/g)].map(m => m[1]));
+    anchors.add('nav-simple');   // set through the simple group's tourId
+    ok(/tourId: 'nav-simple',/.test(jsx) && /data-tour=\{group\.tourId \|\|/.test(jsx), 'the simple nav carries its own tour anchor');
+    ok(anchors.has('tour-mode-switch'), 'so does the mode switch');
+    const block = (name) => { const i = jsx.indexOf(`const ${name} = [`); return jsx.slice(i, jsx.indexOf('\n];', i)); };
+    const simpleSteps = block('SIMPLE_TOUR_STEPS');
+    [...simpleSteps.matchAll(/target: '([a-z-]+)'/g)].map(m => m[1]).forEach(t =>
+      ok(anchors.has(t), `simple tour step targets '${t}', which exists`));
+    ['nav-overview', 'nav-plan-setup', 'nav-analysis', 'nav-tools'].forEach(t =>
+      eq(simpleSteps.includes(`'${t}'`), false, `the simple tour does not point at the full app's '${t}' group`));
+    ['Stress Test', 'Sensitivity', 'Withdrawals', 'Current Year', 'Assumptions', 'Personal Info', 'Monte Carlo']
+      .forEach(n => eq(simpleSteps.includes(n), false, `the simple tour does not name '${n}', which the reader cannot see`));
+    ok(/<GuidedTour steps=\{simpleMode \? SIMPLE_TOUR_STEPS : TOUR_STEPS\}/.test(jsx), 'each mode gets its own tour');
+    ok(/function GuidedTour\(\{ onFinish, steps = TOUR_STEPS \}\)/.test(jsx), 'and the tour reads the steps it is given');
+    const gt0 = jsx.indexOf('function GuidedTour('), gt1 = jsx.indexOf('\n}', gt0);
+    eq(/TOUR_STEPS/.test(jsx.slice(jsx.indexOf('{', gt0 + 40), gt1)), false, 'not the full list behind its back');
+    // Facts the full tour had wrong.
+    const full = block('TOUR_STEPS') + block('TOUR_SHARED_TAIL');
+    eq(/Scenarios saves a full copy/.test(full), false, 'no Scenarios tab is described — scenarios live in the Sandbox');
+    eq(/Two printable summaries/.test(full), false, 'reports are not "two printable summaries"');
+    // Hoisted: read by the tour and the app, and no longer rebuilt every render.
+    ok(/^const SIMPLE_TABS = /m.test(jsx) && /^const SIMPLE_LABELS = /m.test(jsx), 'the simple-mode tables are at module scope');
+    eq(/^  const SIMPLE_TABS = /m.test(jsx), false, 'not inside the component');
+  }
+
+  // ── the mode travels with the plan file ───────────────────────────────────
+  {
+    const exp = jsx.slice(jsx.indexOf('const handleExport'), jsx.indexOf('const handleImport'));
+    ok(/\n      uiMode,/.test(exp), 'an export records the mode, beside the detail level and sections');
+    ok(/if \(data\.uiMode === 'simple' \|\| data\.uiMode === 'advanced'\) setUiMode\(data\.uiMode\);/.test(jsx),
+      'an import restores it — but only when the file says, so an old export does not switch the view');
+    const reset = jsx.slice(jsx.indexOf('const handleReset'), jsx.indexOf('const handleReset') + 3000);
+    eq(/setUiMode\(/.test(reset), false,
+      'Reset keeps the mode: it clears the plan, not how the reader looks at one');
+  }
+
+  // ── the last innerHTML ────────────────────────────────────────────────────
+  {
+    const mobile = fsMod.readFileSync(pathMod.join(ROOT, 'mobile.html'), 'utf8');
+    const index = fsMod.readFileSync(pathMod.join(ROOT, 'index.html'), 'utf8');
+    eq(/\.innerHTML\s*=/.test(mobile), false, "mobile.html's loader error is text, not markup");
+    eq(/\.innerHTML\s*=/.test(index), false, 'and neither page assigns innerHTML anywhere');
+  }
+}
+
+
+section('P131 — state tables checked against 2026 law: four enacted changes, four exclusion bugs');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const engSrc = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'engine.js'), 'utf8');
+  const T = calculateStateTax;
+  const C = engine.STATE_TAX_CONFIG;
+
+  // ── enacted 2026 changes the tables were missing ─────────────────────────
+  {
+    eq(C['Oklahoma'].brackets.single.length, 4, 'Oklahoma: HB 2764 folded six brackets into three (plus the 0% band)');
+    eq(C['Oklahoma'].brackets.single[3].rate, 0.045, 'with a 4.5% top rate, down from 4.75%');
+    eq(C['Oklahoma'].brackets.single[0].rate, 0, 'and the first $3,750 untaxed');
+    eq(C['Arkansas'].brackets.single[2].rate, 0.037, 'Arkansas: top rate 3.7%, cut in May 2026 retroactive to January');
+    eq(JSON.stringify(C['West Virginia'].brackets.single.map(b => b.rate)), JSON.stringify([0.0211, 0.0281, 0.0316, 0.0422, 0.0458]),
+      'West Virginia: the 2026 5% across-the-board cut');
+    C['West Virginia'].brackets.single.forEach((b, i) => approx(b.rate, [0.0222, 0.0296, 0.0333, 0.0444, 0.0482][i] * 0.95,
+      `WV bracket ${i + 1} is 95% of its 2025 rate (the old table had 4.4% where 2025 was 4.44%)`, 0.004));
+    eq(JSON.stringify(C['New Mexico'].brackets.single.map(b => b.rate)), JSON.stringify([0.015, 0.032, 0.043, 0.047, 0.049, 0.059]),
+      'New Mexico: the HB 252 schedule, with its new 4.3% band');
+    eq(C['New Mexico'].inflationIndexed, false, 'and NM brackets are statutory, not indexed');
+  }
+
+  // ── South Carolina: a different structure, not just new rates ────────────
+  {
+    eq(JSON.stringify(C['South Carolina'].brackets.single.map(b => [b.min, b.rate])), JSON.stringify([[0, 0.0199], [30000, 0.0521]]),
+      'SC: 1.99% below $30,000 and 5.21% above');
+    // The statute's "5.21% minus $966" is the same schedule.
+    approx(30000 * (0.0521 - 0.0199), 966, "the statute's $966 is exactly the two-rate schedule", 0.0001);
+    eq(C['South Carolina'].stdDeduction.mode, 'sliding', 'the federal standard deduction is replaced by the SCIAD');
+    const sciad = (inc, fs) => T(inc, 'South Carolina', fs, 0, 0.03, 0, 0);
+    // Below the phase-out the full $15,000 applies: $40,000 − $15,000 = $25,000 × 1.99%.
+    approx(sciad(40000, 'single'), 25000 * 0.0199, 'full SCIAD at the bottom of the phase-out', 0.001);
+    // Above $95,000 single it is gone: tax on the whole income.
+    approx(sciad(100000, 'single'), 597 + 70000 * 0.0521, 'no SCIAD at all above $95,000 single', 0.001);
+    // It phases out on FEDERAL AGI — Social Security the state exempts still counts.
+    const withSS = T(60000, 'South Carolina', 'single', 0, 0.03, 20000, 0);
+    const deduction = 15000 * (1 - (60000 - 40000) / 55000);
+    // SS exempt → 40,000; less SCIAD 9,545.45 → 30,454.55, which crosses $30,000.
+    const taxable = 40000 - deduction;
+    approx(withSS, 30000 * 0.0199 + (taxable - 30000) * 0.0521,
+      'the phase-out reads federal AGI, including taxable Social Security', 0.001);
+    // Read against the post-exclusion $40,000 instead, the full $15,000 would apply.
+    // Phasing out on the post-exclusion $40,000 would keep the whole $15,000:
+    // (40,000 − 15,000) × 1.99% = $497.50. Reading federal AGI must tax MORE.
+    gt(withSS, 25000 * 0.0199 + 100, 'rather than the post-exclusion figure, which would keep the whole deduction');
+  }
+
+  // ── exclusions that were reduced by the wrong Social Security ────────────
+  {
+    // Maryland and Maine reduce their pension caps by ALL Social Security received.
+    const md = (extra) => T(84000, 'Maryland', 'single', 0, 0.03, 34000, 50000, { primaryAge: 70, ...extra });
+    approx(md({ totalSS: 40000 }) - md({}), 6000 * 0.0475, 'Maryland: $6,000 more is taxed when the cap is reduced by total, not taxable, SS', 0.02);
+    ok(/const MD_PENSION_CAP = 40600;/.test(engSrc), "Maryland's 2026 cap is $40,600 — it fell from $41,200");
+    ok(/MD_PENSION_CAP \* persons - \(totalSS \|\| 0\)/.test(engSrc), 'and is reduced by total Social Security');
+    ok(/const ME_PENSION_CAP = 49824;/.test(engSrc), "Maine's 2026 cap follows the maximum SS benefit, $4,152 × 12");
+    approx(49824, 4152 * 12, 'which is that benefit', 0);
+    approx(48216, 4018 * 12, 'as the 2025 figure was — the tie the cap follows', 0);
+    ok(/ME_PENSION_CAP \* taxpayers \* inf - \(totalSS \|\| 0\)/.test(engSrc), 'Maine is reduced by total SS too');
+    // Supplied by every call inside the projection, so the solver and the final
+    // calculation price the same exclusion.
+    eq((engSrc.match(/\{ totalSS: totalSocialSecurity, federalTaxPaid:/g) || []).length, 7,
+      'every state-tax call in the projection passes total Social Security');
+    ok(/totalSS: Number\.isFinite\(extraParams\.totalSS\) \? extraParams\.totalSS : taxableSS,/.test(engSrc),
+      'and a caller that cannot falls back to what the functions received before');
+  }
+  {
+    // Connecticut excluded pensions but never IRA/401(k) withdrawals.
+    const ct = T(60000, 'Connecticut', 'single', 0, 0.03, 0, 0, { primaryAge: 70, qualifiedRetirementWithdrawals: 60000 });
+    eq(Math.round(ct), 0, 'Connecticut: a $60,000 IRA draw under the $75,000 threshold is fully exempt in 2026');
+    ok(T(60000, 'Connecticut', 'single', 0, 0.03, 0, 0) > 1000, 'while the same $60,000 of wages is taxed — the exclusion is specific');
+  }
+  {
+    // The solver prices the same exclusions the final year applies.
+    ['Maryland', 'Connecticut', 'Maine', 'South Carolina'].forEach(state => {
+      const pi = { ...engine.DEFAULT_PLAN_INFO, myAge: 70, spouseAge: 70, myBirthYear: TODAY_YEAR - 70, spouseBirthYear: TODAY_YEAR - 70,
+        myRetirementAge: 65, spouseRetirementAge: 65, filingStatus: 'married_joint', state, desiredRetirementIncome: 90000,
+        legacyAge: 90, survivorModelEnabled: false, healthcareModel: 'none', ltcModel: 'none', rothConversionAmount: 0 };
+      const accts = [{ id: 1, name: '401k', type: '401k', owner: 'me', contributor: 'me', balance: 1500000, contribution: 0, cagr: 0.05, startAge: 70, stopAge: 70 },
+                     { id: 2, name: 'IRA', type: 'traditional_ira', owner: 'spouse', contributor: 'spouse', balance: 600000, contribution: 0, cagr: 0.05, startAge: 70, stopAge: 70 }];
+      const ss = [{ id: 1, name: 'SS', type: 'social_security', amount: 36000, startAge: 67, endAge: 120, cola: 0.02, owner: 'me' },
+                  { id: 2, name: 'SS2', type: 'social_security', amount: 24000, startAge: 67, endAge: 120, cola: 0.02, owner: 'spouse' }];
+      const p = computeProjections(pi, accts, ss, [], [], [], TODAY_YEAR);
+      lt(Math.max(...p.map(r => Math.abs(r.solverResidual || 0))), 100, `${state}: every year lands on target with the corrected exclusions`);
+    });
+  }
+
+  // ── what is still unverified is named, not vague ──────────────────────────
+  {
+    const bare = (engSrc.match(/VERIFY/g) || []).length;
+    const specific = (engSrc.match(/STILL TO VERIFY/g) || []).length;
+    // Nineteen "VERIFY" notes said only "check this"; the ones left say what is
+    // unconfirmed and roughly what it is worth. One general note remains: CT's
+    // benefit-recapture table, which no reachable source covered.
+    eq(bare - specific, 1, 'every remaining note but one names exactly what is unconfirmed');
+    ok(specific <= 10, `and there are ${specific}, down from 19`);
   }
 }
 

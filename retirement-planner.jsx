@@ -62,6 +62,7 @@ const {
   planShortfall, breakingPoint, accountsAtSavingsTarget,
   splitBothContributors, breakEvenTaxRate, conversionFundingComparison,
   DEFAULT_PLAN_INFO, PLAN_SCHEMA_VERSION, normalizeSavedPlan,
+  activeAdvancedSettings,
   betrSensitivity, presentValueOfTaxes, convertEverythingAnalysis,
   getFederalDeduction, NIIT_THRESHOLDS,
   IRMAA_FILL_SAFETY_MARGIN,
@@ -817,6 +818,43 @@ const newK1Row = () => ({
 // problem and a second, redundant encoding of what the swatch beside it already
 // says. This keeps the swatch coloured and the words readable.
 const legendInk = (value) => <span style={{ color: THEME.inkSecondary }}>{value}</span>;
+
+// ── WHAT SIMPLE MODE IS STILL APPLYING ───────────────────────────────────────
+// Shown in simple mode on the Dashboard and on About you, and only when one of
+// the settings whose control the mode hides is switched on. The list comes from
+// the engine (activeAdvancedSettings) so it cannot drift from what the engine
+// actually applies; this is only the frame around it.
+const HiddenSettingsNotice = ({ pi, onShowEverything }) => {
+  const items = activeAdvancedSettings(pi, formatCurrency);
+  if (!items.length) return null;
+  return (
+    <div className="rounded-xl border border-sky-700/40 bg-sky-900/15 px-4 py-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold text-sky-200">
+            Also shaping your plan — set in the full view
+          </div>
+          <ul className="mt-1.5 space-y-0.5 text-xs text-slate-300">
+            {items.map((it, i) => (
+              <li key={it.key + i}>
+                <span className="text-slate-100 font-medium">{it.label}:</span> {it.detail}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1.5 text-[11px] text-slate-500">
+            The simple view hides these controls, not their effect — every figure here includes them.
+          </p>
+        </div>
+        {onShowEverything && (
+          <button onClick={onShowEverything}
+                  className="shrink-0 text-xs px-3 py-1.5 rounded-lg border border-sky-600/50 text-sky-200 hover:bg-sky-800/30 transition-colors">
+            Show everything
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};
 
 // ── ONE SCENARIO, ONE LINE STYLE ─────────────────────────────────────────────
 // Shared by the Sandbox comparison chart and the printed Scenarios report, so a
@@ -11090,7 +11128,7 @@ function SensitivityTab({ detailLevel, sectionVisibility, setDetailLevel, setSec
 // ============================================
 // PersonalInfoTab — Lifted to module scope
 // ============================================
-function PersonalInfoTab({ accounts, dataWarnings, detailLevel, incomeStreams, oneTimeEvents, personalInfo, recurringExpenses, sectionVisibility, setDataWarnings, setDetailLevel, setOneTimeEvents, setPersonalInfo, setRecurringExpenses, setSectionVisibility }) {
+function PersonalInfoTab({ onShowEverything, accounts, dataWarnings, detailLevel, incomeStreams, oneTimeEvents, personalInfo, recurringExpenses, sectionVisibility, setDataWarnings, setDetailLevel, setOneTimeEvents, setPersonalInfo, setRecurringExpenses, setSectionVisibility }) {
   const [localInfo, setLocalInfo] = useState(personalInfo);
   const [dirtyPI, setDirtyPI] = useState(false);
   
@@ -11703,6 +11741,7 @@ function PersonalInfoTab({ accounts, dataWarnings, detailLevel, incomeStreams, o
           >Dismiss all warnings</button>
         </div>
       )}
+      {onShowEverything && <HiddenSettingsNotice pi={personalInfo} onShowEverything={onShowEverything} />}
       <SectionControls tab="personal" vis={sectionVisibility} setVis={setSectionVisibility}
                        level={detailLevel} setLevel={setDetailLevel} />
       <div className={cardStyle}>
@@ -17132,7 +17171,7 @@ function CharitableGivingPanel({ ctx }) {
   );
 }
 
-function DashboardTab({ accounts, assets, computeProjections, dashboardVisibility, detailLevel, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections: planProjections, recurringExpenses, setAccounts, setActiveTab, setDashboardVisibility, setDetailLevel, setIncomeStreams, setPersonalInfo, setSectionVisibility, sectionVisibility, showTourOffer }) {
+function DashboardTab({ onShowEverything, accounts, assets, computeProjections, dashboardVisibility, detailLevel, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections: planProjections, recurringExpenses, setAccounts, setActiveTab, setDashboardVisibility, setDetailLevel, setIncomeStreams, setPersonalInfo, setSectionVisibility, sectionVisibility, showTourOffer }) {
   // Session-only: the banner should stop nagging once acknowledged, but must come
   // back next visit while real numbers are still missing.
   const [estimatesDismissed, setEstimatesDismissed] = useState(false);
@@ -17305,6 +17344,8 @@ function DashboardTab({ accounts, assets, computeProjections, dashboardVisibilit
           <BasisToggle pi={personalInfo} setPersonalInfo={setPersonalInfo} />
         </div>
       </div>
+
+      {onShowEverything && <HiddenSettingsNotice pi={personalInfo} onShowEverything={onShowEverything} />}
 
       {/* Compact Summary Row */}
       {visibilitySettings.summaryCards && (
@@ -20768,7 +20809,7 @@ const NavGroup = ({ group, activeTab, setActiveTab, sidebarCollapsed }) => (
   // data-tour is derived from the group label ('PLAN SETUP' -> 'nav-plan-setup')
   // and is what GuidedTour's spotlight anchors to. Simple mode's single list has
   // no label, and gets no header and no tour anchor rather than an empty one.
-  <div className="mb-4" data-tour={group.label ? `nav-${group.label.toLowerCase().replace(/\s+/g, '-')}` : undefined}>
+  <div className="mb-4" data-tour={group.tourId || (group.label ? `nav-${group.label.toLowerCase().replace(/\s+/g, '-')}` : undefined)}>
     {!sidebarCollapsed && group.label && (
       <div className="flex items-center gap-2 px-3 py-2 text-xs font-bold text-slate-300 uppercase tracking-wider border-b border-slate-700/50 pb-2 mb-1">
         <span>{group.icon}</span>
@@ -20853,18 +20894,76 @@ function markTourSeen() {
 
 // Each step highlights one [data-tour] element in the shell. `target: null`
 // renders a centered card with the screen dimmed instead.
-const TOUR_STEPS = [
+// ── WHAT SIMPLE MODE KEEPS ─────────────────────────────────────────────────
+// Module scope, not inside RetirementPlanner: the tour below needs them too, and
+// inside the component they were rebuilt on every render roughly 480 lines
+// below an effect that read them — a temporal-dead-zone crash waiting for the
+// first edit that moved that read into render code.
+//
+// Chosen by what a plan cannot be made without, not by what is cheap to cut.
+//   Dashboard    where the plan stands
+//   What if      the Sandbox — the question most people actually arrive with
+//   About you    ages, filing, spending target, healthcare, long-term care
+//   Accounts     balances and contributions
+//   Property     the house and anything else that is not a portfolio
+//   Income       Social Security and pensions
+//   Taxes & Roth the conversion opportunity, without the optimiser suite
+//   Claiming     when to take Social Security — a top-two decision, kept
+//   Will it last Monte Carlo — "it works on average" is not a plan
+//
+// Cut: Current Year (a paystub and K-1 ledger), Withdrawals (the Sandbox
+// carries withdrawal order), Stress Test (Monte Carlo covers the same ground
+// for this reader), Sensitivity (an analyst's tornado chart), AI Assistant
+// (wants an API key), Assumptions (reference tables for checking the engine's
+// arithmetic), Plan history. Nothing is deleted — every one of them is one
+// click away in the full app, working on the same plan.
+const SIMPLE_TABS = ['dashboard', 'sandbox', 'personal', 'accounts', 'assets',
+                     'income', 'taxplanning', 'socialsecurity', 'montecarlo'];
+// Plainer names for the same tabs. "Monte Carlo" names a technique; "Will it
+// last?" names the question the reader came with.
+const SIMPLE_LABELS = {
+  sandbox: 'What if', personal: 'About you', assets: 'Property',
+  income: 'Income', taxplanning: 'Taxes & Roth',
+  socialsecurity: 'Claiming', montecarlo: 'Will it last?',
+};
+
+// ── THE TOUR ────────────────────────────────────────────────────────────────
+// Two tours, one per mode, built from shared steps. A single tour described the
+// full app's four nav groups and six analysis tabs to simple-mode readers —
+// who start there by default — so four steps lost their spotlight and the rest
+// named tabs the reader could not see, under names that no longer matched.
+const TOUR_WELCOME = {
+  target: null,
+  title: 'Welcome to your plan',
+  // Worded for someone who may be taking this at any time, not only straight
+  // out of the wizard — the tour is offered now rather than auto-launched.
+  body: "This quick tour explains what each part of the app answers — about a minute. Leave whenever you like; you can restart it from the sidebar.",
+};
+const TOUR_SHARED_TAIL = [
   {
-    target: null,
-    title: 'Welcome to your plan',
-    // Worded for someone who may be taking this at any time, not only straight
-    // out of the wizard — the tour is offered now rather than auto-launched.
-    body: "This quick tour explains what each part of the app answers — about a minute. Leave whenever you like; you can restart it from the sidebar.",
+    target: 'tour-guided-setup',
+    title: 'Guided Setup, anytime',
+    body: "The setup wizard lives here for good. Re-run it to walk your whole plan again — it loads your current numbers, so it's a fast way to review everything without hunting tab to tab. It also explains why each figure matters, and can fill in anything you don't have to hand from typical numbers for your age and income.",
   },
   {
+    target: 'tour-reports',
+    title: 'Reports',
+    // It said "two printable summaries" long after there were seven.
+    body: "Printable reports, each answering one question: a full plan summary, your next 12 months, a Roth conversion roadmap, what breaks first, your saved scenarios side by side, the claiming decision, and the survivor's tax bill. All print to PDF from your browser.",
+  },
+  {
+    target: 'tour-import-export',
+    title: 'Your data stays on this device',
+    body: "Nothing is uploaded anywhere — the whole plan lives in this browser's local storage. That also means clearing site data erases it. Export a backup file here, especially before switching browsers or machines.",
+  },
+];
+
+const TOUR_STEPS = [
+  TOUR_WELCOME,
+  {
     target: 'nav-overview',
-    title: 'Dashboard — start here',
-    body: "Your plan at a glance: portfolio balance year by year, whether the money lasts, and the point where it gets tight. After you change any input, this is where you check what it did. If setup estimated any figures for you, this is also where it offers to help you replace them with your real ones.",
+    title: 'Dashboard and Sandbox — start here',
+    body: "The Dashboard is your plan at a glance: portfolio balance year by year, whether the money lasts, and the point where it gets tight. After you change any input, this is where you check what it did. The Sandbox is the other half — move retirement age, spending, claiming or conversion strategy and see the whole plan re-run, without touching your saved plan until you choose to.",
   },
   {
     target: 'nav-plan-setup',
@@ -20879,9 +20978,10 @@ const TOUR_STEPS = [
   },
   {
     target: 'nav-analysis',
-    title: 'Analysis — six different questions',
+    title: 'Analysis — seven different questions',
     body: "These look easy to confuse. Each one answers something distinct:",
     bullets: [
+      ['Current Year', 'what will this year’s return look like, from your paystubs and K-1s?'],
       ['Social Security', 'what claiming age is worth most to you?'],
       ['Tax Planning', 'should you do Roth conversions, and how much?'],
       ['Withdrawals', 'which accounts should you spend down first?'],
@@ -20892,28 +20992,50 @@ const TOUR_STEPS = [
   },
   {
     target: 'nav-tools',
-    title: 'Tools — compare and verify',
-    body: "Scenarios saves a full copy of your plan so you can compare alternatives side by side — retire at 62 vs. 67, for instance. Assumptions lists every bracket, limit and rate the engine uses, so you can check the math rather than trust it. Worth a look for the things it applies on your behalf: the 10% penalty on pre-tax withdrawals before 59½, the extra deductions that start at 65, and the tax on dividends a taxable account throws off each year.",
+    title: 'Tools — ask and verify',
+    // It described a Scenarios tab that has not existed since saved scenarios
+    // moved into the Sandbox.
+    body: "The AI Assistant answers questions about your plan in plain language, using your own numbers (it needs an Anthropic API key, kept in this browser only). Assumptions lists every bracket, limit and rate the engine uses, so you can check the math rather than trust it — worth a look for what it applies on your behalf: the 10% penalty on pre-tax withdrawals before 59½, the extra deductions that start at 65, and the tax on dividends a taxable account throws off each year. Saved scenarios live in the Sandbox.",
   },
   {
-    target: 'tour-guided-setup',
-    title: 'Guided Setup, anytime',
-    body: "The setup wizard lives here for good. Re-run it to walk your whole plan again — it loads your current numbers, so it's a fast way to review everything without hunting tab to tab. It also explains why each figure matters, and can fill in anything you don't have to hand from typical numbers for your age and income.",
+    target: 'tour-mode-switch',
+    title: 'Too much? Simplify',
+    body: "This switch trims the app to the nine screens a plan is built from and hides the diagnostics. It hides screens, never settings — your plan and every number in it stay exactly the same, and one click brings everything back.",
   },
-  {
-    target: 'tour-reports',
-    title: 'Reports',
-    body: "Two printable summaries: a full plan snapshot, and \"Your Next 12 Months\" — a near-term checklist covering things with real deadlines, like RMDs and conversion room before year end. Both print to PDF from your browser.",
-  },
-  {
-    target: 'tour-import-export',
-    title: 'Your data stays on this device',
-    body: "Nothing is uploaded anywhere — the whole plan lives in this browser's local storage. That also means clearing site data erases it. Export a backup file here, especially before switching browsers or machines.",
-  },
+  ...TOUR_SHARED_TAIL,
   {
     target: null,
     title: "That's the tour",
     body: "If a number ever looks wrong, the Assumptions tab shows exactly what the engine used to produce it. Start on the Dashboard and change one input to see how it flows through.",
+  },
+];
+
+const SIMPLE_TOUR_STEPS = [
+  TOUR_WELCOME,
+  {
+    target: 'nav-simple',
+    title: 'Nine screens, in the order you build a plan',
+    body: "Start at the top and work down. Change a number on any screen and every other one updates from it.",
+    bullets: [
+      ['Dashboard', 'where your plan stands — does the money last?'],
+      [SIMPLE_LABELS.sandbox, 'try a change without touching your saved plan'],
+      [SIMPLE_LABELS.personal, 'ages, spending, healthcare and long-term care'],
+      ['Accounts · ' + SIMPLE_LABELS.assets + ' · ' + SIMPLE_LABELS.income, 'what you have and what comes in'],
+      [SIMPLE_LABELS.taxplanning, 'should you convert to Roth, and how much?'],
+      [SIMPLE_LABELS.socialsecurity, 'when to start Social Security'],
+      [SIMPLE_LABELS.montecarlo, 'does the plan survive bad markets, not just average ones?'],
+    ],
+  },
+  {
+    target: 'tour-mode-switch',
+    title: 'This is the simple view',
+    body: "It hides the diagnostic and specialist screens — nothing about your plan changes, and every setting still counts even where its control is tucked away. If one of those hidden settings is switched on, the screen it belongs to says so. Show everything brings the full planner back.",
+  },
+  ...TOUR_SHARED_TAIL,
+  {
+    target: null,
+    title: "That's the tour",
+    body: "Start on the Dashboard, then open What if and move one slider to see how the plan responds.",
   },
 ];
 
@@ -20923,11 +21045,11 @@ const SPOT_PAD = 8;
 const CARD_W = 380;
 const GAP = 16;
 
-function GuidedTour({ onFinish }) {
+function GuidedTour({ onFinish, steps = TOUR_STEPS }) {
   const [stepIndex, setStepIndex] = useState(0);
   const [rect, setRect] = useState(null);
-  const step = TOUR_STEPS[stepIndex];
-  const isLast = stepIndex === TOUR_STEPS.length - 1;
+  const step = steps[stepIndex];
+  const isLast = stepIndex === steps.length - 1;
 
   const finish = useCallback(() => {
     markTourSeen();
@@ -20980,7 +21102,7 @@ function GuidedTour({ onFinish }) {
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === 'Escape') { e.preventDefault(); finish(); }
-      else if (e.key === 'ArrowRight') { e.preventDefault(); setStepIndex(i => Math.min(i + 1, TOUR_STEPS.length - 1)); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); setStepIndex(i => Math.min(i + 1, steps.length - 1)); }
       else if (e.key === 'ArrowLeft') { e.preventDefault(); setStepIndex(i => Math.max(i - 1, 0)); }
     };
     window.addEventListener('keydown', onKey);
@@ -21062,7 +21184,7 @@ function GuidedTour({ onFinish }) {
         className="bg-gradient-to-br from-slate-800 to-slate-900 border border-amber-500/40 rounded-xl p-5 shadow-2xl"
       >
         <div className="text-xs font-semibold text-amber-400 mb-1.5">
-          STEP {stepIndex + 1} OF {TOUR_STEPS.length}
+          STEP {stepIndex + 1} OF {steps.length}
         </div>
         <h3 className="text-lg font-bold text-slate-100 mb-2">{step.title}</h3>
         <p className="text-sm text-slate-300 leading-relaxed">{step.body}</p>
@@ -21079,7 +21201,7 @@ function GuidedTour({ onFinish }) {
 
         <div className="flex items-center justify-between mt-5 pt-4 border-t border-slate-700/50">
           <div className="flex gap-1.5">
-            {TOUR_STEPS.map((s, i) => (
+            {steps.map((s, i) => (
               <div
                 key={i}
                 className={`w-1.5 h-1.5 rounded-full transition-colors ${i === stepIndex ? 'bg-amber-400' : 'bg-slate-600'}`}
@@ -22197,6 +22319,9 @@ function RetirementPlanner() {
   // strip is the only way back from.
   const effectiveSetSectionVisibility = simpleMode ? null : setSectionVisibility;
   const effectiveSetDetailLevel = simpleMode ? null : setDetailLevel;
+  // Present only in simple mode, which is also what tells a tab to show the
+  // hidden-settings notice at all.
+  const showEverything = simpleMode ? () => setUiMode('advanced') : null;
 
   // Switching to simple mode while standing on a tab it does not show would
   // leave the reader looking at a page with no way back to it in the nav.
@@ -22365,6 +22490,7 @@ function RetirementPlanner() {
       sandboxConfig,
       sectionVisibility,
       detailLevel,
+      uiMode,
       scenarios,
       currentYear: currentYearData,
       exportDate: new Date().toISOString(),
@@ -22463,6 +22589,10 @@ function RetirementPlanner() {
         setSandboxConfig(data.sandboxConfig || { panels: DEFAULT_SANDBOX_PANELS, controls: {} });
         setSectionVisibility(data.sectionVisibility || {});
         setDetailLevel(data.detailLevel || 'standard');
+        // Only when the file says so. An export written before the mode existed
+        // has no opinion, and defaulting it would switch the reader's view out
+        // from under them because of the age of a file they opened.
+        if (data.uiMode === 'simple' || data.uiMode === 'advanced') setUiMode(data.uiMode);
         if (data.scenarios) setScenarios(data.scenarios);
         // Default-merged, not assigned: an export written before a currentYear
         // field existed must gain it rather than arrive missing it.
@@ -22502,6 +22632,11 @@ function RetirementPlanner() {
     setScenarios([]);
     setCurrentYearData(DEFAULT_CURRENT_YEAR);
     setActiveScenarioId(null); // scenarios are gone; don't keep pointing at one
+    // uiMode is deliberately NOT reset, and neither are the detail level, the
+    // section choices or the theme: Reset clears the plan, not how the reader
+    // likes to look at one. "A new plan starts simple" exists because a plan
+    // that does not exist yet has no tabs to take away — someone who pressed
+    // Reset from the full app was just using those tabs.
 
     setShowResetConfirm(false);
     setShowImportExport(false);
@@ -22658,34 +22793,8 @@ function RetirementPlanner() {
     setTimeout(() => setSaveStatus(''), 2000);
   };
 
-  // ── WHAT SIMPLE MODE KEEPS ─────────────────────────────────────────────────
-  // Chosen by what a plan cannot be made without, not by what is cheap to cut.
-  //
-  //   Dashboard    where the plan stands
-  //   What if      the Sandbox — the question most people actually arrive with
-  //   About you    ages, filing, spending target, healthcare, long-term care
-  //   Accounts     balances and contributions
-  //   Property     the house and anything else that is not a portfolio
-  //   Income       Social Security and pensions
-  //   Taxes & Roth the conversion opportunity, without the optimiser suite
-  //   Claiming     when to take Social Security — a top-two decision, kept
-  //   Will it last Monte Carlo — "it works on average" is not a plan
-  //
-  // Cut: Current Year (a paystub and K-1 ledger), Withdrawals (the Sandbox
-  // carries withdrawal order), Stress Test (Monte Carlo covers the same ground
-  // for this reader), Sensitivity (an analyst's tornado chart), AI Assistant
-  // (wants an API key), Plan history. Nothing is deleted — every one of them is
-  // one click away in the full app, working on the same plan.
-  const SIMPLE_TABS = ['dashboard', 'sandbox', 'personal', 'accounts', 'assets',
-                       'income', 'taxplanning', 'socialsecurity', 'montecarlo'];
-  // Plainer names for the same tabs. "Monte Carlo" names a technique; "Will it
-  // last?" names the question the reader came with.
-  const SIMPLE_LABELS = {
-    sandbox: 'What if', personal: 'About you', assets: 'Property',
-    income: 'Income', taxplanning: 'Taxes & Roth',
-    socialsecurity: 'Claiming', montecarlo: 'Will it last?',
-  };
-
+  // SIMPLE_TABS and SIMPLE_LABELS live at module scope, beside the tour that
+  // also reads them.
   const fullNavGroups = [
     {
       label: 'OVERVIEW',
@@ -22738,6 +22847,7 @@ function RetirementPlanner() {
   // each heading than there is.
   const simpleNavGroups = [{
     label: null,
+    tourId: 'nav-simple',
     items: SIMPLE_TABS.map(id => {
       const item = fullNavGroups.flatMap(g => g.items).find(it => it.id === id);
       return item ? { ...item, label: SIMPLE_LABELS[id] || item.label } : null;
@@ -22846,7 +22956,7 @@ function RetirementPlanner() {
       {/* Never render the tour over the wizard: the tour keeps a capture-phase
           scroll listener and smooth-scrolls its target, which fights the wizard's
           own scrolling panel and locks up the main thread. */}
-      {showTour && !showSetupWizard && <GuidedTour onFinish={() => setShowTour(false)} />}
+      {showTour && !showSetupWizard && <GuidedTour steps={simpleMode ? SIMPLE_TOUR_STEPS : TOUR_STEPS} onFinish={() => setShowTour(false)} />}
 
       {/* Sidebar Navigation */}
       <aside className={`${sidebarCollapsed ? 'w-16' : 'w-56'} flex-shrink-0 bg-slate-900/95 border-r border-slate-700/50 backdrop-blur-sm transition-all duration-300 flex flex-col`}>
@@ -22873,6 +22983,7 @@ function RetirementPlanner() {
               names, and this is the one control where guessing wrong means
               your tabs vanish. */}
           <button
+            data-tour="tour-mode-switch"
             onClick={() => setUiMode(simpleMode ? 'advanced' : 'simple')}
             className={`mt-2 w-full flex items-center justify-center gap-1.5 text-xs py-1.5 rounded transition-colors border ${
               simpleMode
@@ -23045,8 +23156,8 @@ function RetirementPlanner() {
             sticky work. */}
         <main className="flex-1 p-6">
           <div className="mx-auto w-full" style={{ maxWidth: contentWidthCss(contentWidth) }}>
-            {activeTab === 'dashboard' && <DashboardTab setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
-            {activeTab === 'personal' && <PersonalInfoTab accounts={accounts} dataWarnings={dataWarnings} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
+            {activeTab === 'dashboard' && <DashboardTab onShowEverything={showEverything} setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
+            {activeTab === 'personal' && <PersonalInfoTab onShowEverything={showEverything} accounts={accounts} dataWarnings={dataWarnings} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
             {activeTab === 'accounts' && <AccountsTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
             {activeTab === 'income' && <IncomeStreamsTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={displayProjections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
