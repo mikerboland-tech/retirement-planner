@@ -14833,16 +14833,24 @@ section('P127 — simple mode hides screens, never settings');
                                           jsx.indexOf('\n};', mStart) + 2) + ')');
     ok(manifest.personal, 'Personal Info has a manifest at last');
     const ids = manifest.personal.map(e => e.id);
-    ['rothStrategy', 'charitable', 'withdrawalPriority', 'spendingPhases', 'survivor', 'healthcare', 'ltc']
+    ['rothStrategy', 'charitable', 'withdrawalPriority', 'spendingPhases', 'survivor']
       .forEach(id => ok(ids.includes(id), `its '${id}' section can be put away`));
-    // Healthcare and long-term care stay at essentials on purpose: they are the
-    // two settings that move a plan by seven figures without being touched, and
-    // a reader who cannot find the switch billing them for care has been hidden
-    // from rather than simplified for.
-    eq(manifest.personal.find(e => e.id === 'healthcare').level, 'essential',
-      'healthcare stays visible at every level');
-    eq(manifest.personal.find(e => e.id === 'ltc').level, 'essential',
-      'and so does long-term care, which is the one people are surprised by');
+    // Healthcare and long-term care are the two settings that move a plan by
+    // seven figures without being touched. v2.41 listed them as 'essential',
+    // which kept them on at every LEVEL but still gave them a Hide button —
+    // so the switch billing $1.7M of care was the one thing a reader could put
+    // away for good. Not listed at all means no Hide, no chip, no level.
+    ['healthcare', 'ltc'].forEach(id => {
+      eq(ids.includes(id), false, `'${id}' is not in the manifest, so nothing can hide it`);
+      eq(new RegExp(`<HideableBlock tab="personal" id="${id}"`).test(jsx), false,
+        `and '${id}' is not wrapped in a HideableBlock, so it has no Hide button either`);
+    });
+    // Nothing a Standard-level reader could see before v2.41 may be above
+    // 'standard' now. 'standard' is the default, so an 'advanced' entry took a
+    // live control away from existing full-app users while its setting kept
+    // moving their numbers.
+    manifest.personal.forEach(e => ok(e.level !== 'advanced',
+      `'${e.id}' is visible at the default Standard level, as it was before sections existed`));
     // The tab's own inputs are not sections — a plan with no way to say how old
     // you are is not a simpler plan.
     ['ages', 'taxSettings', 'spendingGoal'].forEach(id =>
@@ -14867,6 +14875,60 @@ section('P127 — simple mode hides screens, never settings');
       eq(opened - closed, 0,
         'and it sits outside every hideable section, so no detail level can take away the way to save');
     }
+  }
+}
+
+
+section('P128 — the review of v2.41: every Hide button has a way back, or is not there');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const jsx = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+
+  // ── #1: the Dashboard's hand-wired panels ────────────────────────────────
+  {
+    // Simple mode passed a null setter, and the Dashboard's own toggleVisibility
+    // still called it: three Hide buttons on the first page a new user sees,
+    // each throwing "setSectionVisibility is not a function" on click.
+    ok(/const hideFor = \(key\) => \(setSectionVisibility \? \(\) => toggleVisibility\(key\) : undefined\);/.test(jsx),
+      'the Dashboard builds a Hide handler only when there is a setter behind it');
+    eq(/onHide=\{\(\) => toggleVisibility\(/.test(jsx), false,
+      'and no panel is handed an unconditional one');
+    // Every panel that draws a Hide button draws it only when it has a handler.
+    // An unconditional button routed through `if (onHide) onHide()` is a dead
+    // control: it looks like it works and does nothing.
+    const hides = [...jsx.matchAll(/\{(onHide|toggleVisibility) && \(\n[ \t]*<button\n[ \t]*onClick=\{\(\) => toggleVisibility\('(\w+)'\)\}/g)].map(m => m[2]);
+    ['summaryCards', 'withdrawalRate', 'taxSummary', 'safeSpending', 'cashFlow', 'coastFire', 'lifestyleLegacy']
+      .forEach(k => ok(hides.includes(k), `the '${k}' Hide button renders only when it has a handler`));
+    eq((jsx.match(/\n[ \t]*<button\n[ \t]*onClick=\{\(\) => toggleVisibility\('\w+'\)\}/g) || []).length, hides.length,
+      'and there is no other, unguarded one');
+    eq(/toggleVisibility=\{onHide \|\| \(\(\) => \{\}\)\}/.test(jsx), false,
+      'the Sandbox no longer hands panels a no-op in place of a real handler');
+    ok(/toggleVisibility=\{setSectionVisibility \? toggleVisibility : undefined\}/.test(jsx),
+      'and the Dashboard passes its toggler to Coast FIRE and Lifestyle only when it can act');
+  }
+
+  // ── #6: a condition must wrap its section, not sit inside it ─────────────
+  {
+    // Inside, a single filer got a Hide button with nothing under it, and the
+    // Sections strip counted an invisible section as shown.
+    const at = jsx.indexOf('{/* Survivor Modeling Section */}');
+    gt(at, -1, 'the survivor section is found');
+    const head = jsx.slice(at, at + 400);
+    const cond = head.indexOf("{localInfo.filingStatus === 'married_joint' && (");
+    const block = head.indexOf('<HideableBlock tab="personal" id="survivor"');
+    gt(cond, -1, 'it is gated on filing status');
+    gt(block, cond, 'and the gate is OUTSIDE the hideable block');
+  }
+
+  // ── #9: the null-setter rule lives in one place ──────────────────────────
+  {
+    ok(/const effectiveSetDetailLevel = simpleMode \? null : setDetailLevel;/.test(jsx),
+      'the level setter is decided once');
+    eq(/setDetailLevel=\{simpleMode \? null : setDetailLevel\}/.test(jsx), false,
+      'not copied into every tab, where one missed copy would bring the control back');
+    eq(/setDetailLevel=\{setDetailLevel\}/.test(jsx), false,
+      'and no tab is handed the raw setter');
   }
 }
 
