@@ -2403,7 +2403,7 @@ function FAQTab() {
       items: [
         {
           q: "What are the main limitations of this tool?",
-          a: "This is a comprehensive but simplified planning tool. Key limitations: Uses standard deduction only (no itemized — so the engine doesn't model the 2026 OBBBA changes that capped charitable deductions at 35% for high earners or imposed the 0.5%-of-AGI floor for itemizers; QCDs are modeled separately as an above-the-line exclusion). Most states use simplified flat tax rates (Alabama has a full progressive engine with federal deductibility — other states use flat rate approximations). No tax-loss harvesting, no estate planning, brokerage cost basis defaults to 50% per account but is editable on each account (actual depends on your purchase history), no contribution limit enforcement, and no state-level early-distribution penalties. Roth accounts are tracked in layers (contributions, each year's conversion, earnings) so the 5-year conversion clock and the ordering rules for Roth withdrawals are applied. Features included: the 10% early withdrawal penalty before 59.5 with the 457(b), rule-of-55 and 72(t) SEPP exceptions, the age-65 additional standard deduction and the 2025-2028 OBBBA senior deduction, annual taxable dividends on brokerage balances, configurable withdrawal priority ordering with an optional bracket-fill order, Roth conversion modeling (fixed-amount and bracket-fill, with smart defaults for bridge-year windows), QCD optimization, FICA payroll taxes on earned income, tiered capital gains rates (0%/15%/20%), NIIT surtax, Medicare IRMAA surcharges (Part B + Part D based on MAGI), Social Security earnings test for early claimers still working, survivor modeling with SS benefit inheritance, one-time events (expenses and income), healthcare expense modeling (pre-65, Medicare, long-term care), charitable giving, non-liquid asset tracking, full-plan SS claiming age analysis with CAGR sensitivity and Monte Carlo stress testing, sequence-of-returns stress testing with historical scenarios, and dedicated Monte Carlo simulation. Results are estimates for planning purposes only."
+          a: "What it leaves out or simplifies: The year-by-year projection takes the standard deduction every year (plus the age-65 addition and the 2025–2028 senior deduction); itemizing — mortgage interest, state and local tax, charity under the 2026 rules (the 0.5%-of-AGI floor and the 35% benefit cap) — is modeled only for this year, on the Current Year tab's tax return. QCDs are modeled separately as an exclusion from income. Each account grows at the single rate you give it: there is no separate asset allocation, rebalancing or fee drag, so net any fees out of that rate. Brokerage cost basis defaults to 50% of each account's balance unless you set it on the account. Contributions above the 2026 IRS limits are flagged with a warning, not trimmed. There is no tax-loss harvesting, no estate or gift tax, and no state-level early-distribution penalty (such as California's extra 2.5%). What it models: federal income tax on 2026 brackets indexed forward; state income tax for every state — progressive brackets for 25 states and DC, a flat rate where the state's tax is flat, nothing where there is none — including each state's treatment of Social Security and retirement income; FICA; long-term capital gains at 0/15/20%, qualified dividends and the 3.8% NIIT; Medicare IRMAA (Part B and D) on the two-year lookback; ACA premium subsidies before 65; Social Security taxation, the earnings test and survivor benefits; RMDs under SECURE 2.0; the 10% early-withdrawal penalty with the 457(b), rule-of-55 and 72(t) exceptions; Roth accounts tracked in layers so the 5-year clock and ordering rules apply; Roth conversions by fixed amount, bracket fill, IRMAA tier or a staged schedule, with a pre-tax floor and an optional pause after bad years; withdrawal order with an optional bracket fill; QCDs and charitable giving; pensions, annuities and QLACs; HSAs; healthcare and long-term care; one-time events and recurring expenses; and Monte Carlo (sampled or replayed from history), specific-crash stress tests and sensitivity analysis — all through the same projection engine. Results are estimates for planning, not tax or investment advice."
         },
         {
           q: "Should I use this for actual financial decisions?",
@@ -10739,18 +10739,45 @@ function SensitivityTab({ detailLevel, sectionVisibility, setSectionVisibility, 
 // ============================================
 // PersonalInfoTab — Lifted to module scope
 // ============================================
+// How long Personal Info waits after the last keystroke before writing to the
+// plan. Long enough that typing "65" is one projection, not two.
+const PERSONAL_INFO_WRITE_DELAY_MS = 400;
+
 function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWarnings, detailLevel, incomeStreams, oneTimeEvents, personalInfo, recurringExpenses, sectionVisibility, setDataWarnings, setOneTimeEvents, setPersonalInfo, setRecurringExpenses, setSectionVisibility }) {
+  // The form keeps its own copy so typing stays instant, and every edit reaches
+  // the plan by itself shortly after — like every other tab. Until v2.52.0 edits
+  // waited for a "Save Changes" button, and leaving the tab without pressing it
+  // threw them away without a word: change the planning age, click Accounts,
+  // come back, and it was the old number again.
+  //
+  // Batched rather than written per keystroke because each write re-runs the
+  // whole projection. Only the fields edited here are sent, merged onto the
+  // plan as it is NOW, so a change made elsewhere meanwhile (the basis switch
+  // in the top bar) is never overwritten by this tab's older copy.
   const [localInfo, setLocalInfo] = useState(personalInfo);
-  const [dirtyPI, setDirtyPI] = useState(false);
-  
-  // Only sync from parent on structural changes (import/clear), not field edits
-  const piVersion = personalInfo.myAge + '|' + personalInfo.spouseAge + '|' + personalInfo.filingStatus + '|' + (personalInfo.state || '');
-  // Actually, just never sync — local state is master during editing
-  // Parent sync happens only via Save button
-  
+  const pendingEdits = useRef({});
+  const flushTimer = useRef(null);
+  const flushEdits = useCallback(() => {
+    clearTimeout(flushTimer.current);
+    flushTimer.current = null;
+    const patch = pendingEdits.current;
+    pendingEdits.current = {};
+    if (!Object.keys(patch).length) return;
+    // Birth years follow the ages, as they did on Save — the RMD age is read
+    // from the birth year.
+    const year = new Date().getFullYear();
+    if ('myAge' in patch) patch.myBirthYear = year - patch.myAge;
+    if ('spouseAge' in patch && patch.spouseAge) patch.spouseBirthYear = year - patch.spouseAge;
+    setPersonalInfo(prev => ({ ...prev, ...patch }));
+  }, [setPersonalInfo]);
+  // Leaving the tab mid-edit sends what is waiting instead of dropping it.
+  useEffect(() => () => flushEdits(), [flushEdits]);
+
   const handleChange = (field, value) => {
     setLocalInfo(prev => ({ ...prev, [field]: value }));
-    setDirtyPI(true);
+    pendingEdits.current[field] = value;
+    clearTimeout(flushTimer.current);
+    flushTimer.current = setTimeout(flushEdits, PERSONAL_INFO_WRITE_DELAY_MS);
   };
   
   // Check for data inconsistencies that need user attention
@@ -11287,40 +11314,13 @@ function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWa
   }, [warningSig]);
 
 
-  // Save writes the fields edited on THIS tab, not the whole form. The form is
-  // a copy taken when the tab opened, and the plan can change underneath it —
-  // the basis switch in the top bar is on this page too. Writing the whole
-  // copy back silently undid any such change the moment Save was pressed.
-  const openedWith = useRef(personalInfo);
-  const savePersonalInfo = () => {
-    const currentYear = new Date().getFullYear();
-    const patch = {};
-    Object.keys(localInfo).forEach(k => {
-      if (JSON.stringify(localInfo[k]) !== JSON.stringify(openedWith.current[k])) patch[k] = localInfo[k];
-    });
-    patch.myBirthYear = currentYear - localInfo.myAge;
-    if (localInfo.spouseAge) patch.spouseBirthYear = currentYear - localInfo.spouseAge;
-
-    // Check for data inconsistencies and warn user
-    setDataWarnings(getDataWarnings({ ...personalInfo, ...patch }));
-
-    setPersonalInfo(prev => ({ ...prev, ...patch }));
-    openedWith.current = { ...openedWith.current, ...patch };
-    setDirtyPI(false);
-  };
-  
   const compactInputStyle = "w-full bg-slate-900/80 border border-slate-600/50 rounded px-3 py-1.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500/50 transition-all text-sm";
   const compactLabelStyle = "text-xs font-medium text-slate-400";
   
   return (
     <div className="space-y-4">
-      {dirtyPI && (
-        <div className="flex justify-end">
-          <button onClick={savePersonalInfo} className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-sm font-medium transition-colors">💾 Save Changes</button>
-        </div>
-      )}
       
-      {/* Data consistency warnings — shown after saving when mismatches detected */}
+      {/* Data consistency warnings — re-checked whenever the plan changes */}
       {dataWarnings.length > 0 && (
         <div className="space-y-2">
           {dataWarnings.map((w, i) => (

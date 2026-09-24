@@ -15738,14 +15738,14 @@ section('P138 — the small overlaps: one basis switch, labelled sources, and a 
   const pi = jsx.slice(piAt, jsx.indexOf('\nfunction ', piAt + 10));
   eq(/handleChange\('displayBasis'/.test(pi), false, 'Personal Info no longer has a second one behind its Save button');
 
-  // ── Personal Info's Save writes its own edits, not a stale copy ──────────
+  // ── Personal Info writes its own edits, not a stale copy ────────────────
   // The form is a copy taken when the tab opened. Writing all of it back undid
   // anything changed elsewhere meanwhile — like the basis switch above it.
-  ok(/const openedWith = useRef\(personalInfo\);/.test(pi), 'the form remembers what it opened with');
-  ok(/JSON\.stringify\(localInfo\[k\]\) !== JSON\.stringify\(openedWith\.current\[k\]\)\) patch\[k\] = localInfo\[k\];/.test(pi),
-    'and Save sends only the fields that differ from it');
+  // Since v2.52.0 there is no Save button at all (P139): edits are sent as a
+  // patch of the fields typed into, merged onto the plan as it is now.
+  ok(/pendingEdits\.current\[field\] = value;/.test(pi), 'only the fields edited here are queued');
   ok(/setPersonalInfo\(prev => \(\{ \.\.\.prev, \.\.\.patch \}\)\);/.test(pi), 'merged onto the plan as it is now');
-  eq(/setPersonalInfo\(updates\);/.test(pi), false, 'rather than replacing the plan with the form');
+  eq(/setPersonalInfo\(updates\);|setPersonalInfo\(localInfo\)/.test(pi), false, 'rather than replacing the plan with the form');
 
   // ── three "this year" tax figures, each saying where it comes from ───────
   ok(/from your plan's projection\. This year\s+from your actual paychecks and K-1s is on the Current Year tab/.test(jsx),
@@ -15759,6 +15759,46 @@ section('P138 — the small overlaps: one basis switch, labelled sources, and a 
   ok(/For undoing an edit,\s+use Plan history/.test(jsx), 'Saved Scenarios points at Plan history for undo');
   ok(/This is for undoing a bad edit;\s+alternatives you want to compare belong in Saved Scenarios/.test(jsx),
     'and Plan history points back at Scenarios for alternatives');
+}
+
+section('P139 — Personal Info keeps what you type, and the FAQ describes the engine that exists');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const jsx = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+  const piAt = jsx.indexOf('function PersonalInfoTab(');
+  const pi = jsx.slice(piAt, jsx.indexOf('\nfunction ', piAt + 10));
+
+  // ── no Save button to forget ─────────────────────────────────────────────
+  // Edits waited for "Save Changes", and leaving the tab without pressing it
+  // discarded them with no warning. Reproduced in a browser before the fix.
+  const piCode = pi.replace(/\/\/[^\n]*/g, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  eq(/savePersonalInfo|dirtyPI|Save Changes/.test(piCode), false, 'Personal Info has no Save button and no unsaved state');
+  ok(/flushTimer\.current = setTimeout\(flushEdits, PERSONAL_INFO_WRITE_DELAY_MS\);/.test(pi),
+    'every edit is written to the plan shortly after typing stops');
+  ok(/useEffect\(\(\) => \(\) => flushEdits\(\), \[flushEdits\]\);/.test(pi),
+    'and leaving the tab mid-edit writes what is waiting instead of dropping it');
+  const delay = Number((/const PERSONAL_INFO_WRITE_DELAY_MS = (\d+);/.exec(jsx) || [])[1]);
+  ok(delay >= 200 && delay <= 1000, `the wait (${delay}ms) batches a keystroke burst without feeling laggy`);
+  ok(/if \('myAge' in patch\) patch\.myBirthYear = year - patch\.myAge;/.test(pi),
+    'birth years still follow the ages, as Save used to make them — the RMD age reads the birth year');
+
+  // ── the limitations answer ───────────────────────────────────────────────
+  const faqAt = jsx.indexOf('q: "What are the main limitations of this tool?"');
+  gt(faqAt, 0, 'the limitations question is still answered');
+  const faq = jsx.slice(faqAt, jsx.indexOf('\n', jsx.indexOf('a: "', faqAt)));
+  eq(/Most states use simplified flat tax rates|flat rate approximations/.test(faq), false,
+    'it no longer says most states are approximated with a flat rate');
+  eq(/no contribution limit enforcement/.test(faq), false, 'or that contribution limits are ignored');
+  ok(/flagged with a warning, not trimmed/.test(faq), 'it says what actually happens to an over-limit contribution');
+  ok(/IRMAA tier or a staged schedule/.test(faq), 'and lists every conversion strategy');
+  ok(/modeled only for this year, on the Current Year tab/.test(faq), 'and where itemizing is and is not modeled');
+  // The count is the engine's, not a number typed once and left to rot.
+  const progressive = Object.keys(engine.STATE_TAX_CONFIG);
+  const states = progressive.filter(k => k !== 'District of Columbia').length;
+  ok(progressive.includes('District of Columbia'), 'DC is among the progressive jurisdictions');
+  ok(faq.indexOf(`progressive brackets for ${states} states and DC`) > 0,
+    `and the answer's count of progressive states (${states} + DC) matches the engine`);
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
