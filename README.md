@@ -9,9 +9,9 @@ A comprehensive, client-side retirement planning tool built with React. All calc
 - **Tax-aware withdrawal solver** — Iterative solver determines gross withdrawals needed for your net spending target
 - **RMD calculations** — SECURE 2.0 compliant Required Minimum Distributions
 - **Social Security optimization** — Claiming analysis across all ages 62-70 with breakeven, survivor benefits, and portfolio impact
-- **Roth conversion modeling** — Fill-to-bracket or fixed-amount conversions with tax impact analysis
+- **Roth conversion modeling** — Fixed amount, fill-to-bracket, stay-under-an-IRMAA-tier or a staged schedule, set in one place (Taxes & Roth) beside what the strategy saves against converting nothing
 - **Survivor modeling** — Models financial impact when a spouse passes (SS survivor benefits, filing status change)
-- **Scenario comparison** — Save and compare multiple planning scenarios side by side
+- **What-if and scenarios** — The Dashboard's "What if…" card re-runs the whole plan as you move retirement age, spending, claiming, strategy or income streams; save any what-if as a scenario and compare them side by side
 
 ### Tax Engine
 - Federal income tax (2026 brackets, inflation-adjusted)
@@ -25,9 +25,9 @@ A comprehensive, client-side retirement planning tool built with React. All calc
 - MAGI calculation with proper add-backs
 
 ### Analysis Tools
-- **Monte Carlo simulation** — 1,000+ scenario stochastic modeling with tax-aware withdrawals
+- **Will it last?** — Monte Carlo (1,000+ markets, sampled or replayed from history), a stress test of specific crashes at retirement, and a sensitivity ranking of which assumption matters most — all through the full engine
 - **Tax Year Snapshot** — Bracket walk-through for any projected year
-- **Tax Planning** — Marginal rate analysis and Roth conversion simulator
+- **Taxes & Roth** — Your conversion strategy, the optimizer, marginal rates, IRMAA and the years with bracket room
 - **Lifestyle vs Legacy** — Spending tradeoff analysis across 8 spending levels
 - **Coast FIRE** — Portfolio sufficiency analysis
 - **Cash Flow Sankey** — Visual money flow diagram

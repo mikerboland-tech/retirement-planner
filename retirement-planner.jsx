@@ -3145,7 +3145,10 @@ function TaxYearSnapshot({ projections, personalInfo, qcdSavings }) {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
           <h4 className="text-lg font-semibold text-slate-100">Tax Year Snapshot</h4>
-          <p className="text-slate-400 text-xs">Detailed tax breakdown showing how each dollar of income is taxed</p>
+          <p className="text-slate-400 text-xs">
+            How each dollar of income is taxed in the year you pick, from your plan's projection. This year
+            from your actual paychecks and K-1s is on the Current Year tab.
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <span className="text-slate-400 text-sm">Age:</span>
@@ -6032,6 +6035,8 @@ function CurrentYearTab({ detailLevel, sectionVisibility, setSectionVisibility, 
           <p className="text-sm text-slate-400 mb-4">
             Where this year lands if nothing changes. Every line carries its actual 1040 number so you can
             set it beside a filed return, or your preparer&rsquo;s draft, and reconcile it line by line.
+            Built from the paychecks, K-1s and other figures on this tab — not from the plan&rsquo;s
+            projection, whose version of this year is the Tax Year Snapshot on Taxes &amp; Roth.
           </p>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -8467,7 +8472,15 @@ function ScenarioComparisonPanel({ activeScenarioId, assets, computeProjections,
     <div className="space-y-6">
       <div className={cardStyle}>
         <div className="flex items-center justify-between gap-3 mb-4">
-          <h4 className="text-lg font-semibold text-amber-400">Saved Scenarios ({scenarios.length})</h4>
+          <div>
+            <h4 className="text-lg font-semibold text-amber-400">Saved Scenarios ({scenarios.length})</h4>
+            {/* Scenarios and Plan history both hold copies of a plan and were
+                easy to mistake for each other. Each now says what it is for. */}
+            <p className="text-xs text-slate-500 mt-0.5">
+              Alternatives you chose to keep, compared side by side against your plan. For undoing an edit,
+              use Plan history in the sidebar.
+            </p>
+          </div>
           {onHide && (
             <button onClick={onHide}
               className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors">
@@ -11274,17 +11287,25 @@ function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWa
   }, [warningSig]);
 
 
+  // Save writes the fields edited on THIS tab, not the whole form. The form is
+  // a copy taken when the tab opened, and the plan can change underneath it —
+  // the basis switch in the top bar is on this page too. Writing the whole
+  // copy back silently undid any such change the moment Save was pressed.
+  const openedWith = useRef(personalInfo);
   const savePersonalInfo = () => {
     const currentYear = new Date().getFullYear();
-    const updates = { ...localInfo };
-    updates.myBirthYear = currentYear - localInfo.myAge;
-    if (localInfo.spouseAge) updates.spouseBirthYear = currentYear - localInfo.spouseAge;
-    
+    const patch = {};
+    Object.keys(localInfo).forEach(k => {
+      if (JSON.stringify(localInfo[k]) !== JSON.stringify(openedWith.current[k])) patch[k] = localInfo[k];
+    });
+    patch.myBirthYear = currentYear - localInfo.myAge;
+    if (localInfo.spouseAge) patch.spouseBirthYear = currentYear - localInfo.spouseAge;
+
     // Check for data inconsistencies and warn user
-    const warnings = getDataWarnings(updates);
-    setDataWarnings(warnings);
-    
-    setPersonalInfo(updates);
+    setDataWarnings(getDataWarnings({ ...personalInfo, ...patch }));
+
+    setPersonalInfo(prev => ({ ...prev, ...patch }));
+    openedWith.current = { ...openedWith.current, ...patch };
     setDirtyPI(false);
   };
   
@@ -11406,18 +11427,6 @@ function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWa
                   className={compactInputStyle}
                 />
               </div>
-              <div>
-                <label className={compactLabelStyle}>Show amounts in</label>
-                <GridSelect
-                  value={localInfo.displayBasis || 'nominal'}
-                  onChange={e => handleChange('displayBasis', e.target.value)}
-                  options={[
-                    { value: 'nominal', label: 'Future dollars' },
-                    { value: 'real',    label: "Today's dollars" },
-                  ]}
-                  className={compactInputStyle}
-                />
-              </div>
               {/* This rate already existed on the plan and already drove the Roth
                   optimizer's ranking — it was just only editable from inside that
                   one panel, so a plan-wide assumption looked like a setting that
@@ -11435,7 +11444,7 @@ function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWa
             </div>
             <p className="text-xs text-slate-500 mt-2">Retirement age determines when portfolio withdrawals begin. Birth year determines RMD start age per SECURE 2.0 Act. Planning/Legacy Age sets the end of all projections (default 95).</p>
             <p className="text-xs text-slate-500 mt-1">
-              <strong>Show amounts in</strong> chooses the yardstick, not the plan. <em>Future dollars</em> is
+              The <strong>Future $ / Today's $</strong> switch at the top of every page chooses the yardstick, not the plan. <em>Future dollars</em> is
               what the engine computes — the actual number of dollars in the account in that year, inflation
               included. <em>Today's dollars</em> restates the same plan in current purchasing power, so
               $3M forty years out reads as what it would buy now. Nothing about the projection changes:
@@ -14671,8 +14680,8 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
       {/* ── Panel picker ───────────────────────────────────────────────── */}
       {/* Folded to one row by default: choosing panels is something done once
           in a while, and the Dashboard's own Sections strip it replaces was a
-          single line too. The basis toggle lives on the same row because it
-          governs every figure below it. */}
+          single line too. (The basis toggle sat on this row until v2.51.0; it is
+          in the top bar now, on every page.) */}
       <div className={cardStyle}>
         <div className="flex flex-wrap items-center gap-3">
           <button onClick={() => setCfg({ pickerOpen: !pickerOpen })} aria-expanded={pickerOpen}
@@ -14689,7 +14698,6 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
               {v.name}
             </button>
           ))}
-          <BasisToggle pi={personalInfo} setPersonalInfo={setPersonalInfo} className="ml-auto" />
         </div>
         {pickerOpen && (<div className="mt-3 pt-3 border-t border-slate-700/50">
         {/* Views. The panel selection already persists with the plan, so this is
@@ -17694,6 +17702,12 @@ function NextYearReport({ projections, personalInfo, accounts, incomeStreams, on
           <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0 }}>Your Next 12 Months</h1>
           <p style={{ fontSize: 14, color: '#475569', margin: '4px 0 0' }}>
             Retirement action plan for {currentYear} &nbsp;·&nbsp; Prepared {preparedOn}
+          </p>
+          <p style={{ fontSize: 12, color: '#64748b', margin: '4px 0 0' }}>
+            Figures come from your plan&rsquo;s projection for {currentYear}
+            {personalInfo.useDetailedCurrentYear
+              ? ', which uses the paycheck and K-1 figures from the Current Year tab.'
+              : '. The Current Year tab can build this year from your actual paychecks and K-1s instead.'}
           </p>
           <ReportBasisLine pi={personalInfo} follows={true} />
         </div>
@@ -22391,9 +22405,16 @@ function RetirementPlanner() {
               </span>
             )}
           </div>
-          <div className="text-right">
-            <div className="text-xs text-slate-500">Current Year</div>
-            <div className="text-sm font-semibold text-slate-300">{currentYear}</div>
+          <div className="flex items-center gap-5">
+            {/* The one basis switch. It was on the Dashboard AND a field on
+                Personal Info — the second behind that tab's Save button, so the
+                two could disagree until you pressed it. Up here it is on every
+                page, next to the figures it changes. */}
+            <BasisToggle pi={personalInfo} setPersonalInfo={setPersonalInfo} />
+            <div className="text-right">
+              <div className="text-xs text-slate-500">Current Year</div>
+              <div className="text-sm font-semibold text-slate-300">{currentYear}</div>
+            </div>
           </div>
         </header>
         
@@ -22542,7 +22563,8 @@ function RetirementPlanner() {
               <h3 className="text-xl font-bold text-slate-100 mb-1">Plan history</h3>
               <p className="text-xs text-slate-500 mb-4">
                 Recent copies of this plan, kept in this browser — one every half hour while you work, plus
-                one taken before anything that replaces the whole plan.{' '}
+                one taken before anything that replaces the whole plan. This is for undoing a bad edit;
+                alternatives you want to compare belong in Saved Scenarios, under What if… on the Dashboard.{' '}
                 <strong className="text-amber-400/90">These live in this browser only.</strong> Clearing site
                 data or moving to another machine takes them with the plan, so an export is still the backup
                 that survives.

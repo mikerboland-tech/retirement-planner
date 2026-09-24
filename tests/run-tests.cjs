@@ -15431,7 +15431,9 @@ section('P134 — the Dashboard and the Sandbox are one page');
   ok(/showTourOffer && \(/.test(dash), 'the tour offer is on it');
   ok(/estimated\.length > 0 && !estimatesDismissed/.test(dash), 'so is the estimated-values banner');
   ok(/<HiddenSettingsNotice /.test(dash), 'and the simple-mode hidden-settings notice');
-  ok(/<BasisToggle /.test(dash), 'and the basis toggle, not just a label');
+  // The basis toggle came along too — and in v2.51.0 moved to the top bar,
+  // where it is on every page rather than this one (see P138).
+  eq(/<BasisToggle /.test(dash), false, 'the basis toggle is not duplicated on the Dashboard');
   ok(/sandboxScenario\(/.test(dash), 'the levers still compose through the engine');
 
   // ── the levers fold, and never hide silently ─────────────────────────────
@@ -15719,6 +15721,44 @@ section('P137 — the detail-level strip is gone, and nobody’s page changes');
   // Wired at both doors.
   ok(/pinDetailLevel\(savedData\?\.sectionVisibility \|\| \{\}, savedData\?\.detailLevel\)/.test(jsx), 'the migration runs on load');
   ok(/setSectionVisibility\(pinDetailLevel\(data\.sectionVisibility \|\| \{\}, data\.detailLevel\)\)/.test(jsx), 'and on import');
+}
+
+section('P138 — the small overlaps: one basis switch, labelled sources, and a Save that only saves its own edits');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const jsx = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+
+  // ── one basis switch, on every page ──────────────────────────────────────
+  eq((jsx.match(/<BasisToggle /g) || []).length, 1, 'the Future $ / Today’s $ switch is rendered once');
+  const hdrAt = jsx.indexOf('{/* Top Bar */}');
+  const hdr = jsx.slice(hdrAt, jsx.indexOf('</header>', hdrAt));
+  ok(/<BasisToggle pi=\{personalInfo\} setPersonalInfo=\{setPersonalInfo\} \/>/.test(hdr), 'in the top bar, so every tab has it');
+  const piAt = jsx.indexOf('function PersonalInfoTab(');
+  const pi = jsx.slice(piAt, jsx.indexOf('\nfunction ', piAt + 10));
+  eq(/handleChange\('displayBasis'/.test(pi), false, 'Personal Info no longer has a second one behind its Save button');
+
+  // ── Personal Info's Save writes its own edits, not a stale copy ──────────
+  // The form is a copy taken when the tab opened. Writing all of it back undid
+  // anything changed elsewhere meanwhile — like the basis switch above it.
+  ok(/const openedWith = useRef\(personalInfo\);/.test(pi), 'the form remembers what it opened with');
+  ok(/JSON\.stringify\(localInfo\[k\]\) !== JSON\.stringify\(openedWith\.current\[k\]\)\) patch\[k\] = localInfo\[k\];/.test(pi),
+    'and Save sends only the fields that differ from it');
+  ok(/setPersonalInfo\(prev => \(\{ \.\.\.prev, \.\.\.patch \}\)\);/.test(pi), 'merged onto the plan as it is now');
+  eq(/setPersonalInfo\(updates\);/.test(pi), false, 'rather than replacing the plan with the form');
+
+  // ── three "this year" tax figures, each saying where it comes from ───────
+  ok(/from your plan's projection\. This year\s+from your actual paychecks and K-1s is on the Current Year tab/.test(jsx),
+    'the Tax Year Snapshot says it is the projection');
+  ok(/not from the plan&rsquo;s\s+projection, whose version of this year is the Tax Year Snapshot/.test(jsx),
+    'the Current Year 1040 says it is built from paychecks and K-1s');
+  ok(/Figures come from your plan&rsquo;s projection for \{currentYear\}/.test(jsx),
+    'and the Next 12 Months report says which it used');
+
+  // ── Scenarios and Plan history say what each is for ──────────────────────
+  ok(/For undoing an edit,\s+use Plan history/.test(jsx), 'Saved Scenarios points at Plan history for undo');
+  ok(/This is for undoing a bad edit;\s+alternatives you want to compare belong in Saved Scenarios/.test(jsx),
+    'and Plan history points back at Scenarios for alternatives');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
