@@ -14832,7 +14832,9 @@ section('P127 — simple mode hides screens, never settings');
     // buttons that strip is the only way back from must go with it.
     ok(/\{entry && setVis && \(/.test(jsx), 'Section offers Hide only when there is a way to restore');
     ok(/if \(!setVis\) return <div>\{children\}<\/div>;/.test(jsx), 'and so does HideableBlock');
-    ok(/if \(!setLevel\) return null;/.test(jsx), 'the level strip is absent when the level is not the reader’s to set');
+    // The level strip itself went in v2.50.0; what is left, the Sections list,
+    // is absent exactly when there is no setter to restore a section with.
+    ok(/if \(!setVis\) return null;/.test(jsx), 'the Sections control is absent when sections cannot be restored');
     ok(/const effectiveSetSectionVisibility = simpleMode \? null : setSectionVisibility;/.test(jsx),
       'which is signalled by passing no setter, in one place');
   }
@@ -14843,8 +14845,8 @@ section('P127 — simple mode hides screens, never settings');
       'simple mode ignores per-section overrides saved against the full app');
     ok(/const EMPTY_SECTION_VISIBILITY = \{\};/.test(jsx),
       'through a stable object, so every tab is not handed a fresh one each render');
-    ok(/const effectiveDetailLevel = simpleMode \? 'essentials' : detailLevel;/.test(jsx),
-      "and pins the detail level without overwriting the reader's own preference");
+    ok(/const effectiveDetailLevel = simpleMode \? 'essentials' : 'standard';/.test(jsx),
+      'and the mode alone decides the default level — there is no second level control');
     eq(/detailLevel=\{detailLevel\}/.test(jsx), false,
       'no tab is handed the raw level, which would ignore the mode');
     eq(/sectionVisibility=\{sectionVisibility\}/.test(jsx), false, 'nor the raw visibility map');
@@ -14854,7 +14856,7 @@ section('P127 — simple mode hides screens, never settings');
   {
     ok(/savedData\?\.uiMode \|\| \(savedData \? 'advanced' : 'simple'\)/.test(jsx),
       'a saved plan opens in the full app unless it says otherwise; only a brand-new plan starts simple');
-    ok(/detailLevel, uiMode, scenarios,/.test(jsx), 'and the choice is saved with the plan');
+    ok(/sectionVisibility, uiMode, scenarios,/.test(jsx), 'and the choice is saved with the plan');
   }
 
   // ── the level machinery now reaches the longest page in the app ──────────
@@ -14960,12 +14962,10 @@ section('P128 — the review of v2.41: every Hide button has a way back, or is n
 
   // ── #9: the null-setter rule lives in one place ──────────────────────────
   {
-    ok(/const effectiveSetDetailLevel = simpleMode \? null : setDetailLevel;/.test(jsx),
-      'the level setter is decided once');
-    eq(/setDetailLevel=\{simpleMode \? null : setDetailLevel\}/.test(jsx), false,
-      'not copied into every tab, where one missed copy would bring the control back');
-    eq(/setDetailLevel=\{setDetailLevel\}/.test(jsx), false,
-      'and no tab is handed the raw setter');
+    // There is no level setter at all since v2.50.0 — nothing to decide once.
+    eq(/setDetailLevel/.test(jsx), false, 'no level setter exists to be handed to a tab');
+    ok(/const effectiveSetSectionVisibility = simpleMode \? null : setSectionVisibility;/.test(jsx),
+      'the section setter is still decided once');
   }
 }
 
@@ -15660,6 +15660,65 @@ section('P136 — "Will it last?" is one tab asking one question three ways');
   eq(/simplified marginal tax estimate for speed/.test(jsx), false, 'the FAQ no longer says the stress test simplifies tax');
   const st = jsx.slice(jsx.indexOf('function StressTestTab('), jsx.indexOf('function SocialSecurityTab('));
   ok(/computeProjections\(/.test(st), 'because it does not: it runs computeProjections');
+}
+
+section('P137 — the detail-level strip is gone, and nobody’s page changes');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const jsx = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+
+  // ── the strip ────────────────────────────────────────────────────────────
+  // Essentials/Standard/Everything sat on every tab and duplicated the mode
+  // switch. The per-tab Sections list stays: it is how a hidden section comes back.
+  eq(/SECTION_LEVELS/.test(jsx), false, 'there is no list of levels to pick from');
+  eq(/>Detail:</.test(jsx), false, 'and no "Detail:" strip on any tab');
+  ok(/const SectionControls = \(\{ tab, vis, setVis, level \}\) =>/.test(jsx), 'the Sections control takes no level setter');
+  const scAt = jsx.indexOf('const SectionControls = ');
+  const sc = jsx.slice(scAt, jsx.indexOf('\n};\n', scAt));
+  ok(/Show all/.test(sc) && /Back to defaults/.test(sc), 'it can show every section at once, and put them back');
+  ok(/hidden by default/.test(sc), 'and says which sections start hidden, in words rather than a tier name');
+  eq(/detailLevel, uiMode|\n\s+detailLevel,\n/.test(jsx), false, 'the level is no longer saved with the plan');
+
+  // ── the migration ────────────────────────────────────────────────────────
+  const grab = (start, end) => { const a = jsx.indexOf(start); return jsx.slice(a, jsx.indexOf(end, a) + end.length); };
+  const mStart = jsx.indexOf('const SECTION_MANIFEST = {');
+  const code = [
+    grab('const LEVEL_RANK = ', ';'), grab('const LEVEL_SHOWS = ', ';'),
+    'const SECTION_MANIFEST = ' + jsx.slice(mStart + 'const SECTION_MANIFEST = '.length, jsx.indexOf('\n};', mStart) + 2) + ';',
+    grab('const sectionIsVisible = ', '\n};'),
+    grab('const pinDetailLevel = ', '\n};'),
+  ].join('\n');
+  const { pinDetailLevel, sectionIsVisible, SECTION_MANIFEST } =
+    eval(code + '\n({ pinDetailLevel, sectionIsVisible, SECTION_MANIFEST })');
+
+  // The property that matters: whatever level a plan was saved at, every
+  // section shows at the full app's default level exactly as it showed before.
+  const saved = { accounts: { balancesTable: false }, montecarlo: { paths: true } };
+  ['essentials', 'standard', 'everything'].forEach(level => {
+    const pinned = pinDetailLevel(saved, level);
+    const diffs = [];
+    Object.entries(SECTION_MANIFEST).forEach(([tab, entries]) => entries.forEach(e => {
+      if (sectionIsVisible(saved, level, tab, e.id) !== sectionIsVisible(pinned, 'standard', tab, e.id)) diffs.push(tab + '/' + e.id);
+    }));
+    eq(diffs.length, 0, `a plan saved at "${level}" shows the same sections afterwards` + (diffs.length ? ': ' + diffs.join(', ') : ''));
+    eq(pinned.accounts.balancesTable, false, `and a section the reader hid stays hidden (${level})`);
+    eq(pinned.montecarlo.paths, true, `and one they turned on stays on (${level})`);
+  });
+  eq(JSON.stringify(pinDetailLevel(saved, 'standard')), JSON.stringify(saved), 'at the default level nothing is written');
+  eq(JSON.stringify(pinDetailLevel(saved, undefined)), JSON.stringify(saved), 'nor for a plan that never had a level');
+  eq(JSON.stringify(pinDetailLevel(saved, 'bogus')), JSON.stringify(saved), 'nor for one with a level this build does not know');
+  const every = pinDetailLevel({}, 'everything');
+  ok(Object.values(every).every(t => Object.values(t).every(v => v === true)),
+    'Everything becomes explicit "on" choices, never "off" ones');
+  const ess = pinDetailLevel({}, 'essentials');
+  ok(Object.values(ess).every(t => Object.values(t).every(v => v === false)),
+    'and Essentials explicit "off" ones');
+  ok(pinDetailLevel(null, 'everything') && typeof pinDetailLevel(null, 'everything') === 'object', 'a plan with no visibility map at all is fine');
+
+  // Wired at both doors.
+  ok(/pinDetailLevel\(savedData\?\.sectionVisibility \|\| \{\}, savedData\?\.detailLevel\)/.test(jsx), 'the migration runs on load');
+  ok(/setSectionVisibility\(pinDetailLevel\(data\.sectionVisibility \|\| \{\}, data\.detailLevel\)\)/.test(jsx), 'and on import');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
