@@ -8338,15 +8338,9 @@ const WITHDRAWAL_BUCKET_WORDS = { pretax: 'pre-tax', brokerage: 'brokerage', rot
 const activeAdvancedSettings = (pi, fmt = (v) => '$' + Math.round(v).toLocaleString('en-US')) => {
   if (!pi) return [];
   const out = [];
-  if (rothConversionIsPlanned(pi)) {
-    const staged = rothConversionModeOf(pi) === 'staged';
-    const ages = !staged && pi.rothConversionStartAge && pi.rothConversionEndAge
-      ? `, ages ${pi.rothConversionStartAge}–${pi.rothConversionEndAge}` : '';
-    const floor = (pi.rothConversionPreTaxFloor || 0) > 0
-      ? `, keeping ${fmt(pi.rothConversionPreTaxFloor)} pre-tax` : '';
-    out.push({ key: 'rothStrategy', label: 'Roth conversions',
-      detail: rothConversionModeLabel(pi, fmt) + ages + floor });
-  }
+  // Roth conversions were listed here until v2.48.0. Their controls moved to
+  // the Taxes & Roth tab, which simple mode shows and cannot hide them on, so
+  // naming them as "set in the full view" became untrue.
   const order = Array.isArray(pi.withdrawalPriority) ? pi.withdrawalPriority : DEFAULT_WITHDRAWAL_ORDER;
   if (order.join() !== DEFAULT_WITHDRAWAL_ORDER.join()) {
     out.push({ key: 'withdrawalPriority', label: 'Withdrawal order',

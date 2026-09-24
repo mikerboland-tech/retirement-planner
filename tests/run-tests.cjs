@@ -10393,8 +10393,12 @@ section('P87 — the Tax Planning tab can hide its own sections');
   // Every un-Sectioned card on this tab now has a Hide. The count is asserted so
   // that adding a panel to the tab without a manifest entry shows up here rather
   // than as a card the user cannot put away.
-  gt(manifest.taxplanning.length, 11,
+  // Eleven since v2.48.0: the simulator became the strategy editor, which
+  // leads the tab and is deliberately not hideable (it is the tab's control).
+  gt(manifest.taxplanning.length, 10,
     'every card on the Tax Planning tab is declared, including the ones that draw their own title');
+  ok(!manifest.taxplanning.some(e => e.id === 'simulator'),
+    'and the strategy editor is not among them — hiding it would hide the control the tab describes');
 }
 
 section('P88 — the deferral decision priced on equal out-of-pocket cost');
@@ -13556,7 +13560,9 @@ section('P115 — every report component declares the plan it reads');
       || /\(\s*\{[^}]*\bpi\b[^}]*\}[^)]*\)\s*=>|\(\s*pi\b[^)]*\)\s*=>|\bpi\s*=>|function\s*[A-Za-z0-9_]*\s*\([^)]*\bpi\b[^)]*\)/.test(stripped);
     if (!declares) offenders.push(s.name);
   }
-  gt(checked, 5, `components that read a bare pi were found (${checked})`);
+  // Five since v2.48.0, when the simulator's own settings translation (which
+  // read a bare pi) was replaced by a draft of plan fields.
+  gt(checked, 4, `components that read a bare pi were found (${checked})`);
   eq(offenders.length, 0, `every one of them declares it${offenders.length ? ' — offenders: ' + offenders.join(', ') : ''}`);
   ok(/function NextYearReport[\s\S]*?<ReportBasisLine pi=\{personalInfo\}/.test(src), 'and the Next 12 Months report passes the plan it was given');
 }
@@ -14128,13 +14134,16 @@ section('P120 — a staged schedule outranks every scalar mode, and every caller
     const ROOT = pathMod.resolve(__dirname, '..');
     const jsx = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner.jsx'), 'utf8');
     const wrk = fsMod.readFileSync(pathMod.join(ROOT, 'worker.js'), 'utf8');
-    // The simulator builds its plan in ONE place now, through the helper.
-    ok(/const settingsToPI = \(pi, s\) => \(\{\s*\.\.\.withRothConversionTarget\(/.test(jsx.replace(/\n/g, ' ')),
-      'the simulator converts its settings to a plan through the engine helper');
-    ok(/const withPI = settingsToPI\(personalInfo, conversionSettings\);/.test(jsx),
-      'its projection uses that one conversion');
-    ok(/\.\.\.settingsToPI\(prev, conversionSettings\),/.test(jsx),
-      'and so does its Save, so the two cannot drift apart again');
+    // Since v2.48.0 the strategy editor's draft IS plan fields, so there is no
+    // settings-to-plan translation left to go wrong. What has to hold instead:
+    // choosing a mode clears every other one (the engine would otherwise see
+    // two ceilings), and the projection and Save both use the draft itself.
+    ok(/const clear = \(\) => \{ set\('rothConversionStages', null\); set\('rothConversionBracket', ''\); set\('rothConversionIrmaaTier', null\); set\('rothConversionAmount', 0\); \};/.test(jsx),
+      'the strategy editor clears every conversion mode before setting one');
+    ok(/const withPI = draftPI;/.test(jsx),
+      'its projection runs the draft itself');
+    ok(/ROTH_STRATEGY_FIELDS\.forEach\(k => \{\s*if \(!\(draft\[k\] === null && prev\[k\] === undefined\)\) patch\[k\] = draft\[k\];/.test(jsx),
+      'and so does its Save, field for field, so the two cannot drift apart again');
     ok(/\.\.\.E\.withoutRothConversions\(personalInfo\)/.test(wrk),
       'the marginal-rate curve clears through the helper rather than by hand');
     // Nobody hand-rolls the clearing any more. Only DERIVED plans matter: the
@@ -14224,14 +14233,15 @@ section('P121 — the user sweep: six things that were wrong, incomplete or miss
     const flat = jsx.replace(/\s+/g, ' ');
 
     // 2. Personal Info resolves the mode the way the ENGINE does: schedule first.
-    ok(/const stagedMode = Array\.isArray\(localInfo\.rothConversionStages\)/.test(flat),
+    // (The row moved into RothStrategyFields in v2.48.0, reading `info`.)
+    ok(/const stagedMode = Array\.isArray\(info\.rothConversionStages\)/.test(flat),
       'the conversion mode row knows a staged schedule exists');
     ok(/const irmaaMode = !stagedMode &&/.test(flat), 'a schedule outranks a stale scalar tier');
     ok(/const bracketMode = !stagedMode &&/.test(flat), 'and a stale bracket');
     ok(/staged schedule is in force/.test(jsx), 'and the section says so rather than showing a ceiling it is not using');
     // Choosing a single target clears the schedule, so the choice is the one that runs.
-    const modeButtons = (jsx.match(/handleChange\('rothConversionStages', null\); handleChange\('rothConversion/g) || []);
-    eq(modeButtons.length, 3, 'all three single-target buttons clear the schedule first');
+    const modeButtons = (jsx.match(/clear\(\); set\('rothConversion/g) || []);
+    eq(modeButtons.length, 4, 'every mode button clears the schedule and the other targets first');
 
     // 3. The two ending figures name the row they are read at.
     ok(/Ending portfolio \(age \$\{nowM\.endingAge\}\)/.test(jsx),
@@ -14851,8 +14861,10 @@ section('P127 — simple mode hides screens, never settings');
                                           jsx.indexOf('\n};', mStart) + 2) + ')');
     ok(manifest.personal, 'Personal Info has a manifest at last');
     const ids = manifest.personal.map(e => e.id);
-    ['rothStrategy', 'charitable', 'withdrawalPriority', 'spendingPhases', 'survivor']
+    // rothStrategy left in v2.48.0: the strategy moved to Taxes & Roth.
+    ['charitable', 'withdrawalPriority', 'spendingPhases', 'survivor']
       .forEach(id => ok(ids.includes(id), `its '${id}' section can be put away`));
+    eq(ids.includes('rothStrategy'), false, 'the Roth strategy is no longer a Personal Info section');
     // Healthcare and long-term care are the two settings that move a plan by
     // seven figures without being touched. v2.41 listed them as 'essential',
     // which kept them on at every LEVEL but still gave them a Hide button —
@@ -15083,15 +15095,12 @@ section('P130 — the rest of the review: the tour, hidden settings, the mode on
   {
     eq(JSON.stringify(activeAdvancedSettings(single)), '[]', 'a plan doing nothing unusual shows no notice');
     eq(JSON.stringify(activeAdvancedSettings(null)), '[]', 'and no plan is not an error');
+    // A planned conversion is NOT named since v2.48.0: its controls live on
+    // Taxes & Roth, which simple mode shows, so it is not out of sight.
     const conv = { ...single, rothConversionBracket: '24%', rothConversionStartAge: 60, rothConversionEndAge: 70 };
-    const c = activeAdvancedSettings(conv).find(x => x.key === 'rothStrategy');
-    ok(c, 'a planned conversion is named');
-    ok(c.detail.startsWith(rothConversionModeLabel(conv)),
-      'in the same words the Scenarios report uses — one describer, not two');
-    ok(/ages 60–70/.test(c.detail), 'with its window');
-    const staged = { ...single, rothConversionStages: [{ bracket: '24%', startAge: 55, endAge: 62 }, { irmaaTier: 1, startAge: 63, endAge: 74 }] };
-    ok(/2-stage schedule/.test((activeAdvancedSettings(staged).find(x => x.key === 'rothStrategy') || {}).detail || ''),
-      'a staged schedule is described as one');
+    eq(activeAdvancedSettings(conv).some(x => x.key === 'rothStrategy'), false,
+      'a planned conversion is not listed as hidden — simple mode shows its controls');
+    ok(typeof rothConversionModeLabel === 'function', 'the shared describer is still exported');
     ok(activeAdvancedSettings({ ...single, withdrawalPriority: ['roth', 'brokerage', 'pretax'] }).some(x => /Roth → brokerage → pre-tax/.test(x.detail)),
       'a non-default withdrawal order is spelled out');
     ok(activeAdvancedSettings({ ...single, withdrawalBracketFill: '22%' }).some(x => /22% bracket/.test(x.detail)), 'as is bracket-fill spending');
@@ -15532,6 +15541,81 @@ section('P134 — the Dashboard and the Sandbox are one page');
   const userText = jsx.split('\n').filter(l => !/^\s*(\/\/|\{\/\*|\*)/.test(l)).join('\n');
   eq(/[>"'] ?[^<"'\n]*\bthe Sandbox\b/.test(userText.replace(/\/\/.*$/gm, '')), false,
     'no string shown to a reader calls anything "the Sandbox"');
+}
+
+section('P135 — one place to set the Roth conversion strategy');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const jsx = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner.jsx'), 'utf8');
+  const eng = fsMod.readFileSync(pathMod.join(ROOT, 'engine.js'), 'utf8');
+  const body = (name) => { const a = jsx.indexOf('function ' + name + '('); return jsx.slice(a, jsx.indexOf('\n}\n', a)); };
+
+  // ── one editor ───────────────────────────────────────────────────────────
+  // Personal Info and the Tax Planning simulator each edited the same settings,
+  // with different fields (the simulator had no guardrail, no inflation switch
+  // and no per-stage editing), saved by different buttons.
+  eq((jsx.match(/<RothStrategyFields /g) || []).length, 1, 'the strategy fields are rendered in exactly one place');
+  const pi = body('PersonalInfoTab');
+  eq(/(handleChange|set)\('rothConversion/.test(pi), false, 'Personal Info no longer writes any conversion field');
+  ok(/onOpenTaxPlanning && \(/.test(pi) && /conversionModeLabel\(personalInfo\)/.test(pi),
+    'it names the saved strategy and links to where it is set');
+  ok(/onOpenTaxPlanning=\{\(\) => setActiveTab\('taxplanning'\)\}/.test(jsx), 'and the link goes there');
+  const sim = body('RothConversionSimulator');
+  eq(/conversionSettings|settingsToPI|planToSettings/.test(sim), false,
+    'the simulator has no settings model of its own left to translate');
+  ok(/<RothStrategyFields info=\{draftPI\} set=\{setDraftField\}/.test(sim), 'it edits a draft of the plan fields');
+  ok(/disabled=\{!dirty\}/.test(sim), 'Save is live only when the draft differs from the plan');
+  ok(/not saved yet/.test(sim) && /still use your saved strategy/.test(sim),
+    'and an unsaved draft says, in words, that nothing else has changed');
+  ok(/if \(wasClean\) setDraft\(JSON\.parse\(planKey\)\);/.test(sim),
+    'a draft nobody touched follows the plan when the optimizer or the Dashboard changes it');
+
+  // ── it leads its tab, and cannot be hidden ───────────────────────────────
+  const tax = body('TaxPlanningTab');
+  const simAt = tax.indexOf('<RothConversionSimulator');
+  gt(simAt, 0, 'the tab renders the strategy');
+  lt(simAt, tax.indexOf('<RothConversionOptimizer'), 'above the optimizer that writes it');
+  lt(simAt, tax.indexOf('id="bracketSummary"'), 'and above every analysis section');
+  eq(/id="simulator"/.test(tax), false, 'and it is not wrapped in a hideable section');
+  const mStart = jsx.indexOf('const SECTION_MANIFEST = {');
+  const manifest = eval('(' + jsx.slice(mStart + 'const SECTION_MANIFEST = '.length, jsx.indexOf('\n};', mStart) + 2) + ')');
+  eq((manifest.taxplanning.find(e => e.id === 'optimizer') || {}).level, 'standard',
+    'the optimizer shows at the default level now that it sits with the strategy');
+
+  // ── the tab is called what it is ─────────────────────────────────────────
+  ok(/\{ id: 'taxplanning', label: 'Taxes & Roth',/.test(jsx), 'the tab is "Taxes & Roth" in the full app');
+  const lm = /const SIMPLE_LABELS = \{([\s\S]*?)\};/.exec(jsx);
+  eq(/taxplanning/.test(lm[1]), false, 'so simple mode no longer needs to rename it');
+  eq(/Personal Info → Roth Conversions|Turn one on under Personal Info/.test(jsx), false,
+    'no text still sends anyone to Personal Info for conversions');
+
+  // ── the field list is complete ───────────────────────────────────────────
+  // Every conversion input the engine reads must be in the draft, or the
+  // editor would silently save a strategy missing one of its parts.
+  const fm = /const ROTH_STRATEGY_FIELDS = (\[[\s\S]*?\]);/.exec(jsx);
+  ok(fm, 'the field list exists');
+  const fields = eval(fm[1]);
+  const read = [...new Set((eng.match(/pi\.rothConversion[A-Za-z]+/g) || []).map(x => x.slice(3)))];
+  gt(read.length, 10, 'the engine reads the conversion fields it is expected to');
+  read.forEach(f => ok(fields.includes(f), `the draft carries ${f}`));
+  eq(fields.length, read.length, 'and nothing the engine does not read');
+
+  // ── the comparison helpers ───────────────────────────────────────────────
+  const grab = (start, end) => { const a = jsx.indexOf(start); return jsx.slice(a, jsx.indexOf(end, a) + end.length); };
+  const helpers = eval([fm[0], grab('const pickRothStrategy = ', '\n};'),
+                        grab('const sameRothStrategy = ', ';\n')].join('\n') + '\n({ pickRothStrategy, sameRothStrategy })');
+  ok(helpers.sameRothStrategy({ myAge: 50 }, { myAge: 60 }), 'other plan fields do not make a draft unsaved');
+  ok(helpers.sameRothStrategy({}, { rothConversionBracket: undefined }), 'absent and undefined are the same');
+  eq(helpers.sameRothStrategy({ rothConversionBracket: '22%' }, { rothConversionBracket: '24%' }), false,
+    'a different target is a change');
+  eq(helpers.sameRothStrategy({ rothConversionStages: [{ bracket: '24%', startAge: 60, endAge: 62 }] },
+                              { rothConversionStages: [{ bracket: '24%', startAge: 60, endAge: 63 }] }), false,
+    'and so is a different stage');
+
+  // ── the notice no longer calls conversions hidden ────────────────────────
+  eq(/key: 'rothStrategy'/.test(eng), false, 'simple mode shows the conversion controls, so the notice does not list them');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

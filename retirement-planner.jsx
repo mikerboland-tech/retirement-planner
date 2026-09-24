@@ -559,10 +559,11 @@ const SECTION_MANIFEST = {
     { id: 'charitable',      label: 'What Your Charitable Giving Saves',   level: 'advanced' },
     { id: 'breakpoints',     label: 'Income thresholds table',            level: 'advanced' },
     { id: 'yearSnapshot',    label: 'Tax Year Snapshot',                  level: 'standard' },
-    { id: 'optimizer',       label: 'Roth Conversion Optimizer',          level: 'advanced' },
+    { id: 'optimizer',       label: 'Roth Conversion Optimizer',          level: 'standard' },
     { id: 'deferralDecision',label: 'Traditional or Roth while working',  level: 'advanced' },
     { id: 'conversionFunding',label: 'Who pays the conversion tax',       level: 'advanced' },
-    { id: 'simulator',       label: 'Roth Conversion Simulator',          level: 'standard' },
+    // 'simulator' left in v2.48.0: it became the strategy editor, which leads
+    // the tab and is not hideable.
   ],
   montecarlo: [
     { id: 'method',        label: 'Simulation Method',            level: 'standard' },
@@ -596,7 +597,6 @@ const SECTION_MANIFEST = {
     // 'advanced' entry here silently took a live control away from existing
     // users in the FULL app — while its setting kept moving their projection.
     // Only simple mode (and a reader who picks Essentials) hides them.
-    { id: 'rothStrategy',       label: 'Planned Roth conversion strategy', level: 'standard' },
     { id: 'charitable',         label: 'Charitable giving & QCD',          level: 'standard' },
     { id: 'withdrawalPriority', label: 'Withdrawal priority',              level: 'standard' },
     { id: 'spendingPhases',     label: 'Spending phases',                  level: 'standard' },
@@ -1956,7 +1956,7 @@ function FAQTab() {
         },
         {
           q: "How is Social Security calculated?",
-          a: "Social Security is modeled as an income stream starting at your specified claiming age. The annual amount grows by the COLA % each year (default 2-3%). IMPORTANT: SSA statements quote your benefit in today's dollars — check the stream's \"Today's $\" box so the amount is indexed by COLA between now and your claiming age (a $48,000 benefit claimed in 14 years becomes ~$63,000 nominal). Leave it unchecked only if you entered the future nominal amount yourself. The PIA (Primary Insurance Amount) field is used by the Social Security analysis tab to model different claiming ages. Social Security benefits are taxed progressively using IRS combined income thresholds — 0%, up to 50%, or up to 85% may be taxable depending on your total income (see the Tax Planning tab for details)."
+          a: "Social Security is modeled as an income stream starting at your specified claiming age. The annual amount grows by the COLA % each year (default 2-3%). IMPORTANT: SSA statements quote your benefit in today's dollars — check the stream's \"Today's $\" box so the amount is indexed by COLA between now and your claiming age (a $48,000 benefit claimed in 14 years becomes ~$63,000 nominal). Leave it unchecked only if you entered the future nominal amount yourself. The PIA (Primary Insurance Amount) field is used by the Social Security analysis tab to model different claiming ages. Social Security benefits are taxed progressively using IRS combined income thresholds — 0%, up to 50%, or up to 85% may be taxable depending on your total income (see the Taxes & Roth tab for details)."
         },
         {
           q: "How are pension and other income streams handled?",
@@ -2094,15 +2094,15 @@ function FAQTab() {
         },
         {
           q: "What are the default conversion start and end ages?",
-          a: "The 'bridge years' — the gap between retirement and RMDs — are the textbook window for Roth conversions, and the tool uses these as smart defaults. Start age defaults to your retirement age (the year your earned income ends and bracket room opens up). End age defaults to the year before RMDs start (age 71 if born ≤1950, age 72 if born 1951-1959, age 74 if born 1960+ — per SECURE 2.0). The Personal Info form shows the calculated default below each age input and offers a one-click reset button if your saved values differ. The SS Claim Analysis tab also warns when your window is narrower than the standard bridge years, since missed bridge years are missed cheap conversion opportunities."
+          a: "The 'bridge years' — the gap between retirement and RMDs — are the textbook window for Roth conversions, and the tool uses these as smart defaults. Start age defaults to your retirement age (the year your earned income ends and bracket room opens up). End age defaults to the year before RMDs start (age 71 if born ≤1950, age 72 if born 1951-1959, age 74 if born 1960+ — per SECURE 2.0). The strategy editor on the Taxes & Roth tab shows the calculated default below each age input and offers a one-click reset button if your saved values differ. The SS Claim Analysis tab also warns when your window is narrower than the standard bridge years, since missed bridge years are missed cheap conversion opportunities."
         },
         {
           q: "Where do the taxes on Roth conversions come from?",
-          a: "You can choose the tax payment source in Personal Info under Roth Conversions. The default ('Normal Withdrawal Priority') pays conversion taxes the same way as any other withdrawal — from your accounts in priority order. The 'Pay from Brokerage' option estimates the marginal tax on the conversion amount and withdraws that amount from your largest brokerage account, leaving your pre-tax and Roth accounts untouched for the conversion itself. Paying from brokerage is often the more efficient strategy — it maximizes the dollars moved to Roth without also depleting a pre-tax account for taxes."
+          a: "You can choose the tax payment source in your Roth conversion strategy on the Taxes & Roth tab. The default ('Normal Withdrawal Priority') pays conversion taxes the same way as any other withdrawal — from your accounts in priority order. The 'Pay from Brokerage' option estimates the marginal tax on the conversion amount and withdraws that amount from your largest brokerage account, leaving your pre-tax and Roth accounts untouched for the conversion itself. Paying from brokerage is often the more efficient strategy — it maximizes the dollars moved to Roth without also depleting a pre-tax account for taxes."
         },
         {
           q: "When should I consider Roth conversions?",
-          a: "The gap years between retirement and RMDs (or SS) are often ideal — your taxable income is low, so conversions are taxed at lower brackets. Converting reduces future RMDs and grows tax-free in Roth. The Tax Planning tab models this year-by-year. The tradeoff is paying taxes now vs. later. The Social Security Claim Analysis tab additionally shows how SS timing affects how much room you have for cheap conversions — claiming SS earlier fills your brackets faster and reduces conversion opportunities."
+          a: "The gap years between retirement and RMDs (or SS) are often ideal — your taxable income is low, so conversions are taxed at lower brackets. Converting reduces future RMDs and grows tax-free in Roth. The Taxes & Roth tab models this year-by-year — set a strategy there and it shows what it saves against converting nothing. The tradeoff is paying taxes now vs. later. The Social Security Claim Analysis tab additionally shows how SS timing affects how much room you have for cheap conversions — claiming SS earlier fills your brackets faster and reduces conversion opportunities."
         }
       ]
     },
@@ -2166,7 +2166,7 @@ function FAQTab() {
         },
         {
           q: "How does Roth conversion strategy affect SS claim timing?",
-          a: "If you have Roth conversions enabled (Personal Info → Roth Conversions), the analysis automatically reflects them in every claiming scenario. Earlier SS claims push more income into your tax brackets during the conversion years, leaving less room for cheap bracket-fill conversions. Later claims open a wider bridge-year window for conversions at lower marginal rates. The Full Plan Impact banner shows the actual range of lifetime conversions across all scenarios, and the ranking table includes a 'Roth Conv.' column when conversions are active. The standard 'bridge years' conversion window is retirement age through the year before RMDs start — the tool uses your retirement age and SECURE 2.0 RMD age to suggest these defaults."
+          a: "If you have Roth conversions enabled (Taxes & Roth → Your Roth conversion strategy), the analysis automatically reflects them in every claiming scenario. Earlier SS claims push more income into your tax brackets during the conversion years, leaving less room for cheap bracket-fill conversions. Later claims open a wider bridge-year window for conversions at lower marginal rates. The Full Plan Impact banner shows the actual range of lifetime conversions across all scenarios, and the ranking table includes a 'Roth Conv.' column when conversions are active. The standard 'bridge years' conversion window is retirement age through the year before RMDs start — the tool uses your retirement age and SECURE 2.0 RMD age to suggest these defaults."
         },
         {
           q: "Why are the tax differences between claiming ages smaller than expected?",
@@ -3818,79 +3818,509 @@ function suggestPreTaxFloor(baselineProj, pi) {
   return Math.round(total);
 }
 
+// ── THE CONVERSION STRATEGY ─────────────────────────────────────────────────
+// Every input that shapes a planned Roth conversion. The strategy editor works
+// on a draft of exactly these, so Save writes these and nothing else — and a
+// draft is "unsaved" exactly when one of them differs from the plan.
+const ROTH_STRATEGY_FIELDS = [
+  'rothConversionAmount', 'rothConversionBracket', 'rothConversionIrmaaTier', 'rothConversionStages',
+  'rothConversionStartAge', 'rothConversionEndAge', 'rothConversionInflationAdjust',
+  'rothConversionTaxSource', 'rothConversionPreTaxFloor', 'rothConversionGuardrailEnabled',
+  'rothConversionGuardrailReturnFloor', 'rothConversionGuardrailFloor',
+];
+const pickRothStrategy = (pi) => {
+  const out = {};
+  ROTH_STRATEGY_FIELDS.forEach(k => { out[k] = pi[k] === undefined ? null : pi[k]; });
+  return out;
+};
+const sameRothStrategy = (a, b) => JSON.stringify(pickRothStrategy(a)) === JSON.stringify(pickRothStrategy(b));
+
+// The fields themselves, written once. They lived on Personal Info until
+// v2.48.0, while the simulator on Tax Planning had a second, smaller set of its
+// own for the same settings (no guardrail, no inflation switch, no per-stage
+// editing) — so which strategies you could express depended on which screen you
+// were on. `set(field, value)` is the caller's: the editor feeds a draft.
+function RothStrategyFields({ info, set, suggestedFloor = 0 }) {
+  const compactInputStyle = "w-full bg-slate-900/80 border border-slate-600/50 rounded px-3 py-1.5 text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500/50 transition-all text-sm";
+  const compactLabelStyle = "text-xs font-medium text-slate-400";
+  return (
+    <div>
+      {/* Mode row. Mutually exclusive — switching one clears the others, or
+          the engine would see two ceilings at once. "No conversions" is a mode
+          of its own: it used to be spelled "Fixed Amount, $0", which is how a
+          plan reads as having a strategy when it has none. */}
+      {(() => {
+        // The ENGINE resolves an explicit schedule before any scalar mode
+        // (conversionStagesOf), so this row has to as well.
+        const stagedMode = Array.isArray(info.rothConversionStages)
+          && info.rothConversionStages.length > 0;
+        const irmaaMode = !stagedMode && Number.isInteger(info.rothConversionIrmaaTier);
+        const bracketMode = !stagedMode && !!info.rothConversionBracket && !irmaaMode;
+        const fixedMode = !stagedMode && !irmaaMode && !bracketMode && (info.rothConversionAmount || 0) > 0;
+        const btn = (active) => `px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+          active ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                 : 'text-slate-400 border-slate-600/50 hover:text-slate-200 hover:bg-slate-700/50'}`;
+        const clear = () => { set('rothConversionStages', null); set('rothConversionBracket', ''); set('rothConversionIrmaaTier', null); set('rothConversionAmount', 0); };
+        return (
+          <div className="flex flex-wrap gap-2 mb-4">
+            <button onClick={clear} className={btn(!stagedMode && !irmaaMode && !bracketMode && !fixedMode)}>No conversions</button>
+            <button
+              onClick={() => { const amt = info.rothConversionAmount || 50000; clear(); set('rothConversionAmount', amt); }}
+              className={btn(fixedMode)}
+            >Fixed Amount</button>
+            <button
+              onClick={() => { clear(); set('rothConversionBracket', '22%'); }}
+              className={btn(bracketMode)}
+            >Fill to Bracket</button>
+            <button
+              onClick={() => { clear(); set('rothConversionIrmaaTier', 0); }}
+              className={btn(irmaaMode)}
+            >Fill to IRMAA Tier</button>
+            <button
+              onClick={() => { clear(); set('rothConversionStages', irmaaAwareConversionStages(info)); }}
+              className={btn(stagedMode)}
+            >Staged schedule</button>
+          </div>
+        );
+      })()}
+
+      {rothConversionIsPlanned(info) || (Array.isArray(info.rothConversionStages) && info.rothConversionStages.length > 0) ? (<>
+
+          {Array.isArray(info.rothConversionStages) && info.rothConversionStages.length > 0 && (
+            <p className="text-[11px] text-purple-300/80 mb-3 leading-snug">
+              A staged schedule is in force, and the engine runs it ahead of any single target.
+              {' '}Edit the stages below; the single-target fields are hidden while it applies.
+              {' '}Choosing another mode above replaces the schedule.
+            </p>
+          )}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Fixed amount input OR bracket selector. Hidden entirely while a
+                staged schedule governs — showing a ceiling the plan is not using
+                is what made this section contradict itself. */}
+            {Array.isArray(info.rothConversionStages) && info.rothConversionStages.length > 0 ? null
+             : Number.isInteger(info.rothConversionIrmaaTier) ? (
+              <div className="col-span-2">
+                <label className={compactLabelStyle}>Stay Within IRMAA Tier</label>
+                <select
+                  value={info.rothConversionIrmaaTier}
+                  onChange={e => set('rothConversionIrmaaTier', Number(e.target.value))}
+                  className={compactInputStyle}
+                >
+                  {irmaaTierOptions(info.filingStatus,
+                      info.filingStatus === 'married_joint' ? 2 : 1)
+                    .filter(o => !o.isTop)
+                    .map(o => (
+                      <option key={o.index} value={o.index}>
+                        MAGI up to {formatCurrency(o.ceiling)} — surcharge {formatCurrency(o.annualSurchargePerHousehold)}/yr
+                      </option>
+                    ))}
+                </select>
+                <p className="text-[10px] text-slate-500 mt-1 leading-snug">
+                  Converts up to {formatCurrency(IRMAA_FILL_SAFETY_MARGIN)} below that MAGI edge, measured against the
+                  threshold for the year the surcharge is actually paid — IRMAA runs on a two-year lookback, so a
+                  conversion now sets the premium two years from now. Crossing an edge by a single dollar costs the
+                  whole tier step, which is why the tool stops short of it rather than on it.
+                  {' '}Before age 63 there is no IRMAA consequence yet, so in those years this simply acts as a MAGI ceiling.
+                </p>
+              </div>
+            ) : !info.rothConversionBracket ? (
+              <div>
+                <label className={compactLabelStyle}>Annual Conversion Amount</label>
+                <CurrencyCell
+                  value={info.rothConversionAmount || 0}
+                  onValueChange={v => set('rothConversionAmount', v)}
+                  className={compactInputStyle}
+                />
+                <label className="flex items-start gap-1.5 mt-1 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={info.rothConversionInflationAdjust !== false}
+                    onChange={e => set('rothConversionInflationAdjust', e.target.checked)}
+                    className="w-3.5 h-3.5 mt-0.5 rounded border-slate-600 bg-slate-800 text-purple-500"
+                  />
+                  <span className="text-[10px] text-slate-500">
+                    Adjust for inflation — amount is today's $, indexed each year so it keeps filling the
+                    same real bracket space. Uncheck to convert this exact nominal amount every year.
+                  </span>
+                </label>
+              </div>
+            ) : (
+              <div>
+                <label className={compactLabelStyle}>Target Tax Bracket</label>
+                <select 
+                  value={info.rothConversionBracket || '22%'} 
+                  onChange={e => set('rothConversionBracket', e.target.value)} 
+                  className={compactInputStyle}
+                >
+                  <option value="12%">12% Bracket</option>
+                  <option value="22%">22% Bracket</option>
+                  <option value="24%">24% Bracket</option>
+                  <option value="32%">32% Bracket</option>
+                </select>
+              </div>
+            )}
+            <div>
+              <label className={compactLabelStyle}>Start Age</label>
+              <AgeCell
+                value={info.rothConversionStartAge}
+                onChange={e => set('rothConversionStartAge', Number(e.target.value) || 0)}
+                className={compactInputStyle}
+              />
+              <p className="text-[10px] text-slate-500 mt-0.5">
+                {(info.rothConversionStartAge || 0) === 0
+                  ? `Defaults to retirement age (${getDefaultRothConversionWindow(info).startAge})`
+                  : `Smart default: ${getDefaultRothConversionWindow(info).startAge} (retirement age)`}
+              </p>
+            </div>
+            <div>
+              <label className={compactLabelStyle}>End Age</label>
+              <AgeCell
+                value={info.rothConversionEndAge}
+                onChange={e => set('rothConversionEndAge', Number(e.target.value) || 0)}
+                className={compactInputStyle}
+              />
+              <p className="text-[10px] text-slate-500 mt-0.5">
+                {(info.rothConversionEndAge || 0) === 0
+                  ? `Defaults to ${getDefaultRothConversionWindow(info).endAge} (year before RMDs at age ${getRmdStartAge(info.myBirthYear)})`
+                  : `Smart default: ${getDefaultRothConversionWindow(info).endAge} (year before RMDs at age ${getRmdStartAge(info.myBirthYear)})`}
+              </p>
+            </div>
+            <div>
+              <label className={compactLabelStyle}>Tax Payment Source</label>
+              <select
+                value={info.rothConversionTaxSource || 'withdrawal'}
+                onChange={e => set('rothConversionTaxSource', e.target.value)}
+                className={compactInputStyle}
+              >
+                <option value="withdrawal">Normal Withdrawal Priority</option>
+                <option value="brokerage">Pay from Brokerage</option>
+              </select>
+            </div>
+            <div>
+              <label className={compactLabelStyle}>Preserve Pre-Tax Floor</label>
+              <CurrencyCell
+                value={info.rothConversionPreTaxFloor || 0}
+                onValueChange={v => set('rothConversionPreTaxFloor', v)}
+                className={compactInputStyle}
+              />
+                <p className="text-[10px] text-slate-500 mt-0.5">
+          Stop converting once pre-tax (today's $) hits this — keeps room for QCDs and low-bracket withdrawals. 0 = convert per the window.
+          {suggestedFloor > 0 && (
+            <span className="block mt-0.5">
+              Suggested: <span className="text-amber-400">{formatCurrency(suggestedFloor)}</span>
+              <button
+                onClick={() => set('rothConversionPreTaxFloor', suggestedFloor)}
+                className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30"
+              >
+                Use it
+              </button>
+            </span>
+          )}
+        </p>
+            </div>
+          </div>
+
+          {/* Guardrail — the only setting here that changes conversions YEAR BY
+              YEAR rather than setting a fixed rule for all of them. */}
+          <div className="mt-3 p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={!!info.rothConversionGuardrailEnabled}
+                onChange={e => set('rothConversionGuardrailEnabled', e.target.checked)}
+                className="w-4 h-4 mt-0.5 rounded border-slate-600 bg-slate-800 text-amber-500"
+              />
+              <span className="text-sm text-slate-300">
+                Pause conversions when the portfolio is down
+                <span className="block text-[11px] text-slate-500 leading-relaxed mt-0.5">
+                  A conversion is a discretionary, irreversible tax bill funded by selling assets. Paying it
+                  in a falling market sells shares cheap and removes the ones that would have carried the
+                  recovery. This waits instead.
+                </span>
+              </span>
+            </label>
+            {info.rothConversionGuardrailEnabled && (
+              <div className="grid grid-cols-2 gap-3 mt-3 pl-6">
+                <div>
+                  <label className={compactLabelStyle}>Pause after a year returning less than</label>
+                  <PercentCell
+                    value={info.rothConversionGuardrailReturnFloor ?? 0}
+                    onValueChange={v => set('rothConversionGuardrailReturnFloor', Math.min(0.15, Math.max(-0.5, v)))}
+                    className={compactInputStyle}
+                  />
+                  <p className="text-[10px] text-slate-500 mt-0.5">
+                    The prior year&rsquo;s investment return, not the balance. A plan that is spending and
+                    paying conversion tax sees its balance fall in a perfectly good year — only the return
+                    separates &ldquo;the market went against me&rdquo; from &ldquo;I am spending my money
+                    as planned&rdquo;.
+                  </p>
+                </div>
+                <div>
+                  <label className={compactLabelStyle}>Convert this much while paused</label>
+                  <PercentCell
+                    value={info.rothConversionGuardrailFloor ?? 0}
+                    onValueChange={v => set('rothConversionGuardrailFloor', Math.min(1, Math.max(0, v)))}
+                    className={compactInputStyle}
+                  />
+                  <p className="text-[10px] text-slate-500 mt-0.5">
+                    0% stops entirely; 50% keeps converting at half speed. Conversions resume in full once
+                    the portfolio recovers past the band.
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+
+
+          {/* ── Staged schedule ────────────────────────────────────────────
+              One target for the whole window is the wrong shape for the
+              decision: the years before Medicare reads your income are cheaper
+              than the years after, and a plan that converts hard while it is
+              free and throttles once it isn't could not be expressed here at
+              all until now. */}
+          {Array.isArray(info.rothConversionStages) && info.rothConversionStages.length > 0 && (
+          <div className="mt-3 p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg">
+            <div className="flex items-start gap-2">
+              <span>
+                <span className="text-xs font-medium text-slate-200">Staged schedule</span>
+                <span className="block text-[10px] text-slate-500 mt-0.5">
+                  Convert to one target while your income is invisible to Medicare, then to a lower one once
+                  it isn't. IRMAA reads the MAGI you reported {IRMAA_TIER_LOOKBACK_YEARS} years earlier, so
+                  age {65 - IRMAA_TIER_LOOKBACK_YEARS - 1} is the last free year and {65 - IRMAA_TIER_LOOKBACK_YEARS} is
+                  the first that buys a surcharge. The mode button builds that schedule from your own window; every
+                  field stays editable.
+                </span>
+              </span>
+            </div>
+
+            {Array.isArray(info.rothConversionStages) && info.rothConversionStages.length > 0 && (() => {
+              const stages = info.rothConversionStages;
+              const tiers = irmaaTierOptions(info.filingStatus || 'married_joint');
+              const setStage = (i, patch) => set('rothConversionStages',
+                stages.map((s, j) => j === i ? { ...s, ...patch } : s));
+              const targetValue = (s) => Number.isInteger(s.irmaaTier) ? `irmaa:${s.irmaaTier}`
+                : s.bracket ? `bracket:${s.bracket}` : 'amount';
+              const setTarget = (i, v) => {
+                if (v.startsWith('irmaa:')) setStage(i, { irmaaTier: Number(v.slice(6)), bracket: '', amount: 0 });
+                else if (v.startsWith('bracket:')) setStage(i, { irmaaTier: null, bracket: v.slice(8), amount: 0 });
+                else setStage(i, { irmaaTier: null, bracket: '', amount: stages[i].amount || 50000 });
+              };
+              return (
+                <div className="mt-3 space-y-2">
+                  {stages.map((s, i) => (
+                    <div key={i} className="flex flex-wrap items-end gap-2 p-2 bg-slate-900/60 rounded-lg border border-slate-700/40">
+                      <input
+                        type="text" value={s.label || `Stage ${i + 1}`}
+                        onChange={e => setStage(i, { label: e.target.value })}
+                        className="w-32 bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs"
+                      />
+                      <div>
+                        <label className="block text-[10px] text-slate-500">From age</label>
+                        <input type="number" value={s.startAge ?? ''} onChange={e => setStage(i, { startAge: Number(e.target.value) || 0 })}
+                          className="w-16 bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-500">Through</label>
+                        <input type="number" value={s.endAge ?? ''} onChange={e => setStage(i, { endAge: Number(e.target.value) || 0 })}
+                          className="w-16 bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs" />
+                      </div>
+                      <div className="flex-1 min-w-[170px]">
+                        <label className="block text-[10px] text-slate-500">Convert up to</label>
+                        <select value={targetValue(s)} onChange={e => setTarget(i, e.target.value)}
+                          className="w-full bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs">
+                          <option value="bracket:22%">Top of the 22% bracket</option>
+                          <option value="bracket:24%">Top of the 24% bracket</option>
+                          <option value="bracket:32%">Top of the 32% bracket</option>
+                          {tiers.filter(t => !t.isTop).map(t => (
+                            <option key={t.index} value={`irmaa:${t.index}`}>
+                              IRMAA tier {t.index} edge ({formatCurrency(t.ceiling)} MAGI)
+                            </option>
+                          ))}
+                          <option value="amount">A fixed amount</option>
+                        </select>
+                      </div>
+                      {!Number.isInteger(s.irmaaTier) && !s.bracket && (
+                        <div>
+                          <label className="block text-[10px] text-slate-500">Amount</label>
+                          <CurrencyCell value={s.amount || 0} onValueChange={v => setStage(i, { amount: v })}
+                            className="w-28 bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs" />
+                        </div>
+                      )}
+                      <button
+                        onClick={() => set('rothConversionStages', stages.filter((_, j) => j !== i))}
+                        className="text-slate-500 hover:text-red-400 text-xs px-1 pb-1" title="Remove this stage"
+                      >✕</button>
+                    </div>
+                  ))}
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => set('rothConversionStages', stages.concat([{
+                        label: `Stage ${stages.length + 1}`,
+                        startAge: (stages[stages.length - 1]?.endAge || info.myRetirementAge || 65) + 1,
+                        endAge: getDefaultRothConversionWindow(info).endAge,
+                        bracket: '22%', amount: 0, irmaaTier: null,
+                      }]))}
+                      className="text-xs text-purple-400 hover:text-purple-300"
+                    >+ Add stage</button>
+                    <button
+                      onClick={() => set('rothConversionStages', irmaaAwareConversionStages(info))}
+                      className="text-xs text-slate-400 hover:text-slate-200"
+                    >Rebuild the IRMAA-aware schedule</button>
+                  </div>
+                  <p className="text-[10px] text-slate-500">
+                    A year belongs to exactly one stage — the first it falls in. Years outside every stage convert
+                    nothing, and the window fields above are ignored while a schedule is set.
+                  </p>
+                </div>
+              );
+            })()}
+          </div>
+          )}
+          <div className="mt-3 p-3 bg-purple-900/20 border border-purple-700/30 rounded-lg">
+            <p className="text-xs text-purple-300 font-medium mb-1">&#128161; Roth Conversion Strategy</p>
+            <p className="text-xs text-slate-400">
+              Each year during the specified age range, funds are moved from the largest pre-tax account to the largest Roth account. 
+              The conversion is added to your taxable income for that year. 
+              Roth conversions appear as <strong className="text-purple-400">purple-highlighted rows</strong> in the Detailed Table.
+              {Number.isInteger(info.rothConversionIrmaaTier)
+                ? ` IRMAA-tier mode converts up to just under that MAGI edge each year, measured against the threshold for the year the surcharge is actually paid.`
+                : (info.rothConversionBracket ? ` Fill-to-bracket mode converts enough each year to fully utilize the ${info.rothConversionBracket} bracket (based on other income).` : '')}
+              {info.rothConversionTaxSource === 'brokerage'
+                ? ' Tax on conversions is paid by withdrawing from your brokerage account, preserving pre-tax and Roth balances.'
+                : ' Tax on conversions is covered by the normal withdrawal solver (using your withdrawal priority order), which may pull additional pre-tax funds.'}
+              {(info.rothConversionPreTaxFloor || 0) > 0
+                ? ` Conversions stop once your pre-tax balance reaches ${formatCurrency(info.rothConversionPreTaxFloor)} (today's dollars), leaving funds for QCDs and low-bracket withdrawals.`
+                : ''}
+              {info.rothConversionGuardrailEnabled
+                ? ` The guardrail pauses conversions in any year following a portfolio return below ${Math.round((info.rothConversionGuardrailReturnFloor ?? 0) * 100)}%${(info.rothConversionGuardrailFloor ?? 0) > 0 ? `, converting at ${Math.round((info.rothConversionGuardrailFloor) * 100)}% of target instead of stopping` : ''}. It never fires on a steady-return projection — you will see it in Monte Carlo, the stress test, and the optimizer's balanced goal, which are where a bad year exists.`
+                : ''}
+            </p>
+          </div>
+    
+          {/* Smart-default reset / suboptimal window warning.
+              Compares the user's explicit window against the smart defaults
+              (retirement age → RMD age - 1). If the user's window is significantly
+              narrower than the optimal bridge years, surface a hint with a
+              one-click reset. */}
+          {(() => {
+            const smart = getDefaultRothConversionWindow(info);
+            const userStart = info.rothConversionStartAge || 0;
+            const userEnd = info.rothConversionEndAge || 0;
+            const usingDefaults = userStart === 0 && userEnd === 0;
+            const userMatchesSmart = userStart === smart.startAge && userEnd === smart.endAge;
+            const startsTooLate = userStart > 0 && userStart > smart.startAge;
+            const endsTooEarly = userEnd > 0 && userEnd < smart.endAge;
+            const suboptimal = (startsTooLate || endsTooEarly) && !usingDefaults && !userMatchesSmart;
+      
+            const resetToSmartDefaults = () => {
+              set('rothConversionStartAge', smart.startAge);
+              set('rothConversionEndAge', smart.endAge);
+            };
+      
+            if (usingDefaults || userMatchesSmart) {
+              return (
+                <div className="mt-3 p-3 bg-emerald-900/15 border border-emerald-700/30 rounded-lg">
+                  <p className="text-xs text-emerald-300">
+                    ✓ Using the standard bridge-year conversion window (retirement age {smart.startAge} → year before RMDs {smart.endAge}). This is the textbook approach for maximizing cheap conversions.
+                  </p>
+                </div>
+              );
+            }
+      
+            if (suboptimal) {
+              const userYears = userEnd - userStart + 1;
+              const smartYears = smart.endAge - smart.startAge + 1;
+              const missing = smartYears - userYears;
+              return (
+                <div className="mt-3 p-3 bg-amber-900/20 border border-amber-700/40 rounded-lg">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1">
+                      <p className="text-xs text-amber-300 font-medium mb-1">
+                        ⚠ Your conversion window may be missing {missing} year{missing !== 1 ? 's' : ''} of cheap conversion opportunities
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        Your window: ages {userStart}–{userEnd} ({userYears} year{userYears !== 1 ? 's' : ''}). 
+                        Standard bridge: ages {smart.startAge}–{smart.endAge} ({smartYears} years).
+                        {startsTooLate && ` You're skipping ${smart.startAge}-${userStart - 1} (after retirement, before SS or RMDs — typically lowest-bracket years).`}
+                        {endsTooEarly && ` You're stopping early at ${userEnd} instead of the year before RMDs ({smart.endAge}).`}
+                      </p>
+                    </div>
+                    <button
+                      onClick={resetToSmartDefaults}
+                      className="text-xs px-3 py-1 bg-amber-700/30 hover:bg-amber-700/50 border border-amber-600/50 rounded text-amber-200 font-medium whitespace-nowrap transition-colors"
+                    >
+                      Use {smart.startAge}–{smart.endAge}
+                    </button>
+                  </div>
+                </div>
+              );
+            }
+      
+            // User chose a wider window than smart defaults — assume intentional, no warning
+            return (
+              <div className="mt-3 p-3 bg-slate-800/40 border border-slate-700 rounded-lg flex items-center justify-between gap-3">
+                <p className="text-xs text-slate-400">
+                  Your custom window: ages {userStart || smart.startAge}–{userEnd || smart.endAge}. 
+                  Standard would be ages {smart.startAge}–{smart.endAge}.
+                </p>
+                <button
+                  onClick={resetToSmartDefaults}
+                  className="text-xs px-3 py-1 bg-slate-700 hover:bg-slate-600 border border-slate-600 rounded text-slate-300 font-medium whitespace-nowrap transition-colors"
+                >
+                  Reset to defaults
+                </button>
+              </div>
+            );
+          })()}
+      </>) : (
+        <p className="text-xs text-slate-500">
+          Nothing is converted. Pick a strategy above to see what it does against converting nothing.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function RothConversionSimulator({ projections, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, retirementAge, computeProjections, setPersonalInfo }) {
-  // Seed the simulator from the user's SAVED plan (plus the engine's smart
-  // window defaults) so the simulator and the Personal Info "planned strategy"
-  // agree out of the box, instead of starting from hardcoded sandbox values.
-  const planToSettings = (pi) => {
-    const dw = getDefaultRothConversionWindow(pi);
-    return {
-      // Four constraints now, tested in the order the ENGINE resolves them.
-      // conversionStagesOf consults an explicit schedule before any scalar
-      // mode, so a staged plan must be recognised first — testing IRMAA first
-      // seeded a staged plan as 'IRMAA tier 0' (the stale scalar left beside
-      // the schedule) and opened the simulator on a strategy the plan was not
-      // running. IRMAA still precedes the bracket for the reason below.
-      mode: rothConversionModeOf(pi) === 'staged' ? 'staged'
-          : Number.isInteger(pi.rothConversionIrmaaTier) ? 'irmaa'
-          : (pi.rothConversionBracket ? 'bracket' : 'fixed'),
-      startAge: pi.rothConversionStartAge || dw.startAge,
-      endAge: pi.rothConversionEndAge || dw.endAge,
-      targetBracket: pi.rothConversionBracket || '22%',
-      irmaaTier: Number.isInteger(pi.rothConversionIrmaaTier) ? pi.rothConversionIrmaaTier : 0,
-      fixedAmount: pi.rothConversionAmount || 0,
-      // The staged schedule, kept verbatim when the plan already has one so the
-      // simulator opens on the reader's OWN stages rather than a rebuilt
-      // approximation of them. The two knobs are seeded from it: the bracket the
-      // free years fill, and the tier the charged years hold.
-      stages: Array.isArray(pi.rothConversionStages) && pi.rothConversionStages.length
-        ? pi.rothConversionStages.map(x => ({ ...x })) : null,
-      freeBracket: (Array.isArray(pi.rothConversionStages) && pi.rothConversionStages.length
-        ? (pi.rothConversionStages.find(x => x.bracket) || {}).bracket : '') || '24%',
-      chargedTier: (() => {
-        const st = Array.isArray(pi.rothConversionStages) ? pi.rothConversionStages : [];
-        const withTier = st.filter(x => Number.isInteger(x.irmaaTier));
-        return withTier.length ? withTier[withTier.length - 1].irmaaTier : 1;
-      })(),
-      taxSource: pi.rothConversionTaxSource || 'withdrawal',
-      preTaxFloor: pi.rothConversionPreTaxFloor || 0,
-    };
-  };
   // Which year's rate the reader has asked to see proved. One at a time: the
   // audit is long, and the question is always about a specific year.
   const [auditAge, setAuditAge] = useState(null);
 
-  const [conversionSettings, setConversionSettings] = useState(() => planToSettings(personalInfo));
-
-  // ── SETTINGS → PLAN ────────────────────────────────────────────────────────
-  // One conversion of the panel's settings into a plan, used by the projection
-  // this panel draws AND by Save. They used to be two hand-written copies of the
-  // same field list, and neither knew about staged schedules: both set the
-  // scalar fields and left pi.rothConversionStages untouched. Since the engine
-  // reads an explicit schedule BEFORE any scalar mode, a reader with a staged
-  // plan got the same projection whatever they chose here — every control on
-  // this panel was inert — and Save wrote a mode the schedule then overrode.
+  // ── THE DRAFT ─────────────────────────────────────────────────────────────
+  // The editor works on a draft of the plan's twelve conversion fields, and
+  // everything this panel measures is the draft against converting nothing.
+  // Nothing reaches the plan until Save — the rest of the app keeps describing
+  // the saved strategy, which the panel says in words while they differ.
   //
-  // withRothConversionTarget clears every mode before applying the one asked
-  // for, so it cannot happen again by omission.
-  const settingsToPI = (pi, s) => ({
-    ...withRothConversionTarget(pi, {
-      ...(s.mode === 'fixed' ? { amount: s.fixedAmount } : {}),
-      ...(s.mode === 'bracket' ? { bracket: s.targetBracket } : {}),
-      ...(s.mode === 'irmaa' ? { irmaaTier: s.irmaaTier } : {}),
-      ...(s.mode === 'staged' ? { stages: stagesFor(pi, s) } : {}),
-      startAge: s.startAge,
-      endAge: s.endAge,
-    }),
-    rothConversionTaxSource: s.taxSource,
-    rothConversionPreTaxFloor: s.preTaxFloor,
-  });
-  // The schedule a staged setting means. The reader's own stages are kept while
-  // they are untouched; changing either knob rebuilds the canonical two-stage
-  // schedule over the chosen window, with the hinge derived by the engine.
-  const stagesFor = (pi, s) => (s.stages && s.stages.length ? s.stages
-    : irmaaAwareConversionStages(pi, { freeBracket: s.freeBracket, chargedTier: s.chargedTier,
-                                       startAge: s.startAge, endAge: s.endAge }));
+  // This replaces a settings object of the simulator's own ({mode, startAge,
+  // targetBracket, ...}) that had to be translated to and from plan fields in
+  // both directions, and could only express the strategies that translation
+  // knew about. The draft IS plan fields, so there is nothing to translate.
+  const [draft, setDraft] = useState(() => pickRothStrategy(personalInfo));
+  const setDraftField = useCallback((k, v) => setDraft(d => ({ ...d, [k]: v })), []);
+  const draftPI = useMemo(() => ({ ...personalInfo, ...draft }), [personalInfo, draft]);
+  const dirty = !sameRothStrategy(draftPI, personalInfo);
+  // The plan can change under the draft — the optimizer's Apply, the
+  // Dashboard's "Make this the plan", an import. A draft nobody has touched
+  // follows it; one being edited is left alone rather than wiped.
+  const planKey = JSON.stringify(pickRothStrategy(personalInfo));
+  const lastPlanKey = useRef(planKey);
+  useEffect(() => {
+    if (planKey === lastPlanKey.current) return;
+    const wasClean = JSON.stringify(draft) === lastPlanKey.current;
+    lastPlanKey.current = planKey;
+    if (wasClean) setDraft(JSON.parse(planKey));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planKey]);
+  // The ages the with-versus-without table reads: the schedule's span when
+  // staged, else the window with the engine's defaults filled in.
+  const convWindow = useMemo(() => {
+    const st = (Array.isArray(draftPI.rothConversionStages) ? draftPI.rothConversionStages : [])
+      .filter(x => Number.isFinite(x.startAge) && Number.isFinite(x.endAge) && x.endAge >= x.startAge);
+    if (st.length) return { startAge: Math.min(...st.map(x => x.startAge)), endAge: Math.max(...st.map(x => x.endAge)) };
+    const dw = getDefaultRothConversionWindow(draftPI);
+    return { startAge: draftPI.rothConversionStartAge || dw.startAge, endAge: draftPI.rothConversionEndAge || dw.endAge };
+  }, [draftPI]);
   const [savedFlash, setSavedFlash] = useState(false);
 
   // ── LIFETIME RATE CURVE ────────────────────────────────────────────────────
@@ -3945,18 +4375,12 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
         curveJobRef.current = null;
       }
     };
-    // Deliberately NOT dependent on conversionSettings: the curve is measured
+    // Deliberately NOT dependent on the draft: the curve is measured
     // against a no-conversion baseline, so it describes the plan's tax terrain
     // rather than any one strategy. Re-running it on every slider nudge would
     // burn ~35 projections to redraw an identical chart.
   }, [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
 
-  const bracketOptions = [
-    { value: '12%', label: '12% Bracket' },
-    { value: '22%', label: '22% Bracket' },
-    { value: '24%', label: '24% Bracket' },
-    { value: '32%', label: '32% Bracket' }
-  ];
   
   // Run two full projections through the unified engine:
   // 1. "With conversions" — using the simulator's conversion settings
@@ -3964,7 +4388,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
   // The difference between them IS the impact of conversions.
   const { conversionProj, baselineProj, conversionAnalysis, totals } = useMemo(() => {
     // Projection WITH the simulator's conversion settings
-    const withPI = settingsToPI(personalInfo, conversionSettings);
+    const withPI = draftPI;
     const withProj = computeProjections(withPI, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses);
 
     // Projection WITHOUT any conversions (baseline)
@@ -3979,7 +4403,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
     let cumulativeConversion = 0;
     let cumulativeTaxDelta = 0;
     
-    for (let age = conversionSettings.startAge; age <= conversionSettings.endAge; age++) {
+    for (let age = convWindow.startAge; age <= convWindow.endAge; age++) {
       const withYear = withProj.find(p => p.myAge === age);
       const withoutYear = withoutProj.find(p => p.myAge === age);
       if (!withYear || !withoutYear) continue;
@@ -4055,188 +4479,84 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
         avgEffRate: cumulativeConversion > 0 ? cumulativeTaxDelta / cumulativeConversion : 0
       }
     };
-  }, [personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, conversionSettings]);
+  }, [personalInfo, draftPI, convWindow, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
 
   const suggestedFloor = useMemo(() => suggestPreTaxFloor(baselineProj, personalInfo), [baselineProj, personalInfo]);
 
   const saveToPlan = () => {
-    setPersonalInfo(prev => ({
-      ...prev,
-      ...settingsToPI(prev, conversionSettings),
-    }));
+    setPersonalInfo(prev => {
+      // Only the conversion fields, and no nulls written over fields the plan
+      // never had — the draft spells "absent" as null so it can be compared.
+      const patch = {};
+      ROTH_STRATEGY_FIELDS.forEach(k => {
+        if (!(draft[k] === null && prev[k] === undefined)) patch[k] = draft[k];
+      });
+      return { ...prev, ...patch };
+    });
     setSavedFlash(true);
     setTimeout(() => setSavedFlash(false), 2500);
   };
-  const resetToPlan = () => setConversionSettings(planToSettings(personalInfo));
+  const resetToPlan = () => setDraft(pickRothStrategy(personalInfo));
 
   return (
     <div className={cardStyle}>
-      <h4 className="text-lg font-semibold text-slate-100 mb-2">🔄 Roth Conversion Simulator</h4>
-      <p className="text-sm text-slate-400 mb-4">
-        Compare your plan WITH vs. WITHOUT Roth conversions. Uses the full projection engine — same tax calculations, SS re-taxation, IRMAA, and withdrawal solver as your main plan.
-      </p>
-      
-      {/* Settings */}
-      <div className="grid grid-cols-2 md:grid-cols-6 gap-4 mb-6 p-4 bg-slate-800/50 rounded-lg">
-        <div>
-          <label className="block text-sm text-slate-400 mb-1">Mode</label>
-          <select
-            value={conversionSettings.mode}
-            onChange={e => setConversionSettings({
-              ...conversionSettings, mode: e.target.value,
-              // Leaving staged mode drops the carried schedule. Keeping it
-              // would let the panel go on running stages while displaying a
-              // scalar mode — the exact mismatch this rewrite removes.
-              ...(e.target.value === 'staged' ? {} : { stages: null }),
-            })}
-            className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
-          >
-            <option value="bracket">Fill to Bracket</option>
-            <option value="irmaa">Fill to IRMAA Tier</option>
-            <option value="staged">Bracket, then IRMAA Tier</option>
-            <option value="fixed">Fixed Amount</option>
-          </select>
-        </div>
-        <div>
-          <label className="block text-sm text-slate-400 mb-1">Start Age</label>
-          <input
-            type="number"
-            value={conversionSettings.startAge}
-            onChange={e => setConversionSettings({...conversionSettings, startAge: Number(e.target.value)})}
-            className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
-          />
-        </div>
-        <div>
-          <label className="block text-sm text-slate-400 mb-1">End Age</label>
-          <input
-            type="number"
-            value={conversionSettings.endAge}
-            onChange={e => setConversionSettings({...conversionSettings, endAge: Number(e.target.value)})}
-            className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
-          />
-        </div>
-        {conversionSettings.mode === 'irmaa' ? (
-          <div className="col-span-2">
-            <label className="block text-sm text-slate-400 mb-1">Stay Within IRMAA Tier</label>
-            <select
-              value={conversionSettings.irmaaTier}
-              onChange={e => setConversionSettings({...conversionSettings, irmaaTier: Number(e.target.value)})}
-              className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
-            >
-              {irmaaTierOptions(personalInfo.filingStatus,
-                  personalInfo.filingStatus === 'married_joint' ? 2 : 1)
-                .filter(o => !o.isTop)
-                .map(o => (
-                  <option key={o.index} value={o.index}>
-                    MAGI up to {formatCurrency(o.ceiling)} — surcharge {formatCurrency(o.annualSurchargePerHousehold)}/yr
-                  </option>
-                ))}
-            </select>
-          </div>
-        ) : conversionSettings.mode === 'staged' ? (
-          <div className="col-span-2">
-            <label className="block text-sm text-slate-400 mb-1">Two stages</label>
-            <div className="grid grid-cols-2 gap-2">
-              <select
-                value={conversionSettings.freeBracket}
-                onChange={e => setConversionSettings({ ...conversionSettings, freeBracket: e.target.value, stages: null })}
-                className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
-              >
-                {bracketOptions.map(b => <option key={b.value} value={b.value}>Fill {b.value}</option>)}
-              </select>
-              <select
-                value={conversionSettings.chargedTier}
-                onChange={e => setConversionSettings({ ...conversionSettings, chargedTier: Number(e.target.value), stages: null })}
-                className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
-              >
-                {irmaaTierOptions(personalInfo.filingStatus,
-                    personalInfo.filingStatus === 'married_joint' ? 2 : 1)
-                  .filter(o => !o.isTop)
-                  .map(o => (
-                    <option key={o.index} value={o.index}>Then under {formatCurrency(o.ceiling)} MAGI</option>
-                  ))}
-              </select>
-            </div>
-            {(() => {
-              const st = stagesFor(personalInfo, conversionSettings);
-              return (
-                <p className="text-[11px] text-slate-500 mt-1 leading-snug">
-                  {st.map(x => `${x.label}: ages ${x.startAge}–${x.endAge} — ${x.bracket ? 'fill ' + x.bracket : 'hold IRMAA tier ' + x.irmaaTier}`).join(' · ')}
-                  {' '}IRMAA reads the MAGI from {IRMAA_TIER_LOOKBACK_YEARS} years earlier and Medicare starts at
-                  {' '}{MEDICARE_ELIGIBILITY_AGE}, so a conversion at {irmaaLastFreeAge()} or earlier never reaches an IRMAA calculation at all.
-                </p>
-              );
-            })()}
-          </div>
-        ) : conversionSettings.mode === 'bracket' ? (
-          <div>
-            <label className="block text-sm text-slate-400 mb-1">Fill Up To</label>
-            <select
-              value={conversionSettings.targetBracket}
-              onChange={e => setConversionSettings({...conversionSettings, targetBracket: e.target.value})}
-              className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
-            >
-              {bracketOptions.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
-            </select>
-          </div>
-        ) : (
-          <div>
-            <label className="block text-sm text-slate-400 mb-1">Annual Amount</label>
-            <CurrencyCell
-              value={conversionSettings.fixedAmount}
-              onValueChange={v => setConversionSettings({...conversionSettings, fixedAmount: v})}
-              className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
-            />
-          </div>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+        <h4 className="text-lg font-semibold text-slate-100">Your Roth conversion strategy</h4>
+        {dirty && (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/40 whitespace-nowrap">
+            not saved yet
+          </span>
         )}
-        <div>
-          <label className="block text-sm text-slate-400 mb-1">Tax Payment Source</label>
-          <select
-            value={conversionSettings.taxSource}
-            onChange={e => setConversionSettings({...conversionSettings, taxSource: e.target.value})}
-            className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
-          >
-            <option value="withdrawal">Normal Withdrawal Priority</option>
-            <option value="brokerage">Pay from Brokerage</option>
-          </select>
-        </div>
-        <div>
-          <label className="block text-sm text-slate-400 mb-1">Preserve Pre-Tax Floor</label>
-          <CurrencyCell
-            value={conversionSettings.preTaxFloor}
-            onValueChange={v => setConversionSettings({...conversionSettings, preTaxFloor: v})}
-            className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-slate-100"
-          />
-          <div className="text-[10px] text-slate-500 mt-1">
-            Stop converting at this pre-tax balance (today's $). 0 = no floor.
-            {suggestedFloor > 0 && (
-              <span className="block mt-0.5">
-                Suggested: <span className="text-amber-400">{formatCurrency(suggestedFloor)}</span>
-                <button
-                  onClick={() => setConversionSettings(cs => ({...cs, preTaxFloor: suggestedFloor}))}
-                  className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30"
-                >
-                  Apply
-                </button>
-              </span>
-            )}
-          </div>
-        </div>
-        <div className="flex items-end">
-          <div className="text-xs text-slate-500">
-            {conversionSettings.mode === 'bracket'
-              ? `Converts enough each year to fill the ${conversionSettings.targetBracket} bracket`
-              : `Converts ${formatCurrency(conversionSettings.fixedAmount)}/yr (inflation-adjusted)`}
-          </div>
-        </div>
       </div>
-      
+      <p className="text-sm text-slate-400 mb-4">
+        The one place your plan's conversions are set. Change anything below and every figure in this panel
+        re-runs your whole plan with that strategy and without any conversions, through the same engine as
+        everything else. Nothing changes elsewhere until you save.
+      </p>
+
+      <div className="mb-4 p-4 bg-slate-800/50 rounded-lg">
+        <RothStrategyFields info={draftPI} set={setDraftField} suggestedFloor={suggestedFloor} />
+      </div>
+
+      {/* Save sits beside the fields, not below a page of analysis: the
+          decision is made here, and a button eight hundred pixels down is one
+          people leave without pressing. */}
+      <div className="mb-6 flex items-center gap-3 flex-wrap">
+        <button
+          onClick={saveToPlan} disabled={!dirty}
+          className={`px-4 py-2 text-sm font-medium rounded-lg border transition-colors ${dirty
+            ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'
+            : 'bg-slate-800/40 text-slate-600 border-slate-700 cursor-not-allowed'}`}
+        >
+          Save to my plan
+        </button>
+        {dirty && (
+          <button
+            onClick={resetToPlan}
+            className="px-4 py-2 text-sm font-medium rounded-lg text-slate-300 border border-slate-600/60 hover:bg-slate-700/50"
+          >
+            Discard changes
+          </button>
+        )}
+        {savedFlash && <span className="text-sm text-emerald-400">Saved ✓ — every tab now uses this strategy.</span>}
+        {dirty && !savedFlash && (
+          <span className="text-xs text-amber-300/90">
+            Not saved — the rest of this tab and the app still use your saved strategy
+            {rothConversionIsPlanned(personalInfo) ? ` (${conversionModeLabel(personalInfo)})` : ' (no conversions)'}.
+          </span>
+        )}
+      </div>
+
       {/* Summary: With vs Without */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           <div className="text-slate-500 text-xs mb-0.5">Total Converted</div>
           <div className="text-xl font-bold text-emerald-400">{formatCurrency(totals.totalConverted)}</div>
-          <div className="text-xs text-slate-500">{conversionAnalysis.length} years</div>
+          <div className="text-xs text-slate-500">
+            {totals.totalConverted > 0
+              ? `${conversionAnalysis.filter(r => r.conversionAmount > 0).length} years`
+              : 'no conversions'}
+          </div>
         </div>
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           <div className="text-slate-500 text-xs mb-0.5">Cost During Conversions</div>
@@ -4260,7 +4580,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           <div className="text-slate-500 text-xs mb-0.5">Pre-Tax Remaining</div>
           <div className="text-xl font-bold text-amber-400">{formatCurrency(conversionAnalysis[conversionAnalysis.length - 1]?.remainingPreTax || 0)}</div>
-          <div className="text-xs text-slate-500">Age {conversionSettings.endAge}</div>
+          <div className="text-xs text-slate-500">Age {convWindow.endAge}</div>
         </div>
       </div>
       
@@ -4328,7 +4648,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                   {/* The strategy's own window, so the plan can be read against
                       the terrain it is operating on. */}
                   <ReferenceArea
-                    x1={conversionSettings.startAge} x2={conversionSettings.endAge}
+                    x1={convWindow.startAge} x2={convWindow.endAge}
                     fill="#38bdf8" fillOpacity={0.07} stroke="#38bdf8" strokeOpacity={0.25}
                     label={{ value: 'your conversion window', fill: THEME.inkSecondary, fontSize: 11, position: 'insideTop' }}
                   />
@@ -4371,7 +4691,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
               const usable = curve.filter(r => r.marginalRate !== null);
               if (usable.length === 0) return null;
               const avgGap = usable.reduce((s, r) => s + (r.marginalRate - r.bracket), 0) / usable.length;
-              const inWindow = usable.filter(r => r.age >= conversionSettings.startAge && r.age <= conversionSettings.endAge);
+              const inWindow = usable.filter(r => r.age >= convWindow.startAge && r.age <= convWindow.endAge);
               const rmdAge = getRmdStartAge(personalInfo.myBirthYear);
               const afterRmd = usable.filter(r => r.age >= rmdAge);
               const avg = (a) => a.length ? a.reduce((s, r) => s + r.marginalRate, 0) / a.length : null;
@@ -4388,7 +4708,7 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
                   {win !== null && late !== null && (
                     <p className={win < late ? 'text-emerald-300' : 'text-amber-300'}>
                       {win < late
-                        ? `Your window (ages ${conversionSettings.startAge}–${conversionSettings.endAge}) averages ${(win * 100).toFixed(1)}% versus ${(late * 100).toFixed(1)}% from age ${rmdAge} on — you are converting in the cheaper years, which is the whole idea.`
+                        ? `Your window (ages ${convWindow.startAge}–${convWindow.endAge}) averages ${(win * 100).toFixed(1)}% versus ${(late * 100).toFixed(1)}% from age ${rmdAge} on — you are converting in the cheaper years, which is the whole idea.`
                         : `Your window averages ${(win * 100).toFixed(1)}%, but from age ${rmdAge} on it is ${(late * 100).toFixed(1)}% — converting is not currently buying you a lower rate. Check the window against the dip in the orange line.`}
                     </p>
                   )}
@@ -4698,27 +5018,9 @@ function RothConversionSimulator({ projections, personalInfo, accounts, incomeSt
         );
       })()}
 
-      {/* Save the simulated settings back to the user's plan */}
-      <div className="mt-4 flex items-center gap-3 flex-wrap">
-        <button
-          onClick={saveToPlan}
-          className="px-4 py-2 text-sm font-medium rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30"
-        >
-          Save to my plan
-        </button>
-        <button
-          onClick={resetToPlan}
-          className="px-4 py-2 text-sm font-medium rounded-lg text-slate-300 border border-slate-600/60 hover:bg-slate-700/50"
-        >
-          Reset to my saved plan
-        </button>
-        {savedFlash && <span className="text-sm text-emerald-400">Saved ✓ — this is now your baseline plan.</span>}
-        <span className="text-xs text-slate-500">Saving makes these conversion settings the baseline used everywhere (Dashboard, Detailed Table).</span>
-      </div>
-
       <div className="mt-4 p-3 bg-blue-900/20 border border-blue-800/30 rounded-lg">
         <p className="text-xs text-blue-300">
-          <strong>How this works:</strong> The simulator runs your complete financial plan twice through the projection engine — once with the conversion settings above, once without any conversions. 
+          <strong>How this works:</strong> This panel runs your complete financial plan twice through the projection engine — once with the conversion settings above, once without any conversions. 
           Every number reflects the full tax model: SS re-taxation, IRMAA surcharges, state taxes, withdrawal solver adjustments, and portfolio growth differences. 
           "Lifetime Tax Savings" is the total tax difference across ALL years (not just the conversion window) — conversions pay more tax now but reduce RMDs and taxes later.
           "Portfolio at End" shows the total portfolio difference at age {personalInfo.legacyAge || 95}, reflecting tax-free Roth growth vs. taxable pre-tax growth.
@@ -6202,7 +6504,7 @@ function DeferralDecisionPanel({ personalInfo, accounts, incomeStreams, assets, 
                 </p>
               )}
               <p className="text-xs text-slate-500 mt-2">
-                This is also not the same as the "cost per $ converted" in the conversion simulator. That is the
+                This is also not the same as the "cost per $ converted" in your Roth conversion strategy panel. That is the
                 AVERAGE cost of moving a large block through several brackets at once; this is the MARGINAL cost
                 of one more dollar. The conversion figure is higher for the same reason a bracket-fill is: it
                 includes everything below the top slice.
@@ -6550,8 +6852,8 @@ function TaxPlanningTab({ accounts, assets, computeProjections, detailLevel, inc
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-xl font-semibold text-slate-100 mb-2">Tax Planning & Roth Conversion Opportunities</h3>
-        <p className="text-slate-400 text-sm">Identify years with room in lower tax brackets for potential Roth conversions. The chart shows your taxable income vs. federal bracket thresholds (adjusted for inflation).</p>
+        <h3 className="text-xl font-semibold text-slate-100 mb-2">Taxes &amp; Roth Conversions</h3>
+        <p className="text-slate-400 text-sm">Set your conversion strategy and see what it does, let the optimizer search for a better one, then check the years with room in the lower brackets. Everything Roth lives on this tab.</p>
       </div>
 
       <SectionControls tab="taxplanning" vis={sectionVisibility} setVis={setSectionVisibility}
@@ -6561,7 +6863,41 @@ function TaxPlanningTab({ accounts, assets, computeProjections, detailLevel, inc
         'IRMAA tiers — and those are nominal amounts the IRS indexes year by year. Restating the income ' +
         'and not the threshold would be wrong; restating both would relabel the 22% bracket as something ' +
         'it is not.'} />
-      
+
+      {/* The strategy leads the tab, and cannot be hidden: it is the control
+          the rest of the tab describes the consequences of — the same rule
+          that keeps the +Add buttons out of every hideable section. It used to
+          sit at the very bottom, below eleven sections, with a second copy of
+          its fields on Personal Info. */}
+      <RothConversionSimulator
+        projections={projections}
+        personalInfo={personalInfo}
+        accounts={accounts}
+        incomeStreams={incomeStreams}
+        assets={assets}
+        oneTimeEvents={oneTimeEvents}
+        recurringExpenses={recurringExpenses}
+        retirementAge={retirementAge}
+        computeProjections={computeProjections}
+        setPersonalInfo={setPersonalInfo}
+      />
+
+      {/* The optimizer's Apply writes the plan, and the strategy above follows
+          it — so the search sits directly under the thing it changes. */}
+      {/* Roth Conversion Optimizer — goal-based strategy sweep (worker) */}
+      <HideableBlock tab="taxplanning" id="optimizer" level={detailLevel}
+                     vis={sectionVisibility} setVis={setSectionVisibility}>
+        <RothConversionOptimizer
+          personalInfo={personalInfo}
+          accounts={accounts}
+          incomeStreams={incomeStreams}
+          assets={assets}
+          oneTimeEvents={oneTimeEvents}
+          recurringExpenses={recurringExpenses}
+          setPersonalInfo={setPersonalInfo}
+        />
+      </HideableBlock>
+
       {/* Summary Cards */}
       <HideableBlock tab="taxplanning" id="bracketSummary" level={detailLevel}
                      vis={sectionVisibility} setVis={setSectionVisibility}>
@@ -6790,19 +7126,6 @@ function TaxPlanningTab({ accounts, assets, computeProjections, detailLevel, inc
         />
       </HideableBlock>
       
-      {/* Roth Conversion Optimizer — goal-based strategy sweep (worker) */}
-      <HideableBlock tab="taxplanning" id="optimizer" level={detailLevel}
-                     vis={sectionVisibility} setVis={setSectionVisibility}>
-        <RothConversionOptimizer
-          personalInfo={personalInfo}
-          accounts={accounts}
-          incomeStreams={incomeStreams}
-          assets={assets}
-          oneTimeEvents={oneTimeEvents}
-          recurringExpenses={recurringExpenses}
-          setPersonalInfo={setPersonalInfo}
-        />
-      </HideableBlock>
 
       {/* The accumulation-years decision, ahead of the retirement-years ones. */}
       <HideableBlock tab="taxplanning" id="deferralDecision" level={detailLevel}
@@ -6830,22 +7153,6 @@ function TaxPlanningTab({ accounts, assets, computeProjections, detailLevel, inc
         />
       </HideableBlock>
 
-      {/* Roth Conversion Simulator */}
-      <HideableBlock tab="taxplanning" id="simulator" level={detailLevel}
-                     vis={sectionVisibility} setVis={setSectionVisibility}>
-        <RothConversionSimulator
-          projections={projections}
-          personalInfo={personalInfo}
-          accounts={accounts}
-          incomeStreams={incomeStreams}
-          assets={assets}
-          oneTimeEvents={oneTimeEvents}
-          recurringExpenses={recurringExpenses}
-          retirementAge={retirementAge}
-          computeProjections={computeProjections}
-          setPersonalInfo={setPersonalInfo}
-        />
-      </HideableBlock>
     </div>
   );
 }
@@ -9421,7 +9728,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, currentYearRe
                   return (
                     <div className="mb-4 p-3 bg-slate-800/50 border border-slate-700 rounded-lg text-sm">
                       <p className="text-slate-300 font-medium">🔄 Roth conversions are OFF in this plan</p>
-                      <p className="text-slate-500 text-xs mt-1">If you enable Roth conversions in <strong className="text-slate-300">Personal Info → Roth Conversions</strong>, the analysis below will model them in each scenario. Conversion amounts depend on SS timing (earlier SS = less bracket room for cheap conversions), which can shift the optimal claim age.</p>
+                      <p className="text-slate-500 text-xs mt-1">If you enable Roth conversions in <strong className="text-slate-300">Taxes &amp; Roth → Your Roth conversion strategy</strong>, the analysis below will model them in each scenario. Conversion amounts depend on SS timing (earlier SS = less bracket room for cheap conversions), which can shift the optimal claim age.</p>
                     </div>
                   );
                 }
@@ -9448,7 +9755,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, currentYearRe
                     <p className="text-purple-400/70 text-xs mt-1">Strategy: <strong className="text-purple-200">{mode}</strong>, {ages}. Each scenario below executes conversions according to this strategy.</p>
                     {narrowerThanOptimal && (
                       <p className="text-amber-300/90 text-xs mt-2">
-                        ⚠ Your conversion window is {userYears} year{userYears !== 1 ? 's' : ''}, but the standard "bridge years" approach uses {smartYears} years (retirement age {ssDefaultWindow.startAge} through {ssDefaultWindow.endAge}, the year before RMDs at {getRmdStartAge(personalInfo.myBirthYear)}). Adjust in <strong className="text-amber-200">Personal Info → Roth Conversions</strong> for a more complete analysis.
+                        ⚠ Your conversion window is {userYears} year{userYears !== 1 ? 's' : ''}, but the standard "bridge years" approach uses {smartYears} years (retirement age {ssDefaultWindow.startAge} through {ssDefaultWindow.endAge}, the year before RMDs at {getRmdStartAge(personalInfo.myBirthYear)}). Adjust in <strong className="text-amber-200">Taxes &amp; Roth → Your Roth conversion strategy</strong> for a more complete analysis.
                       </p>
                     )}
                     {convSpread > 1000 && (
@@ -10351,7 +10658,7 @@ function SensitivityTab({ detailLevel, sectionVisibility, setDetailLevel, setSec
 // ============================================
 // PersonalInfoTab — Lifted to module scope
 // ============================================
-function PersonalInfoTab({ onShowEverything, accounts, dataWarnings, detailLevel, incomeStreams, oneTimeEvents, personalInfo, recurringExpenses, sectionVisibility, setDataWarnings, setDetailLevel, setOneTimeEvents, setPersonalInfo, setRecurringExpenses, setSectionVisibility }) {
+function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWarnings, detailLevel, incomeStreams, oneTimeEvents, personalInfo, recurringExpenses, sectionVisibility, setDataWarnings, setDetailLevel, setOneTimeEvents, setPersonalInfo, setRecurringExpenses, setSectionVisibility }) {
   const [localInfo, setLocalInfo] = useState(personalInfo);
   const [dirtyPI, setDirtyPI] = useState(false);
   
@@ -11066,7 +11373,7 @@ function PersonalInfoTab({ onShowEverything, accounts, dataWarnings, detailLevel
               $3M forty years out reads as what it would buy now. Nothing about the projection changes:
               contributions, taxes, RMDs and IRMAA are all computed on nominal figures because that is how the
               law indexes them, and only the displayed amounts are converted, at your inflation rate of{' '}
-              {(((localInfo.inflationRate ?? 0.03) * 100)).toFixed(1)}%. Tax Planning, Current Year and Monte
+              {(((localInfo.inflationRate ?? 0.03) * 100)).toFixed(1)}%. Taxes &amp; Roth, Current Year and Monte
               Carlo keep their own basis, and say so on the page.
             </p>
             <p className="text-xs text-slate-500 mt-1">
@@ -11178,432 +11485,28 @@ function PersonalInfoTab({ onShowEverything, accounts, dataWarnings, detailLevel
         </div>
         </HideableBlock>
         
-        <HideableBlock tab="personal" id="rothStrategy" level={detailLevel}
-                       vis={sectionVisibility} setVis={setSectionVisibility}>
-        {/* Roth Conversion Strategy Section */}
+        {/* The conversion strategy used to be edited here AND in the Tax
+            Planning simulator — two editors for the same twelve fields, one
+            saving on this tab's button and one on its own. v2.48.0 left one:
+            on Taxes & Roth, beside what the strategy actually does. */}
         <div className="border-t border-slate-700/50 mt-5 pt-5">
-          <h4 className="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wide">Planned Roth Conversion Strategy</h4>
-          
-          {/* Mode toggle. Three modes, mutually exclusive — switching one clears
-              the others, or the engine would see two ceilings at once. */}
-          {(() => {
-            // The ENGINE resolves an explicit schedule before any scalar mode
-            // (conversionStagesOf), so this row has to as well. It used to read
-            // the scalar fields alone: a staged plan carrying a stale tier
-            // beside its schedule lit up 'Fill to IRMAA Tier' and rendered that
-            // tier's ceiling, while the schedule below actually governed. Two
-            // contradictory strategies on one screen, with the wrong one on top.
-            const stagedMode = Array.isArray(localInfo.rothConversionStages)
-              && localInfo.rothConversionStages.length > 0;
-            const irmaaMode = !stagedMode && Number.isInteger(localInfo.rothConversionIrmaaTier);
-            const bracketMode = !stagedMode && !!localInfo.rothConversionBracket && !irmaaMode;
-            const btn = (active) => `px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
-              active ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
-                     : 'text-slate-400 border-slate-600/50 hover:text-slate-200 hover:bg-slate-700/50'}`;
-            return (
-              <div className="flex flex-wrap gap-2 mb-4">
-                <button
-                  onClick={() => { handleChange('rothConversionStages', null); handleChange('rothConversionBracket', ''); handleChange('rothConversionIrmaaTier', null); }}
-                  className={btn(!stagedMode && !bracketMode && !irmaaMode)}
-                >Fixed Amount</button>
-                <button
-                  onClick={() => { handleChange('rothConversionStages', null); handleChange('rothConversionAmount', 0); handleChange('rothConversionIrmaaTier', null); handleChange('rothConversionBracket', '22%'); }}
-                  className={btn(bracketMode)}
-                >Fill to Bracket</button>
-                <button
-                  onClick={() => { handleChange('rothConversionStages', null); handleChange('rothConversionAmount', 0); handleChange('rothConversionBracket', ''); handleChange('rothConversionIrmaaTier', 0); }}
-                  className={btn(irmaaMode)}
-                >Fill to IRMAA Tier</button>
-                {stagedMode && (
-                  <span className={btn(true) + ' cursor-default'}>Staged schedule</span>
-                )}
-              </div>
-            );
-          })()}
-
-          {Array.isArray(localInfo.rothConversionStages) && localInfo.rothConversionStages.length > 0 && (
-            <p className="text-[11px] text-purple-300/80 mb-3 leading-snug">
-              A staged schedule is in force, and the engine runs it ahead of any single target.
-              {' '}Edit the stages below; the single-target fields are hidden while it applies.
-              {' '}Choosing one of the three modes above replaces the schedule.
-            </p>
-          )}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            {/* Fixed amount input OR bracket selector. Hidden entirely while a
-                staged schedule governs — showing a ceiling the plan is not using
-                is what made this section contradict itself. */}
-            {Array.isArray(localInfo.rothConversionStages) && localInfo.rothConversionStages.length > 0 ? null
-             : Number.isInteger(localInfo.rothConversionIrmaaTier) ? (
-              <div className="col-span-2">
-                <label className={compactLabelStyle}>Stay Within IRMAA Tier</label>
-                <select
-                  value={localInfo.rothConversionIrmaaTier}
-                  onChange={e => handleChange('rothConversionIrmaaTier', Number(e.target.value))}
-                  className={compactInputStyle}
-                >
-                  {irmaaTierOptions(localInfo.filingStatus,
-                      localInfo.filingStatus === 'married_joint' ? 2 : 1)
-                    .filter(o => !o.isTop)
-                    .map(o => (
-                      <option key={o.index} value={o.index}>
-                        MAGI up to {formatCurrency(o.ceiling)} — surcharge {formatCurrency(o.annualSurchargePerHousehold)}/yr
-                      </option>
-                    ))}
-                </select>
-                <p className="text-[10px] text-slate-500 mt-1 leading-snug">
-                  Converts up to {formatCurrency(IRMAA_FILL_SAFETY_MARGIN)} below that MAGI edge, measured against the
-                  threshold for the year the surcharge is actually paid — IRMAA runs on a two-year lookback, so a
-                  conversion now sets the premium two years from now. Crossing an edge by a single dollar costs the
-                  whole tier step, which is why the tool stops short of it rather than on it.
-                  {' '}Before age 63 there is no IRMAA consequence yet, so in those years this simply acts as a MAGI ceiling.
-                </p>
-              </div>
-            ) : !localInfo.rothConversionBracket ? (
-              <div>
-                <label className={compactLabelStyle}>Annual Conversion Amount</label>
-                <CurrencyCell
-                  value={localInfo.rothConversionAmount || 0}
-                  onValueChange={v => handleChange('rothConversionAmount', v)}
-                  className={compactInputStyle}
-                />
-                <label className="flex items-start gap-1.5 mt-1 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={localInfo.rothConversionInflationAdjust !== false}
-                    onChange={e => handleChange('rothConversionInflationAdjust', e.target.checked)}
-                    className="w-3.5 h-3.5 mt-0.5 rounded border-slate-600 bg-slate-800 text-purple-500"
-                  />
-                  <span className="text-[10px] text-slate-500">
-                    Adjust for inflation — amount is today's $, indexed each year so it keeps filling the
-                    same real bracket space. Uncheck to convert this exact nominal amount every year.
-                  </span>
-                </label>
-              </div>
-            ) : (
-              <div>
-                <label className={compactLabelStyle}>Target Tax Bracket</label>
-                <select 
-                  value={localInfo.rothConversionBracket || '22%'} 
-                  onChange={e => handleChange('rothConversionBracket', e.target.value)} 
-                  className={compactInputStyle}
-                >
-                  <option value="12%">12% Bracket</option>
-                  <option value="22%">22% Bracket</option>
-                  <option value="24%">24% Bracket</option>
-                  <option value="32%">32% Bracket</option>
-                </select>
-              </div>
-            )}
-            <div>
-              <label className={compactLabelStyle}>Start Age</label>
-              <AgeCell
-                value={localInfo.rothConversionStartAge}
-                onChange={e => handleChange('rothConversionStartAge', Number(e.target.value) || 0)}
-                className={compactInputStyle}
-              />
-              <p className="text-[10px] text-slate-500 mt-0.5">
-                {(localInfo.rothConversionStartAge || 0) === 0
-                  ? `Defaults to retirement age (${getDefaultRothConversionWindow(localInfo).startAge})`
-                  : `Smart default: ${getDefaultRothConversionWindow(localInfo).startAge} (retirement age)`}
-              </p>
-            </div>
-            <div>
-              <label className={compactLabelStyle}>End Age</label>
-              <AgeCell
-                value={localInfo.rothConversionEndAge}
-                onChange={e => handleChange('rothConversionEndAge', Number(e.target.value) || 0)}
-                className={compactInputStyle}
-              />
-              <p className="text-[10px] text-slate-500 mt-0.5">
-                {(localInfo.rothConversionEndAge || 0) === 0
-                  ? `Defaults to ${getDefaultRothConversionWindow(localInfo).endAge} (year before RMDs at age ${getRmdStartAge(localInfo.myBirthYear)})`
-                  : `Smart default: ${getDefaultRothConversionWindow(localInfo).endAge} (year before RMDs at age ${getRmdStartAge(localInfo.myBirthYear)})`}
-              </p>
-            </div>
-            <div>
-              <label className={compactLabelStyle}>Tax Payment Source</label>
-              <select
-                value={localInfo.rothConversionTaxSource || 'withdrawal'}
-                onChange={e => handleChange('rothConversionTaxSource', e.target.value)}
-                className={compactInputStyle}
-              >
-                <option value="withdrawal">Normal Withdrawal Priority</option>
-                <option value="brokerage">Pay from Brokerage</option>
-              </select>
-            </div>
-            <div>
-              <label className={compactLabelStyle}>Preserve Pre-Tax Floor</label>
-              <CurrencyCell
-                value={localInfo.rothConversionPreTaxFloor || 0}
-                onValueChange={v => handleChange('rothConversionPreTaxFloor', v)}
-                className={compactInputStyle}
-              />
-              <p className="text-[10px] text-slate-500 mt-0.5">
-                Stop converting once pre-tax (today's $) hits this — keeps room for QCDs and low-bracket withdrawals. 0 = convert per the window.
-              </p>
-            </div>
-          </div>
-
-          {/* Guardrail — the only setting here that changes conversions YEAR BY
-              YEAR rather than setting a fixed rule for all of them. */}
-          <div className="mt-3 p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg">
-            <label className="flex items-start gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={!!localInfo.rothConversionGuardrailEnabled}
-                onChange={e => handleChange('rothConversionGuardrailEnabled', e.target.checked)}
-                className="w-4 h-4 mt-0.5 rounded border-slate-600 bg-slate-800 text-amber-500"
-              />
-              <span className="text-sm text-slate-300">
-                Pause conversions when the portfolio is down
-                <span className="block text-[11px] text-slate-500 leading-relaxed mt-0.5">
-                  A conversion is a discretionary, irreversible tax bill funded by selling assets. Paying it
-                  in a falling market sells shares cheap and removes the ones that would have carried the
-                  recovery. This waits instead.
-                </span>
+          <h4 className="text-sm font-semibold text-slate-300 mb-3 uppercase tracking-wide">Roth Conversions</h4>
+          <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-slate-800/50 border border-slate-700/50 rounded-lg">
+            <p className="text-sm text-slate-300">
+              {rothConversionIsPlanned(personalInfo) ? conversionModeLabel(personalInfo) : 'No conversions planned.'}
+              <span className="block text-xs text-slate-500 mt-0.5">
+                Set, compare and save your conversion strategy on the Taxes &amp; Roth tab.
               </span>
-            </label>
-            {localInfo.rothConversionGuardrailEnabled && (
-              <div className="grid grid-cols-2 gap-3 mt-3 pl-6">
-                <div>
-                  <label className={compactLabelStyle}>Pause after a year returning less than</label>
-                  <PercentCell
-                    value={localInfo.rothConversionGuardrailReturnFloor ?? 0}
-                    onValueChange={v => handleChange('rothConversionGuardrailReturnFloor', Math.min(0.15, Math.max(-0.5, v)))}
-                    className={compactInputStyle}
-                  />
-                  <p className="text-[10px] text-slate-500 mt-0.5">
-                    The prior year&rsquo;s investment return, not the balance. A plan that is spending and
-                    paying conversion tax sees its balance fall in a perfectly good year — only the return
-                    separates &ldquo;the market went against me&rdquo; from &ldquo;I am spending my money
-                    as planned&rdquo;.
-                  </p>
-                </div>
-                <div>
-                  <label className={compactLabelStyle}>Convert this much while paused</label>
-                  <PercentCell
-                    value={localInfo.rothConversionGuardrailFloor ?? 0}
-                    onValueChange={v => handleChange('rothConversionGuardrailFloor', Math.min(1, Math.max(0, v)))}
-                    className={compactInputStyle}
-                  />
-                  <p className="text-[10px] text-slate-500 mt-0.5">
-                    0% stops entirely; 50% keeps converting at half speed. Conversions resume in full once
-                    the portfolio recovers past the band.
-                  </p>
-                </div>
-              </div>
+            </p>
+            {onOpenTaxPlanning && (
+              <button onClick={onOpenTaxPlanning}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-purple-500/40 text-purple-300 hover:bg-purple-500/10 transition-colors">
+                Open Taxes &amp; Roth →
+              </button>
             )}
           </div>
-
-
-          {/* ── Staged schedule ────────────────────────────────────────────
-              One target for the whole window is the wrong shape for the
-              decision: the years before Medicare reads your income are cheaper
-              than the years after, and a plan that converts hard while it is
-              free and throttles once it isn't could not be expressed here at
-              all until now. */}
-          <div className="mt-3 p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg">
-            <label className="flex items-start gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={Array.isArray(localInfo.rothConversionStages) && localInfo.rothConversionStages.length > 0}
-                onChange={e => handleChange('rothConversionStages',
-                  e.target.checked ? irmaaAwareConversionStages(localInfo) : null)}
-                className="mt-0.5 accent-purple-500"
-              />
-              <span>
-                <span className="text-xs font-medium text-slate-200">Use a staged schedule</span>
-                <span className="block text-[10px] text-slate-500 mt-0.5">
-                  Convert to one target while your income is invisible to Medicare, then to a lower one once
-                  it isn't. IRMAA reads the MAGI you reported {IRMAA_TIER_LOOKBACK_YEARS} years earlier, so
-                  age {65 - IRMAA_TIER_LOOKBACK_YEARS - 1} is the last free year and {65 - IRMAA_TIER_LOOKBACK_YEARS} is
-                  the first that buys a surcharge. Ticking this builds that schedule from your own window; every
-                  field stays editable.
-                </span>
-              </span>
-            </label>
-
-            {Array.isArray(localInfo.rothConversionStages) && localInfo.rothConversionStages.length > 0 && (() => {
-              const stages = localInfo.rothConversionStages;
-              const tiers = irmaaTierOptions(localInfo.filingStatus || 'married_joint');
-              const setStage = (i, patch) => handleChange('rothConversionStages',
-                stages.map((s, j) => j === i ? { ...s, ...patch } : s));
-              const targetValue = (s) => Number.isInteger(s.irmaaTier) ? `irmaa:${s.irmaaTier}`
-                : s.bracket ? `bracket:${s.bracket}` : 'amount';
-              const setTarget = (i, v) => {
-                if (v.startsWith('irmaa:')) setStage(i, { irmaaTier: Number(v.slice(6)), bracket: '', amount: 0 });
-                else if (v.startsWith('bracket:')) setStage(i, { irmaaTier: null, bracket: v.slice(8), amount: 0 });
-                else setStage(i, { irmaaTier: null, bracket: '', amount: stages[i].amount || 50000 });
-              };
-              return (
-                <div className="mt-3 space-y-2">
-                  {stages.map((s, i) => (
-                    <div key={i} className="flex flex-wrap items-end gap-2 p-2 bg-slate-900/60 rounded-lg border border-slate-700/40">
-                      <input
-                        type="text" value={s.label || `Stage ${i + 1}`}
-                        onChange={e => setStage(i, { label: e.target.value })}
-                        className="w-32 bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs"
-                      />
-                      <div>
-                        <label className="block text-[10px] text-slate-500">From age</label>
-                        <input type="number" value={s.startAge ?? ''} onChange={e => setStage(i, { startAge: Number(e.target.value) || 0 })}
-                          className="w-16 bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs" />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] text-slate-500">Through</label>
-                        <input type="number" value={s.endAge ?? ''} onChange={e => setStage(i, { endAge: Number(e.target.value) || 0 })}
-                          className="w-16 bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs" />
-                      </div>
-                      <div className="flex-1 min-w-[170px]">
-                        <label className="block text-[10px] text-slate-500">Convert up to</label>
-                        <select value={targetValue(s)} onChange={e => setTarget(i, e.target.value)}
-                          className="w-full bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs">
-                          <option value="bracket:22%">Top of the 22% bracket</option>
-                          <option value="bracket:24%">Top of the 24% bracket</option>
-                          <option value="bracket:32%">Top of the 32% bracket</option>
-                          {tiers.filter(t => !t.isTop).map(t => (
-                            <option key={t.index} value={`irmaa:${t.index}`}>
-                              IRMAA tier {t.index} edge ({formatCurrency(t.ceiling)} MAGI)
-                            </option>
-                          ))}
-                          <option value="amount">A fixed amount</option>
-                        </select>
-                      </div>
-                      {!Number.isInteger(s.irmaaTier) && !s.bracket && (
-                        <div>
-                          <label className="block text-[10px] text-slate-500">Amount</label>
-                          <CurrencyCell value={s.amount || 0} onValueChange={v => setStage(i, { amount: v })}
-                            className="w-28 bg-slate-900/80 border border-slate-600/50 rounded px-2 py-1 text-slate-100 text-xs" />
-                        </div>
-                      )}
-                      <button
-                        onClick={() => handleChange('rothConversionStages', stages.filter((_, j) => j !== i))}
-                        className="text-slate-500 hover:text-red-400 text-xs px-1 pb-1" title="Remove this stage"
-                      >✕</button>
-                    </div>
-                  ))}
-                  <div className="flex items-center gap-3">
-                    <button
-                      onClick={() => handleChange('rothConversionStages', stages.concat([{
-                        label: `Stage ${stages.length + 1}`,
-                        startAge: (stages[stages.length - 1]?.endAge || localInfo.myRetirementAge || 65) + 1,
-                        endAge: getDefaultRothConversionWindow(localInfo).endAge,
-                        bracket: '22%', amount: 0, irmaaTier: null,
-                      }]))}
-                      className="text-xs text-purple-400 hover:text-purple-300"
-                    >+ Add stage</button>
-                    <button
-                      onClick={() => handleChange('rothConversionStages', irmaaAwareConversionStages(localInfo))}
-                      className="text-xs text-slate-400 hover:text-slate-200"
-                    >Rebuild the IRMAA-aware schedule</button>
-                  </div>
-                  <p className="text-[10px] text-slate-500">
-                    A year belongs to exactly one stage — the first it falls in. Years outside every stage convert
-                    nothing, and the window fields above are ignored while a schedule is set.
-                  </p>
-                </div>
-              );
-            })()}
-          </div>
-          <div className="mt-3 p-3 bg-purple-900/20 border border-purple-700/30 rounded-lg">
-            <p className="text-xs text-purple-300 font-medium mb-1">&#128161; Roth Conversion Strategy</p>
-            <p className="text-xs text-slate-400">
-              Each year during the specified age range, funds are moved from the largest pre-tax account to the largest Roth account. 
-              The conversion is added to your taxable income for that year. 
-              Roth conversions appear as <strong className="text-purple-400">purple-highlighted rows</strong> in the Detailed Table.
-              {Number.isInteger(localInfo.rothConversionIrmaaTier)
-                ? ` IRMAA-tier mode converts up to just under that MAGI edge each year, measured against the threshold for the year the surcharge is actually paid.`
-                : (localInfo.rothConversionBracket ? ` Fill-to-bracket mode converts enough each year to fully utilize the ${localInfo.rothConversionBracket} bracket (based on other income).` : '')}
-              {localInfo.rothConversionTaxSource === 'brokerage'
-                ? ' Tax on conversions is paid by withdrawing from your brokerage account, preserving pre-tax and Roth balances.'
-                : ' Tax on conversions is covered by the normal withdrawal solver (using your withdrawal priority order), which may pull additional pre-tax funds.'}
-              {(localInfo.rothConversionPreTaxFloor || 0) > 0
-                ? ` Conversions stop once your pre-tax balance reaches ${formatCurrency(localInfo.rothConversionPreTaxFloor)} (today's dollars), leaving funds for QCDs and low-bracket withdrawals.`
-                : ''}
-              {localInfo.rothConversionGuardrailEnabled
-                ? ` The guardrail pauses conversions in any year following a portfolio return below ${Math.round((localInfo.rothConversionGuardrailReturnFloor ?? 0) * 100)}%${(localInfo.rothConversionGuardrailFloor ?? 0) > 0 ? `, converting at ${Math.round((localInfo.rothConversionGuardrailFloor) * 100)}% of target instead of stopping` : ''}. It never fires on a steady-return projection — you will see it in Monte Carlo, the stress test, and the optimizer's balanced goal, which are where a bad year exists.`
-                : ''}
-            </p>
-          </div>
-          
-          {/* Smart-default reset / suboptimal window warning.
-              Compares the user's explicit window against the smart defaults
-              (retirement age → RMD age - 1). If the user's window is significantly
-              narrower than the optimal bridge years, surface a hint with a
-              one-click reset. */}
-          {(() => {
-            const smart = getDefaultRothConversionWindow(localInfo);
-            const userStart = localInfo.rothConversionStartAge || 0;
-            const userEnd = localInfo.rothConversionEndAge || 0;
-            const usingDefaults = userStart === 0 && userEnd === 0;
-            const userMatchesSmart = userStart === smart.startAge && userEnd === smart.endAge;
-            const startsTooLate = userStart > 0 && userStart > smart.startAge;
-            const endsTooEarly = userEnd > 0 && userEnd < smart.endAge;
-            const suboptimal = (startsTooLate || endsTooEarly) && !usingDefaults && !userMatchesSmart;
-            
-            const resetToSmartDefaults = () => {
-              handleChange('rothConversionStartAge', smart.startAge);
-              handleChange('rothConversionEndAge', smart.endAge);
-            };
-            
-            if (usingDefaults || userMatchesSmart) {
-              return (
-                <div className="mt-3 p-3 bg-emerald-900/15 border border-emerald-700/30 rounded-lg">
-                  <p className="text-xs text-emerald-300">
-                    ✓ Using the standard bridge-year conversion window (retirement age {smart.startAge} → year before RMDs {smart.endAge}). This is the textbook approach for maximizing cheap conversions.
-                  </p>
-                </div>
-              );
-            }
-            
-            if (suboptimal) {
-              const userYears = userEnd - userStart + 1;
-              const smartYears = smart.endAge - smart.startAge + 1;
-              const missing = smartYears - userYears;
-              return (
-                <div className="mt-3 p-3 bg-amber-900/20 border border-amber-700/40 rounded-lg">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex-1">
-                      <p className="text-xs text-amber-300 font-medium mb-1">
-                        ⚠ Your conversion window may be missing {missing} year{missing !== 1 ? 's' : ''} of cheap conversion opportunities
-                      </p>
-                      <p className="text-xs text-slate-400">
-                        Your window: ages {userStart}–{userEnd} ({userYears} year{userYears !== 1 ? 's' : ''}). 
-                        Standard bridge: ages {smart.startAge}–{smart.endAge} ({smartYears} years).
-                        {startsTooLate && ` You're skipping ${smart.startAge}-${userStart - 1} (after retirement, before SS or RMDs — typically lowest-bracket years).`}
-                        {endsTooEarly && ` You're stopping early at ${userEnd} instead of the year before RMDs ({smart.endAge}).`}
-                      </p>
-                    </div>
-                    <button
-                      onClick={resetToSmartDefaults}
-                      className="text-xs px-3 py-1 bg-amber-700/30 hover:bg-amber-700/50 border border-amber-600/50 rounded text-amber-200 font-medium whitespace-nowrap transition-colors"
-                    >
-                      Use {smart.startAge}–{smart.endAge}
-                    </button>
-                  </div>
-                </div>
-              );
-            }
-            
-            // User chose a wider window than smart defaults — assume intentional, no warning
-            return (
-              <div className="mt-3 p-3 bg-slate-800/40 border border-slate-700 rounded-lg flex items-center justify-between gap-3">
-                <p className="text-xs text-slate-400">
-                  Your custom window: ages {userStart || smart.startAge}–{userEnd || smart.endAge}. 
-                  Standard would be ages {smart.startAge}–{smart.endAge}.
-                </p>
-                <button
-                  onClick={resetToSmartDefaults}
-                  className="text-xs px-3 py-1 bg-slate-700 hover:bg-slate-600 border border-slate-600 rounded text-slate-300 font-medium whitespace-nowrap transition-colors"
-                >
-                  Reset to defaults
-                </button>
-              </div>
-            );
-          })()}
         </div>
-        </HideableBlock>
-        
+
         <HideableBlock tab="personal" id="withdrawalPriority" level={detailLevel}
                        vis={sectionVisibility} setVis={setSectionVisibility}>
         {/* Withdrawal Priority Section */}
@@ -14432,7 +14335,7 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
             label="Roth conversions" on={rothOn} onChange={v => setControl('rothOn', v)}
             planLabel={`plan: ${rothConversionIsPlanned(personalInfo) ? 'on' : 'off'}`}
             note={!rothConversionIsPlanned(personalInfo) && rothOn
-              ? 'set a strategy on Tax Planning first' : null} />
+              ? 'set a strategy on Taxes & Roth first' : null} />
 
           {/* The conversion strategy: a mode, then the arguments that mode
               takes. Three targets that need different arguments do not belong
@@ -16442,7 +16345,7 @@ function MarginalIrmaaPanel({ ctx }) {
                     {
                       heading: 'How to Use This',
                       body: 'Use this to plan Roth conversions — convert in years when your true marginal rate is lowest. Avoid pushing income into IRMAA tiers. The best conversion years are typically early retirement before Social Security and RMDs begin.',
-                      tip: 'See the Tax Planning tab for a full year-by-year bracket analysis.'
+                      tip: 'See the Taxes & Roth tab for a full year-by-year bracket analysis.'
                     }
                   ]}
                 />
@@ -16561,7 +16464,7 @@ function MarginalIrmaaPanel({ ctx }) {
               the torpedo has already done its worst — 85% of the benefit is taxable, the statutory
               ceiling, so the next dollar cannot drag in any more. IRMAA is a <em>cliff</em>, not a rate:
               a year can show 0% and still sit a few thousand dollars from an edge that costs a full tier
-              to cross, which is why the distance is shown instead of a dash. See Tax Planning tab for
+              to cross, which is why the distance is shown instead of a dash. See the Taxes & Roth tab for
               full year-by-year detail. Rows marked <strong>cliff</strong> sit right against an IRMAA edge —
               usually because the plan is deliberately converting up to it. There the next $1,000 tips you
               into the next tier and the cost shown is the <em>dollar</em> step for that year, not a rate:
@@ -17626,7 +17529,7 @@ function buildNextYearActions(projections, personalInfo, accounts, incomeStreams
           id: 'irmaa-lookback', severity: 'warn',
           title: `This year's income sets your Medicare premium at ${paysAt}`,
           amount: fmt(edge.distance),
-          detail: `Medicare looks back ${lookback} years, so the MAGI you report at ${age} decides the IRMAA surcharge you pay at ${paysAt}. Your projected MAGI is ${fmt(y.magi)} — adding more than ${fmt(edge.distance)} would cross the next tier. See Marginal Tax Impact & IRMAA on the Tax Planning tab.`,
+          detail: `Medicare looks back ${lookback} years, so the MAGI you report at ${age} decides the IRMAA surcharge you pay at ${paysAt}. Your projected MAGI is ${fmt(y.magi)} — adding more than ${fmt(edge.distance)} would cross the next tier. See Marginal Tax Impact & IRMAA on the Taxes & Roth tab.`,
         });
       }
     } else if (age === lastFree) {
@@ -18553,7 +18456,7 @@ function RothRoadmapReport({ computeProjections, projections, personalInfo, acco
 
         {!planned ? (
           <p style={{ fontSize: 15, color: '#475569', lineHeight: 1.6 }}>
-            No Roth conversion strategy is configured in this plan. Turn one on under Personal Info —
+            No Roth conversion strategy is configured in this plan. Set one on the Taxes &amp; Roth tab —
             choose a target bracket, an IRMAA tier to stay under, or a fixed annual amount — and this
             report will lay out what gets converted in each year, what stops it, and what it costs.
           </p>
@@ -18648,7 +18551,7 @@ function RothRoadmapReport({ computeProjections, projections, personalInfo, acco
           the column reports the bracket filled, within $1,000. Nominal (future) dollars.
           {' '}{pi.rothConversionTaxSource === 'brokerage'
             ? 'This plan pays the conversion tax from a taxable account, so the bill does not add ordinary income of its own — the cheaper of the two options.'
-            : 'This plan pays the conversion tax from pre-tax withdrawals, so every tax dollar is itself taxed. Paying it from a taxable account instead (Personal Info → conversion tax source) removes that layer and is usually the single largest reduction available to this column.'}
+            : 'This plan pays the conversion tax from pre-tax withdrawals, so every tax dollar is itself taxed. Paying it from a taxable account instead (Taxes & Roth → Your Roth conversion strategy → tax payment source) removes that layer and is usually the single largest reduction available to this column.'}
         </p>
 
         <h2 style={h2}>What Stopped It — and What to Do About It</h2>
@@ -20191,7 +20094,7 @@ function markTourSeen() {
 //   Accounts     balances and contributions
 //   Property     the house and anything else that is not a portfolio
 //   Income       Social Security and pensions
-//   Taxes & Roth the conversion opportunity, without the optimiser suite
+//   Taxes & Roth the conversion strategy and what it does, without the optimiser
 //   Claiming     when to take Social Security — a top-two decision, kept
 //   Will it last Monte Carlo — "it works on average" is not a plan
 //
@@ -20206,7 +20109,7 @@ const SIMPLE_TABS = ['dashboard', 'personal', 'accounts', 'assets',
 // last?" names the question the reader came with.
 const SIMPLE_LABELS = {
   personal: 'About you', assets: 'Property',
-  income: 'Income', taxplanning: 'Taxes & Roth',
+  income: 'Income',
   socialsecurity: 'Claiming', montecarlo: 'Will it last?',
 };
 
@@ -20266,7 +20169,7 @@ const TOUR_STEPS = [
     bullets: [
       ['Current Year', 'what will this year’s return look like, from your paystubs and K-1s?'],
       ['Social Security', 'what claiming age is worth most to you?'],
-      ['Tax Planning', 'should you do Roth conversions, and how much?'],
+      ['Taxes & Roth', 'your Roth conversion strategy — set it, see what it saves, find a better one'],
       ['Monte Carlo', 'how does the plan hold up across 1,000 random markets? (results shown in today’s dollars)'],
       ['Stress Test', 'what happens in a specific bad event — a crash, high inflation?'],
       ['Sensitivity', 'which single assumption changes the outcome most?'],
@@ -20302,7 +20205,7 @@ const SIMPLE_TOUR_STEPS = [
       ['Dashboard', 'does the money last? — and “What if…” tries a change without touching your plan'],
       [SIMPLE_LABELS.personal, 'ages, spending, healthcare and long-term care'],
       ['Accounts · ' + SIMPLE_LABELS.assets + ' · ' + SIMPLE_LABELS.income, 'what you have and what comes in'],
-      [SIMPLE_LABELS.taxplanning, 'should you convert to Roth, and how much?'],
+      ['Taxes & Roth', 'should you convert to Roth, and how much?'],
       [SIMPLE_LABELS.socialsecurity, 'when to start Social Security'],
       [SIMPLE_LABELS.montecarlo, 'does the plan survive bad markets, not just average ones?'],
     ],
@@ -21163,7 +21066,7 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
             {!w.editingExisting && (<>
             {whyBox(
               'Account TYPE matters as much as the balance — each one is taxed differently in retirement, and that changes what order to spend them in.',
-              "Pre-tax accounts (401(k), Traditional IRA) are taxed as income when withdrawn and are forced out by RMDs later. Roth accounts come out tax-free with no RMDs. Brokerage accounts pay lower capital-gains rates on their growth. That's why the same total, split differently, produces a different after-tax retirement — and it's what the withdrawal order on Personal Info and the Tax Planning tab are for. So getting the types right is the important part; the balances you can refine any time."
+              "Pre-tax accounts (401(k), Traditional IRA) are taxed as income when withdrawn and are forced out by RMDs later. Roth accounts come out tax-free with no RMDs. Brokerage accounts pay lower capital-gains rates on their growth. That's why the same total, split differently, produces a different after-tax retirement — and it's what the withdrawal order on Personal Info and the Taxes & Roth tab are for. So getting the types right is the important part; the balances you can refine any time."
             )}
             <p className="text-sm text-slate-400">Check off the accounts you have. If you don't know a balance or contribution, use <span className="text-sky-400">Estimate it</span> — a rough plan today beats a perfect one you never finish.</p>
             <AccountCard active={w.has401k} onToggle={()=>update('has401k',!w.has401k)} title="Traditional 401(k) / 403(b)" desc="Pre-tax contributions, taxed on withdrawal" />
@@ -22105,7 +22008,7 @@ function RetirementPlanner() {
         // Deep analysis tools
         { id: 'currentyear', label: 'Current Year', icon: '🧾' },
         { id: 'socialsecurity', label: 'Social Security', icon: '🎯' },
-        { id: 'taxplanning', label: 'Tax Planning', icon: '📋' },
+        { id: 'taxplanning', label: 'Taxes & Roth', icon: '📋' },
         { id: 'montecarlo', label: 'Monte Carlo', icon: '🎲' },
         { id: 'stresstest', label: 'Stress Test', icon: '⚡' },
         { id: 'sensitivity', label: 'Sensitivity', icon: '🔬' }
@@ -22435,7 +22338,7 @@ function RetirementPlanner() {
             sticky work. */}
         <main className="flex-1 p-6">
           <div className="mx-auto w-full" style={{ maxWidth: contentWidthCss(contentWidth) }}>
-            {activeTab === 'personal' && <PersonalInfoTab onShowEverything={showEverything} accounts={accounts} dataWarnings={dataWarnings} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
+            {activeTab === 'personal' && <PersonalInfoTab onShowEverything={showEverything} onOpenTaxPlanning={() => setActiveTab('taxplanning')} accounts={accounts} dataWarnings={dataWarnings} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
             {activeTab === 'accounts' && <AccountsTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
             {activeTab === 'income' && <IncomeStreamsTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={displayProjections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
