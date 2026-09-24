@@ -11904,8 +11904,10 @@ section('P98 — no surface shows money in a basis it never declared');
   const EXPECTED = {
     // scenarios is absent on purpose: the tab was merged into the Sandbox in
     // v2.14.0, and its comparison rides the Sandbox's basis with everything else.
+    // withdrawal is absent too: retired in v2.46.0 (it ran an untaxed model of
+    // its own — see P133).
     dashboard: 'real', accounts: 'real', income: 'real', socialsecurity: 'real',
-    sandbox: 'real', withdrawal: 'real', stresstest: 'real',
+    sandbox: 'real', stresstest: 'real',
     sensitivity: 'real', assistant: 'real',
     taxplanning: 'nominal', currentyear: 'nominal', montecarlo: 'nominal',
   };
@@ -12281,7 +12283,10 @@ section('P101 — the Sandbox is a primary surface, and charts can be stretched'
       eq((src.match(new RegExp('className="' + cls + '"', 'g')) || []).length, 0,
         `no chart container is still pinned to ${cls}`);
     });
-    gt((src.match(/chartBox\(/g) || []).length, 8,
+    // The pinned-height check above is the real guard; this only confirms the
+    // scale is in wide use. (It was "more than 8" until the Withdrawals tab left
+    // in v2.46.0 and took two charts with it.)
+    gt((src.match(/chartBox\(/g) || []).length, 6,
       'and every remaining chart container goes through the scale');
   }
 
@@ -12419,7 +12424,7 @@ section('P104 — every tab that has sections can put them away');
   // Every tab with more than one hideable section is in the manifest. The list
   // is explicit rather than derived, because the judgement — which tabs have
   // sections at all — is the part worth writing down.
-  ['dashboard', 'accounts', 'income', 'withdrawal', 'stresstest', 'sensitivity',
+  ['dashboard', 'accounts', 'income', 'stresstest', 'sensitivity',
    'currentyear', 'taxplanning', 'montecarlo', 'socialsecurity', 'personal'].forEach(tab => {
     ok(manifest[tab], `the ${tab} tab is in the manifest`);
     gt((manifest[tab] || []).length, 1,
@@ -14787,7 +14792,7 @@ section('P127 — simple mode hides screens, never settings');
     ok(kept.includes('taxplanning'), 'so is tax planning, which is where the biggest lever lives');
     ok(kept.includes('socialsecurity'), 'and claiming, which is a top-two decision');
     ok(kept.includes('montecarlo'), "and Monte Carlo — 'it works on average' is not a plan");
-    ['currentyear', 'withdrawal', 'stresstest', 'sensitivity', 'assistant'].forEach(t =>
+    ['currentyear', 'stresstest', 'sensitivity', 'assistant'].forEach(t =>
       eq(kept.includes(t), false, `${t} is not kept`));
 
     // Every kept id must be a real tab, or the nav silently renders fewer items
@@ -15358,6 +15363,32 @@ section('P132 — Sandbox: income streams you do not control, switched off, scal
     ok(/st\.type === 'social_security' \|\| st\.type === 'earned_income'\) delete merged\.endAge;/.test(jsx),
       "salary's end date stays with the retirement-age slider, so two controls cannot disagree about it");
   }
+}
+
+
+section('P133 — the Withdrawals tab is retired: no screen runs a model of its own');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const jsx = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+  // It compared spending rules with a private simulation that modelled no tax,
+  // so its rankings described a plan more generous than the reader's and could
+  // disagree with every other tab. Gone, and nothing left pointing at it.
+  eq(/function WithdrawalStrategiesTab/.test(jsx), false, 'the component is gone');
+  eq(/id: 'withdrawal', label: 'Withdrawals'/.test(jsx), false, 'so is its nav entry');
+  eq(/activeTab === 'withdrawal'/.test(jsx), false, 'and its render');
+  eq(/tab="withdrawal"/.test(jsx), false, 'and its sections');
+  const mStart = jsx.indexOf('const SECTION_MANIFEST = {');
+  const manifest = eval('(' + jsx.slice(mStart + 'const SECTION_MANIFEST = '.length, jsx.indexOf('\n};', mStart) + 2) + ')');
+  eq(manifest.withdrawal, undefined, 'and its section list');
+  // The tour described it, wrongly: it compared spending rules, not the order
+  // accounts are drawn (that is withdrawal priority, on Personal Info).
+  const tour = jsx.slice(jsx.indexOf('const TOUR_STEPS = ['), jsx.indexOf('const SIMPLE_TOUR_STEPS'));
+  eq(/\['Withdrawals',/.test(tour), false, 'the tour no longer sends anyone to it');
+  ok(/Analysis — six different questions/.test(tour), 'and counts the analysis tabs correctly');
+  // The two rules that were worth keeping already live in the engine.
+  ok(/label="Spending guardrails"/.test(jsx), 'guardrails remain, as a Sandbox lever the engine runs');
+  ok(/spendingPhasesEnabled/.test(jsx), 'and spending phases, on Personal Info');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

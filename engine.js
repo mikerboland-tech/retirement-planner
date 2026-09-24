@@ -2546,10 +2546,10 @@ const getRmdStartAge = (birthYear) => {
 // future-dated stream (SS from an SSA statement, future rental) is indexed
 // between now and its start instead of paying today's number in future dollars.
 //
-// At module scope, not inside computeProjections, because the Withdrawals tab
-// needs the identical rule. It used to carry its own copy, which had drifted:
-// it omitted the (stream.cola || 0) guard, so a stream saved without a COLA
-// produced NaN and silently poisoned that tab's income figures.
+// At module scope, not inside computeProjections, so any screen that prices a
+// stream uses the identical rule. The (since retired) Withdrawals tab once kept
+// its own copy, which drifted: it omitted the (stream.cola || 0) guard, so a
+// stream saved without a COLA produced NaN and poisoned that tab's figures.
 const streamColaYears = (stream, ownerAge, yearsFromNow) => {
   if (stream.todaysDollars) return yearsFromNow;
   // Standard: COLA compounds from the start age. A colaStartAge delays the first
@@ -11378,7 +11378,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // Include reinvested excess RMDs in brokerage balance
     finalBrokerageBalance += Math.round(excessReinvestmentPool);
     
-    // Weighted average growth rate across all accounts (for CoastFIRE, Withdrawal Strategies).
+    // Weighted average growth rate across all accounts (for Coast FIRE and the Stress Test baseline).
     // Numerator and denominator both range over real accounts ONLY. The excess
     // reinvestment pool is deliberately excluded from both: it has no per-account
     // cagr, so folding it into the denominator alone (as the old code did via
