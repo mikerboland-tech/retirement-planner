@@ -9382,14 +9382,13 @@ section('P78 — the section manifest and the JSX cannot drift apart');
         `the gated section tab="${tab}" id="${id}" is declared in the manifest, so it can be toggled`);
     });
   });
-  // The dashboard keeps its `visibilitySettings.x &&` guards rather than
-  // <Section>, so it is checked against those instead. Everything else must be
-  // wrapped in <Section> or <HideableBlock>.
+  // Every entry must be wrapped in <Section> or <HideableBlock>. (The Dashboard
+  // was the one exception, with hand-written guards, until v2.47.0 took it out
+  // of the manifest altogether.)
   Object.entries(manifest).forEach(([tab, entries]) => {
     entries.forEach(e => {
       const viaSection = rendered[tab] && rendered[tab].has(e.id);
-      const viaGuard = tab === 'dashboard' && src.indexOf(`visibilitySettings.${e.id}`) > 0;
-      ok(viaSection || viaGuard,
+      ok(viaSection,
         `${tab}/${e.id} is declared in the manifest AND actually gates something — no toggle that does nothing`);
     });
   });
@@ -10329,10 +10328,11 @@ section('P87 — the Tax Planning tab can hide its own sections');
   gt(manifest.taxplanning.length, 1,
     'it is not a manifest of one — the tab’s other cards are hideable too');
 
-  // The toggle it used to share now gates exactly one thing.
-  const taxSummaryGates = (src.match(/visibilitySettings\.taxSummary/g) || []).length;
-  eq(taxSummaryGates, 1,
-    'visibilitySettings.taxSummary gates a single card, matching the one label the manifest gives it');
+  // The toggle it used to share gated exactly one thing. Since v2.47.0 the
+  // Dashboard has no section toggles at all — the tax summary is a registry
+  // panel with its own picker entry — so the rule holds by construction.
+  eq((src.match(/visibilitySettings\.taxSummary/g) || []).length, 0,
+    'the Dashboard no longer gates panels on section toggles — each panel is its own picker entry');
 
   // And the card really did leave the dashboard rather than being copied.
   const dashStart = src.indexOf('function DashboardTab(');
@@ -11519,8 +11519,9 @@ section('P94 — no component is defined inside another component');
   ['SandboxSlider', 'SandboxSwitch'].forEach(name => {
     const decl = src.indexOf('\nconst ' + name + ' = ');
     gt(decl, 0, `${name} is declared at module scope, so a drag survives the value changing`);
-    const tabStart = src.indexOf('function SandboxTab(');
-    ok(decl < tabStart, `${name} is declared before SandboxTab rather than inside it`);
+    // The Sandbox became the Dashboard in v2.47.0; the sliders went with it.
+    const tabStart = src.indexOf('function DashboardTab(');
+    ok(decl < tabStart, `${name} is declared before DashboardTab rather than inside it`);
   });
 
   // The savings-rate explorer is on the Sandbox's catalogue, using the same
@@ -11906,8 +11907,9 @@ section('P98 — no surface shows money in a basis it never declared');
     // v2.14.0, and its comparison rides the Sandbox's basis with everything else.
     // withdrawal is absent too: retired in v2.46.0 (it ran an untaxed model of
     // its own — see P133).
+    // sandbox is absent since v2.47.0: it merged into the Dashboard.
     dashboard: 'real', accounts: 'real', income: 'real', socialsecurity: 'real',
-    sandbox: 'real', stresstest: 'real',
+    stresstest: 'real',
     sensitivity: 'real', assistant: 'real',
     taxplanning: 'nominal', currentyear: 'nominal', montecarlo: 'nominal',
   };
@@ -12235,19 +12237,12 @@ section('P101 — the Sandbox is a primary surface, and charts can be stretched'
   const navAt = src.indexOf('const fullNavGroups = [');
   gt(navAt, 0, 'the nav is where the test expects it');
   const nav = src.slice(navAt, src.indexOf('\n  ];', navAt));
+  // It went one better in v2.47.0: it IS the Dashboard now, so there is no
+  // second entry to promote.
   const dashAt = nav.indexOf("id: 'dashboard'");
-  const sandAt = nav.indexOf("id: 'sandbox'");
   gt(dashAt, 0, 'the Dashboard is in the nav');
-  gt(sandAt, 0, 'so is the Sandbox');
-  gt(sandAt, dashAt, 'and the Sandbox comes after the Dashboard');
-  {
-    // Same group: no group label may sit between them.
-    const between = nav.slice(dashAt, sandAt);
-    ok(between.indexOf('label:') < 0 || between.indexOf("items: [") < 0,
-      'they are in the same nav group — the Sandbox is a headline surface, not a tool');
-  }
-  eq((nav.match(/id: 'sandbox'/g) || []).length, 1,
-    'and it appears once — promoting it must not leave a copy behind in TOOLS');
+  eq((nav.match(/id: 'sandbox'/g) || []).length, 0,
+    'and the Sandbox is not a separate entry anywhere — its levers are on the Dashboard');
 
   // ── the two one-lever what-ifs the Sandbox replaces are gone ─────────────
   eq((src.match(/<RetirementAgeExplorer/g) || []).length, 0,
@@ -12383,8 +12378,9 @@ section('P103 — no control that does nothing');
   const path13 = require('path');
   const src = fs13.readFileSync(path13.resolve(__dirname, '..', 'retirement-planner.jsx'), 'utf8');
 
-  eq((src.match(/showDashboardSettings/g) || []).length, 1,
-    'showDashboardSettings survives only in the comment explaining why it is gone');
+  // The comment explaining it left with the old DashboardTab in v2.47.0.
+  eq((src.match(/showDashboardSettings/g) || []).length, 0,
+    'showDashboardSettings is gone, and so is the component that once carried it');
   ok(src.indexOf('>View Settings<') < 0 && src.indexOf("'View Settings'") < 0,
     'and the button it drove is gone with it');
 
@@ -12424,7 +12420,8 @@ section('P104 — every tab that has sections can put them away');
   // Every tab with more than one hideable section is in the manifest. The list
   // is explicit rather than derived, because the judgement — which tabs have
   // sections at all — is the part worth writing down.
-  ['dashboard', 'accounts', 'income', 'stresstest', 'sensitivity',
+  // dashboard left in v2.47.0: it has the panel picker instead (see P134).
+  ['accounts', 'income', 'stresstest', 'sensitivity',
    'currentyear', 'taxplanning', 'montecarlo', 'socialsecurity', 'personal'].forEach(tab => {
     ok(manifest[tab], `the ${tab} tab is in the manifest`);
     gt((manifest[tab] || []).length, 1,
@@ -12441,9 +12438,10 @@ section('P104 — every tab that has sections can put them away');
   //
   // Deliberately absent, each for a reason:
   //   assets    — one hideable card once the +Add header is excluded
-  //   sandbox   — has its own panel picker, which is a better version of this
+  //   dashboard — has its own panel picker, which is a better version of this
+  //               (it inherited it from the Sandbox, merged in v2.47.0)
   //   faq, assistant — reference text and a chat
-  ['assets', 'sandbox', 'faq', 'assistant'].forEach(tab => {
+  ['assets', 'dashboard', 'sandbox', 'faq', 'assistant'].forEach(tab => {
     ok(!manifest[tab], `${tab} deliberately has no section manifest`);
   });
 
@@ -14786,8 +14784,10 @@ section('P127 — simple mode hides screens, never settings');
     const m = /const SIMPLE_TABS = \[([\s\S]*?)\];/.exec(jsx);
     ok(m, 'the kept-tab list exists');
     const kept = [...m[1].matchAll(/'([a-z]+)'/g)].map(x => x[1]);
-    eq(kept.length, 9, 'nine tabs are kept');
-    ['dashboard', 'sandbox', 'personal', 'accounts', 'income'].forEach(t =>
+    // Eight since v2.47.0: "What if" is the Dashboard's own card now.
+    eq(kept.length, 8, 'eight tabs are kept');
+    eq(kept.includes('sandbox'), false, 'the separate what-if screen is not one of them — it merged into the Dashboard');
+    ['dashboard', 'personal', 'accounts', 'income'].forEach(t =>
       ok(kept.includes(t), `${t} is kept — a plan cannot be built without it`));
     ok(kept.includes('taxplanning'), 'so is tax planning, which is where the biggest lever lives');
     ok(kept.includes('socialsecurity'), 'and claiming, which is a top-two decision');
@@ -14908,8 +14908,12 @@ section('P128 — the review of v2.41: every Hide button has a way back, or is n
     // Simple mode passed a null setter, and the Dashboard's own toggleVisibility
     // still called it: three Hide buttons on the first page a new user sees,
     // each throwing "setSectionVisibility is not a function" on click.
-    ok(/const hideFor = \(key\) => \(setSectionVisibility \? \(\) => toggleVisibility\(key\) : undefined\);/.test(jsx),
-      'the Dashboard builds a Hide handler only when there is a setter behind it');
+    // Since v2.47.0 the Dashboard's panels hide by unticking themselves in its
+    // panel picker, which is on the page in every mode — so a Hide button there
+    // always has a way back, and the setter-or-nothing wiring went with the
+    // old component.
+    ok(jsx.indexOf('const hideFor = (key)') < 0,
+      'the old Dashboard\u2019s section-toggle Hide wiring is gone');
     eq(/onHide=\{\(\) => toggleVisibility\(/.test(jsx), false,
       'and no panel is handed an unconditional one');
     // Every panel that draws a Hide button draws it only when it has a handler.
@@ -14922,8 +14926,8 @@ section('P128 — the review of v2.41: every Hide button has a way back, or is n
       'and there is no other, unguarded one');
     eq(/toggleVisibility=\{onHide \|\| \(\(\) => \{\}\)\}/.test(jsx), false,
       'the Sandbox no longer hands panels a no-op in place of a real handler');
-    ok(/toggleVisibility=\{setSectionVisibility \? toggleVisibility : undefined\}/.test(jsx),
-      'and the Dashboard passes its toggler to Coast FIRE and Lifestyle only when it can act');
+    ok(/toggleVisibility=\{onHide\} retirementProjection/.test(jsx) && /toggleVisibility=\{onHide\} badge=\{badge\} \/> \},/.test(jsx),
+      'and Coast FIRE and Lifestyle get the registry\u2019s real Hide handler');
   }
 
   // ── #6: a condition must wrap its section, not sit inside it ─────────────
@@ -15389,6 +15393,145 @@ section('P133 — the Withdrawals tab is retired: no screen runs a model of its 
   // The two rules that were worth keeping already live in the engine.
   ok(/label="Spending guardrails"/.test(jsx), 'guardrails remain, as a Sandbox lever the engine runs');
   ok(/spendingPhasesEnabled/.test(jsx), 'and spending phases, on Personal Info');
+}
+
+section('P134 — the Dashboard and the Sandbox are one page');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const jsx = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+
+  // ── one page, one route, one component ───────────────────────────────────
+  // The Sandbox already drew every Dashboard panel from the same engine with
+  // levers on top; two tabs meant two visibility systems and a reader who had
+  // to discover the second half of the app on its own.
+  eq(/function SandboxTab\(/.test(jsx), false, 'there is no separate Sandbox component');
+  eq((jsx.match(/function DashboardTab\(/g) || []).length, 1, 'and exactly one Dashboard');
+  eq(/activeTab === 'sandbox'/.test(jsx), false, 'nothing routes to a Sandbox tab');
+  eq((jsx.match(/activeTab === 'dashboard' && </g) || []).length, 1, 'and the Dashboard is rendered once');
+  const dStart = jsx.indexOf('function DashboardTab(');
+  const dEnd = jsx.indexOf('\n// ── THE DASHBOARD', dStart);
+  gt(dEnd, dStart, 'the Dashboard body is found');
+  const dash = jsx.slice(dStart, dEnd);
+
+  // Everything the old Dashboard had that the Sandbox did not came along.
+  ok(/showTourOffer && \(/.test(dash), 'the tour offer is on it');
+  ok(/estimated\.length > 0 && !estimatesDismissed/.test(dash), 'so is the estimated-values banner');
+  ok(/<HiddenSettingsNotice /.test(dash), 'and the simple-mode hidden-settings notice');
+  ok(/<BasisToggle /.test(dash), 'and the basis toggle, not just a label');
+  ok(/sandboxScenario\(/.test(dash), 'the levers still compose through the engine');
+
+  // ── the levers fold, and never hide silently ─────────────────────────────
+  ok(/const leversOpen = !!cfg\.leversOpen;/.test(dash), 'the lever card folds, closed unless opened');
+  ok(/\{leversOpen && \(<>/.test(dash), 'and its sliders render only while open');
+  ok(/!leversOpen && \(leverSummary\.length > 0/.test(dash),
+    'while folded, every moved lever is named on its header');
+  ok(/\.\.\.strategySummary, \.\.\.streamSummary/.test(dash),
+    'including the strategy and income-stream levers, not just the sliders');
+  ok(/leversOpen \|\| touched \? 'sticky top-2 z-30'/.test(dash),
+    'and the card stays pinned while a what-if is on screen, so no chart can be mistaken for the plan');
+  ok(/showing a what-if, not your plan/.test(dash), 'which it says in words');
+
+  // The what-if tiles repeated the summary cards when nothing had moved.
+  ok(/panelOn\('kpis'\) && thenM && \(/.test(dash), 'the what-if tiles draw only while there is a what-if');
+
+  // ── the healthcare card became a panel ───────────────────────────────────
+  ok(/\{ id: 'healthcare',\s+label: 'Healthcare cost projection'/.test(jsx),
+    'the healthcare card is a registry panel, so it can be hidden and follows the levers');
+  const hStart = jsx.indexOf('function HealthcareCostPanel(');
+  const hBody = jsx.slice(hStart, jsx.indexOf('\n}\n', hStart));
+  ok(/p\.myAge >= ctx\.retirementAge/.test(hBody),
+    'and sums from the what-if retirement age, not the saved one');
+  ok(/if \(!healthcareCostsModeled\(personalInfo\)\) return null;/.test(hBody),
+    'and draws nothing when healthcare is not modelled');
+
+  // On the page people land on, a panel drawing a what-if must say so. Only the
+  // two big charts did; the rest took the badge and dropped it.
+  ['Portfolio Withdrawal Rate Over Time', 'Lifetime Tax Summary (Retirement Years)', 'Safe Spending Capacity',
+   'Annual Cash Flow', 'Coast FIRE Progress', 'Lifestyle vs Legacy Tradeoff'].forEach(t =>
+    ok(jsx.indexOf('>' + t + '</h3>{badge}') > 0, `the "${t}" panel shows the what-if badge`));
+  eq((jsx.match(/<PanelCard title="[^"]+" onHide=\{onHide\}>/g) || []).length, 0,
+    'every registry PanelCard is handed the badge');
+  ok(/\{badge\}\n\s*<InfoCard\n\s*title="Summary Cards"/.test(jsx), 'and so do the summary cards');
+
+  // The registry handed its panels a no-op for the info cards.
+  eq(/openInfoCard=\{null\} toggleInfoCard=\{\(\) => \{\}\}/.test(jsx), false,
+    'no panel is handed a dead info-card toggle');
+  ok(/openInfoCard, toggleInfoCard,\n/.test(dash), 'the Dashboard puts real ones in the panel context');
+
+  // ── the section manifest no longer describes the Dashboard ───────────────
+  const mStart = jsx.indexOf('const SECTION_MANIFEST = {');
+  const manifest = eval('(' + jsx.slice(mStart + 'const SECTION_MANIFEST = '.length, jsx.indexOf('\n};', mStart) + 2) + ')');
+  eq(manifest.dashboard, undefined, 'the Dashboard has one way to choose panels, not two');
+
+  // ── the defaults are real panels ─────────────────────────────────────────
+  const regIds = [...jsx.slice(jsx.indexOf('const PANEL_REGISTRY = ['), jsx.indexOf('\n];', jsx.indexOf('const PANEL_REGISTRY = [')))
+    .matchAll(/\{ id: '(\w+)',/g)].map(m => m[1]);
+  const extraIds = [...jsx.slice(jsx.indexOf('const SANDBOX_EXTRA_PANELS = ['), jsx.indexOf('];', jsx.indexOf('const SANDBOX_EXTRA_PANELS = [')))
+    .matchAll(/\{ id: '(\w+)',/g)].map(m => m[1]);
+  const defM = /const DEFAULT_DASHBOARD_PANELS = (\[[\s\S]*?\]);/.exec(jsx);
+  ok(defM, 'the default panel list exists');
+  const defaults = eval(defM[1]);
+  defaults.forEach(id => ok(regIds.includes(id) || extraIds.includes(id), `default panel '${id}' is a real panel`));
+
+  // ── the migration: nothing either page showed disappears ─────────────────
+  const grab = (start, end) => { const a = jsx.indexOf(start); return jsx.slice(a, jsx.indexOf(end, a) + end.length); };
+  const code = [
+    grab('const LEVEL_RANK = ', ';'), grab('const LEVEL_SHOWS = ', ';'),
+    grab('const LEGACY_DASHBOARD_SECTIONS = [', '];'),
+    grab('const mergedDashboardConfig = ', '\n};'),
+  ].join('\n');
+  const merge = eval(code + '\nmergedDashboardConfig');
+
+  // A plan that never opened the Sandbox, at the default level, no overrides:
+  // exactly the old Dashboard, plus the what-if tiles (invisible until used).
+  const fresh = merge(undefined, {}, 'standard');
+  eq(JSON.stringify(fresh.panels), JSON.stringify(['kpis', 'summaryCards', 'netWorth', 'retirementIncome',
+    'cashFlow', 'withdrawalRate', 'taxSummary', 'safeSpending', 'healthcare']),
+    'the old Dashboard\u2019s standard-level panels carry over, healthcare included');
+  eq(fresh.layout, 2, 'and the result is marked migrated');
+  eq(JSON.stringify(fresh.controls), '{}', 'with no levers moved');
+
+  // Detail levels: Essentials showed three; Everything showed the advanced two as well.
+  const ess = merge(undefined, {}, 'essentials');
+  eq(ess.panels.includes('cashFlow'), false, 'Essentials did not show the cash-flow panel, and still does not');
+  ok(ess.panels.includes('netWorth'), 'but did show net worth');
+  const all = merge(undefined, {}, 'everything');
+  ok(all.panels.includes('coastFire') && all.panels.includes('lifestyleLegacy'),
+    'Everything showed Coast FIRE and Lifestyle vs Legacy, and still does');
+
+  // A per-section override beats the level, in both directions.
+  const hid = merge(undefined, { dashboard: { netWorth: false, coastFire: true } }, 'standard');
+  eq(hid.panels.includes('netWorth'), false, 'a panel the reader hid stays hidden');
+  ok(hid.panels.includes('coastFire'), 'and one they turned on above their level stays on');
+
+  // The Sandbox's own choices join the union, and its levers survive.
+  const sb = merge({ panels: ['kpis', 'balances', 'scenarios'], controls: { spending: 90000 },
+                     views: [{ name: 'Tax', panels: ['taxSummary'] }] }, {}, 'standard');
+  ok(sb.panels.includes('balances') && sb.panels.includes('scenarios'), 'panels picked in the Sandbox stay');
+  ok(sb.panels.includes('summaryCards'), 'alongside the Dashboard\u2019s');
+  eq(new Set(sb.panels).size, sb.panels.length, 'with no panel listed twice');
+  eq(sb.controls.spending, 90000, 'the levers the reader left moved are kept');
+  eq(sb.views.length, 1, 'and so are saved views');
+
+  // Idempotent: once migrated, a panel the reader later removed is never re-added.
+  const mine = { panels: ['netWorth'], controls: {}, layout: 2 };
+  ok(merge(mine, {}, 'everything') === mine, 'a migrated config is returned untouched on the next load');
+
+  // Wired at every door: first load, import, and reset.
+  ok(/mergedDashboardConfig\(savedData\.sandboxConfig, savedData\.sectionVisibility, savedData\.detailLevel\)/.test(jsx),
+    'the migration runs on load');
+  ok(/mergedDashboardConfig\(data\.sandboxConfig, data\.sectionVisibility, data\.detailLevel\)/.test(jsx),
+    'and on import');
+  ok(/setSandboxConfig\(freshDashboardConfig\(\)\)/.test(jsx), 'and a reset starts from the new defaults');
+
+  // ── tours and labels no longer send anyone to a Sandbox tab ──────────────
+  const tours = jsx.slice(jsx.indexOf('const TOUR_WELCOME = {'), jsx.indexOf('function GuidedTour('));
+  eq(/Sandbox/.test(tours.replace(/\/\/.*$/gm, '')), false, 'no tour step names a Sandbox');
+  eq(/SIMPLE_LABELS\.sandbox/.test(jsx), false, 'and the simple tour does not list a What-if screen');
+  const userText = jsx.split('\n').filter(l => !/^\s*(\/\/|\{\/\*|\*)/.test(l)).join('\n');
+  eq(/[>"'] ?[^<"'\n]*\bthe Sandbox\b/.test(userText.replace(/\/\/.*$/gm, '')), false,
+    'no string shown to a reader calls anything "the Sandbox"');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

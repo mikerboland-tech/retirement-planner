@@ -504,18 +504,17 @@ const SECTION_LEVELS = ['essentials', 'standard', 'everything'];
 const LEVEL_RANK = { essential: 0, standard: 1, advanced: 2 };
 const LEVEL_SHOWS = { essentials: 0, standard: 1, everything: 2 };
 
+// The Dashboard left the manifest in v2.47.0, when it merged with the Sandbox
+// and took over the Sandbox's panel picker — one way to choose what the page
+// shows instead of two. Its old levels are kept only to carry each reader's
+// choices across (see mergedDashboardConfig).
+const LEGACY_DASHBOARD_SECTIONS = [
+  ['summaryCards', 'essential'], ['netWorth', 'essential'], ['retirementIncome', 'essential'],
+  ['cashFlow', 'standard'], ['withdrawalRate', 'standard'], ['taxSummary', 'standard'],
+  ['safeSpending', 'standard'], ['coastFire', 'advanced'], ['lifestyleLegacy', 'advanced'],
+];
+
 const SECTION_MANIFEST = {
-  dashboard: [
-    { id: 'summaryCards',     label: 'Summary Cards',                 level: 'essential' },
-    { id: 'netWorth',         label: 'Net Worth Projection',          level: 'essential' },
-    { id: 'retirementIncome', label: 'Retirement Income vs Spending', level: 'essential' },
-    { id: 'cashFlow',         label: 'Annual Cash Flow',              level: 'standard' },
-    { id: 'withdrawalRate',   label: 'Portfolio Withdrawal Rate',     level: 'standard' },
-    { id: 'taxSummary',       label: 'Lifetime Tax Summary',          level: 'standard' },
-    { id: 'safeSpending',     label: 'Safe Spending Capacity',        level: 'standard' },
-    { id: 'coastFire',        label: 'Coast FIRE Indicator',          level: 'advanced' },
-    { id: 'lifestyleLegacy',  label: 'Lifestyle vs Legacy',           level: 'advanced' },
-  ],
   // The Tax Planning tab had no manifest entry at all, so nothing on it could be
   // hidden and its detail level did nothing. The IRMAA card arriving from the
   // dashboard would otherwise have been the one section on the tab with no way
@@ -13131,7 +13130,7 @@ function AccountsTab({ detailLevel, sectionVisibility, setDetailLevel, setSectio
 // ============================================
 // CoastFireSection — Lifted to module scope
 // ============================================
-function CoastFireSection({ accounts, personalInfo, retirementProjection, openInfoCard, toggleInfoCard, toggleVisibility, projections }) {
+function CoastFireSection({ accounts, personalInfo, retirementProjection, openInfoCard, toggleInfoCard, toggleVisibility, projections, badge }) {
   const [showTestScenarios, setShowTestScenarios] = useState(false);
   const [selectedScenario, setSelectedScenario] = useState(null);
   const [showMathBreakdown, setShowMathBreakdown] = useState(false);
@@ -13288,7 +13287,7 @@ function CoastFireSection({ accounts, personalInfo, retirementProjection, openIn
     <div className={cardStyle}>
       <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
         <div className="flex items-center gap-2">
-          <h3 className="text-lg font-semibold text-slate-100">Coast FIRE Progress</h3>
+          <h3 className="text-lg font-semibold text-slate-100">Coast FIRE Progress</h3>{badge}
           <InfoCard
             title="Coast FIRE"
             isOpen={openInfoCard === 'coastFire'}
@@ -13619,7 +13618,7 @@ function CoastFireSection({ accounts, personalInfo, retirementProjection, openIn
 // ============================================
 // LifestyleVsLegacy — Lifted to module scope
 // ============================================
-function LifestyleVsLegacy({ projections, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, retirementAge, openInfoCard, toggleInfoCard, computeProjections, toggleVisibility }) {
+function LifestyleVsLegacy({ projections, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses, retirementAge, openInfoCard, toggleInfoCard, computeProjections, toggleVisibility, badge }) {
   const scenarios = useMemo(() => {
     const baseDesired = personalInfo.desiredRetirementIncome;
     const adjustments = [-30, -20, -10, 0, 10, 20, 30, 50];
@@ -13643,7 +13642,7 @@ function LifestyleVsLegacy({ projections, personalInfo, accounts, incomeStreams,
   return (
     <div className={cardStyle}>
       <div className="flex items-center gap-2 mb-2">
-        <h3 className="text-lg font-semibold text-slate-100">Lifestyle vs Legacy Tradeoff</h3>
+        <h3 className="text-lg font-semibold text-slate-100">Lifestyle vs Legacy Tradeoff</h3>{badge}
         <InfoCard
           title="Lifestyle vs Legacy Tradeoff"
           isOpen={openInfoCard === 'lifestyleLegacy'}
@@ -13743,7 +13742,33 @@ const SANDBOX_EXTRA_PANELS = [
   { id: 'changes',     label: 'What the controls changed (dates)' },
   { id: 'scenarios',   label: 'Saved scenarios & comparison' },
 ];
-const DEFAULT_SANDBOX_PANELS = ['kpis', 'netWorth', 'retirementIncome'];
+// What the old Dashboard showed at its default detail level, plus the what-if
+// tiles — which draw nothing until a lever moves, so a reader who never
+// touches one sees the Dashboard they always had.
+const DEFAULT_DASHBOARD_PANELS = ['kpis', 'summaryCards', 'netWorth', 'retirementIncome',
+  'withdrawalRate', 'taxSummary', 'healthcare', 'safeSpending', 'cashFlow'];
+
+// v2.47.0 folded the Sandbox into the Dashboard. A saved plan arrives with
+// two opinions about what the page should show: the Dashboard's section
+// choices (a detail level plus per-section overrides) and the Sandbox's own
+// panel list. The merged page shows the UNION, so nothing either page was
+// showing disappears on upgrade; a reader who wants less now has one picker
+// to do it with. Pure, and idempotent via the `layout` marker, so it can run
+// on every load and import without ever re-adding a panel someone removed.
+const mergedDashboardConfig = (cfg, sectionVisibility, detailLevel) => {
+  if (cfg && cfg.layout === 2) return cfg;
+  const dashVis = (sectionVisibility && sectionVisibility.dashboard) || {};
+  const shows = LEVEL_SHOWS[detailLevel || 'standard'] ?? 1;
+  const fromDashboard = LEGACY_DASHBOARD_SECTIONS
+    .filter(([id, level]) => (typeof dashVis[id] === 'boolean' ? dashVis[id] : LEVEL_RANK[level] <= shows))
+    .map(([id]) => id);
+  // The healthcare card was never hideable, so it was always there.
+  const union = ['kpis', ...fromDashboard, 'healthcare'];
+  const fromSandbox = cfg && Array.isArray(cfg.panels) ? cfg.panels : [];
+  fromSandbox.forEach(id => { if (!union.includes(id)) union.push(id); });
+  return { ...(cfg || {}), controls: (cfg && cfg.controls) || {}, panels: union, layout: 2 };
+};
+const freshDashboardConfig = () => ({ panels: [...DEFAULT_DASHBOARD_PANELS], controls: {}, layout: 2 });
 
 // These two live at module scope, and that is the whole reason the sliders drag
 // smoothly. Defined inside SandboxTab they were a NEW component type on every
@@ -13857,31 +13882,38 @@ const SandboxChoice = ({ label, value, options, onChange, planLabel, note, disab
   </div>
 );
 
-function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, computeProjections,
+// The Dashboard and the Sandbox were one page drawn twice: the Sandbox already
+// rendered every Dashboard panel through the registry, from the same engine,
+// with levers on top. v2.47.0 made that the only page. With the levers left
+// alone it IS the old Dashboard — the plan as saved, the same panels — and
+// "what happens if I change it" is one click away on the page that answers
+// "where do I stand", rather than a separate tab to discover.
+function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, computeProjections,
                       createScenarioFrom, deleteScenario, incomeStreams, loadScenario, oneTimeEvents,
                       personalInfo, projections, recurringExpenses, sandboxConfig, scenarios,
-                      setSandboxConfig }) {
+                      setSandboxConfig, onShowEverything, onDismissTour, onTakeTour, setActiveTab,
+                      setPersonalInfo, showTourOffer }) {
   const R = window.Recharts || {};
   const { ComposedChart, LineChart, BarChart, Line, Bar, Area, XAxis, YAxis,
           CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } = R;
 
   const cfg = sandboxConfig || {};
   const controls = cfg.controls || {};
-  const panels = Array.isArray(cfg.panels) ? cfg.panels : DEFAULT_SANDBOX_PANELS;
+  const panels = Array.isArray(cfg.panels) ? cfg.panels : DEFAULT_DASHBOARD_PANELS;
   const setControl = (k, v) => setSandboxConfig(prev => ({
     ...(prev || {}), controls: { ...((prev || {}).controls || {}), [k]: v },
-    panels: Array.isArray((prev || {}).panels) ? prev.panels : DEFAULT_SANDBOX_PANELS }));
+    panels: Array.isArray((prev || {}).panels) ? prev.panels : DEFAULT_DASHBOARD_PANELS }));
   // Writes a top-level config key (not a control) while preserving the rest —
   // setControl and togglePanel each rebuild the object, and a third one that
   // forgot a key would silently reset the reader's panels or levers.
   const setCfg = (patch) => setSandboxConfig(prev => ({
     ...(prev || {}),
     controls: (prev || {}).controls || {},
-    panels: Array.isArray((prev || {}).panels) ? prev.panels : DEFAULT_SANDBOX_PANELS,
+    panels: Array.isArray((prev || {}).panels) ? prev.panels : DEFAULT_DASHBOARD_PANELS,
     ...patch,
   }));
   const togglePanel = (id) => setSandboxConfig(prev => {
-    const cur = Array.isArray((prev || {}).panels) ? prev.panels : DEFAULT_SANDBOX_PANELS;
+    const cur = Array.isArray((prev || {}).panels) ? prev.panels : DEFAULT_DASHBOARD_PANELS;
     return { ...(prev || {}), controls: (prev || {}).controls || {},
              panels: cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id] };
   });
@@ -13996,6 +14028,11 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
   // its plan value is named on the toggle. A control that is doing something
   // to the numbers and cannot be seen is worse than a crowded panel.
   const strategyOpen = !!cfg.strategyOpen;
+  // The whole lever card folds too, closed by default: on the page people land
+  // on, the plan comes first. Same rule as the drawers — while it is shut,
+  // every lever that is moved is named on its header, and the page says it is
+  // showing a what-if.
+  const leversOpen = !!cfg.leversOpen;
 
   // ── Income streams ────────────────────────────────────────────────────────
   // Business and rental income, a pension that might be cut, Social Security
@@ -14131,26 +14168,37 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
     // Show the list, or the scenario just saved vanishes into a panel that is
     // not on screen and the click reads as having done nothing.
     setSandboxConfig(prev => {
-      const list = Array.isArray(prev?.panels) ? prev.panels : DEFAULT_SANDBOX_PANELS;
+      const list = Array.isArray(prev?.panels) ? prev.panels : DEFAULT_DASHBOARD_PANELS;
       return list.includes('scenarios') ? prev : { ...(prev || {}), panels: [...list, 'scenarios'] };
     });
   };
   const [confirmBaseline, setConfirmBaseline] = useState(false);
+  // Session-only: the banner should stop nagging once acknowledged, but must come
+  // back next visit while real numbers are still missing.
+  const [estimatesDismissed, setEstimatesDismissed] = useState(false);
+  // Which panel's explainer is open. The registry used to hand its panels a
+  // no-op here, so the ⓘ buttons on Coast FIRE and Lifestyle vs Legacy did
+  // nothing anywhere but the old Dashboard.
+  const [openInfoCard, setOpenInfoCard] = useState(null);
+  const toggleInfoCard = useCallback((id) => setOpenInfoCard(prev => prev === id ? null : id), []);
 
-  // Built the same way the Dashboard builds its own, from whatever the controls
-  // compose — so a panel cannot tell which tab it is on, and does not need to.
-  const sandboxCtx = useMemo(() => buildPanelCtx({
-    projections: live,
-    personalInfo: (scenario && !scenario.error) ? scenario.pi : personalInfo,
-    accounts: (scenario && !scenario.error) ? scenario.accts : accounts,
-    incomeStreams: (scenario && !scenario.error) ? scenario.streams : incomeStreams,
-    assets, oneTimeEvents, recurringExpenses, computeProjections,
-    retirementAge: liveRetAge,
+  // Built from whatever the levers compose — the plan itself while none is
+  // moved — so a panel never needs to know whether it is drawing a what-if.
+  const sandboxCtx = useMemo(() => ({
+    ...buildPanelCtx({
+      projections: live,
+      personalInfo: (scenario && !scenario.error) ? scenario.pi : personalInfo,
+      accounts: (scenario && !scenario.error) ? scenario.accts : accounts,
+      incomeStreams: (scenario && !scenario.error) ? scenario.streams : incomeStreams,
+      assets, oneTimeEvents, recurringExpenses, computeProjections,
+      retirementAge: liveRetAge,
+    }),
+    openInfoCard, toggleInfoCard,
   }), [live, scenario, personalInfo, accounts, incomeStreams, assets, oneTimeEvents,
-       recurringExpenses, liveRetAge]);
+       recurringExpenses, liveRetAge, openInfoCard, toggleInfoCard]);
 
-  // The shared charts take a badge node, which is how the Dashboard marks a
-  // preview. Here it marks the same thing for the same reason.
+  // The shared charts take a badge node; it marks every panel drawing a
+  // what-if, so no chart on the page can be mistaken for the saved plan.
   const whatIfBadge = (
     <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/40 whitespace-nowrap">
       what-if
@@ -14205,6 +14253,23 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
 
   const panelOn = (id) => panels.includes(id);
 
+  // Everything moved, in words, for the header while the card is folded.
+  const leverSummary = [
+    myRet !== planMyRet && `${married ? 'I retire' : 'retire'} at ${myRet}`,
+    married && spRet !== planSpRet && `spouse retires at ${spRet}`,
+    claimMe !== planClaimMe && `${married ? 'I claim' : 'claim'} SS at ${claimMe}`,
+    married && claimSp !== planClaimSp && `spouse claims at ${claimSp}`,
+    Math.abs(savingsRate - planSavingsRate) > 0.05 && `save ${savingsRate.toFixed(1)}%`,
+    spend !== planSpend && `spend ${money(spend)}/yr`,
+    ...strategySummary, ...streamSummary,
+  ].filter(Boolean);
+  const pickerOpen = !!cfg.pickerOpen;
+  // Values the Guided Setup filled from a benchmark rather than from the user.
+  // Surfaced here because this is where someone judges their plan — the moment
+  // to know which numbers are still ours. Dismissing hides the banner for the
+  // session; entering a real number is what removes it for good.
+  const estimated = (personalInfo.estimatedFields || []).filter(f => ESTIMATE_LABELS[f]);
+
   // ── Views: named panel arrangements ──────────────────────────────────────
   // Stored alongside the panels in sandboxConfig, so they travel with the plan
   // and with an export. A view is a LAYOUT, not a scenario: it says which panels
@@ -14233,26 +14298,92 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
     ...(prev || {}), views: (prev?.views || []).filter(v => v.name !== name) }));
 
   return (
-    <div className="space-y-6">
-      <BasisLabel pi={personalInfo} />
-      <div>
-        <h3 className="text-xl font-semibold text-slate-100 mb-2">Sandbox</h3>
-        <p className="text-slate-400 text-sm">
-          Your own page, with the levers attached. Nothing here changes your plan — every control
-          follows it until you move it, and everything on the page then describes the same what-if.
-          The Dashboard stays as it is.
-        </p>
-      </div>
+    <div className="space-y-4">
+      {/* Offer the tour rather than launching it. Kept to a single slim line so
+          that a first-time user who also has estimates outstanding gets a nudge,
+          not a wall of banners. */}
+      {showTourOffer && (
+        <div className="flex items-center gap-3 flex-wrap px-4 py-2.5 bg-sky-500/5 border border-sky-500/25 rounded-lg">
+          <span className="text-sm text-slate-300 flex-1 min-w-[14rem]">
+            New here? A one-minute tour explains what each tab answers.
+          </span>
+          <button onClick={onTakeTour}
+            className="px-3 py-1.5 text-xs font-medium bg-sky-700 hover:bg-sky-600 text-white rounded-lg transition-colors">
+            Take the tour
+          </button>
+          <button onClick={onDismissTour}
+            className="px-2 py-1.5 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+            title="You can still start it any time from the sidebar">
+            No thanks
+          </button>
+        </div>
+      )}
 
-      {/* ── The controls ───────────────────────────────────────────────── */}
-      <div className={`${cardStyle} sticky top-2 z-30 ${previewing ? 'bg-slate-900/45 backdrop-blur-md border-amber-500/40' : ''}`}>
-        <div className="flex items-center justify-between mb-3">
-          <h4 className="text-lg font-semibold text-slate-100">Controls</h4>
-          <div className="flex items-center gap-2">
-            {previewing && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/40">what-if</span>}
-            {touched && <button className={buttonSecondary} onClick={resetAll}>Reset all</button>}
+      {estimated.length > 0 && !estimatesDismissed && (
+        <div className="p-4 bg-amber-500/5 border border-amber-500/30 rounded-xl">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 space-y-2">
+              <div className="text-sm font-semibold text-amber-300">
+                {estimated.length} {estimated.length === 1 ? 'number is' : 'numbers are'} still our estimate
+              </div>
+              <p className="text-xs text-slate-400 leading-relaxed max-w-2xl">
+                Setup filled these from typical figures for your age and income so you could see a plan straight away.
+                They're reasonable, but they aren't yours — swap in real numbers and everything below sharpens up.
+              </p>
+              <div className="flex flex-wrap gap-1.5 pt-0.5">
+                {estimated.map(f => (
+                  <button key={f} onClick={() => setActiveTab && setActiveTab(ESTIMATE_TAB(f))}
+                    className="px-2 py-1 rounded text-[11px] bg-slate-800 text-slate-300 border border-slate-700 hover:border-amber-500/50 hover:text-amber-300 transition-colors"
+                    title={`Fix this on the ${ESTIMATE_TAB(f)} tab`}>
+                    {ESTIMATE_LABELS[f]} →
+                  </button>
+                ))}
+              </div>
+            </div>
+            <button onClick={() => setEstimatesDismissed(true)}
+              className="shrink-0 text-xs text-slate-500 hover:text-slate-300 px-2 py-1"
+              title="Hide until next visit">
+              Dismiss
+            </button>
           </div>
         </div>
+      )}
+
+      {onShowEverything && <HiddenSettingsNotice pi={personalInfo} onShowEverything={onShowEverything} />}
+
+      {/* ── The what-if levers ─────────────────────────────────────────── */}
+      {/* Sticky while it is doing something — open, or folded with a lever
+          moved — so the reader can never scroll into a chart without the
+          notice that it is not their plan. Folded and untouched, it is one
+          line that scrolls away like anything else. */}
+      <div data-tour="whatif-levers"
+           className={`${cardStyle} ${leversOpen || touched ? 'sticky top-2 z-30' : ''} ${previewing ? 'bg-slate-900/45 backdrop-blur-md border-amber-500/40' : ''}`}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <button onClick={() => setCfg({ leversOpen: !leversOpen })} aria-expanded={leversOpen}
+            className="flex items-center gap-2 text-left min-w-0 flex-1">
+            <span className="text-xs text-slate-500">{leversOpen ? '▾' : '▸'}</span>
+            <span className="text-lg font-semibold text-slate-100 whitespace-nowrap">What if…</span>
+            {!leversOpen && (leverSummary.length > 0
+              ? <span className="text-sm text-amber-400/90 truncate">{leverSummary.join(' · ')}</span>
+              : <span className="text-sm text-slate-500 truncate">
+                  retire earlier, spend more, claim later, change strategy — try it without touching your plan
+                </span>)}
+          </button>
+          <div className="flex items-center gap-2">
+            {previewing && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/40 whitespace-nowrap">
+                showing a what-if, not your plan
+              </span>
+            )}
+            {touched && <button className={buttonSecondary} onClick={resetAll}>Back to my plan</button>}
+          </div>
+        </div>
+        {leversOpen && (<>
+        <p className="text-xs text-slate-500 mt-2 mb-3">
+          Nothing here changes your saved plan. Every control follows the plan until you move it, and
+          everything on this page then describes the same what-if. Save it as a scenario to keep it, or make it
+          the plan.
+        </p>
         <div className="flex flex-wrap gap-x-6 gap-y-4">
           <SandboxSlider label={married ? 'My retirement age' : 'Retirement age'} value={myRet}
                   onChange={v => setControl('myRetirementAge', v)}
@@ -14563,10 +14694,33 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
             tab describes — a copy is kept in Plan history first.
           </span>
         </div>
+        </>)}
       </div>
 
       {/* ── Panel picker ───────────────────────────────────────────────── */}
+      {/* Folded to one row by default: choosing panels is something done once
+          in a while, and the Dashboard's own Sections strip it replaces was a
+          single line too. The basis toggle lives on the same row because it
+          governs every figure below it. */}
       <div className={cardStyle}>
+        <div className="flex flex-wrap items-center gap-3">
+          <button onClick={() => setCfg({ pickerOpen: !pickerOpen })} aria-expanded={pickerOpen}
+            className="flex items-center gap-2 text-sm text-slate-400 hover:text-slate-200 transition-colors">
+            <span className="text-xs text-slate-500">{pickerOpen ? '▾' : '▸'}</span>
+            <span>Panels</span>
+            <span className="text-xs text-slate-500">{panels.length} of {allPanelIds.length} shown · choose</span>
+          </button>
+          {!pickerOpen && views.map(v => (
+            <button key={v.name} onClick={() => applyView(v)}
+              className={`px-2.5 py-0.5 rounded-lg border text-xs transition-colors ${
+                sameSet(v.panels, panels) ? 'bg-amber-500/15 border-amber-500/50 text-amber-300'
+                                          : 'border-slate-700 text-slate-400 hover:text-slate-200'}`}>
+              {v.name}
+            </button>
+          ))}
+          <BasisToggle pi={personalInfo} setPersonalInfo={setPersonalInfo} className="ml-auto" />
+        </div>
+        {pickerOpen && (<div className="mt-3 pt-3 border-t border-slate-700/50">
         {/* Views. The panel selection already persists with the plan, so this is
             not about remembering — it is about having MORE THAN ONE arrangement.
             "Everything on" is how you find what is available; a four-panel
@@ -14627,10 +14781,13 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
             </button>
           ))}
         </div>
+        </div>)}
       </div>
 
       {/* ── Panels ─────────────────────────────────────────────────────── */}
-      {panelOn('kpis') && nowM && (
+      {/* Drawn only while a lever is moved. With nothing moved they were the
+          plan's own figures, a second copy of the summary cards beside them. */}
+      {panelOn('kpis') && thenM && (
         <div>
           <div className="flex justify-end mb-1">
             <button onClick={() => togglePanel('kpis')}
@@ -14692,7 +14849,7 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
       ))}
 
       {panelOn('balances') && ResponsiveContainer && (
-        <PanelCard title="Balances by tax treatment" onHide={() => togglePanel('balances')}>
+        <PanelCard title="Balances by tax treatment" badge={previewing ? whatIfBadge : null} onHide={() => togglePanel('balances')}>
           <ResponsiveContainer width="100%" height={280}>
             <ComposedChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -14775,8 +14932,8 @@ function SandboxTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets, c
 // Extracted verbatim — same series, same annotations, same explanatory text —
 // and now given a projections array rather than reading a closure. Each owns
 // its own age range and info-card state, so two of them on two tabs do not
-// fight over one. `onHide` is optional: the Dashboard passes its section
-// toggle, the Sandbox has its own picker and passes nothing.
+// fight over one. `onHide` is optional: the Dashboard passes one that
+// unticks the panel in its picker; a caller with no way back passes nothing.
 function NetWorthProjectionChart({ data, personalInfo, retirementAge, badge, onHide }) {
   const [range, setRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || MAX_AGE });
   const [infoOpen, setInfoOpen] = useState(false);
@@ -15071,8 +15228,8 @@ function SummaryCardsPanel({ ctx, badge, onHide }) {
   // tabs cannot open and close each other's explanations.
   const [openInfoCard, setOpenInfoCard] = useState(null);
   const toggleInfoCard = (id) => setOpenInfoCard(v => (v === id ? null : id));
-  // The Dashboard passes its section toggle; the Sandbox passes one that unticks
-  // the panel in its own picker. Either way Hide means the same thing.
+  // The Dashboard passes one that unticks the panel in its picker, which is
+  // also where it comes back from.
   const toggleVisibility = () => { if (onHide) onHide(); };
   // One rule, in the engine: the estate value and what it is worth after the
   // heirs' tax on inherited pre-tax dollars.
@@ -15083,6 +15240,7 @@ function SummaryCardsPanel({ ctx, badge, onHide }) {
 return (
       <div>
         <div className="flex items-center gap-2 mb-2">
+          {badge}
           <InfoCard
             title="Summary Cards"
             isOpen={openInfoCard === 'summaryCards'}
@@ -15218,8 +15376,8 @@ function WithdrawalRatePanel({ ctx, badge, onHide }) {
   // tabs cannot open and close each other's explanations.
   const [openInfoCard, setOpenInfoCard] = useState(null);
   const toggleInfoCard = (id) => setOpenInfoCard(v => (v === id ? null : id));
-  // The Dashboard passes its section toggle; the Sandbox passes one that unticks
-  // the panel in its own picker. Either way Hide means the same thing.
+  // The Dashboard passes one that unticks the panel in its picker, which is
+  // also where it comes back from.
   const toggleVisibility = () => { if (onHide) onHide(); };
 
         // Calculate withdrawal rates for retirement years only
@@ -15341,7 +15499,7 @@ function WithdrawalRatePanel({ ctx, badge, onHide }) {
             <div className={cardStyle}>
               <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                 <div className="flex items-center gap-2">
-                  <h3 className="text-lg font-semibold text-slate-100">Portfolio Withdrawal Rate Over Time</h3>
+                  <h3 className="text-lg font-semibold text-slate-100">Portfolio Withdrawal Rate Over Time</h3>{badge}
                   <InfoCard
                     title="Portfolio Withdrawal Rate"
                     isOpen={openInfoCard === 'withdrawalRate'}
@@ -15488,8 +15646,8 @@ function TaxSummaryPanel({ ctx, badge, onHide }) {
   // tabs cannot open and close each other's explanations.
   const [openInfoCard, setOpenInfoCard] = useState(null);
   const toggleInfoCard = (id) => setOpenInfoCard(v => (v === id ? null : id));
-  // The Dashboard passes its section toggle; the Sandbox passes one that unticks
-  // the panel in its own picker. Either way Hide means the same thing.
+  // The Dashboard passes one that unticks the panel in its picker, which is
+  // also where it comes back from.
   const toggleVisibility = () => { if (onHide) onHide(); };
 
         const retirementYears = projections.filter(p => p.myAge >= retirementAge);
@@ -15520,7 +15678,7 @@ function TaxSummaryPanel({ ctx, badge, onHide }) {
           <div className={cardStyle}>
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
-                <h3 className="text-lg font-semibold text-slate-100">Lifetime Tax Summary (Retirement Years)</h3>
+                <h3 className="text-lg font-semibold text-slate-100">Lifetime Tax Summary (Retirement Years)</h3>{badge}
                 <InfoCard
                   title="Lifetime Tax Summary"
                   isOpen={openInfoCard === 'taxSummary'}
@@ -15611,8 +15769,8 @@ function SafeSpendingPanel({ ctx, badge, onHide }) {
   // tabs cannot open and close each other's explanations.
   const [openInfoCard, setOpenInfoCard] = useState(null);
   const toggleInfoCard = (id) => setOpenInfoCard(v => (v === id ? null : id));
-  // The Dashboard passes its section toggle; the Sandbox passes one that unticks
-  // the panel in its own picker. Either way Hide means the same thing.
+  // The Dashboard passes one that unticks the panel in its picker, which is
+  // also where it comes back from.
   const toggleVisibility = () => { if (onHide) onHide(); };
 
         const retirementPortfolio = retirementProjection?.totalPortfolio || 0;
@@ -15644,7 +15802,7 @@ function SafeSpendingPanel({ ctx, badge, onHide }) {
           <div className={cardStyle}>
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
-                <h3 className="text-lg font-semibold text-slate-100">Safe Spending Capacity</h3>
+                <h3 className="text-lg font-semibold text-slate-100">Safe Spending Capacity</h3>{badge}
                 <InfoCard
                   title="Safe Spending Capacity"
                   isOpen={openInfoCard === 'safeSpending'}
@@ -15736,8 +15894,8 @@ function CashFlowPanel({ ctx, badge, onHide }) {
   // tabs cannot open and close each other's explanations.
   const [openInfoCard, setOpenInfoCard] = useState(null);
   const toggleInfoCard = (id) => setOpenInfoCard(v => (v === id ? null : id));
-  // The Dashboard passes its section toggle; the Sandbox passes one that unticks
-  // the panel in its own picker. Either way Hide means the same thing.
+  // The Dashboard passes one that unticks the panel in its picker, which is
+  // also where it comes back from.
   const toggleVisibility = () => { if (onHide) onHide(); };
   const [sankeyAge, setSankeyAge] = useState(personalInfo.myRetirementAge || 65);
 
@@ -15783,7 +15941,7 @@ function CashFlowPanel({ ctx, badge, onHide }) {
           <div className={cardStyle}>
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
               <div className="flex items-center gap-2">
-                <h3 className="text-lg font-semibold text-slate-100">Annual Cash Flow</h3>
+                <h3 className="text-lg font-semibold text-slate-100">Annual Cash Flow</h3>{badge}
                 <InfoCard
                   title="Annual Cash Flow"
                   isOpen={openInfoCard === 'cashFlow'}
@@ -15902,10 +16060,9 @@ function CashFlowPanel({ ctx, badge, onHide }) {
       
 }
 
-// The ctx every panel reads, derived once. Both tabs call this with their own
-// projections — the Dashboard with the plan (or its retirement-age preview), the
-// Sandbox with whatever its controls compose — so the two cannot drift on how a
-// savings rate or a retirement-year row is worked out.
+// The ctx every panel reads, derived once, from whatever the Dashboard's levers
+// compose (the plan itself while none is moved) — so no panel works out a
+// savings rate or a retirement-year row its own way.
 const buildPanelCtx = ({ projections, personalInfo, accounts, assets, incomeStreams,
                          oneTimeEvents, recurringExpenses, computeProjections,
                          retirementAge }) => {
@@ -15942,10 +16099,13 @@ const buildPanelCtx = ({ projections, personalInfo, accounts, assets, incomeStre
 // Hide button stops being something each entry has to remember. The bug this
 // fixes was exactly that: two entries stubbed toggleVisibility to a no-op, so
 // their Hide buttons rendered and did nothing, and three more had no Hide at all.
-const PanelCard = ({ title, onHide, children }) => (
+const PanelCard = ({ title, badge, onHide, children }) => (
   <div className={cardStyle}>
     <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-      {title ? <h4 className="text-lg font-semibold text-slate-100">{title}</h4> : <span />}
+      <div className="flex flex-wrap items-center gap-2">
+        {title ? <h4 className="text-lg font-semibold text-slate-100">{title}</h4> : <span />}
+        {badge}
+      </div>
       {onHide && (
         <button onClick={onHide}
           className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors shrink-0"
@@ -15971,19 +16131,21 @@ const PANEL_REGISTRY = [
     render: (ctx, badge, onHide) => <WithdrawalRatePanel ctx={ctx} badge={badge} onHide={onHide} /> },
   { id: 'taxSummary',       label: 'Lifetime tax summary',
     render: (ctx, badge, onHide) => <TaxSummaryPanel ctx={ctx} badge={badge} onHide={onHide} /> },
+  { id: 'healthcare',       label: 'Healthcare cost projection',
+    render: (ctx, badge, onHide) => <HealthcareCostPanel ctx={ctx} badge={badge} onHide={onHide} /> },
   { id: 'safeSpending',     label: 'Safe spending capacity',
     render: (ctx, badge, onHide) => <SafeSpendingPanel ctx={ctx} badge={badge} onHide={onHide} /> },
   { id: 'coastFire',        label: 'Coast FIRE progress',
     render: (ctx, badge, onHide) => <CoastFireSection accounts={ctx.accounts} personalInfo={ctx.personalInfo}
-      projections={ctx.projections} openInfoCard={null} toggleInfoCard={() => {}}
-      toggleVisibility={onHide} retirementProjection={ctx.retirementProjection} /> },
+      projections={ctx.projections} openInfoCard={ctx.openInfoCard} toggleInfoCard={ctx.toggleInfoCard}
+      toggleVisibility={onHide} retirementProjection={ctx.retirementProjection} badge={badge} /> },
   { id: 'lifestyleLegacy',  label: 'Lifestyle vs legacy',
     render: (ctx, badge, onHide) => <LifestyleVsLegacy accounts={ctx.accounts} assets={ctx.assets}
       computeProjections={ctx.computeProjections} incomeStreams={ctx.incomeStreams}
       oneTimeEvents={ctx.oneTimeEvents} personalInfo={ctx.personalInfo}
       projections={ctx.projections} recurringExpenses={ctx.recurringExpenses}
-      retirementAge={ctx.retirementAge} openInfoCard={null} toggleInfoCard={() => {}}
-      toggleVisibility={onHide} /> },
+      retirementAge={ctx.retirementAge} openInfoCard={ctx.openInfoCard} toggleInfoCard={ctx.toggleInfoCard}
+      toggleVisibility={onHide} badge={badge} /> },
   { id: 'cashFlow',         label: 'Annual cash flow',
     render: (ctx, badge, onHide) => <CashFlowPanel ctx={ctx} badge={badge} onHide={onHide} /> },
 
@@ -15997,17 +16159,17 @@ const PANEL_REGISTRY = [
   // one lands in both places.
   { id: 'tp_conversionYears', label: 'Roth conversion opportunity by year',
     render: (ctx, badge, onHide) => (
-      <PanelCard title="Roth Conversion Opportunity by Year" onHide={onHide}>
+      <PanelCard title="Roth Conversion Opportunity by Year" badge={badge} onHide={onHide}>
         <ConversionOpportunityPanel ctx={ctx} />
       </PanelCard>) },
   { id: 'tp_marginalIrmaa',   label: 'Marginal tax impact & IRMAA',
     render: (ctx, badge, onHide) => (
-      <PanelCard title="Marginal Tax Impact &amp; IRMAA" onHide={onHide}>
+      <PanelCard title="Marginal Tax Impact &amp; IRMAA" badge={badge} onHide={onHide}>
         <MarginalIrmaaPanel ctx={ctx} />
       </PanelCard>) },
   { id: 'tp_charitable',      label: 'What your charitable giving saves',
     render: (ctx, badge, onHide) => (
-      <PanelCard title="What Your Charitable Giving Saves" onHide={onHide}>
+      <PanelCard title="What Your Charitable Giving Saves" badge={badge} onHide={onHide}>
         <CharitableGivingPanel ctx={ctx} />
       </PanelCard>) },
 ];
@@ -16255,7 +16417,7 @@ function MarginalIrmaaPanel({ ctx }) {
         return (
           <div>
             {/* No card and no title here: on the Tax Planning tab the Section
-                supplies both, and in the Sandbox the registry does. A panel that
+                supplies both, and on the Dashboard the registry does. A panel that
                 drew its own would show the heading twice on one of them — which
                 it did, until the rendered page said so. */}
             <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
@@ -16538,304 +16700,58 @@ function CharitableGivingPanel({ ctx }) {
   );
 }
 
-function DashboardTab({ onShowEverything, accounts, assets, computeProjections, dashboardVisibility, detailLevel, incomeStreams, onDismissTour, oneTimeEvents, onTakeTour, personalInfo, projections: planProjections, recurringExpenses, setAccounts, setActiveTab, setDashboardVisibility, setDetailLevel, setIncomeStreams, setPersonalInfo, setSectionVisibility, sectionVisibility, showTourOffer }) {
-  // Session-only: the banner should stop nagging once acknowledged, but must come
-  // back next visit while real numbers are still missing.
-  const [estimatesDismissed, setEstimatesDismissed] = useState(false);
-
-  // The retirement-age what-if used to live here, aliasing `projections` so the
-  // whole tab previewed one age. The Sandbox does that job properly now — two
-  // independent sliders for a couple, and every other lever beside them — so the
-  // Dashboard is back to one thing: what the plan as saved actually says.
-  const previewing = false;
-  const projections = planProjections;
-  const current = projections[0];
-  
-  // The dashboard's section guards stay as they are — `visibilitySettings.x &&`
-  // reads fine and there are a dozen of them — but the ANSWER now comes from the
-  // shared per-tab store, so the detail level reaches this tab too and there is
-  // one source of truth rather than a bespoke map here and a manifest everywhere
-  // else. A Proxy would be cleverer; a plain object built from the manifest is
-  // easier to be sure about.
-  const visibilitySettings = {};
-  SECTION_MANIFEST.dashboard.forEach(e => {
-    visibilitySettings[e.id] = sectionIsVisible(sectionVisibility, detailLevel, 'dashboard', e.id);
-  });
-  // A "View Settings" button used to sit here. It opened a panel listing the
-  // dashboard's sections — a panel replaced by SectionControls below, which is
-  // where hiding and restoring sections actually live now. The button outlived
-  // it: showDashboardSettings was read only to flip itself and to change its own
-  // label, so clicking it left the DOM byte-identical. Measured, not assumed.
-  // Same defect as the Hide buttons wired to a no-op: a control that looks like
-  // it works and does not.
-
-  const toggleVisibility = (key) => {
-    const on = sectionIsVisible(sectionVisibility, detailLevel, 'dashboard', key);
-    setSectionVisibility(prev => ({ ...prev, dashboard: { ...(prev.dashboard || {}), [key]: !on } }));
-  };
-  // The Dashboard's panels are hand-wired rather than wrapped in <Section>, so
-  // they need the same rule by hand: no setter means no Sections strip to
-  // restore from, so no Hide button at all. Before this, simple mode passed a
-  // null setter and these buttons stayed on screen, throwing a TypeError on
-  // every click — the first thing a brand-new user (who starts in simple mode)
-  // could touch on the first page they see.
-  const hideFor = (key) => (setSectionVisibility ? () => toggleVisibility(key) : undefined);
-  
-  // Retirement age: the plan's, unless a what-if is on screen — otherwise every
-  // `myAge >= retirementAge` filter below slices the scenario at the OLD
-  // boundary and reports a mixture of the two plans.
-  const retirementAge = previewing ? previewTarget : personalInfo.myRetirementAge;
-  const retirementProjection = projections.find(p => p.myAge === retirementAge);
-  // Savings rate for dashboard card — read from unified engine (same as Accounts tab)
-  const dashEarnedIncome = current?.earnedIncome || 0;
-  const dashContribs = current?.perAccountContributions || {};
-  let dashMyContributions = 0;
-  let dashTotalContributions = 0;
-  accounts.forEach(a => {
-    const c = dashContribs[a.id] || 0;
-    dashMyContributions += myContribShare(a, c);
-    dashTotalContributions += c;
-  });
-  const dashSavingsRate = dashEarnedIncome > 0 ? (dashMyContributions / dashEarnedIncome) * 100 : null;
-  const dashTotalTax = current ? (current.federalTax + current.stateTax + current.ficaTax) : 0;
-  const dashAfterTaxIncome = dashEarnedIncome - dashTotalTax;
-  const dashAfterTaxSavingsRate = dashAfterTaxIncome > 0 ? (dashMyContributions / dashAfterTaxIncome) * 100 : null;
-  const isPreRetirement = current?.earnedIncome > 0;
-  
-  // The two big charts own their own age range now — see the components above.
-  const [sankeyAge, setSankeyAge] = useState(retirementAge);
-  // Roth conversion overlay on the Income vs Spending chart. Only offered when
-  // the plan actually executes conversions; defaults ON so the tax-line spike and
-  // net-income dip in conversion years are self-explanatory. The checkbox exists
-  // because a large bracket-fill conversion can dominate the y-axis scale.
-
-  
-  // Info card open/close state — tracks which section's info card is visible
-  const [openInfoCard, setOpenInfoCard] = useState(null);
-  const toggleInfoCard = useCallback((id) => {
-    setOpenInfoCard(prev => prev === id ? null : id);
-  }, []);
-  
-  // Memoize filtered data to prevent recalculation on every render
-  // Charts drawing a what-if must say so. A reader who glances at the Net Worth
-  // curve after someone else moved the slider should not take it for the plan.
-  // One bag, handed to every panel. Building it here rather than threading a
-  // dozen bespoke prop lists is what lets the registry render a panel without
-  // knowing which one it is.
-  const panelCtx = {
-    projections, personalInfo, retirementAge, accounts, assets, incomeStreams,
-    oneTimeEvents, recurringExpenses, computeProjections, current,
-    retirementProjection, isPreRetirement, dashSavingsRate, dashAfterTaxSavingsRate,
-    dashMyContributions, dashTotalContributions,
-  };
-
-  const previewBadge = previewing ? (
-    <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/40 whitespace-nowrap">
-      previewing retirement at {previewTarget}
-    </span>
-  ) : null;
-
-  
-  // Values the Guided Setup filled from a benchmark rather than from the user.
-  // Surfaced here because the Dashboard is where someone judges their plan — the
-  // moment to know which numbers are still ours. Dismissing hides the banner for
-  // the session; clearing a field's flag (by entering a real number) is what
-  // removes it for good.
-  const estimated = (personalInfo.estimatedFields || []).filter(f => ESTIMATE_LABELS[f]);
+// The healthcare card was the one thing on the old Dashboard written inline
+// rather than as a panel, which is why it could not be hidden and never
+// reached the what-if levers. As a panel it reads the retirement age from ctx,
+// so moving that lever moves the window it sums over — it summed from the
+// SAVED plan's age before, which was right only while nothing could move it.
+// Renders nothing when the plan does not model healthcare, so it can sit on
+// the default list without leaving an empty card behind.
+function HealthcareCostPanel({ ctx, badge, onHide }) {
+  const { projections, personalInfo } = ctx;
+  if (!healthcareCostsModeled(personalInfo)) return null;
+  const retirementYears = projections.filter(p => p.myAge >= ctx.retirementAge);
+  const lifetimeHealthcare = retirementYears.reduce((sum, p) => sum + (p.healthcareExpense || 0), 0);
+  const lifetimePre65 = retirementYears.reduce((sum, p) => sum + (p.healthcarePre65 || 0), 0);
+  const lifetimeMedicare = retirementYears.reduce((sum, p) => sum + (p.healthcareMedicare || 0), 0);
+  const lifetimeLTC = retirementYears.reduce((sum, p) => sum + (p.healthcareLTC || 0), 0);
+  const lifetimeIRMAA = retirementYears.reduce((sum, p) => sum + (p.irmaaSurcharge || 0), 0);
+  const peakYear = retirementYears.reduce((max, p) => (p.healthcareExpense || 0) > (max.healthcareExpense || 0) ? p : max, retirementYears[0] || {});
 
   return (
-    <div className="space-y-4">
-      {/* Offer the tour rather than launching it. Kept to a single slim line so
-          that a first-time user who also has estimates outstanding gets a nudge,
-          not a wall of banners. */}
-      {showTourOffer && (
-        <div className="flex items-center gap-3 flex-wrap px-4 py-2.5 bg-sky-500/5 border border-sky-500/25 rounded-lg">
-          <span className="text-sm text-slate-300 flex-1 min-w-[14rem]">
-            New here? A one-minute tour explains what each tab answers.
-          </span>
-          <button onClick={onTakeTour}
-            className="px-3 py-1.5 text-xs font-medium bg-sky-700 hover:bg-sky-600 text-white rounded-lg transition-colors">
-            Take the tour
-          </button>
-          <button onClick={onDismissTour}
-            className="px-2 py-1.5 text-xs text-slate-500 hover:text-slate-300 transition-colors"
-            title="You can still start it any time from the sidebar">
-            No thanks
-          </button>
+    <PanelCard title="Healthcare Cost Projection" badge={badge} onHide={onHide}>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+        <div className="bg-slate-800/50 rounded-lg p-3">
+          <div className="text-xs text-slate-400 mb-1">Lifetime Healthcare</div>
+          <div className="text-xl font-bold text-pink-400">{formatCurrency(lifetimeHealthcare)}</div>
+          <div className="text-xs text-slate-500">Retirement years only</div>
         </div>
-      )}
-
-      {estimated.length > 0 && !estimatesDismissed && (
-        <div className="p-4 bg-amber-500/5 border border-amber-500/30 rounded-xl">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0 space-y-2">
-              <div className="text-sm font-semibold text-amber-300">
-                {estimated.length} {estimated.length === 1 ? 'number is' : 'numbers are'} still our estimate
-              </div>
-              <p className="text-xs text-slate-400 leading-relaxed max-w-2xl">
-                Setup filled these from typical figures for your age and income so you could see a plan straight away.
-                They're reasonable, but they aren't yours — swap in real numbers and everything below sharpens up.
-              </p>
-              <div className="flex flex-wrap gap-1.5 pt-0.5">
-                {estimated.map(f => (
-                  <button key={f} onClick={() => setActiveTab && setActiveTab(ESTIMATE_TAB(f))}
-                    className="px-2 py-1 rounded text-[11px] bg-slate-800 text-slate-300 border border-slate-700 hover:border-amber-500/50 hover:text-amber-300 transition-colors"
-                    title={`Fix this on the ${ESTIMATE_TAB(f)} tab`}>
-                    {ESTIMATE_LABELS[f]} →
-                  </button>
-                ))}
-              </div>
-            </div>
-            <button onClick={() => setEstimatesDismissed(true)}
-              className="shrink-0 text-xs text-slate-500 hover:text-slate-300 px-2 py-1"
-              title="Hide until next visit">
-              Dismiss
-            </button>
+        {lifetimePre65 > 0 && (
+          <div className="bg-slate-800/50 rounded-lg p-3">
+            <div className="text-xs text-slate-400 mb-1">Pre-Medicare (before 65)</div>
+            <div className="text-lg font-bold text-orange-400">{formatCurrency(lifetimePre65)}</div>
           </div>
+        )}
+        <div className="bg-slate-800/50 rounded-lg p-3">
+          <div className="text-xs text-slate-400 mb-1">Medicare + OOP</div>
+          <div className="text-lg font-bold text-blue-400">{formatCurrency(lifetimeMedicare)}</div>
+          <div className="text-xs text-slate-500">+{formatCurrency(lifetimeIRMAA)} IRMAA</div>
         </div>
-      )}
-
-      {/* The section list used to be written out again here, next to a chain of
-          `visibilitySettings.x &&` guards that had to agree with it by hand. Both
-          now come from SECTION_MANIFEST. */}
-      {/* Simple mode drops the level control, and the flex-1 spacer that used to
-          hold it left an empty card with the basis toggle stranded on the far
-          right. With nothing on the left, the row closes up. */}
-      <div className={cardStyle}>
-        <div className={`flex flex-wrap items-center gap-3 ${setDetailLevel ? 'justify-between' : 'justify-end'}`}>
-          {setDetailLevel && (
-            <div className="flex-1 min-w-[260px]">
-              <SectionControls tab="dashboard" vis={sectionVisibility} setVis={setSectionVisibility} level={detailLevel} setLevel={setDetailLevel} />
-            </div>
-          )}
-          <BasisToggle pi={personalInfo} setPersonalInfo={setPersonalInfo} />
-        </div>
+        {lifetimeLTC > 0 && (
+          <div className="bg-slate-800/50 rounded-lg p-3">
+            <div className="text-xs text-slate-400 mb-1">Long-Term Care</div>
+            <div className="text-lg font-bold text-red-400">{formatCurrency(lifetimeLTC)}</div>
+          </div>
+        )}
       </div>
-
-      {onShowEverything && <HiddenSettingsNotice pi={personalInfo} onShowEverything={onShowEverything} />}
-
-      {/* Compact Summary Row */}
-      {visibilitySettings.summaryCards && (
-        <SummaryCardsPanel ctx={panelCtx} badge={previewBadge}
-          onHide={hideFor('summaryCards')} />
+      {peakYear && peakYear.healthcareExpense > 0 && (
+        <p className="text-xs text-slate-400">
+          Peak healthcare year: age {peakYear.myAge} at {formatCurrency(peakYear.healthcareExpense)}/yr. 
+          Model: {HEALTHCARE_PRESETS[personalInfo.healthcareModel]?.label}. 
+          Medical inflation: {((personalInfo.medicalInflation || 0.05) * 100).toFixed(1)}%.
+        </p>
       )}
-      
-      {visibilitySettings.netWorth && (
-        <NetWorthProjectionChart data={projections} personalInfo={personalInfo}
-          retirementAge={retirementAge} badge={previewBadge}
-          onHide={hideFor('netWorth')} />
-      )}
-
-      {visibilitySettings.retirementIncome && (
-        <IncomeVsSpendingChart data={projections} personalInfo={personalInfo}
-          retirementAge={retirementAge} badge={previewBadge}
-          onHide={hideFor('retirementIncome')} />
-      )}
-      
-      {/* Portfolio Stress / Withdrawal Rate Section */}
-      {visibilitySettings.withdrawalRate && (
-        <WithdrawalRatePanel ctx={panelCtx} badge={previewBadge}
-          onHide={hideFor('withdrawalRate')} />
-      )}
-      
-      {/* Tax & QCD Summary Section */}
-      {visibilitySettings.taxSummary && (
-        <TaxSummaryPanel ctx={panelCtx} badge={previewBadge}
-          onHide={hideFor('taxSummary')} />
-      )}
-      
-      
-      {/* Healthcare Cost Projection Card */}
-      {healthcareCostsModeled(personalInfo) && (() => {
-        const retirementYears = projections.filter(p => p.myAge >= personalInfo.myRetirementAge);
-        const lifetimeHealthcare = retirementYears.reduce((sum, p) => sum + (p.healthcareExpense || 0), 0);
-        const lifetimePre65 = retirementYears.reduce((sum, p) => sum + (p.healthcarePre65 || 0), 0);
-        const lifetimeMedicare = retirementYears.reduce((sum, p) => sum + (p.healthcareMedicare || 0), 0);
-        const lifetimeLTC = retirementYears.reduce((sum, p) => sum + (p.healthcareLTC || 0), 0);
-        const lifetimeIRMAA = retirementYears.reduce((sum, p) => sum + (p.irmaaSurcharge || 0), 0);
-        const peakYear = retirementYears.reduce((max, p) => (p.healthcareExpense || 0) > (max.healthcareExpense || 0) ? p : max, retirementYears[0] || {});
-        
-        return (
-          <div className={cardStyle}>
-            <h3 className="text-lg font-semibold text-slate-100 mb-3">Healthcare Cost Projection</h3>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-              <div className="bg-slate-800/50 rounded-lg p-3">
-                <div className="text-xs text-slate-400 mb-1">Lifetime Healthcare</div>
-                <div className="text-xl font-bold text-pink-400">{formatCurrency(lifetimeHealthcare)}</div>
-                <div className="text-xs text-slate-500">Retirement years only</div>
-              </div>
-              {lifetimePre65 > 0 && (
-                <div className="bg-slate-800/50 rounded-lg p-3">
-                  <div className="text-xs text-slate-400 mb-1">Pre-Medicare (before 65)</div>
-                  <div className="text-lg font-bold text-orange-400">{formatCurrency(lifetimePre65)}</div>
-                </div>
-              )}
-              <div className="bg-slate-800/50 rounded-lg p-3">
-                <div className="text-xs text-slate-400 mb-1">Medicare + OOP</div>
-                <div className="text-lg font-bold text-blue-400">{formatCurrency(lifetimeMedicare)}</div>
-                <div className="text-xs text-slate-500">+{formatCurrency(lifetimeIRMAA)} IRMAA</div>
-              </div>
-              {lifetimeLTC > 0 && (
-                <div className="bg-slate-800/50 rounded-lg p-3">
-                  <div className="text-xs text-slate-400 mb-1">Long-Term Care</div>
-                  <div className="text-lg font-bold text-red-400">{formatCurrency(lifetimeLTC)}</div>
-                </div>
-              )}
-            </div>
-            {peakYear && peakYear.healthcareExpense > 0 && (
-              <p className="text-xs text-slate-400">
-                Peak healthcare year: age {peakYear.myAge} at {formatCurrency(peakYear.healthcareExpense)}/yr. 
-                Model: {HEALTHCARE_PRESETS[personalInfo.healthcareModel]?.label}. 
-                Medical inflation: {((personalInfo.medicalInflation || 0.05) * 100).toFixed(1)}%.
-              </p>
-            )}
-          </div>
-        );
-      })()}
-      
-      {/* Safe Spending Capacity Section */}
-      {visibilitySettings.safeSpending && (
-        <SafeSpendingPanel ctx={panelCtx} badge={previewBadge}
-          onHide={hideFor('safeSpending')} />
-      )}
-      
-      {/* Coast FIRE Indicator */}
-      {visibilitySettings.coastFire && (
-      <CoastFireSection
-        accounts={accounts}
-        personalInfo={personalInfo}
-        retirementProjection={retirementProjection}
-        openInfoCard={openInfoCard}
-        toggleInfoCard={toggleInfoCard}
-        toggleVisibility={setSectionVisibility ? toggleVisibility : undefined}
-        projections={projections}
-      />
-      )}
-      
-      {/* Lifestyle vs Legacy Interactive Section */}
-      {visibilitySettings.lifestyleLegacy && (
-      <LifestyleVsLegacy 
-        projections={projections}
-        personalInfo={personalInfo}
-        accounts={accounts}
-        incomeStreams={incomeStreams}
-        assets={assets}
-        oneTimeEvents={oneTimeEvents}
-        recurringExpenses={recurringExpenses}
-        retirementAge={retirementAge}
-        openInfoCard={openInfoCard}
-        toggleInfoCard={toggleInfoCard}
-        computeProjections={computeProjections}
-        toggleVisibility={setSectionVisibility ? toggleVisibility : undefined}
-      />
-      )}
-      
-      {/* Cash Flow Sankey Diagram */}
-      {visibilitySettings.cashFlow && (
-        <CashFlowPanel ctx={panelCtx} badge={previewBadge}
-          onHide={hideFor('cashFlow')} />
-      )}
-    </div>
+    </PanelCard>
   );
 }
 
@@ -19353,7 +19269,7 @@ function ScenarioComparisonReport({ computeProjections, projections, personalInf
         {others.length === 0 ? (
           <p style={{ fontSize: 14, color: '#334155', lineHeight: 1.6 }}>
             No scenarios have been saved yet, so there is nothing to compare your plan against. Build one on
-            the <strong>Sandbox</strong> tab — move the retirement age, claiming age, savings rate or spending
+            the <strong>Dashboard</strong> under <strong>What if…</strong> — move the retirement age, claiming age, savings rate or spending
             until you have something worth keeping, then use <strong>Save as scenario</strong>. This report
             becomes useful the moment there are two plans to weigh.
           </p>
@@ -20121,7 +20037,7 @@ function ReportMenu({ onPick, onClose }) {
           </button>
           <button onClick={() => onPick('scenarios')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
             <div className="font-semibold text-slate-100">⚖️ Scenarios, Side by Side</div>
-            <div className="text-xs text-slate-400 mt-1">Your plan against every scenario you saved in the Sandbox — re-run, not recalled, so the columns are comparable.</div>
+            <div className="text-xs text-slate-400 mt-1">Your plan against every scenario you saved from the Dashboard’s What if… — re-run, not recalled, so the columns are comparable.</div>
           </button>
           <button onClick={() => onPick('claiming')} className="w-full text-left p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/50 hover:border-amber-500/40 rounded-lg transition-all">
             <div className="font-semibold text-slate-100">🗓️ The Claiming Decision</div>
@@ -20268,8 +20184,9 @@ function markTourSeen() {
 // first edit that moved that read into render code.
 //
 // Chosen by what a plan cannot be made without, not by what is cheap to cut.
-//   Dashboard    where the plan stands
-//   What if      the Sandbox — the question most people actually arrive with
+//   Dashboard    where the plan stands, with the what-if levers on it — the
+//                question most people actually arrive with (the separate
+//                "What if" screen merged into it in v2.47.0)
 //   About you    ages, filing, spending target, healthcare, long-term care
 //   Accounts     balances and contributions
 //   Property     the house and anything else that is not a portfolio
@@ -20283,12 +20200,12 @@ function markTourSeen() {
 // (wants an API key), Assumptions (reference tables for checking the engine's
 // arithmetic), Plan history. Nothing is deleted — every one of them is one
 // click away in the full app, working on the same plan.
-const SIMPLE_TABS = ['dashboard', 'sandbox', 'personal', 'accounts', 'assets',
+const SIMPLE_TABS = ['dashboard', 'personal', 'accounts', 'assets',
                      'income', 'taxplanning', 'socialsecurity', 'montecarlo'];
 // Plainer names for the same tabs. "Monte Carlo" names a technique; "Will it
 // last?" names the question the reader came with.
 const SIMPLE_LABELS = {
-  sandbox: 'What if', personal: 'About you', assets: 'Property',
+  personal: 'About you', assets: 'Property',
   income: 'Income', taxplanning: 'Taxes & Roth',
   socialsecurity: 'Claiming', montecarlo: 'Will it last?',
 };
@@ -20328,8 +20245,8 @@ const TOUR_STEPS = [
   TOUR_WELCOME,
   {
     target: 'nav-overview',
-    title: 'Dashboard and Sandbox — start here',
-    body: "The Dashboard is your plan at a glance: portfolio balance year by year, whether the money lasts, and the point where it gets tight. After you change any input, this is where you check what it did. The Sandbox is the other half — move retirement age, spending, claiming or conversion strategy and see the whole plan re-run, without touching your saved plan until you choose to.",
+    title: 'Dashboard — start here',
+    body: "The Dashboard is your plan at a glance: portfolio balance year by year, whether the money lasts, and the point where it gets tight. After you change any input, this is where you check what it did. Open “What if…” at the top to move retirement age, spending, claiming or conversion strategy and watch the whole page re-run — your saved plan is untouched until you choose otherwise. “Panels” picks what the page shows.",
   },
   {
     target: 'nav-plan-setup',
@@ -20360,12 +20277,12 @@ const TOUR_STEPS = [
     title: 'Tools — ask and verify',
     // It described a Scenarios tab that has not existed since saved scenarios
     // moved into the Sandbox.
-    body: "The AI Assistant answers questions about your plan in plain language, using your own numbers (it needs an Anthropic API key, kept in this browser only). Assumptions lists every bracket, limit and rate the engine uses, so you can check the math rather than trust it — worth a look for what it applies on your behalf: the 10% penalty on pre-tax withdrawals before 59½, the extra deductions that start at 65, and the tax on dividends a taxable account throws off each year. Saved scenarios live in the Sandbox.",
+    body: "The AI Assistant answers questions about your plan in plain language, using your own numbers (it needs an Anthropic API key, kept in this browser only). Assumptions lists every bracket, limit and rate the engine uses, so you can check the math rather than trust it — worth a look for what it applies on your behalf: the 10% penalty on pre-tax withdrawals before 59½, the extra deductions that start at 65, and the tax on dividends a taxable account throws off each year. Saved scenarios live on the Dashboard, under “What if…”.",
   },
   {
     target: 'tour-mode-switch',
     title: 'Too much? Simplify',
-    body: "This switch trims the app to the nine screens a plan is built from and hides the diagnostics. It hides screens, never settings — your plan and every number in it stay exactly the same, and one click brings everything back.",
+    body: "This switch trims the app to the eight screens a plan is built from and hides the diagnostics. It hides screens, never settings — your plan and every number in it stay exactly the same, and one click brings everything back.",
   },
   ...TOUR_SHARED_TAIL,
   {
@@ -20379,11 +20296,10 @@ const SIMPLE_TOUR_STEPS = [
   TOUR_WELCOME,
   {
     target: 'nav-simple',
-    title: 'Nine screens, in the order you build a plan',
+    title: 'Eight screens, in the order you build a plan',
     body: "Start at the top and work down. Change a number on any screen and every other one updates from it.",
     bullets: [
-      ['Dashboard', 'where your plan stands — does the money last?'],
-      [SIMPLE_LABELS.sandbox, 'try a change without touching your saved plan'],
+      ['Dashboard', 'does the money last? — and “What if…” tries a change without touching your plan'],
       [SIMPLE_LABELS.personal, 'ages, spending, healthcare and long-term care'],
       ['Accounts · ' + SIMPLE_LABELS.assets + ' · ' + SIMPLE_LABELS.income, 'what you have and what comes in'],
       [SIMPLE_LABELS.taxplanning, 'should you convert to Roth, and how much?'],
@@ -20400,7 +20316,7 @@ const SIMPLE_TOUR_STEPS = [
   {
     target: null,
     title: "That's the tour",
-    body: "Start on the Dashboard, then open What if and move one slider to see how the plan responds.",
+    body: "Start on the Dashboard, then open “What if…” and move one slider to see how the plan responds.",
   },
 ];
 
@@ -21698,8 +21614,9 @@ function RetirementPlanner() {
   // The Sandbox's own configuration: which panels the reader picked and where
   // they left the controls. Persisted like any other plan preference so a page
   // someone built for themselves is still there next visit.
-  const [sandboxConfig, setSandboxConfig] = useState(() =>
-    savedData?.sandboxConfig || { panels: DEFAULT_SANDBOX_PANELS, controls: {} });
+  const [sandboxConfig, setSandboxConfig] = useState(() => savedData
+    ? mergedDashboardConfig(savedData.sandboxConfig, savedData.sectionVisibility, savedData.detailLevel)
+    : freshDashboardConfig());
 
   const [dashboardVisibility, setDashboardVisibility] = useState(() => {
     return savedData?.dashboardVisibility || DEFAULT_DASHBOARD_VISIBILITY;
@@ -21951,7 +21868,7 @@ function RetirementPlanner() {
         // fields here so re-import doesn't fail and the data isn't lost (it's still in
         // the JSON file the user has on disk).
         setDashboardVisibility(data.dashboardVisibility || DEFAULT_DASHBOARD_VISIBILITY);
-        setSandboxConfig(data.sandboxConfig || { panels: DEFAULT_SANDBOX_PANELS, controls: {} });
+        setSandboxConfig(mergedDashboardConfig(data.sandboxConfig, data.sectionVisibility, data.detailLevel));
         setSectionVisibility(data.sectionVisibility || {});
         setDetailLevel(data.detailLevel || 'standard');
         // Only when the file says so. An export written before the mode existed
@@ -21993,7 +21910,7 @@ function RetirementPlanner() {
     setOneTimeEvents([]);
     setRecurringExpenses(DEFAULT_RECURRING_EXPENSES);
     setDashboardVisibility(DEFAULT_DASHBOARD_VISIBILITY);
-    setSandboxConfig({ panels: DEFAULT_SANDBOX_PANELS, controls: {} });
+    setSandboxConfig(freshDashboardConfig());
     setScenarios([]);
     setCurrentYearData(DEFAULT_CURRENT_YEAR);
     setActiveScenarioId(null); // scenarios are gone; don't keep pointing at one
@@ -22165,12 +22082,10 @@ function RetirementPlanner() {
       label: 'OVERVIEW',
       icon: '📊',
       items: [
-        { id: 'dashboard', label: 'Dashboard', icon: '🏠' },
-        // Promoted out of TOOLS. The Dashboard answers "where does my plan
-        // stand"; the Sandbox answers "what happens if I change it", which is
-        // the question most people arrive with. Seven groups down it read as a
-        // curiosity rather than the second half of the app.
-        { id: 'sandbox', label: 'Sandbox', icon: '🎛️' }
+        // The Sandbox sat here as a second entry until v2.47.0, when it
+        // became the Dashboard's own "What if…" card — "where does my plan
+        // stand" and "what if I change it" are one page now.
+        { id: 'dashboard', label: 'Dashboard', icon: '🏠' }
       ]
     },
     {
@@ -22355,7 +22270,7 @@ function RetirementPlanner() {
                 : 'text-slate-400 border-slate-700/60 hover:text-slate-200 hover:bg-slate-700/50'}`}
             title={simpleMode
               ? 'Show every tab and every section — the full planner. Nothing about your plan changes either way.'
-              : 'Hide the advanced tabs and diagnostics, leaving the nine screens a plan is actually built from. Your plan and its numbers are untouched.'}
+              : 'Hide the advanced tabs and diagnostics, leaving the eight screens a plan is actually built from. Your plan and its numbers are untouched.'}
           >
             <span>{simpleMode ? '◇' : '◆'}</span>
             {!sidebarCollapsed && <span>{simpleMode ? 'Show everything' : 'Simplify'}</span>}
@@ -22520,13 +22435,12 @@ function RetirementPlanner() {
             sticky work. */}
         <main className="flex-1 p-6">
           <div className="mx-auto w-full" style={{ maxWidth: contentWidthCss(contentWidth) }}>
-            {activeTab === 'dashboard' && <DashboardTab onShowEverything={showEverything} setAccounts={setAccounts} setIncomeStreams={setIncomeStreams} setPersonalInfo={setPersonalInfo} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} dashboardVisibility={dashboardVisibility} incomeStreams={incomeStreams} onDismissTour={declineTourOffer} oneTimeEvents={oneTimeEvents} onTakeTour={acceptTourOffer} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setActiveTab={setActiveTab} setDashboardVisibility={setDashboardVisibility} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} />}
             {activeTab === 'personal' && <PersonalInfoTab onShowEverything={showEverything} accounts={accounts} dataWarnings={dataWarnings} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setDataWarnings={setDataWarnings} setOneTimeEvents={setOneTimeEvents} setPersonalInfo={setPersonalInfo} setRecurringExpenses={setRecurringExpenses} />}
             {activeTab === 'accounts' && <AccountsTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accountTypes={ACCOUNT_TYPES} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} contributorTypes={CONTRIBUTOR_TYPES} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} setAccounts={setAccounts} setEditingAccount={setEditingAccount} setShowAccountModal={setShowAccountModal} />}
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
             {activeTab === 'income' && <IncomeStreamsTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={displayProjections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
             {activeTab === 'socialsecurity' && <SocialSecurityTab currentYearReturn={currentYearReturn} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
-            {activeTab === 'sandbox' && <SandboxTab accounts={accounts} activeScenarioId={activeScenarioId} applyPlanAsBaseline={applyPlanAsBaseline} createScenarioFrom={createScenarioFrom} deleteScenario={deleteScenario} loadScenario={loadScenario} scenarios={scenarios} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
+            {activeTab === 'dashboard' && <DashboardTab onShowEverything={showEverything} onDismissTour={declineTourOffer} onTakeTour={acceptTourOffer} setActiveTab={setActiveTab} setPersonalInfo={setPersonalInfo} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} accounts={accounts} activeScenarioId={activeScenarioId} applyPlanAsBaseline={applyPlanAsBaseline} createScenarioFrom={createScenarioFrom} deleteScenario={deleteScenario} loadScenario={loadScenario} scenarios={scenarios} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'currentyear' && <CurrentYearTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'montecarlo' && <MonteCarloTab currentYearReturn={currentYearReturn} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}

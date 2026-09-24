@@ -438,7 +438,7 @@ function ToggleRow({ label, value, onChange, hint }) {
 // normalisation, so every figure here is the figure there.
 //
 // The levers go through sandboxScenario — the identical function the desktop
-// Sandbox uses — for the same reason. A second implementation of "retire two
+// Dashboard what-if uses — for the same reason. A second implementation of "retire two
 // years later" is how two screens start disagreeing.
 function MyPlanView({ plan, onSwitch }) {
   const planRetAge = plan.pi.myRetirementAge;
@@ -453,7 +453,7 @@ function MyPlanView({ plan, onSwitch }) {
 
   const touched = retAge !== planRetAge || spend !== planSpend || claim !== planClaim;
 
-  // One slider, two people. The desktop Sandbox has a slider each; a phone does
+  // One slider, two people. The desktop what-if has a slider each; a phone does
   // not have room, and forcing both to the SAME age would quietly delete a gap
   // the plan was built around. So the spouse moves by the same number of years,
   // which preserves the shape of the plan and is what "retire two years later"
@@ -522,7 +522,7 @@ function MyPlanView({ plan, onSwitch }) {
       </div>
 
       {/* The three levers worth having on a phone. Same engine call as the
-          desktop Sandbox, so the answers match rather than merely resemble. */}
+          desktop what-if, so the answers match rather than merely resemble. */}
       <div className="bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-2">
         <div className="flex items-center justify-between mb-1">
           <span className="text-xs uppercase tracking-wide text-slate-500">Try a change</span>
