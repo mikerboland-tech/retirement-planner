@@ -2224,7 +2224,7 @@ function FAQTab() {
         },
         {
           q: "How is long-term care modeled?",
-          a: "Two ways. The plan itself uses a fixed window: under Personal Info → Long-Term Care, 'Default' bills 28 months of assisted living at the Genworth 2024 median for each of you in the final months before your life expectancy, 'Custom' lets you set the months and monthly cost, and 'Stress' gives whichever of you is planned to live longer five years of nursing-home care and the other none — the worst realistic case. Long-term care is billed whichever healthcare model you chose. The Monte Carlo tab can instead draw a different episode for every run ('Vary long-term care too'): about 70% of people need some paid care after 65, a typical episode is two years, one in five runs past five years, and the setting is drawn between home care, assisted living and a nursing home. The results then show how often care was drawn, what it cost, and the plan's success rate with care against without — the number that says whether long-term care insurance is worth its premium for you."
+          a: "Two ways. The plan itself uses a fixed window: under Personal Info → Long-Term Care, 'Default' bills 28 months of assisted living at the Genworth 2024 median for each of you in the final months before your life expectancy, 'Custom' lets you set the months and monthly cost, and 'Stress' gives whichever of you is planned to live longer five years of nursing-home care and the other none — the worst realistic case. Long-term care is billed whichever healthcare model you chose. Will it last? (thousands of markets) can instead draw a different episode for every run ('Vary long-term care too'): about 70% of people need some paid care after 65, a typical episode is two years, one in five runs past five years, and the setting is drawn between home care, assisted living and a nursing home. The results then show how often care was drawn, what it cost, and the plan's success rate with care against without — the number that says whether long-term care insurance is worth its premium for you."
         },
         {
           q: "What are the limitations of Monte Carlo?",
@@ -2256,8 +2256,8 @@ function FAQTab() {
           a: "If your plan survives the worst historical scenarios, it is highly robust. If it fails under 2-3 of them, consider building buffers: a cash reserve (1-2 years of expenses in cash/bonds), a 'bond tent' (higher bond allocation in early retirement years), a dynamic withdrawal strategy that reduces spending during downturns, or delaying retirement by a year or two. The gap between your baseline and the worst scenario shows how much sequence risk you carry."
         },
         {
-          q: "Why does the stress test use simplified tax calculations?",
-          a: "The stress test uses a simplified marginal tax estimate for speed, since it runs multiple full-length scenarios. The deterministic and Monte Carlo engines use the full iterative tax solver. The stress test results are directionally accurate for comparing scenarios but may differ slightly in exact dollar amounts from the main projections."
+          q: "Does the stress test use the same tax calculations as the rest of the plan?",
+          a: "Yes. Each scenario is your whole plan run through the same projection engine as every other screen, with that scenario's historical returns put in place of your expected ones for the early retirement years — the same tax brackets, IRMAA, Social Security taxation, RMDs, conversions and withdrawal solver. (An early version estimated tax with a simplified marginal rate; that was replaced, so a stress-test year and the same year on the Dashboard differ only by the returns.)"
         }
       ]
     },
@@ -7157,6 +7157,57 @@ function TaxPlanningTab({ accounts, assets, computeProjections, detailLevel, inc
   );
 }
 
+// ── WILL IT LAST? ────────────────────────────────────────────────────────────
+// Monte Carlo, the Stress Test and Sensitivity were three nav entries until
+// v2.49.0. They are three ways of asking one question — does the plan survive
+// things going differently from the average? — and a reader choosing between
+// "Monte Carlo" and "Stress Test" in a sidebar was being asked to know the
+// techniques before the question. One tab now, with the question on top and
+// each method named by what it tests. The three pages themselves are
+// unchanged: same components, same engine calls, same sections.
+const LASTING_VIEWS = [
+  // "Thousands of markets", not "random": the Monte Carlo page can replay
+  // history as well as sample it, and a label saying random beside one saying
+  // historical would have put the difference in the wrong place.
+  { id: 'montecarlo',  label: 'Thousands of markets', method: 'Monte Carlo',
+    q: 'How often does the plan survive 1,000 markets — sampled, or replayed from history?' },
+  { id: 'stresstest',  label: 'Specific crashes',     method: 'Stress test',
+    q: 'Does it survive named crashes — 2008, the dot-com bust, stagflation — right at retirement?' },
+  { id: 'sensitivity', label: 'What matters most',  method: 'Sensitivity',
+    q: 'Which single assumption moves the outcome most?' },
+];
+
+function WillItLastTab({ view, setView, children }) {
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-xl font-semibold text-slate-100 mb-2">Will it last?</h3>
+        <p className="text-slate-400 text-sm">
+          Your plan assumes average returns every year. These three test what happens when they are not.
+        </p>
+      </div>
+      <div role="tablist" aria-label="Ways to test the plan" className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {LASTING_VIEWS.map(v => {
+          const on = view === v.id;
+          return (
+            <button key={v.id} role="tab" aria-selected={on} onClick={() => setView(v.id)}
+              className={`text-left rounded-xl border px-4 py-3 transition-colors ${on
+                ? 'bg-amber-500/10 border-amber-500/50'
+                : 'bg-slate-800/40 border-slate-700 hover:border-slate-500'}`}>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className={`font-semibold ${on ? 'text-amber-300' : 'text-slate-200'}`}>{v.label}</span>
+                <span className="text-[11px] text-slate-500 whitespace-nowrap">{v.method}</span>
+              </div>
+              <div className="text-xs text-slate-400 mt-1 leading-snug">{v.q}</div>
+            </button>
+          );
+        })}
+      </div>
+      <div role="tabpanel">{children}</div>
+    </div>
+  );
+}
+
 // ============================================
 // MonteCarloTab — Lifted to module scope
 // ============================================
@@ -11945,7 +11996,7 @@ function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWa
               {localInfo.ltcModel === 'stress'
                 ? `Stress case: ${LTC_STRESS_MONTHS / 12} years of nursing-home care at $${LTC_MONTHLY_NURSING_HOME_2025.toLocaleString()}/mo (Genworth 2024 private-room median) for whichever of you is planned to live longer, and none for the other — the case with no spouse left to give informal care and the estate at its lowest. Roughly 1 in 7 people who need care need it this long.`
                 : `Default models $${LTC_MONTHLY_ASSISTED_LIVING_2025.toLocaleString()}/mo assisted living for ${LTC_DEFAULT_DURATION_MONTHS} months before death (Genworth 2024 median) — about the average across everyone, including the 30% who never need paid care. Cost compounds at the medical inflation rate and appears as a spike in the final years before each spouse's life expectancy.`}
-              {' '}Long-term care is billed whichever healthcare model is chosen above. The Monte Carlo tab can draw a different episode for every run instead.
+              {' '}Long-term care is billed whichever healthcare model is chosen above. Will it last? (thousands of markets) can draw a different episode for every run instead.
             </p>
           </div>
         </div>
@@ -19905,7 +19956,7 @@ function BreakingPointReport({ projections, personalInfo, accounts, incomeStream
           This report is a directional planning tool generated from the assumptions in your plan, not tax or
           investment advice. The edges are found by re-running your plan with one assumption moved at a time
           under steady returns; they say nothing about the ORDER returns arrive in, which matters enormously
-          in the first decade of retirement — the Stress Test and Monte Carlo tabs cover that. Confirm
+          in the first decade of retirement — the Will it last? tab covers that. Confirm
           decisions with a qualified professional.
         </p>
       </div>
@@ -20110,7 +20161,7 @@ const SIMPLE_TABS = ['dashboard', 'personal', 'accounts', 'assets',
 const SIMPLE_LABELS = {
   personal: 'About you', assets: 'Property',
   income: 'Income',
-  socialsecurity: 'Claiming', montecarlo: 'Will it last?',
+  socialsecurity: 'Claiming',
 };
 
 // ── THE TOUR ────────────────────────────────────────────────────────────────
@@ -20164,15 +20215,13 @@ const TOUR_STEPS = [
   },
   {
     target: 'nav-analysis',
-    title: 'Analysis — six different questions',
-    body: "These look easy to confuse. Each one answers something distinct:",
+    title: 'Analysis — four different questions',
+    body: "Each one answers something distinct:",
     bullets: [
       ['Current Year', 'what will this year’s return look like, from your paystubs and K-1s?'],
       ['Social Security', 'what claiming age is worth most to you?'],
       ['Taxes & Roth', 'your Roth conversion strategy — set it, see what it saves, find a better one'],
-      ['Monte Carlo', 'how does the plan hold up across 1,000 random markets? (results shown in today’s dollars)'],
-      ['Stress Test', 'what happens in a specific bad event — a crash, high inflation?'],
-      ['Sensitivity', 'which single assumption changes the outcome most?'],
+      ['Will it last?', 'three ways to ask it: 1,000 markets, specific crashes right at retirement, and which single assumption changes the outcome most'],
     ],
   },
   {
@@ -20207,7 +20256,7 @@ const SIMPLE_TOUR_STEPS = [
       ['Accounts · ' + SIMPLE_LABELS.assets + ' · ' + SIMPLE_LABELS.income, 'what you have and what comes in'],
       ['Taxes & Roth', 'should you convert to Roth, and how much?'],
       [SIMPLE_LABELS.socialsecurity, 'when to start Social Security'],
-      [SIMPLE_LABELS.montecarlo, 'does the plan survive bad markets, not just average ones?'],
+      ['Will it last?', 'does the plan survive bad markets, not just average ones?'],
     ],
   },
   {
@@ -21332,6 +21381,9 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
 
 function RetirementPlanner() {
   const [activeTab, setActiveTab] = useState('dashboard');
+  // Which of the three "Will it last?" questions is open. Held here rather than
+  // in the tab so leaving and coming back returns to the same one.
+  const [lastingView, setLastingView] = useState('montecarlo');
   // The palette switch is done by applyThemeMode BEFORE setState, so the single
   // re-render this triggers already reads the new values. Doing it in an effect
   // would paint one frame of the old chart colours against the new surface.
@@ -22009,9 +22061,10 @@ function RetirementPlanner() {
         { id: 'currentyear', label: 'Current Year', icon: '🧾' },
         { id: 'socialsecurity', label: 'Social Security', icon: '🎯' },
         { id: 'taxplanning', label: 'Taxes & Roth', icon: '📋' },
-        { id: 'montecarlo', label: 'Monte Carlo', icon: '🎲' },
-        { id: 'stresstest', label: 'Stress Test', icon: '⚡' },
-        { id: 'sensitivity', label: 'Sensitivity', icon: '🔬' }
+        // Monte Carlo, Stress Test and Sensitivity were three entries until
+        // v2.49.0. They answer one question three ways, and simple mode had
+        // already been calling the first of them "Will it last?".
+        { id: 'montecarlo', label: 'Will it last?', icon: '🎲' }
       ]
     },
     {
@@ -22346,9 +22399,13 @@ function RetirementPlanner() {
             {activeTab === 'dashboard' && <DashboardTab onShowEverything={showEverything} onDismissTour={declineTourOffer} onTakeTour={acceptTourOffer} setActiveTab={setActiveTab} setPersonalInfo={setPersonalInfo} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} accounts={accounts} activeScenarioId={activeScenarioId} applyPlanAsBaseline={applyPlanAsBaseline} createScenarioFrom={createScenarioFrom} deleteScenario={deleteScenario} loadScenario={loadScenario} scenarios={scenarios} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'currentyear' && <CurrentYearTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
-            {activeTab === 'montecarlo' && <MonteCarloTab currentYearReturn={currentYearReturn} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
-            {activeTab === 'stresstest' && <StressTestTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} computeProjections={displayComputeProjections} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
-            {activeTab === 'sensitivity' && <SensitivityTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
+            {activeTab === 'montecarlo' && (
+              <WillItLastTab view={lastingView} setView={setLastingView}>
+                {lastingView === 'montecarlo' && <MonteCarloTab currentYearReturn={currentYearReturn} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} />}
+                {lastingView === 'stresstest' && <StressTestTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} currentYear={currentYear} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} computeProjections={displayComputeProjections} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
+                {lastingView === 'sensitivity' && <SensitivityTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setDetailLevel={effectiveSetDetailLevel} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} />}
+              </WillItLastTab>
+            )}
             {activeTab === 'assistant' && <AiAssistantTab computeProjections={displayComputeProjections} onApply={applyAiPlan} plan={livePlan} projections={displayProjections} />}
             {activeTab === 'faq' && <FAQTab />}
           </div>

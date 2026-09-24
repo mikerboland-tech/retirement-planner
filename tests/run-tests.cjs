@@ -11918,7 +11918,10 @@ section('P98 — no surface shows money in a basis it never declared');
     taxplanning: 'nominal', currentyear: 'nominal', montecarlo: 'nominal',
   };
   Object.entries(EXPECTED).forEach(([tab, want]) => {
-    const re = new RegExp("activeTab === '" + tab + "' && <[A-Za-z]+[^>]*", 'g');
+    // The three "Will it last?" views are routed by lastingView inside the one
+    // tab since v2.49.0; each is still its own component with its own basis.
+    const LASTING = ['montecarlo', 'stresstest', 'sensitivity'];
+    const re = new RegExp((LASTING.includes(tab) ? 'lastingView' : 'activeTab') + " === '" + tab + "' && <[A-Za-z]+[^>]*", 'g');
     const m = src.match(re);
     ok(m && m.length, `the ${tab} tab is rendered where the test can see it`);
     if (!m) return;
@@ -15398,7 +15401,8 @@ section('P133 — the Withdrawals tab is retired: no screen runs a model of its 
   // accounts are drawn (that is withdrawal priority, on Personal Info).
   const tour = jsx.slice(jsx.indexOf('const TOUR_STEPS = ['), jsx.indexOf('const SIMPLE_TOUR_STEPS'));
   eq(/\['Withdrawals',/.test(tour), false, 'the tour no longer sends anyone to it');
-  ok(/Analysis — six different questions/.test(tour), 'and counts the analysis tabs correctly');
+  // Four since v2.49.0, when the three "Will it last?" tabs became one.
+  ok(/Analysis — four different questions/.test(tour), 'and counts the analysis tabs correctly');
   // The two rules that were worth keeping already live in the engine.
   ok(/label="Spending guardrails"/.test(jsx), 'guardrails remain, as a Sandbox lever the engine runs');
   ok(/spendingPhasesEnabled/.test(jsx), 'and spending phases, on Personal Info');
@@ -15616,6 +15620,46 @@ section('P135 — one place to set the Roth conversion strategy');
 
   // ── the notice no longer calls conversions hidden ────────────────────────
   eq(/key: 'rothStrategy'/.test(eng), false, 'simple mode shows the conversion controls, so the notice does not list them');
+}
+
+section('P136 — "Will it last?" is one tab asking one question three ways');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const jsx = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+  const navAt = jsx.indexOf('const fullNavGroups = [');
+  const nav = jsx.slice(navAt, jsx.indexOf('\n  ];', navAt));
+  ok(/\{ id: 'montecarlo', label: 'Will it last\?',/.test(nav), 'the nav has one "Will it last?" entry');
+  eq(/id: 'stresstest'|id: 'sensitivity'/.test(nav), false, 'and no separate Stress Test or Sensitivity entry');
+  eq(/activeTab === '(stresstest|sensitivity)'/.test(jsx), false, 'nothing routes to them as tabs');
+
+  // All three methods survive, each as the component it always was.
+  const vm = /const LASTING_VIEWS = (\[[\s\S]*?\n\]);/.exec(jsx);
+  ok(vm, 'the three views are declared');
+  const views = eval(vm[1]);
+  eq(JSON.stringify(views.map(v => v.id)), JSON.stringify(['montecarlo', 'stresstest', 'sensitivity']),
+    'many markets, specific crashes, what matters most — in that order');
+  views.forEach(v => ok(v.q && v.q.endsWith('?'), `the ${v.label} view is labelled by the question it answers`));
+  const routeAt = jsx.indexOf("{activeTab === 'montecarlo' && (");
+  gt(routeAt, 0, 'the tab is routed');
+  const route = jsx.slice(routeAt, jsx.indexOf('</WillItLastTab>', routeAt));
+  ['MonteCarloTab', 'StressTestTab', 'SensitivityTab'].forEach((c, i) =>
+    ok(route.indexOf(`{lastingView === '${views[i].id}' && <${c} `) > 0, `${c} renders under its own view`));
+  ok(/const \[lastingView, setLastingView\] = useState\('montecarlo'\);/.test(jsx),
+    'the open view is held by the app, so leaving the tab and coming back keeps it');
+  ok(/role="tablist"/.test(jsx.slice(jsx.indexOf('function WillItLastTab('), jsx.indexOf('function MonteCarloTab('))),
+    'the switcher is a real tab list for a screen reader');
+
+  // Simple mode already called it this, so there is nothing left to rename.
+  const lm = /const SIMPLE_LABELS = \{([\s\S]*?)\};/.exec(jsx);
+  eq(/montecarlo/.test(lm[1]), false, 'simple mode no longer renames it');
+  eq(/Stress Test and Monte Carlo tabs|The Monte Carlo tab /.test(jsx), false, 'no text points at the old tabs');
+
+  // The FAQ claimed the stress test used a simplified tax estimate. It has run
+  // the full engine for a long time.
+  eq(/simplified marginal tax estimate for speed/.test(jsx), false, 'the FAQ no longer says the stress test simplifies tax');
+  const st = jsx.slice(jsx.indexOf('function StressTestTab('), jsx.indexOf('function SocialSecurityTab('));
+  ok(/computeProjections\(/.test(st), 'because it does not: it runs computeProjections');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
