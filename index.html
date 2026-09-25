@@ -17,7 +17,7 @@
        sending it anywhere else.
        ============================================================ -->
   <!-- BEGIN GENERATED CSP (tools/build.cjs) -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' blob: 'sha256-rgxZ5aAxJ0ZaucgNMwggm2ZNr6qq/7utA6ihDmGCf+k=' 'sha256-/qpjHQa+WHXkba2n4wptslgtTco22XxznaEPS//H4lw=' 'sha256-4BwXYwbl6cLzApN/fAzuHQq+QYhCEDf5AT9/BLBSX6U=' 'sha256-Jh7tKM+p6nJg/H9UQXd+3XlgUikHSZtETWz2HijyZhs=' 'sha256-mNyJT2WQdwdQjbiOSQuB6LffSgSKbTga5RK4Inp3wSo=' 'sha256-rBOydewJv2+ml20OJ8SRsf7+gi7F0TYXXqbG0BiZ+1I='; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://api.anthropic.com; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' blob: 'sha256-rgxZ5aAxJ0ZaucgNMwggm2ZNr6qq/7utA6ihDmGCf+k=' 'sha256-HgWdksz3PSn8kfVrmUQem9tqX6oPHXAtBBe5FKSCLXU=' 'sha256-A5rmoHxnM54f3AF3Pa+lACOtYLQK5F5m9N/SXZV8U5c=' 'sha256-BIjCZBXQ4Ix3p8YecnH+yqC5R6O5cDCHqpJWKlcYawY=' 'sha256-Jh7tKM+p6nJg/H9UQXd+3XlgUikHSZtETWz2HijyZhs=' 'sha256-mNyJT2WQdwdQjbiOSQuB6LffSgSKbTga5RK4Inp3wSo=' 'sha256-axQhiGjko5wbItYjYJ2wf1To7q31xsowOMPaTk5XY0Y='; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://api.anthropic.com; object-src 'none'; base-uri 'self'; form-action 'self'">
   <!-- END GENERATED CSP -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <!-- ============================================================
@@ -55,13 +55,21 @@
   <title>Retirement Planner</title>
   <!-- Vendored libraries (see vendor/README.md for source URLs). Served locally
        so the app works offline and isn't affected by CDN cert/network issues. -->
-  <script src="vendor/tailwind.js"></script>
   <script src="vendor/react.min.js"></script>
   <script src="vendor/react-dom.min.js"></script>
   <script src="vendor/react-is.min.js"></script>
   <script src="vendor/prop-types.min.js"></script>
   <script src="vendor/recharts.js"></script>
-  <script src="vendor/babel.min.js"></script>
+  <!-- The stylesheet and the hash of the source the compiled app was built
+       from. Babel (3 MB) and Tailwind's in-browser compiler are NOT loaded
+       here any more: the loader below fetches them only if the build is out
+       of date, which on the live site it never is (the suite checks). -->
+  <!-- No icon file: an empty one stops the browser requesting /favicon.ico and logging a 404. -->
+  <link rel="icon" href="data:,">
+  <!-- BEGIN GENERATED BUILD STAMP (tools/build.cjs) -->
+  <link rel="stylesheet" href="app.css?h=5538cb52">
+  <script>window.PLANNER_BUILD = {"src":"d33d6fc3","css":"5538cb52"};</script>
+  <!-- END GENERATED BUILD STAMP -->
   <!-- ============================================================
        APP_VERSION — SINGLE SOURCE OF TRUTH
        Bumping this one number drives:
@@ -71,9 +79,9 @@
            the value off its own Worker URL search params)
        So one edit per release, in both index.html AND mobile.html.
        ============================================================ -->
-  <script>window.APP_VERSION = '2.52.0';</script>
+  <script>window.APP_VERSION = '2.53.0';</script>
   <!-- BEGIN GENERATED THEME TOKENS (tools/build.cjs from theme.js) -->
-  <script>tailwind.config = { theme: { extend: { colors: {
+  <script>window.PLANNER_TW_CONFIG = { theme: { extend: { colors: {
       "slate": {"50":"rgb(var(--c-slate-50) / <alpha-value>)","100":"rgb(var(--c-slate-100) / <alpha-value>)","200":"rgb(var(--c-slate-200) / <alpha-value>)","300":"rgb(var(--c-slate-300) / <alpha-value>)","400":"rgb(var(--c-slate-400) / <alpha-value>)","500":"rgb(var(--c-slate-500) / <alpha-value>)","600":"rgb(var(--c-slate-600) / <alpha-value>)","700":"rgb(var(--c-slate-700) / <alpha-value>)","800":"rgb(var(--c-slate-800) / <alpha-value>)","900":"rgb(var(--c-slate-900) / <alpha-value>)","950":"rgb(var(--c-slate-950) / <alpha-value>)"},
       "amber": {"50":"rgb(var(--c-amber-50) / <alpha-value>)","100":"rgb(var(--c-amber-100) / <alpha-value>)","200":"rgb(var(--c-amber-200) / <alpha-value>)","300":"rgb(var(--c-amber-300) / <alpha-value>)","400":"rgb(var(--c-amber-400) / <alpha-value>)","500":"rgb(var(--c-amber-500) / <alpha-value>)","600":"rgb(var(--c-amber-600) / <alpha-value>)","700":"rgb(var(--c-amber-700) / <alpha-value>)","800":"rgb(var(--c-amber-800) / <alpha-value>)","900":"rgb(var(--c-amber-900) / <alpha-value>)","950":"rgb(var(--c-amber-950) / <alpha-value>)"},
       "emerald": {"50":"rgb(var(--c-emerald-50) / <alpha-value>)","100":"rgb(var(--c-emerald-100) / <alpha-value>)","200":"rgb(var(--c-emerald-200) / <alpha-value>)","300":"rgb(var(--c-emerald-300) / <alpha-value>)","400":"rgb(var(--c-emerald-400) / <alpha-value>)","500":"rgb(var(--c-emerald-500) / <alpha-value>)","600":"rgb(var(--c-emerald-600) / <alpha-value>)","700":"rgb(var(--c-emerald-700) / <alpha-value>)","800":"rgb(var(--c-emerald-800) / <alpha-value>)","900":"rgb(var(--c-emerald-900) / <alpha-value>)","950":"rgb(var(--c-emerald-950) / <alpha-value>)"},
@@ -279,8 +287,6 @@
       showError('Failed to load React. Check your internet connection and try again.');
     } else if (typeof Recharts === 'undefined') {
       showError('Failed to load Recharts charting library. Check your internet connection and try again.');
-    } else if (typeof Babel === 'undefined') {
-      showError('Failed to load Babel compiler. Check your internet connection and try again.');
     } else {
       // engine.js is loaded dynamically inside the IIFE below so the ?v= cache-bust
       // can come from window.APP_VERSION (single source of truth).
@@ -315,6 +321,36 @@
       }
       (async function() {
         try {
+          // What the build says it compiled. On the live site the stamp is
+          // trusted: the suite fails if it disagrees with the source, so the
+          // page never needs the 1.4 MB .jsx or the 3 MB compiler. Served from
+          // this machine, the .jsx is fetched and hashed as well, so an edit
+          // made without rebuilding is compiled here rather than ignored.
+          var BUILD = window.PLANNER_BUILD || {};
+          var LOCAL = location.protocol === 'file:'
+            || /^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|)$/.test(location.hostname);
+          var compiledFile = APP_FILE.replace(/\.jsx$/, '.compiled.js');
+
+          // FNV-1a 32-bit — must match hashSource() in tools/build.cjs.
+          function hashSource(str) {
+            var h = 0x811c9dc5;
+            for (var i = 0; i < str.length; i++) {
+              h ^= str.charCodeAt(i);
+              h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+            }
+            return h.toString(16);
+          }
+          async function fetchText(url) {
+            var r = await fetch(url).catch(function () { return null; });
+            return (r && r.ok) ? r.text() : null;
+          }
+
+          var jsxSource = null;
+          var sourceHash = BUILD.src || null;
+          var fetches = [fetchText(compiledFile + '?h=' + (BUILD.src || window.APP_VERSION))];
+          if (LOCAL || !BUILD.src) fetches.push(fetchText(APP_FILE));
+          // Started before the engine loads, so the two downloads overlap.
+          var appFetch = Promise.all(fetches);
           document.getElementById('load-status').textContent = 'Loading engine...';
           await loadScript('engine.js?v=' + window.APP_VERSION);
           if (typeof window.PlannerEngine === 'undefined') {
@@ -328,41 +364,34 @@
             throw new Error('theme.js loaded but window.PlannerTheme is undefined.');
           }
           document.getElementById('load-status').textContent = 'Fetching app code...';
-          // Fetch source and precompiled bundle together. The bundle (written by
-          // `node tools/build.cjs`) is optional: it carries a hash of the source
-          // it was built from, and we use it ONLY when that matches the source we
-          // just fetched. Any edit to the .jsx changes the hash, so a forgotten
-          // rebuild costs speed, never correctness — the compiled file is a pure
-          // cache. Deleting it is always safe.
-          var compiledFile = APP_FILE.replace(/\.jsx$/, '.compiled.js');
-          var results = await Promise.all([
-            fetch(APP_FILE),
-            fetch(compiledFile + '?v=' + window.APP_VERSION).catch(function () { return null; })
-          ]);
-          var resp = results[0];
-          if (!resp.ok) throw new Error('Failed to load ' + APP_FILE + ': HTTP ' + resp.status);
-          var jsxSource = await resp.text();
-          var compiledSource = (results[1] && results[1].ok) ? await results[1].text() : null;
-
-          // FNV-1a 32-bit — must match hashSource() in tools/build.cjs.
-          function hashSource(str) {
-            var h = 0x811c9dc5;
-            for (var i = 0; i < str.length; i++) {
-              h ^= str.charCodeAt(i);
-              h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
-            }
-            return h.toString(16);
+          var got = await appFetch;
+          var compiledSource = got[0];
+          if (fetches.length > 1) {
+            jsxSource = got[1];
+            if (jsxSource === null) throw new Error('Failed to load ' + APP_FILE);
+            sourceHash = hashSource(jsxSource);
           }
 
           var code = null;
-          if (compiledSource) {
-            var stamped = /^\/\/# planner-src-hash=([0-9a-f]+)/.exec(compiledSource);
-            if (stamped && stamped[1] === hashSource(jsxSource)) {
-              document.getElementById('load-status').textContent = 'Loading precompiled app...';
-              code = compiledSource;
-            }
+          var stamped = compiledSource && /^\/\/# planner-src-hash=([0-9a-f]+)/.exec(compiledSource);
+          if (stamped && stamped[1] === sourceHash) {
+            document.getElementById('load-status').textContent = 'Loading precompiled app...';
+            code = compiledSource;
+          }
+          // The source has moved on since the last build: the styles may lack a
+          // class it now uses, so the in-browser compiler fills in from here.
+          if (sourceHash !== BUILD.src) {
+            await loadScript('vendor/tailwind.js');
+            if (window.tailwind && window.PLANNER_TW_CONFIG) window.tailwind.config = window.PLANNER_TW_CONFIG;
           }
           if (code === null) {
+            if (jsxSource === null) {
+              jsxSource = await fetchText(APP_FILE);
+              if (jsxSource === null) throw new Error('Failed to load ' + APP_FILE);
+            }
+            document.getElementById('load-status').textContent = 'Loading compiler...';
+            await loadScript('vendor/babel.min.js');
+            if (typeof Babel === 'undefined') throw new Error('Failed to load the Babel compiler.');
             document.getElementById('load-status').textContent = 'Compiling (' + Math.round(jsxSource.length/1024) + ' KB)...';
             var transformed = Babel.transform(jsxSource, { presets: ['react'] });
             code = transformed.code;

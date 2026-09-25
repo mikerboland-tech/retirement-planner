@@ -16,8 +16,14 @@ proxies that MITM HTTPS to unpkg.com).
 | `recharts.js`        | https://unpkg.com/recharts@2.10.3/umd/Recharts.js                            |
 | `babel.min.js`       | https://unpkg.com/@babel/standalone/babel.min.js                             |
 
-`tailwind.js`, `react.min.js`, `react-dom.min.js`, `babel.min.js` are loaded by
-both `index.html` and `mobile.html`. The others are desktop-only.
+`react.min.js` and `react-dom.min.js` are loaded by both `index.html` and
+`mobile.html`; `react-is`, `prop-types` and `recharts` are desktop-only.
+
+`babel.min.js` and `tailwind.js` are fallbacks, loaded only when a page finds its
+source newer than its build (see `tools/build.cjs`). Normally the pages run the
+precompiled `.compiled.js` files and the prebuilt `app.css` instead. The build
+itself also uses `babel.min.js`, so the compiled output matches what the
+browser would have produced.
 
 ## Refresh
 

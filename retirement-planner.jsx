@@ -1527,7 +1527,17 @@ const SectionControls = ({ tab, vis, setVis, level }) => {
     </div>
   );
 };
-const inputStyle = "w-full bg-slate-900/80 border border-slate-600/50 rounded-lg px-4 py-2.5 text-slate-100 focus:outline-none focus:ring-2 focus:ring-amber-500/50 transition-all";
+// The input look without a width or padding, for the inputs that need their
+// own. Appending "w-24" to inputStyle does NOT override its "w-full": two
+// classes setting one property on one element are settled by where their rules
+// sit in the stylesheet, not by the order they are written in the class list —
+// and that order differs between Tailwind's in-browser compiler and the build
+// (found when the stylesheet moved to the build in v2.53.0). Overrides replace;
+// they never append.
+const inputSkin = "bg-slate-900/80 border border-slate-600/50 rounded-lg text-slate-100 focus:outline-none focus:ring-2 focus:ring-amber-500/50 transition-all";
+const inputStyle = "w-full px-4 py-2.5 " + inputSkin;
+// Replace one class of a shared style with another, for the same reason.
+const swapClass = (style, from, to) => style.split(/\s+/).map(c => (c === from ? to : c)).join(' ');
 const labelStyle = "block text-sm font-medium text-slate-400 mb-1.5";
 const buttonPrimary = "bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 font-semibold px-6 py-2.5 rounded-lg transition-all shadow-lg";
 const buttonSecondary = "bg-slate-700 hover:bg-slate-600 text-slate-100 font-medium px-4 py-2 rounded-lg transition-all";
@@ -2935,7 +2945,17 @@ function IncomeStreamsTab({ detailLevel, sectionVisibility, setSectionVisibility
             </thead>
             <tbody>
               {tableData.map((row, idx) => (
-                <tr key={row.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${row.qcd > 0 ? 'bg-emerald-900/10' : ''} ${row.rothConversion > 0 ? 'bg-purple-900/10' : ''} ${row.survivorEvent ? 'bg-red-900/15 border-red-500/30' : ''} ${row.oneTimeEvents?.length ? 'bg-amber-900/10' : ''} ${row.unfundedShortfall > 0 ? 'bg-red-900/25' : ''}`}>
+                <tr key={row.year} className={`border-b ${row.survivorEvent ? 'border-red-500/30' : 'border-slate-700/50'} ${
+                  // One tint per row, most important first. These were five
+                  // separate classes appended together, which left the winner
+                  // to stylesheet order: a survivor year's red border never
+                  // showed, and the striping could bury a highlight.
+                  row.unfundedShortfall > 0 ? 'bg-red-900/25'
+                  : row.survivorEvent ? 'bg-red-900/15'
+                  : row.rothConversion > 0 ? 'bg-purple-900/10'
+                  : row.oneTimeEvents?.length ? 'bg-amber-900/10'
+                  : row.qcd > 0 ? 'bg-emerald-900/10'
+                  : idx % 2 === 0 ? 'bg-slate-800/30' : ''}`}>
                   <td className="py-2 px-2 text-slate-100 font-medium">
                     {row.myAge}
                     {row.survivorEvent === 'spouse_died' && <span title="Spouse passed" className="ml-1">🕊️</span>}
@@ -9375,7 +9395,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, currentYearRe
                   <p className="text-slate-500 text-xs">{formatCurrency(calculateSSBenefit(f.pia, f.pending, f.birthYear) * 12)}/year</p>
                   {dirty && <p className="text-sky-400 text-xs mt-1">Plan currently has {f.saved} — not applied yet</p>}
                 </div>
-                <select value={f.pending} onChange={e => f.onChange(Number(e.target.value))} className={`${inputStyle} w-24`}>
+                <select value={f.pending} onChange={e => f.onChange(Number(e.target.value))} className={`${inputSkin} px-4 py-2.5 w-24`}>
                   {claimingAges.map(age => <option key={age} value={age}>{age}</option>)}
                 </select>
               </div>
@@ -9979,7 +9999,7 @@ function SocialSecurityTab({ accounts, assets, computeProjections, currentYearRe
                       const mc = s.mcResults;
                       const successColor = mc ? (mc.successRate >= 0.9 ? 'text-emerald-400' : mc.successRate >= 0.75 ? 'text-amber-400' : 'text-red-400') : '';
                       return (
-                        <tr key={s.label} className={`border-b border-slate-700/50 ${isBest ? 'bg-emerald-900/20' : ''} ${isCurrent ? 'bg-amber-900/20' : ''}`}>
+                        <tr key={s.label} className={`border-b border-slate-700/50 ${isCurrent ? 'bg-amber-900/20' : isBest ? 'bg-emerald-900/20' : ''}`}>
                           <td className="py-2 px-2 text-slate-500">{i + 1}</td>
                           <td className="py-2 px-2 text-slate-200">
                             {s.label}
@@ -11510,7 +11530,7 @@ function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWa
               <CurrencyCell
                 value={localInfo.desiredRetirementIncome}
                 onValueChange={v => handleChange('desiredRetirementIncome', v)}
-                className={compactInputStyle + " text-emerald-400 font-medium"}
+                className={swapClass(compactInputStyle, 'text-slate-100', 'text-emerald-400') + ' font-medium'}
               />
             </div>
             <div>
@@ -12747,7 +12767,7 @@ function AccountsTab({ detailLevel, sectionVisibility, setSectionVisibility, acc
                       {projections.filter((_, idx) => idx <= 50).map((p, idx) => {
                         const hasRMD = p.rmd > 0;
                         return (
-                          <tr key={p.year} className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${hasRMD ? 'bg-orange-900/10' : ''}`}>
+                          <tr key={p.year} className={`border-b border-slate-700/50 ${hasRMD ? 'bg-orange-900/10' : idx % 2 === 0 ? 'bg-slate-800/30' : ''}`}>
                             <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
                             <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
                             {accounts.map((acct, i) => {
@@ -12807,7 +12827,7 @@ function AccountsTab({ detailLevel, sectionVisibility, setSectionVisibility, acc
                       return (
                         <tr
                           key={p.year}
-                          className={`border-b border-slate-700/50 ${idx % 2 === 0 ? 'bg-slate-800/30' : ''} ${hasRMD ? 'bg-orange-900/10' : ''}`}
+                          className={`border-b border-slate-700/50 ${hasRMD ? 'bg-orange-900/10' : idx % 2 === 0 ? 'bg-slate-800/30' : ''}`}
                         >
                           <td className="py-1.5 px-2 text-slate-300">{p.year}</td>
                           <td className="py-1.5 px-2 text-center text-slate-400">{p.myAge}</td>
@@ -14337,7 +14357,9 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
           notice that it is not their plan. Folded and untouched, it is one
           line that scrolls away like anything else. */}
       <div data-tour="whatif-levers"
-           className={`${cardStyle} ${leversOpen || touched ? 'sticky top-2 z-30' : ''} ${previewing ? 'bg-slate-900/45 backdrop-blur-md border-amber-500/40' : ''}`}>
+           className={`${previewing
+             ? swapClass(swapClass(cardStyle, 'border-slate-700/50', 'border-amber-500/40'), 'backdrop-blur-sm', 'backdrop-blur-md') + ' bg-slate-900/45'
+             : cardStyle} ${leversOpen || touched ? 'sticky top-2 z-30' : ''}`}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <button onClick={() => setCfg({ leversOpen: !leversOpen })} aria-expanded={leversOpen}
             className="flex items-center gap-2 text-left min-w-0 flex-1">
@@ -20079,7 +20101,7 @@ const NavGroup = ({ group, activeTab, setActiveTab, sidebarCollapsed }) => (
   // no label, and gets no header and no tour anchor rather than an empty one.
   <div className="mb-4" data-tour={group.tourId || (group.label ? `nav-${group.label.toLowerCase().replace(/\s+/g, '-')}` : undefined)}>
     {!sidebarCollapsed && group.label && (
-      <div className="flex items-center gap-2 px-3 py-2 text-xs font-bold text-slate-300 uppercase tracking-wider border-b border-slate-700/50 pb-2 mb-1">
+      <div className="flex items-center gap-2 px-3 py-2 text-xs font-bold text-slate-300 uppercase tracking-wider border-b border-slate-700/50 mb-1">
         <span>{group.icon}</span>
         <span>{group.label}</span>
       </div>
@@ -21108,8 +21130,8 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
             <p className="text-sm text-slate-400">Your current annual income, before taxes.</p>
             <div><label className="text-sm font-medium text-slate-300 mb-1 block">My annual salary</label>{dollarInput(w.mySalary,v=>update('mySalary',v),'85,000')}</div>
             {w.hasSpouse && <div><label className="text-sm font-medium text-slate-300 mb-1 block">Spouse's annual salary</label>{dollarInput(w.spouseSalary,v=>update('spouseSalary',v),'60,000')}</div>}
-            <div><label className="text-sm font-medium text-slate-300 mb-1 block">My expected annual raises (%)</label><input type="number" step="0.5" value={w.mySalaryGrowth} onChange={e=>update('mySalaryGrowth',e.target.value)} className={`${inputStyle} w-24`} /><p className="text-xs text-slate-500 mt-1">Most people get 2–4% annual raises.</p></div>
-            {w.hasSpouse && <div><label className="text-sm font-medium text-slate-300 mb-1 block">Spouse's expected annual raises (%)</label><input type="number" step="0.5" value={w.spouseSalaryGrowth} onChange={e=>update('spouseSalaryGrowth',e.target.value)} className={`${inputStyle} w-24`} /></div>}
+            <div><label className="text-sm font-medium text-slate-300 mb-1 block">My expected annual raises (%)</label><input type="number" step="0.5" value={w.mySalaryGrowth} onChange={e=>update('mySalaryGrowth',e.target.value)} className={`${inputSkin} px-4 py-2.5 w-24`} /><p className="text-xs text-slate-500 mt-1">Most people get 2–4% annual raises.</p></div>
+            {w.hasSpouse && <div><label className="text-sm font-medium text-slate-300 mb-1 block">Spouse's expected annual raises (%)</label><input type="number" step="0.5" value={w.spouseSalaryGrowth} onChange={e=>update('spouseSalaryGrowth',e.target.value)} className={`${inputSkin} px-4 py-2.5 w-24`} /></div>}
             {householdIncome>0 && <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/50"><div className="text-xs text-slate-500">Household income</div><div className="text-xl font-bold text-emerald-400">${householdIncome.toLocaleString()}/year</div></div>}
           </div>)}
 
@@ -21231,11 +21253,11 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
                     <button onClick={()=>setW(prev=>({...prev,otherIncomes:prev.otherIncomes.filter(o=>o.id!==oi.id)}))} className="text-red-400/70 hover:text-red-400 text-xs ml-2">Remove</button>
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    <div><label className="text-[10px] text-slate-500 block mb-0.5">Type</label><select value={oi.type} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,type:v}:o)}))}} className={`${inputStyle} text-xs py-1.5`}><option value="rental">Rental</option><option value="business">Business/Consulting</option><option value="annuity">Annuity</option><option value="other">Other</option></select></div>
+                    <div><label className="text-[10px] text-slate-500 block mb-0.5">Type</label><select value={oi.type} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,type:v}:o)}))}} className={`${inputSkin} w-full px-4 text-xs py-1.5`}><option value="rental">Rental</option><option value="business">Business/Consulting</option><option value="annuity">Annuity</option><option value="other">Other</option></select></div>
                     <div><label className="text-[10px] text-slate-500 block mb-0.5">Annual $</label>{dollarInput(oi.amount, v=>setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,amount:v}:o)})), '12,000')}</div>
-                    <div><label className="text-[10px] text-slate-500 block mb-0.5">Ages</label><div className="flex items-center gap-1"><input type="number" value={oi.startAge} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,startAge:v}:o)}))}} className={`${inputStyle} text-xs py-1.5 w-14`} /><span className="text-slate-500">–</span><input type="number" value={oi.endAge} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,endAge:v}:o)}))}} className={`${inputStyle} text-xs py-1.5 w-14`} /></div></div>
-                    <div><label className="text-[10px] text-slate-500 block mb-0.5">Annual growth (%)</label><input type="number" step="0.5" value={oi.cola} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,cola:v}:o)}))}} className={`${inputStyle} text-xs py-1.5`} placeholder="2" /></div>
-                    {w.hasSpouse&&<div><label className="text-[10px] text-slate-500 block mb-0.5">Owner</label><select value={oi.owner} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,owner:v}:o)}))}} className={`${inputStyle} text-xs py-1.5`}><option value="me">Me</option><option value="spouse">Spouse</option><option value="joint">Joint</option></select></div>}
+                    <div><label className="text-[10px] text-slate-500 block mb-0.5">Ages</label><div className="flex items-center gap-1"><input type="number" value={oi.startAge} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,startAge:v}:o)}))}} className={`${inputSkin} px-2 text-xs py-1.5 w-14`} /><span className="text-slate-500">–</span><input type="number" value={oi.endAge} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,endAge:v}:o)}))}} className={`${inputSkin} px-2 text-xs py-1.5 w-14`} /></div></div>
+                    <div><label className="text-[10px] text-slate-500 block mb-0.5">Annual growth (%)</label><input type="number" step="0.5" value={oi.cola} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,cola:v}:o)}))}} className={`${inputSkin} w-full px-4 text-xs py-1.5`} placeholder="2" /></div>
+                    {w.hasSpouse&&<div><label className="text-[10px] text-slate-500 block mb-0.5">Owner</label><select value={oi.owner} onChange={e=>{const v=e.target.value;setW(prev=>({...prev,otherIncomes:prev.otherIncomes.map(o=>o.id===oi.id?{...o,owner:v}:o)}))}} className={`${inputSkin} w-full px-4 text-xs py-1.5`}><option value="me">Me</option><option value="spouse">Spouse</option><option value="joint">Joint</option></select></div>}
                   </div>
                 </div>
               ))}
@@ -22496,7 +22518,7 @@ function RetirementPlanner() {
       )}
       {exportNudge && (
         <div className="fixed bottom-4 right-4 z-40 max-w-sm">
-          <div className={`${cardStyle} border-amber-500/40`}>
+          <div className={swapClass(cardStyle, 'border-slate-700/50', 'border-amber-500/40')}>
             <div className="text-sm font-semibold text-slate-100 mb-1">Keep a copy somewhere else</div>
             <p className="text-xs text-slate-400 leading-relaxed mb-3">
               This plan lives in this browser. Plan history protects you from a bad edit, but clearing site

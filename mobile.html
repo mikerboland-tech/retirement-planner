@@ -5,7 +5,7 @@
   <!-- Content Security Policy — see index.html for the reasoning. Generated
        by tools/build.cjs; must be the first thing in <head>. -->
   <!-- BEGIN GENERATED CSP (tools/build.cjs) -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' blob: 'sha256-/qpjHQa+WHXkba2n4wptslgtTco22XxznaEPS//H4lw=' 'sha256-4BwXYwbl6cLzApN/fAzuHQq+QYhCEDf5AT9/BLBSX6U=' 'sha256-Jh7tKM+p6nJg/H9UQXd+3XlgUikHSZtETWz2HijyZhs=' 'sha256-wuJJENNnybVY+HebEod36XkxjajBXi/d3rfMVwxsjqw=' 'sha256-ewybwqDQUKD+NnZ2070OM6sgcClUVQeyV7Nx/GPO6QM='; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://api.anthropic.com; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' blob: 'sha256-AcxmDKN2+7h0alLbKMEm/3JqWqIvRbfEb0RbBJlMmNE=' 'sha256-A5rmoHxnM54f3AF3Pa+lACOtYLQK5F5m9N/SXZV8U5c=' 'sha256-BIjCZBXQ4Ix3p8YecnH+yqC5R6O5cDCHqpJWKlcYawY=' 'sha256-Jh7tKM+p6nJg/H9UQXd+3XlgUikHSZtETWz2HijyZhs=' 'sha256-wuJJENNnybVY+HebEod36XkxjajBXi/d3rfMVwxsjqw=' 'sha256-v75Oq+BIRf71e7yW1wDvjBycpgXpVFxlmg4QVLCd3pA='; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://api.anthropic.com; object-src 'none'; base-uri 'self'; form-action 'self'">
   <!-- END GENERATED CSP -->
   <!-- viewport-fit=cover lets the page extend under iPhone's notch/safe areas; our CSS uses env() to inset properly -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
@@ -15,17 +15,23 @@
   <title>Retirement What-If</title>
   <!-- Vendored libraries (see vendor/README.md for source URLs). Served locally
        so the app works offline and isn't affected by CDN cert/network issues. -->
-  <script src="vendor/tailwind.js"></script>
   <script src="vendor/react.min.js"></script>
   <script src="vendor/react-dom.min.js"></script>
-  <script src="vendor/babel.min.js"></script>
+  <!-- Stylesheet and build stamp — see index.html. Babel and the in-browser
+       Tailwind compiler load only if the build is out of date. -->
+  <!-- No icon file: an empty one stops the browser requesting /favicon.ico and logging a 404. -->
+  <link rel="icon" href="data:,">
+  <!-- BEGIN GENERATED BUILD STAMP (tools/build.cjs) -->
+  <link rel="stylesheet" href="app.css?h=5538cb52">
+  <script>window.PLANNER_BUILD = {"src":"7ed30c1f","css":"5538cb52"};</script>
+  <!-- END GENERATED BUILD STAMP -->
   <!-- APP_VERSION — single source of truth. Keep this value in sync with
        index.html so desktop and mobile cache-bust to the same version. The body
        IIFE below loads engine.js dynamically using this value (and awaits it
        before touching window.PlannerEngine), so there is no second place to edit. -->
-  <script>window.APP_VERSION = '2.52.0';</script>
+  <script>window.APP_VERSION = '2.53.0';</script>
   <!-- BEGIN GENERATED THEME TOKENS (tools/build.cjs from theme.js) -->
-  <script>tailwind.config = { theme: { extend: { colors: {
+  <script>window.PLANNER_TW_CONFIG = { theme: { extend: { colors: {
       "slate": {"50":"rgb(var(--c-slate-50) / <alpha-value>)","100":"rgb(var(--c-slate-100) / <alpha-value>)","200":"rgb(var(--c-slate-200) / <alpha-value>)","300":"rgb(var(--c-slate-300) / <alpha-value>)","400":"rgb(var(--c-slate-400) / <alpha-value>)","500":"rgb(var(--c-slate-500) / <alpha-value>)","600":"rgb(var(--c-slate-600) / <alpha-value>)","700":"rgb(var(--c-slate-700) / <alpha-value>)","800":"rgb(var(--c-slate-800) / <alpha-value>)","900":"rgb(var(--c-slate-900) / <alpha-value>)","950":"rgb(var(--c-slate-950) / <alpha-value>)"},
       "amber": {"50":"rgb(var(--c-amber-50) / <alpha-value>)","100":"rgb(var(--c-amber-100) / <alpha-value>)","200":"rgb(var(--c-amber-200) / <alpha-value>)","300":"rgb(var(--c-amber-300) / <alpha-value>)","400":"rgb(var(--c-amber-400) / <alpha-value>)","500":"rgb(var(--c-amber-500) / <alpha-value>)","600":"rgb(var(--c-amber-600) / <alpha-value>)","700":"rgb(var(--c-amber-700) / <alpha-value>)","800":"rgb(var(--c-amber-800) / <alpha-value>)","900":"rgb(var(--c-amber-900) / <alpha-value>)","950":"rgb(var(--c-amber-950) / <alpha-value>)"},
       "emerald": {"50":"rgb(var(--c-emerald-50) / <alpha-value>)","100":"rgb(var(--c-emerald-100) / <alpha-value>)","200":"rgb(var(--c-emerald-200) / <alpha-value>)","300":"rgb(var(--c-emerald-300) / <alpha-value>)","400":"rgb(var(--c-emerald-400) / <alpha-value>)","500":"rgb(var(--c-emerald-500) / <alpha-value>)","600":"rgb(var(--c-emerald-600) / <alpha-value>)","700":"rgb(var(--c-emerald-700) / <alpha-value>)","800":"rgb(var(--c-emerald-800) / <alpha-value>)","900":"rgb(var(--c-emerald-900) / <alpha-value>)","950":"rgb(var(--c-emerald-950) / <alpha-value>)"},
@@ -194,14 +200,47 @@
         if (typeof window.PlannerEngine === 'undefined') {
           throw new Error('engine.js loaded but window.PlannerEngine is undefined.');
         }
-        const response = await fetch(MOBILE_APP_FILE);
-        if (!response.ok) throw new Error('Failed to load ' + MOBILE_APP_FILE + ': ' + response.status);
-        const source = await response.text();
-
-        // Transform JSX → JS using Babel
-        const transformed = Babel.transform(source, {
-          presets: ['env', 'react']
-        }).code;
+        // Same rule as the desktop page (index.html): trust the build stamp on
+        // the live site, check the source too when served from this machine,
+        // and fetch the 3 MB compiler only if the bundle is out of date. The
+        // phone used to download and run the compiler on every visit.
+        const BUILD = window.PLANNER_BUILD || {};
+        const LOCAL = location.protocol === 'file:'
+          || /^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|)$/.test(location.hostname);
+        const hashSource = (str) => {   // FNV-1a 32-bit — must match tools/build.cjs
+          let h = 0x811c9dc5;
+          for (let i = 0; i < str.length; i++) {
+            h ^= str.charCodeAt(i);
+            h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+          }
+          return h.toString(16);
+        };
+        const fetchText = async (url) => {
+          const r = await fetch(url).catch(() => null);
+          return (r && r.ok) ? r.text() : null;
+        };
+        const compiledFile = MOBILE_APP_FILE.replace(/\.jsx$/, '.compiled.js');
+        let source = null;
+        let sourceHash = BUILD.src || null;
+        const compiledSource = await fetchText(compiledFile + '?h=' + (BUILD.src || window.APP_VERSION));
+        if (LOCAL || !BUILD.src) {
+          source = await fetchText(MOBILE_APP_FILE);
+          if (source === null) throw new Error('Failed to load ' + MOBILE_APP_FILE);
+          sourceHash = hashSource(source);
+        }
+        const stamped = compiledSource && /^\/\/# planner-src-hash=([0-9a-f]+)/.exec(compiledSource);
+        let transformed = (stamped && stamped[1] === sourceHash) ? compiledSource : null;
+        if (sourceHash !== BUILD.src) {
+          await loadScript('vendor/tailwind.js');
+          if (window.tailwind && window.PLANNER_TW_CONFIG) window.tailwind.config = window.PLANNER_TW_CONFIG;
+        }
+        if (transformed === null) {
+          if (source === null) source = await fetchText(MOBILE_APP_FILE);
+          if (source === null) throw new Error('Failed to load ' + MOBILE_APP_FILE);
+          await loadScript('vendor/babel.min.js');
+          if (typeof Babel === 'undefined') throw new Error('Failed to load the Babel compiler.');
+          transformed = Babel.transform(source, { presets: ['env', 'react'] }).code;
+        }
 
         // Run the transformed code as a classic script from a Blob URL — not
         // new Function, which the Content-Security-Policy forbids. It defines

@@ -431,7 +431,9 @@
       .join('\n');
     return [
       HEAD_MARKERS.open,
-      '  <script>tailwind.config = { theme: { extend: { colors: {\n' + cfg + '\n    } } } };</script>',
+      // Read only by the in-browser Tailwind fallback (a source edited without
+      // rebuilding); app.css is built from the same colours by tools/build.cjs.
+      '  <script>window.PLANNER_TW_CONFIG = { theme: { extend: { colors: {\n' + cfg + '\n    } } } };</script>',
       '  <style>',
       cssVariables(),
       '  </style>',

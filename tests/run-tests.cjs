@@ -15801,6 +15801,100 @@ section('P139 — Personal Info keeps what you type, and the FAQ describes the e
     `and the answer's count of progressive states (${states} + DC) matches the engine`);
 }
 
+section('P140 — the pages load the build, not the compilers');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const read = (f) => fsMod.readFileSync(pathMod.join(ROOT, f), 'utf8');
+  // Same FNV-1a as tools/build.cjs and the two pages. (Requiring build.cjs
+  // would run the build.)
+  const fnv = (str) => { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0; } return h.toString(16); };
+  const build = read('tools/build.cjs');
+  const cssInputs = eval((/const CSS_INPUTS = (\[[\s\S]*?\]);/.exec(build) || [])[1] || '[]');
+  gt(cssInputs.length, 2, 'the stylesheet’s inputs are declared');
+  const cssHash = fnv(cssInputs.map(read).join('\u0000'));
+
+  // ── the stylesheet is current ────────────────────────────────────────────
+  const css = read('app.css');
+  ok(css.startsWith(`/*! planner-css-hash=${cssHash} `),
+    'app.css was built from the current source and palette — run tools/build.cjs if this fails');
+  ok(/\.bg-slate-900\{/.test(css) && /\.rounded-xl\{/.test(css), 'and it is a real Tailwind build');
+  lt(css.length, 120 * 1024, `and small (${Math.round(css.length / 1024)} KB) — the in-browser compiler it replaces was 400 KB`);
+
+  [['index.html', 'retirement-planner.jsx'], ['mobile.html', 'retirement-planner-mobile.jsx']].forEach(([page, src]) => {
+    const html = read(page);
+    // ── nothing heavy loads up front ───────────────────────────────────────
+    eq(/<script src="vendor\/babel\.min\.js">/.test(html), false, `${page} does not load the 3 MB compiler up front`);
+    eq(/<script src="vendor\/tailwind\.js">/.test(html), false, `${page} does not load the in-browser Tailwind up front`);
+    ok(/await loadScript\('vendor\/babel\.min\.js'\)/.test(html), `${page} can still fetch the compiler when it has to`);
+    // ── the stamp matches the source, so the live site may trust it ───────
+    const stamp = JSON.parse((/window\.PLANNER_BUILD = (\{[^}]*\});/.exec(html) || [])[1] || '{}');
+    const srcHash = fnv(read(src));
+    eq(stamp.src, srcHash, `${page}'s build stamp matches ${src} — run tools/build.cjs if this fails`);
+    eq(stamp.css, cssHash, `and names the current stylesheet`);
+    ok(html.includes(`<link rel="stylesheet" href="app.css?h=${cssHash}">`), `${page} links the stylesheet by its hash, so a new build is never served from cache`);
+    const compiled = read(src.replace(/\.jsx$/, '.compiled.js'));
+    ok(compiled.startsWith(`//# planner-src-hash=${srcHash}\n`), `the compiled ${src} is from the current source`);
+    // ── served locally, an unbuilt edit is compiled, not ignored ──────────
+    ok(/LOCAL = location\.protocol === 'file:'/.test(html), `${page} checks the source itself when served from this machine`);
+    ok(/if \(sourceHash !== BUILD\.src\) \{\s*await loadScript\('vendor\/tailwind\.js'\);/.test(html),
+      `and brings in the in-browser Tailwind when the source has moved on from the stylesheet`);
+    ok(/<link rel="icon" href="data:,">/.test(html), `${page} names an (empty) icon, so the browser does not request a missing one`);
+  });
+  eq(/tailwind\.config = \{/.test(read('theme.js')), false,
+    'the palette block no longer assumes the in-browser Tailwind is on the page');
+
+  // ── overrides replace, they never append ─────────────────────────────────
+  // Two classes that set one property on one element are settled by stylesheet
+  // order, not by the order they are written — and that order differed between
+  // the in-browser compiler and the build. Found by comparing every class list
+  // the app renders under both: an appended "w-24" lost to the shared w-full.
+  const jsx = read('retirement-planner.jsx');
+  const constClasses = {};
+  ['inputStyle', 'compactInputStyle', 'cardStyle', 'labelStyle', 'compactLabelStyle', 'buttonPrimary', 'buttonSecondary'].forEach(n => {
+    const m = new RegExp('const ' + n + ' = "([^"]+)"').exec(jsx);
+    if (m) constClasses[n] = m[1].split(/\s+/);
+  });
+  const group = (c) => {
+    c = c.replace(/^(hover|focus|md|lg|sm|xl):/, '$1:');
+    if (/^(w|h|max-w|min-w|max-h|min-h)-/.test(c)) return c.split('-').slice(0, c.startsWith('m') ? 2 : 1).join('-');
+    if (/^p[xy]?-/.test(c)) return c.split('-')[0];
+    if (/^text-(xs|sm|base|lg|xl|\d?xl)$/.test(c)) return 'text-size';
+    if (/^text-[a-z]+-\d+/.test(c)) return 'text-color';
+    if (/^bg-[a-z]+-\d+/.test(c)) return 'bg-color';
+    if (/^border-(?![lrtbxy]-)[a-z]+-\d+/.test(c)) return 'border-color';   // not border-l-4, a width
+    if (/^backdrop-blur/.test(c)) return 'backdrop-blur';
+    if (/^rounded(-|$)/.test(c) && !/^rounded-[lrtb]/.test(c)) return 'rounded';
+    return null;
+  };
+  const clashes = [];
+  const re = /\$\{(inputStyle|compactInputStyle|cardStyle|labelStyle|compactLabelStyle|buttonPrimary|buttonSecondary)\}([^`$]*)/g;
+  let m;
+  while ((m = re.exec(jsx))) {
+    const base = constClasses[m[1]] || [];
+    m[2].split(/\s+/).filter(Boolean).forEach(extra => {
+      const g = group(extra);
+      if (g && base.some(b => group(b) === g && b !== extra)) clashes.push(`\${${m[1]}} + ${extra}`);
+    });
+  }
+  const re2 = /\b(inputStyle|compactInputStyle|cardStyle) \+ ["']([^"']*)["']/g;
+  while ((m = re2.exec(jsx))) {
+    const base = constClasses[m[1]] || [];
+    m[2].split(/\s+/).filter(Boolean).forEach(extra => {
+      const g = group(extra);
+      if (g && base.some(b => group(b) === g && b !== extra)) clashes.push(`${m[1]} + "${extra}"`);
+    });
+  }
+  eq(clashes.length, 0, 'no shared style has a conflicting class appended to it' + (clashes.length ? ': ' + [...new Set(clashes)].join(', ') : ''));
+  // Table rows: one tint per row, chosen in one expression, not several
+  // conditional classes that each might add a background.
+  const rowTints = (jsx.match(/<tr [^>]*className=\{`[^`]*`\}/g) || []).filter(t => (t.match(/\$\{[^}]*'bg-/g) || []).length > 1);
+  eq(rowTints.length, 0, 'no table row appends two independent background tints' + (rowTints.length ? ': ' + rowTints[0].slice(0, 120) : ''));
+  ok(/const swapClass = \(style, from, to\)/.test(jsx), 'overrides of a shared style go through swapClass');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

@@ -55,7 +55,7 @@ Visit the live site: `https://YOUR-USERNAME.github.io/retirement-planner/`
 
 Note: double-clicking `index.html` does **not** work — the app fetches its JSX and spawns a Web Worker, both of which browsers block on `file://` URLs.
 
-All libraries (React, Tailwind, Recharts, Babel) are vendored in `vendor/` and load locally — no CDN dependency, works offline. Babel transforms the JSX in-browser; there is no build step.
+All libraries (React, Recharts) are vendored in `vendor/` and load locally — no CDN dependency, works offline. The pages load the prebuilt app and stylesheet; Babel and Tailwind's in-browser compiler are vendored too, but only load when the source has been edited without rebuilding.
 
 ### Running the tests
 ```
@@ -63,20 +63,23 @@ node tests/run-tests.cjs
 ```
 The suite exercises the shared calc engine (`engine.js`) — federal/state tax brackets, RMD, Social Security taxation, IRMAA, the early-withdrawal penalty, the age-65 deductions, Roth bracket-fill, and full projection integration tests.
 
-### Speeding up page load (optional)
+### Building (after any change to the source)
 ```
+npm install          # once — installs Tailwind 3.4.17, used only by the build
 node tools/build.cjs
 ```
-There is still no bundler: `index.html` fetches the JSX and compiles it with the
-vendored Babel. That costs a few seconds of CPU per load for ~780 KB of source.
-This command precompiles it to `retirement-planner.compiled.js`, which the page
-uses instead when present.
+There is still no bundler. The build precompiles `retirement-planner.jsx` and
+`retirement-planner-mobile.jsx` to `.compiled.js` files, builds `app.css` from the
+classes they use, and stamps each page with the hash of the source it was built
+from. On the live site the pages trust that stamp and load only the compiled app
+and the stylesheet — about 2.6 MB for the desktop and 1 MB for the phone, where
+it was about 7.7 MB and 4.4 MB when both compiled in the browser.
 
-It is a pure cache and cannot go stale: the compiled file records a hash of the
-source it came from, and the page only uses it when that matches the `.jsx` it
-actually fetched. Edit the JSX without rebuilding and the browser quietly falls
-back to compiling from source — slower, never wrong. Deleting the compiled file
-is always safe. Re-run the command before committing a release.
+A stale build cannot reach the live site: the test suite fails if any stamp,
+compiled file or `app.css` does not match its source. Served from `localhost`,
+the pages also check the source itself, so an edit you have not rebuilt yet is
+compiled in the browser rather than ignored — slower, never wrong. Commit the
+`.compiled.js` files and `app.css` alongside the source.
 
 ## Architecture
 
@@ -96,9 +99,9 @@ Display components read from year data
 
 - **React 18** — UI framework
 - **Recharts** — Charts and visualizations
-- **Tailwind CSS** — Styling
-- **Babel** — In-browser JSX transformation
-- No build tools, no bundler, no server
+- **Tailwind CSS** — Styling, prebuilt to `app.css`
+- **Babel** — JSX precompiled by `tools/build.cjs` (in-browser only as a fallback)
+- No bundler, no server
 
 ## License
 

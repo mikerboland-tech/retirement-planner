@@ -1,0 +1,12 @@
+{
+  "name": "retirement-planner",
+  "private": true,
+  "description": "Build tooling only. The app itself has no runtime dependencies beyond the files in vendor/.",
+  "scripts": {
+    "build": "node tools/build.cjs",
+    "test": "node tests/run-tests.cjs"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.17"
+  }
+}
