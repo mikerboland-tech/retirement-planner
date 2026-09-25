@@ -15895,6 +15895,112 @@ section('P140 — the pages load the build, not the compilers');
   ok(/const swapClass = \(style, from, to\)/.test(jsx), 'overrides of a shared style go through swapClass');
 }
 
+section('P141 — the Dashboard says whether the plan is on track, and what to do');
+
+{
+  const fsMod = require('fs'), pathMod = require('path'), vmMod = require('vm');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const jsx = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner.jsx'), 'utf8');
+
+  // ── the engine's searches ────────────────────────────────────────────────
+  const b = baseScenario({ filingStatus: 'single' });
+  const ctx = { pi: b.pi, accts: b.accts, streams: b.streams, assetList: [], events: [], recurring: [] };
+  const fails = (pi, accts = ctx.accts, streams = ctx.streams) =>
+    engine.planShortfall(computeProjections(pi, accts, streams, [], [], []), { retirementAge: pi.myRetirementAge }).fails;
+  eq(fails(ctx.pi), false, 'the fixture plan is funded as configured');
+  const edge = engine.survivableEdge(ctx, 'spending');
+  const bp = engine.breakingPoint(ctx, 'spending');
+  ok(edge && Number.isFinite(edge.value), 'survivableEdge finds a spending edge');
+  eq(edge.value, bp.value, 'and it is exactly the edge breakingPoint reports — one search, two callers');
+  eq(fails({ ...ctx.pi, desiredRetirementIncome: edge.value }), false, 'spending at the edge funds every year');
+  eq(fails({ ...ctx.pi, desiredRetirementIncome: edge.breaksAt }), true, 'and just past it does not');
+  // The case breakingPoint declines: a plan already short.
+  const shortPi = { ...ctx.pi, desiredRetirementIncome: edge.breaksAt * 1.4 };
+  const shortCtx = { ...ctx, pi: shortPi };
+  eq(fails(shortPi), true, 'the over-spending variant falls short');
+  ok(engine.breakingPoint(shortCtx, 'spending').alreadyFails, 'breakingPoint says only that it already fails');
+  const edge2 = engine.survivableEdge(shortCtx, 'spending');
+  ok(Number.isFinite(edge2.value) && edge2.value < shortPi.desiredRetirementIncome,
+    'survivableEdge still answers how much less to spend');
+  ok(Math.abs(edge2.value - edge.value) < Math.max(1, edge.value * 0.01), 'and the edge does not depend on where you started');
+  const late = engine.earliestSurvivingRetirementAge(shortCtx);
+  if (late && late.age !== null) {
+    ok(late.age > shortPi.myRetirementAge, `a later retirement (${late.age}) closes the gap`);
+    const at = engine.planAtRetirementAge(shortPi, ctx.accts, ctx.streams, { myRetirementAge: late.age });
+    eq(fails(at.pi, at.accts, at.streams), false, 'retiring then funds every year');
+    const before = engine.planAtRetirementAge(shortPi, ctx.accts, ctx.streams, { myRetirementAge: late.age - 1 });
+    eq(fails(before.pi, before.accts, before.streams), true, 'and a year earlier does not — it is the earliest');
+  } else {
+    ok(late && late.age === null, 'or it says plainly that no retirement age up to 75 closes it');
+  }
+  eq(engine.earliestSurvivingRetirementAge(ctx).age, ctx.pi.myRetirementAge, 'a funded plan needs no delay');
+
+  // ── the verdict's tiers ──────────────────────────────────────────────────
+  const grab = (start, end) => { const a = jsx.indexOf(start); return jsx.slice(a, jsx.indexOf(end, a) + end.length); };
+  const code = ['HEALTH_SIMS', 'HEALTH_ON_TRACK', 'HEALTH_AT_RISK'].map(n => grab('const ' + n + ' = ', ';')).join('\n')
+    + '\n' + grab('const planHealthVerdict = ', '\n};');
+  const verdict = eval(code + '\nplanHealthVerdict');
+  eq(verdict({ fails: true, shortAge: 81, lastAge: 95, mc: 0.9 }).tone, 'risk', 'a plan short at average returns is at risk, whatever the odds');
+  ok(/runs short at age 81/.test(verdict({ fails: true, shortAge: 81, lastAge: 95, mc: null }).text), 'and says when');
+  eq(verdict({ fails: false, lastAge: 95, mc: null }).tone, 'pending', 'before the markets are in, it says it is checking');
+  eq(verdict({ fails: false, lastAge: 95, mc: 0.60 }).tone, 'risk', 'funded on average but 60% odds is at risk');
+  eq(verdict({ fails: false, lastAge: 95, mc: 0.80 }).tone, 'warn', '80% is worth a look');
+  eq(verdict({ fails: false, lastAge: 95, mc: 0.90 }).tone, 'good', '90% is on track');
+  ok(/about 95% of 250/.test(verdict({ fails: false, lastAge: 95, mc: 0.964 }).text),
+    'the odds are rounded to 5 and called "about" — 250 markets are not precise to the point');
+
+  // ── the worker ───────────────────────────────────────────────────────────
+  // Run the real worker in a sandbox: a seeded simulation must repeat exactly,
+  // or the same plan shows a different percentage on every visit.
+  const msgs = [];
+  const sb = { URLSearchParams, Math, Date, JSON, Array, Object, Number, String, Map, Set, Float64Array,
+    Int32Array, Uint32Array, Uint8Array, Float32Array, Symbol, Reflect, RegExp, Promise, Error, isFinite, isNaN,
+    parseFloat, parseInt, Infinity, NaN, console };
+  sb.self = sb; sb.location = { search: '?v=test' };
+  sb.postMessage = (m) => msgs.push(m);
+  sb.importScripts = (u) => vmMod.runInContext(fsMod.readFileSync(pathMod.join(ROOT, u.replace(/\?.*/, '')), 'utf8'), sb);
+  vmMod.createContext(sb);
+  vmMod.runInContext(fsMod.readFileSync(pathMod.join(ROOT, 'worker.js'), 'utf8'), sb);
+  const job = (type, payload) => { msgs.length = 0; sb.onmessage({ data: { jobId: 1, type, payload } });
+    return msgs.find(m => m.type === 'result' || m.type === 'error'); };
+  const payload = { personalInfo: ctx.pi, accounts: ctx.accts, incomeStreams: ctx.streams, assets: [], oneTimeEvents: [], recurringExpenses: [] };
+  const sim = { numSimulations: 24, startAge: ctx.pi.myRetirementAge, returnModel: 'perAccount', meanReturn: 0.07, stdDev: 0.15,
+    inflationMean: 0.03, inflationStdDev: 0.01, method: 'random', assetMix: 0.7, historicalStartYear: 'all',
+    guardrails: { enabled: false, bandPct: 0.2, adjustPct: 0.1 }, longevity: { enabled: false }, ltc: { enabled: false } };
+  const r1 = job('monteCarlo', { ...payload, simSettings: sim, seed: 12345 });
+  const r2 = job('monteCarlo', { ...payload, simSettings: sim, seed: 12345 });
+  ok(r1 && r1.type === 'result' && r2 && r2.type === 'result', 'the seeded simulation runs');
+  eq(JSON.stringify(r1.data.percentileBands), JSON.stringify(r2.data.percentileBands),
+    'and the same seed gives the same result, run for run — every percentile of every year');
+  const u1 = job('monteCarlo', { ...payload, simSettings: sim });
+  const u2 = job('monteCarlo', { ...payload, simSettings: sim });
+  ok(JSON.stringify(u1.data.percentileBands) !== JSON.stringify(u2.data.percentileBands),
+    'while an unseeded run (the Will it last? tab) still draws fresh markets every time');
+  const solve = job('planSolve', payload);
+  ok(solve && solve.type === 'result', 'the planSolve job runs');
+  ok(Math.abs(solve.data.spendingEdge - edge.value) < 1, 'and its spending edge is the engine’s, to the dollar');
+  eq(solve.data.fails, false, 'it agrees the plan is funded');
+  const solve2 = job('planSolve', { ...payload, personalInfo: shortPi });
+  eq(solve2.data.fails, true, 'and that the over-spending variant is not');
+  eq(solve2.data.retireAge, late ? late.age : null, 'with the same earliest retirement age the engine finds');
+
+  // ── wiring ───────────────────────────────────────────────────────────────
+  const html = fsMod.readFileSync(pathMod.join(ROOT, 'index.html'), 'utf8');
+  ok(/window\.PlannerHealthWorker = makePlannerWorker\(\);/.test(html),
+    'the verdict has a worker of its own, so restarting it never cancels another panel’s job');
+  const dStart = jsx.indexOf('function DashboardTab(');
+  const dash = jsx.slice(dStart, jsx.indexOf('\n// ── THE DASHBOARD', dStart));
+  ok(/<PlanHealthCard\s/.test(dash), 'the Dashboard shows the verdict');
+  ok(dash.indexOf('<PlanHealthCard') < dash.indexOf('data-tour="whatif-levers"'), 'above the what-if card');
+  ok(/onTrySpending=\{\(v\) => \{ setCfg\(\{ leversOpen: true \}\); setControl\('spending', v\); \}\}/.test(dash),
+    '"Try it" puts the fix into the what-if levers rather than changing the plan');
+  ok(/buildNextYearActions\(live, healthPlan\.pi/.test(dash), 'the next steps come from the same builder as the Next 12 Months report');
+  const card = jsx.slice(jsx.indexOf('function PlanHealthCard('), jsx.indexOf('// The Dashboard and the Sandbox were one page'));
+  ok(/planShortfall\(live, \{ retirementAge: retireAge \}\)/.test(card), 'pass/fail is read off the projection the page shows');
+  ok(/a\.id !== 'quarterly'/.test(card), 'and the calendar reminder is left to the report');
+  ok(/seed: healthSeed\(planKey\)/.test(card), 'the simulation is seeded by the plan');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

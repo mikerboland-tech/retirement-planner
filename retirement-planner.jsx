@@ -13882,6 +13882,172 @@ const SandboxChoice = ({ label, value, options, onChange, planLabel, note, disab
   </div>
 );
 
+// ── PLAN HEALTH ──────────────────────────────────────────────────────────────
+// The answer a reader came to the Dashboard for, in one line: is this plan on
+// track? Then what to do about it. Everything here is the engine's:
+//   • pass/fail is read off the projection the page is already showing, so the
+//     verdict cannot disagree with the charts beneath it;
+//   • "how much could I spend" and "when could I retire" are the engine's own
+//     searches (survivableEdge, earliestSurvivingRetirementAge);
+//   • the odds are a Monte Carlo with the Will it last? tab's default settings.
+// The last two run on a worker of their own, restarted whenever the plan
+// changes, so a slider drag never waits on them.
+//
+// The simulation is 250 markets, not the tab's 1,000 — seconds rather than
+// twenty. At 250 the figure is good to a couple of points, so it is shown
+// rounded to 5 and called "about"; the seed is fixed per plan, so the same
+// plan says the same thing on every visit. The full run is one click away.
+const HEALTH_SIMS = 250;
+const HEALTH_ON_TRACK = 0.85;   // at or above, with the average case funded
+const HEALTH_AT_RISK = 0.70;    // below this the odds alone make it at risk
+const HEALTH_DEBOUNCE_MS = 800;
+const healthSeed = (str) => {   // FNV-1a — a stable seed per plan
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h;
+};
+const roundDownTo = (v, step) => Math.floor(v / step) * step;
+// Pure, so the tiers are testable without a worker.
+const planHealthVerdict = ({ fails, shortAge, lastAge, mc }) => {
+  const pct = Number.isFinite(mc) ? Math.round(mc * 20) * 5 : null;    // nearest 5
+  const odds = pct === null ? null : `in about ${pct}% of ${HEALTH_SIMS} simulated markets`;
+  if (fails) return { tone: 'risk', label: 'At risk',
+    text: `At average returns your money runs short at age ${shortAge}` + (odds ? `, and it lasts ${odds}.` : '.') };
+  if (pct === null) return { tone: 'pending', label: 'Checking',
+    text: `Your money lasts through age ${lastAge} at average returns. Testing it against ${HEALTH_SIMS} simulated markets…` };
+  if (mc < HEALTH_AT_RISK) return { tone: 'risk', label: 'At risk',
+    text: `It lasts through age ${lastAge} at average returns, but only ${odds} — a poor run of markets early in retirement would leave it short.` };
+  if (mc < HEALTH_ON_TRACK) return { tone: 'warn', label: 'Worth a look',
+    text: `Your money lasts through age ${lastAge} at average returns, and ${odds}. A margin would make it sturdier.` };
+  return { tone: 'good', label: 'On track',
+    text: `Your money lasts through age ${lastAge} at average returns, and ${odds}.` };
+};
+
+function PlanHealthCard({ plan, opts, currentYearReturn, live, isWhatIf, actions,
+                          onTrySpending, onTryRetireAge, onOpenWillItLast }) {
+  const [solve, setSolve] = useState(null);
+  const [mc, setMc] = useState(null);
+  const planKey = useMemo(() => JSON.stringify([plan, opts || null]), [plan, opts]);
+
+  useEffect(() => {
+    setSolve(null); setMc(null);
+    const W = window.PlannerHealthWorker;
+    if (!W) return undefined;
+    let alive = true;
+    const timer = setTimeout(async () => {
+      try {
+        W.cancel();
+        const payload = { personalInfo: plan.pi, accounts: plan.accts, incomeStreams: plan.streams,
+          assets: plan.assets, oneTimeEvents: plan.events, recurringExpenses: plan.recurring,
+          currentYearReturn, opts };
+        const s = await W.run({ type: 'planSolve', payload }).promise;
+        if (!alive) return;
+        setSolve(s);
+        const r = await W.run({ type: 'monteCarlo', payload: { ...payload, seed: healthSeed(planKey),
+          simSettings: { numSimulations: HEALTH_SIMS, startAge: plan.pi.myRetirementAge,
+            returnModel: 'perAccount', meanReturn: 0.07, stdDev: 0.15, inflationMean: 0.03, inflationStdDev: 0.01,
+            method: 'random', assetMix: 0.7, historicalStartYear: 'all',
+            guardrails: { enabled: false, bandPct: 0.20, adjustPct: 0.10 },
+            longevity: { enabled: false }, ltc: { enabled: false } } } }).promise;
+        if (alive && r && Number.isFinite(r.successRate)) setMc(r.successRate);
+      } catch (e) { /* cancelled by a newer edit, or the worker is unavailable */ }
+    }, HEALTH_DEBOUNCE_MS);
+    return () => { alive = false; clearTimeout(timer); };
+    // planKey is the plan; the rest are read through it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planKey, currentYearReturn]);
+
+  const retireAge = plan.pi.myRetirementAge;
+  const short = useMemo(() => planShortfall(live, { retirementAge: retireAge }), [live, retireAge]);
+  if (!short || !live || !live.length) return null;
+  const firstShort = short.firstShortYear || short.depletedYear;
+  const lastAge = live[live.length - 1].myAge;
+  const v = planHealthVerdict({ fails: short.fails, shortAge: firstShort ? firstShort.myAge : null, lastAge, mc });
+
+  // What to do about it, most useful first. The plan-level levers come first
+  // when there is a gap to close; this year's to-dos fill the rest.
+  const spend = plan.pi.desiredRetirementIncome || 0;
+  const steps = [];
+  if (solve && short.fails && Number.isFinite(solve.spendingEdge) && solve.spendingEdge < spend) {
+    const target = roundDownTo(solve.spendingEdge, 500);
+    steps.push({ key: 'spend', title: `Spend about ${formatCurrency(spend - target)} less a year`,
+      detail: `${formatCurrency(target)} a year in today's dollars funds every year at average returns.`,
+      action: { label: 'Try it', run: () => onTrySpending(target) } });
+  }
+  if (solve && short.fails && Number.isFinite(solve.retireAge) && solve.retireAge > retireAge) {
+    steps.push({ key: 'retire', title: `Or retire at ${solve.retireAge} instead of ${retireAge}`,
+      detail: 'The earliest age that funds every year at average returns, with nothing else changed.',
+      action: { label: 'Try it', run: () => onTryRetireAge(solve.retireAge) } });
+  }
+  if (!short.fails && mc !== null && mc < HEALTH_ON_TRACK) {
+    steps.push({ key: 'markets', title: 'See the markets it does not survive',
+      detail: 'Will it last? shows when and how the failing runs go wrong.',
+      action: { label: 'Open', run: onOpenWillItLast } });
+  }
+  // The estimated-tax reminder stays in the report and off this card: it is a
+  // calendar note that applies to every plan with a tax bill, not a decision
+  // about this one, and on the card it pushed real steps out of the top three.
+  const SEV = { high: 0, warn: 1, info: 2 };
+  (actions || []).filter(a => a.id !== 'quarterly')
+    .sort((a, b) => (SEV[a.severity] ?? 3) - (SEV[b.severity] ?? 3))
+    .forEach(a => { if (steps.length < 3) steps.push({ key: a.id, title: a.title, amount: a.amount, detail: a.detail }); });
+
+  const tone = {
+    good: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40',
+    warn: 'bg-amber-500/15 text-amber-300 border-amber-500/40',
+    risk: 'bg-red-500/15 text-red-300 border-red-500/40',
+    pending: 'bg-slate-700/40 text-slate-300 border-slate-600',
+  }[v.tone];
+  const cushion = solve && !short.fails && Number.isFinite(solve.spendingEdge) ? roundDownTo(solve.spendingEdge, 1000) : null;
+
+  return (
+    <div className={cardStyle} data-tour="plan-health">
+      <div className="flex flex-wrap items-start gap-3">
+        <span className={`shrink-0 text-sm font-semibold px-3 py-1 rounded-full border ${tone}`}>{v.label}</span>
+        <div className="flex-1 min-w-[260px]">
+          <p className="text-slate-100">
+            {isWhatIf && <span className="text-amber-400">This what-if: </span>}
+            {v.text}
+          </p>
+          {cushion !== null && cushion > spend && (
+            <p className="text-sm text-slate-400 mt-1">
+              At average returns you could spend up to about {formatCurrency(cushion)} a year in today's dollars
+              — {formatCurrency(cushion - spend)} more than you plan — and still fund every year.
+            </p>
+          )}
+          {solve && solve.spendingSurvivesRange && !short.fails && (
+            <p className="text-sm text-slate-400 mt-1">At average returns it would fund even five times your planned spending.</p>
+          )}
+        </div>
+      </div>
+      {steps.length > 0 && (
+        <div className="mt-4 pt-3 border-t border-slate-700/50">
+          <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">Next steps</div>
+          <ol className="space-y-2">
+            {steps.map((st, i) => (
+              <li key={st.key} className="flex flex-wrap items-start gap-3">
+                <span className="shrink-0 w-5 h-5 rounded-full bg-slate-700 text-slate-300 text-xs flex items-center justify-center mt-0.5">{i + 1}</span>
+                <div className="flex-1 min-w-[220px]">
+                  <div className="text-sm text-slate-200">
+                    {st.title}{st.amount && <span className="text-slate-400"> · {st.amount}</span>}
+                  </div>
+                  {st.detail && <div className="text-xs text-slate-500 line-clamp-2">{st.detail}</div>}
+                </div>
+                {st.action && (
+                  <button onClick={st.action.run}
+                    className="shrink-0 px-3 py-1 rounded-lg border border-amber-500/50 bg-amber-500/10 text-amber-300 text-xs hover:bg-amber-500/20 transition-colors">
+                    {st.action.label}
+                  </button>
+                )}
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // The Dashboard and the Sandbox were one page drawn twice: the Sandbox already
 // rendered every Dashboard panel through the registry, from the same engine,
 // with levers on top. v2.47.0 made that the only page. With the levers left
@@ -13892,7 +14058,7 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
                       createScenarioFrom, deleteScenario, incomeStreams, loadScenario, oneTimeEvents,
                       personalInfo, projections, recurringExpenses, sandboxConfig, scenarios,
                       setSandboxConfig, onShowEverything, onDismissTour, onTakeTour, setActiveTab,
-                      setPersonalInfo, showTourOffer }) {
+                      setPersonalInfo, showTourOffer, currentYearReturn }) {
   const R = window.Recharts || {};
   const { ComposedChart, LineChart, BarChart, Line, Bar, Area, XAxis, YAxis,
           CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } = R;
@@ -14197,6 +14363,17 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
   }), [live, scenario, personalInfo, accounts, incomeStreams, assets, oneTimeEvents,
        recurringExpenses, liveRetAge, openInfoCard, toggleInfoCard]);
 
+  // The plan the health card judges: whatever the page is showing.
+  const healthPlan = useMemo(() => {
+    const sc = (scenario && !scenario.error) ? scenario : null;
+    return { pi: sc ? sc.pi : personalInfo, accts: sc ? sc.accts : accounts,
+             streams: sc ? sc.streams : incomeStreams, assets, events: oneTimeEvents, recurring: recurringExpenses };
+  }, [scenario, personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses]);
+  // This year's to-dos, from the same builder as the Next 12 Months report.
+  const nextActions = useMemo(
+    () => buildNextYearActions(live, healthPlan.pi, healthPlan.accts, healthPlan.streams),
+    [live, healthPlan]);
+
   // The shared charts take a badge node; it marks every panel drawing a
   // what-if, so no chart on the page can be mistaken for the saved plan.
   const whatIfBadge = (
@@ -14350,6 +14527,19 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
       )}
 
       {onShowEverything && <HiddenSettingsNotice pi={personalInfo} onShowEverything={onShowEverything} />}
+
+      {/* ── Is it on track, and what to do ─────────────────────────────── */}
+      <PlanHealthCard
+        plan={healthPlan}
+        opts={(scenario && !scenario.error) ? scenario.opts : undefined}
+        currentYearReturn={currentYearReturn}
+        live={live}
+        isWhatIf={previewing}
+        actions={nextActions}
+        onTrySpending={(v) => { setCfg({ leversOpen: true }); setControl('spending', v); }}
+        onTryRetireAge={(a) => { setCfg({ leversOpen: true }); setControl('myRetirementAge', a); }}
+        onOpenWillItLast={() => setActiveTab && setActiveTab('montecarlo')}
+      />
 
       {/* ── The what-if levers ─────────────────────────────────────────── */}
       {/* Sticky while it is doing something — open, or folded with a lever
@@ -20253,7 +20443,7 @@ const TOUR_STEPS = [
   {
     target: 'nav-overview',
     title: 'Dashboard — start here',
-    body: "The Dashboard is your plan at a glance: portfolio balance year by year, whether the money lasts, and the point where it gets tight. After you change any input, this is where you check what it did. Open “What if…” at the top to move retirement age, spending, claiming or conversion strategy and watch the whole page re-run — your saved plan is untouched until you choose otherwise. “Panels” picks what the page shows.",
+    body: "The Dashboard is your plan at a glance. The top line says whether it is on track — at average returns and across simulated markets — and lists the next steps worth taking. Below it: portfolio balance year by year, whether the money lasts, and the point where it gets tight. After you change any input, this is where you check what it did. Open “What if…” at the top to move retirement age, spending, claiming or conversion strategy and watch the whole page re-run — your saved plan is untouched until you choose otherwise. “Panels” picks what the page shows.",
   },
   {
     target: 'nav-plan-setup',
@@ -22456,7 +22646,7 @@ function RetirementPlanner() {
             {activeTab === 'assets' && <AssetsTab assetTypes={ASSET_TYPES} assets={assets} setAssets={setAssets} setEditingAsset={setEditingAsset} setShowAssetModal={setShowAssetModal} />}
             {activeTab === 'income' && <IncomeStreamsTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setSectionVisibility={effectiveSetSectionVisibility} incomeStreams={incomeStreams} incomeTypes={INCOME_TYPES} personalInfo={personalInfo} projections={displayProjections} setEditingIncome={setEditingIncome} setIncomeStreams={setIncomeStreams} setShowIncomeModal={setShowIncomeModal} />}
             {activeTab === 'socialsecurity' && <SocialSecurityTab currentYearReturn={currentYearReturn} detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} recurringExpenses={recurringExpenses} setIncomeStreams={setIncomeStreams} />}
-            {activeTab === 'dashboard' && <DashboardTab onShowEverything={showEverything} onDismissTour={declineTourOffer} onTakeTour={acceptTourOffer} setActiveTab={setActiveTab} setPersonalInfo={setPersonalInfo} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} accounts={accounts} activeScenarioId={activeScenarioId} applyPlanAsBaseline={applyPlanAsBaseline} createScenarioFrom={createScenarioFrom} deleteScenario={deleteScenario} loadScenario={loadScenario} scenarios={scenarios} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
+            {activeTab === 'dashboard' && <DashboardTab currentYearReturn={currentYearReturn} onShowEverything={showEverything} onDismissTour={declineTourOffer} onTakeTour={acceptTourOffer} setActiveTab={setActiveTab} setPersonalInfo={setPersonalInfo} showTourOffer={tourPromptOpen && !showSetupWizard && !showTour} accounts={accounts} activeScenarioId={activeScenarioId} applyPlanAsBaseline={applyPlanAsBaseline} createScenarioFrom={createScenarioFrom} deleteScenario={deleteScenario} loadScenario={loadScenario} scenarios={scenarios} assets={assets} computeProjections={displayComputeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={displayProjections} recurringExpenses={recurringExpenses} sandboxConfig={sandboxConfig} setSandboxConfig={setSandboxConfig} />}
             {activeTab === 'taxplanning' && <TaxPlanningTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setSectionVisibility={effectiveSetSectionVisibility} accounts={accounts} assets={assets} computeProjections={computeProjections} incomeStreams={incomeStreams} oneTimeEvents={oneTimeEvents} personalInfo={personalInfo} projections={projections} recurringExpenses={recurringExpenses} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'currentyear' && <CurrentYearTab detailLevel={effectiveDetailLevel} sectionVisibility={effectiveSectionVisibility} setSectionVisibility={effectiveSetSectionVisibility} currentYearData={currentYearData} personalInfo={personalInfo} projections={projections} setCurrentYearData={setCurrentYearData} setPersonalInfo={setPersonalInfo} />}
             {activeTab === 'montecarlo' && (

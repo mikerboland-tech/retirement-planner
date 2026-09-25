@@ -41,8 +41,29 @@ const {
   rothConversionModeOf,
 } = E;
 
+// ── RANDOMNESS ───────────────────────────────────────────────────────────────
+// Every draw in this file goes through rand(). It is Math.random unless a job
+// asks for a seed, which the Dashboard's plan-health verdict does: the same
+// plan must give the same "about 95%" on every visit, or the number flickers
+// between reloads and reads as the plan changing when nothing has. Reset at
+// the start of every job so a seeded run can never leak into the next one.
+let rand = Math.random;
+// mulberry32 — small, fast, and good enough for sampling returns; this is a
+// planning tool, not a cryptographic one.
+function seededRandom(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 self.onmessage = (e) => {
   const { jobId, type, payload } = e.data;
+  rand = (payload && Number.isFinite(payload.seed)) ? seededRandom(payload.seed) : Math.random;
   try {
     switch (type) {
       case 'monteCarlo':         runMonteCarlo(jobId, payload); break;
@@ -50,6 +71,7 @@ self.onmessage = (e) => {
       case 'ssMonteCarlo':       runSocialSecurityGrid(jobId, payload, true);  break;
       case 'rothOptimizer':      runRothOptimizer(jobId, payload); break;
       case 'marginalRateCurve':  runMarginalRateCurve(jobId, payload); break;
+      case 'planSolve':          runPlanSolve(jobId, payload); break;
       default:
         postMessage({ jobId, type: 'error', error: 'Unknown job type: ' + type });
     }
@@ -59,14 +81,14 @@ self.onmessage = (e) => {
 };
 
 // Box-Muller transform for normal distribution. The zero guards matter:
-// Math.random() can return exactly 0, and Math.log(0) is -Infinity, which makes
+// rand() (Math.random by default) can return exactly 0, and Math.log(0) is -Infinity, which makes
 // z -Infinity and turns every balance in the simulation into NaN. A NaN
 // portfolio then compares false against every survival test, silently counting
 // as a failure. Same guard as randomNormalSS below.
 function randomNormalMC(mean, stdDev) {
   let u1 = 0, u2 = 0;
-  while (u1 === 0) u1 = Math.random();
-  while (u2 === 0) u2 = Math.random();
+  while (u1 === 0) u1 = rand();
+  while (u2 === 0) u2 = rand();
   const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
   return mean + stdDev * z;
 }
@@ -74,8 +96,8 @@ function randomNormalMC(mean, stdDev) {
 // Standard-normal sample for SS-tab MC shocks (matches SocialSecurityTab usage)
 function randomNormalSS() {
   let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
+  while (u === 0) u = rand();
+  while (v === 0) v = rand();
   return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 }
 
@@ -271,7 +293,7 @@ function runMonteCarlo(jobId, payload) {
     // and conservative choice for a couple.
     let piForSim = piWithLifeExp;
     if (longevity) {
-      const myDeath = E.sampleAgeAtDeath(piWithLifeExp.myAge, Math.random, myShift);
+      const myDeath = E.sampleAgeAtDeath(piWithLifeExp.myAge, rand, myShift);
       piForSim = {
         ...piWithLifeExp,
         myLifeExpectancy: myDeath,
@@ -279,13 +301,13 @@ function runMonteCarlo(jobId, payload) {
       };
       if (isMarried) {
         piForSim.spouseLifeExpectancy =
-          E.sampleAgeAtDeath(piWithLifeExp.spouseAge, Math.random, spouseShift);
+          E.sampleAgeAtDeath(piWithLifeExp.spouseAge, rand, spouseShift);
       }
     }
     let ltcDraw = null;
     if (ltcVary) {
-      const mine = E.sampleLTCEpisode(Math.random);
-      const sp = isMarried ? E.sampleLTCEpisode(Math.random) : { months: 0, monthly: 0, setting: null };
+      const mine = E.sampleLTCEpisode(rand);
+      const sp = isMarried ? E.sampleLTCEpisode(rand) : { months: 0, monthly: 0, setting: null };
       ltcDraw = { me: mine, spouse: sp };
       piForSim = { ...piForSim, ltcModel: 'custom', ltcPerPerson: { me: mine, spouse: sp } };
     }
@@ -708,9 +730,9 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
       // habits and environment, the widowhood effect), but modelling that needs a
       // copula this app has no data to calibrate; independence is the conventional
       // and conservative choice.
-      seq.myDeathAge = E.sampleAgeAtDeath(personalInfo.myAge, Math.random, myShift);
+      seq.myDeathAge = E.sampleAgeAtDeath(personalInfo.myAge, rand, myShift);
       if (isMarried && typeof personalInfo.spouseAge === 'number') {
-        seq.spouseDeathAge = E.sampleAgeAtDeath(personalInfo.spouseAge, Math.random, spouseShift);
+        seq.spouseDeathAge = E.sampleAgeAtDeath(personalInfo.spouseAge, rand, spouseShift);
       }
     }
     sharedSequences.push(seq);
@@ -1281,4 +1303,34 @@ function runMarginalRateCurve(jobId, payload) {
   });
 
   postMessage({ jobId, type: 'result', data: { probeAmount: probe, curve } });
+}
+
+// ============================================================================
+// runPlanSolve — the two answers the Dashboard's plan-health card gives beside
+// its verdict: the most the plan could spend and still fund every year, and
+// (only for a plan that falls short) the earliest retirement age that closes
+// the gap. Both are the engine's own searches — survivableEdge and
+// earliestSurvivingRetirementAge — run here so a lever drag never waits on
+// thirty projections.
+// ============================================================================
+function runPlanSolve(jobId, payload) {
+  const { personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
+          currentYearReturn, opts } = payload;
+  const ctx = {
+    pi: personalInfo, accts: accounts || [], streams: incomeStreams || [],
+    assetList: assets || [], events: oneTimeEvents || [], recurring: recurringExpenses || [],
+    opts: { ...(opts || {}), ...(currentYearReturn ? { currentYearReturn } : {}) },
+  };
+  const edge = E.survivableEdge(ctx, 'spending');
+  const base = E.computeProjections(ctx.pi, ctx.accts, ctx.streams, ctx.assetList, ctx.events,
+    ctx.recurring, undefined, ctx.opts);
+  const short = E.planShortfall(base, { retirementAge: ctx.pi.myRetirementAge });
+  const retire = short && short.fails ? E.earliestSurvivingRetirementAge(ctx) : null;
+  postMessage({ jobId, type: 'result', data: {
+    spendingEdge: edge ? edge.value : null,
+    spendingSurvivesRange: !!(edge && edge.survivesRange),
+    spendingFailsAtZero: !!(edge && edge.failsAtBest),
+    fails: !!(short && short.fails),
+    retireAge: retire ? retire.age : null,
+  } });
 }

@@ -8069,33 +8069,30 @@ const STRESS_DIMENSIONS = {
   },
 };
 
-const breakingPoint = (ctx, dimension, { steps = 16 } = {}) => {
+// The survivable edge of one assumption: the worst value the plan still funds
+// every year of. It is the same bisection breakingPoint reports, without
+// breakingPoint's first question (does the plan as configured survive?) — so it
+// also answers for a plan that is already short, which is exactly the plan
+// that most needs to hear "spending $X less would close it". The Dashboard's
+// verdict asks it that; the What Breaks First report asks breakingPoint.
+// ctx.opts is handed to the projection, so a what-if's projection options
+// (guardrails, the QCD switch, this year's actual return) are respected.
+const survivableEdge = (ctx, dimension, { steps = 16 } = {}) => {
   const dim = STRESS_DIMENSIONS[dimension];
   if (!dim || !ctx || !ctx.pi) return null;
   const run = (v) => {
     const c = dim.apply(v, ctx);
     const proj = computeProjections(c.pi, c.accts, c.streams, c.assetList || [],
-      c.events || [], c.recurring || [], c.currentYear);
+      c.events || [], c.recurring || [], c.currentYear, c.opts);
     return planShortfall(proj, { retirementAge: c.pi.myRetirementAge });
   };
   const lo = dim.lo;
   const hi = dim.hi !== null ? dim.hi
     : Math.max(1, (ctx.pi.desiredRetirementIncome || 0) * 5);
-
-  // The plan AS CONFIGURED, not the low end of the sweep. For the spending
-  // dimension the low end is $0/yr, which no plan fails — so testing the range
-  // rather than the plan reported a comfortable cushion for a plan that is
-  // already short today.
-  const base = computeProjections(ctx.pi, ctx.accts, ctx.streams, ctx.assetList || [],
-    ctx.events || [], ctx.recurring || [], ctx.currentYear);
-  const atBase = planShortfall(base, { retirementAge: ctx.pi.myRetirementAge });
-  if (!atBase || atBase.fails) return { dimension, alreadyFails: true, value: null, base: null };
-
   const atLo = run(lo);
-  if (!atLo || atLo.fails) return { dimension, alreadyFails: true, value: null, base: lo };
+  if (!atLo || atLo.fails) return { dimension, failsAtBest: true, value: null, lo, hi };
   const atHi = run(hi);
-  if (atHi && !atHi.fails) return { dimension, survivesRange: true, value: null, base: hi };
-
+  if (atHi && !atHi.fails) return { dimension, survivesRange: true, value: null, lo, hi };
   // Invariant: run(a) survives, run(b) fails. Halve until they meet.
   let a = lo, b = hi;
   for (let i = 0; i < steps; i++) {
@@ -8103,7 +8100,46 @@ const breakingPoint = (ctx, dimension, { steps = 16 } = {}) => {
     if (run(mid).fails) b = mid; else a = mid;
   }
   // `a` is the last value that survives — the edge, stated conservatively.
-  return { dimension, value: a, breaksAt: b, alreadyFails: false, survivesRange: false };
+  return { dimension, value: a, breaksAt: b, lo, hi };
+};
+
+const breakingPoint = (ctx, dimension, { steps = 16 } = {}) => {
+  const dim = STRESS_DIMENSIONS[dimension];
+  if (!dim || !ctx || !ctx.pi) return null;
+  // The plan AS CONFIGURED, not the low end of the sweep. For the spending
+  // dimension the low end is $0/yr, which no plan fails — so testing the range
+  // rather than the plan reported a comfortable cushion for a plan that is
+  // already short today.
+  const base = computeProjections(ctx.pi, ctx.accts, ctx.streams, ctx.assetList || [],
+    ctx.events || [], ctx.recurring || [], ctx.currentYear, ctx.opts);
+  const atBase = planShortfall(base, { retirementAge: ctx.pi.myRetirementAge });
+  if (!atBase || atBase.fails) return { dimension, alreadyFails: true, value: null, base: null };
+  const edge = survivableEdge(ctx, dimension, { steps });
+  if (edge.failsAtBest) return { dimension, alreadyFails: true, value: null, base: edge.lo };
+  if (edge.survivesRange) return { dimension, survivesRange: true, value: null, base: edge.hi };
+  return { dimension, value: edge.value, breaksAt: edge.breaksAt, alreadyFails: false, survivesRange: false };
+};
+
+// The earliest retirement age (for the plan's first person) at or after the
+// planned one that funds every year. Moved through planAtRetirementAge — the
+// same function the Dashboard's retirement-age lever uses — so salary ends and
+// contributions stop with it, rather than only relabelling the year. Tried one
+// year at a time rather than bisected: the answer is an integer, a later
+// retirement is not strictly monotone when it moves income across a tax
+// cliff, and the first age that works is the one worth reporting.
+// Returns { age } or { age: null } when nothing up to maxAge works.
+const earliestSurvivingRetirementAge = (ctx, { maxAge = 75 } = {}) => {
+  if (!ctx || !ctx.pi) return null;
+  const from = ctx.pi.myRetirementAge || 65;
+  for (let age = from; age <= Math.max(from, maxAge); age++) {
+    const moved = age === from ? { pi: ctx.pi, accts: ctx.accts, streams: ctx.streams }
+      : planAtRetirementAge(ctx.pi, ctx.accts, ctx.streams, { myRetirementAge: age });
+    const proj = computeProjections(moved.pi, moved.accts, moved.streams, ctx.assetList || [],
+      ctx.events || [], ctx.recurring || [], ctx.currentYear, ctx.opts);
+    const s = planShortfall(proj, { retirementAge: age });
+    if (s && !s.fails) return { age, delay: age - from };
+  }
+  return { age: null, delay: null };
 };
 
 // A contribution window with no bounds funds NOTHING. The projection gates
@@ -12110,7 +12146,7 @@ const describePlanPatch = (state, patch) => {
     marginalCostOfNextDollar, survivorTaxComparison, survivorSSLoss,
     PLAN_COLLECTIONS, PLAN_PATCH_FORBIDDEN, planPatchSchema,
     validatePlanPatch, applyPlanPatch, describePlanPatch,
-    planShortfall, breakingPoint, STRESS_DIMENSIONS,
+    planShortfall, breakingPoint, survivableEdge, earliestSurvivingRetirementAge, STRESS_DIMENSIONS,
     scaleOwnContributions, addOwnContribution, accountsAtSavingsTarget,
     SAVINGS_FILL_ORDER, savingsBucketOf, employeeDollarsOf, savingsHeadroom,
     fillSavingsToTarget, drainSavingsToTarget, savingsTargetPlan,
