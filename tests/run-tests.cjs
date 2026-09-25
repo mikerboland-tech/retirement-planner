@@ -14263,17 +14263,11 @@ section('P121 — the user sweep: six things that were wrong, incomplete or miss
     ok(/if \(!hasData \|\| personalInfo\.useDetailedCurrentYear\) return null;/.test(flat),
       'staying quiet on an empty tab, and once the switch is on');
 
-    // 6. Mobile says it is not showing the saved plan, and still never reads it.
-    ok(/DESKTOP_STORAGE_KEY = 'retirement_planner_data'/.test(mob), 'mobile can detect a full plan');
-    // It no longer merely SAYS it is not using the plan — it projects it. The
-    // banner this used to assert was replaced by the real view in v2.38.0.
-    ok(/function MyPlanView/.test(mob), 'and renders that plan rather than a stranger’s numbers');
-    ok(/savedDesktopPlan && \(/.test(mob), 'the mode switch only appears when a plan exists');
-    // It must remain read-only about that key: seeding a married, multi-account
-    // plan into a single-filer model would invent a NEW disagreement.
-    ok(!/setItem\(DESKTOP_STORAGE_KEY/.test(mob), 'mobile never writes the desktop plan');
-    eq((mob.match(/DESKTOP_STORAGE_KEY/g) || []).length, 2,
-      'and touches that key only to define it and read it');
+    // 6. The phone is one screen of the reader's own numbers (v2.55.0, P142).
+    // It read the full version's saved plan for a while, but a phone keeps its
+    // own storage, so that "plan" was usually the sample the full version saves
+    // on first open. It neither reads nor writes that key now.
+    eq(/retirement_planner_data/.test(mob), false, 'mobile does not touch the full version’s plan');
   }
 }
 
@@ -14471,10 +14465,9 @@ section('P124 — the phone reads the plan the desktop saved, and gets the same 
 
   // ── the phone at rest projects exactly what the desktop projects ──────────
   {
-    // MyPlanView runs the plan through sandboxScenario with every lever
-    // untouched before projecting, so that moving one later is the same code
-    // path as not moving it. That has to be a no-op, row for row — otherwise
-    // the phone shows a what-if the moment it opens.
+    // sandboxScenario with every lever untouched must be a no-op, row for
+    // row: the Dashboard's what-if card relies on it (and the phone's old
+    // My plan view did, until v2.55.0).
     const sc0 = baseScenario({ myAge: 58, myRetirementAge: 63, spouseRetirementAge: 63,
       desiredRetirementIncome: 90000, rothConversionAmount: 50000,
       rothConversionStartAge: 63, rothConversionEndAge: 70 });
@@ -14515,25 +14508,6 @@ section('P124 — the phone reads the plan the desktop saved, and gets the same 
       'and five more working years leave more behind');
   }
 
-  // ── the phone never writes to the plan it is reading ──────────────────────
-  {
-    const mob = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner-mobile.jsx'), 'utf8');
-    ok(/function MyPlanView/.test(mob), 'the phone has a view for the saved plan');
-    ok(/normalizeSavedPlan\(JSON\.parse\(raw\)\)/.test(mob), 'which reads it through the shared reader');
-    ok(/computeProjections\(sc\.pi, sc\.accts, sc\.streams/.test(mob),
-      'and projects it with the engine, not a second model');
-    const desktopKeyWrites = mob.match(/setItem\(\s*DESKTOP_STORAGE_KEY/g);
-    eq(desktopKeyWrites, null, 'and never writes back to the desktop’s saved plan');
-    ok(/never writes to it/.test(mob), 'the page says so on screen');
-    // The sparkline is fed rows, not bare numbers: it reads d.totalPortfolio and
-    // d.myAge off each element, and handing it a number array drew a flat line.
-    ok(/<Sparkline data=\{proj\}/.test(mob), 'the sparkline is handed projection rows, which is what it reads');
-    // One slider, two people. The control names must be the ones sandboxScenario
-    // actually reads — a plausible-looking `retirementAge` is silently ignored,
-    // and the slider then moves nothing at all.
-    ok(/myRetirementAge: retAge !== planRetAge/.test(mob), 'the retirement slider uses the control name the engine reads');
-    ok(/spouseRetirementAge: \(retAge !== planRetAge/.test(mob), 'and moves the spouse by the same number of years');
-  }
 }
 
 
@@ -15999,6 +15973,29 @@ section('P141 — the Dashboard says whether the plan is on track, and what to d
   ok(/planShortfall\(live, \{ retirementAge: retireAge \}\)/.test(card), 'pass/fail is read off the projection the page shows');
   ok(/a\.id !== 'quarterly'/.test(card), 'and the calendar reminder is left to the report');
   ok(/seed: healthSeed\(planKey\)/.test(card), 'the simulation is seeded by the plan');
+}
+
+section('P142 — the phone is one screen of your own numbers');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const mob = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner-mobile.jsx'), 'utf8');
+  const html = fsMod.readFileSync(pathMod.join(ROOT, 'mobile.html'), 'utf8');
+  // Two views became one: the "My plan" view showed whatever the full version
+  // had saved in the phone's browser — usually its sample plan — and had no way
+  // to enter anything, while the screen that did was called a what-if.
+  eq(/function MyPlanView|mobileMode|Quick what-if/.test(mob), false, 'there is one view, with no switch between two');
+  ok(/<h1 className="text-lg font-bold text-slate-100">My Retirement Plan<\/h1>/.test(mob), 'and it is called the reader’s plan');
+  ok(/<title>My Retirement Plan<\/title>/.test(html), 'in the browser tab too');
+  // Every input starts from one table of defaults, so the screen can tell an
+  // untouched example from the reader's own numbers.
+  const inits = mob.match(/useState\(saved\.(\w+) \?\? [^)]+\)/g) || [];
+  gt(inits.length, 20, 'the inputs restore from saved state');
+  eq(inits.filter(x => !/\?\? MOBILE_DEFAULTS\./.test(x)).length, 0, 'every one of them defaults from MOBILE_DEFAULTS');
+  ok(/const isExample = Object\.keys\(MOBILE_DEFAULTS\)\.every/.test(mob), 'the example is detected from that table');
+  ok(/\{isExample && \(/.test(mob) && /These are example numbers/.test(mob), 'and the screen says so until the numbers are changed');
+  ok(/everything stays on this phone/.test(mob), 'along with where the numbers are kept');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
