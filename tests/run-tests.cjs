@@ -16233,6 +16233,18 @@ section('P144 — the plan as a timeline you can play');
   // Nothing new is computed: every figure is a field of the row.
   eq(/computeProjections|planSolve|runMonteCarlo/.test(panel), false, 'the panel computes nothing of its own');
 
+  // The year's headline figures live in the summary cards, not in a second row
+  // of tiles inside the panel (v2.57.2): "At Retirement" becomes "At age N" and
+  // "Retirement Income" becomes "Income at age N" while the timeline is shown,
+  // and are exactly the old cards when it is hidden.
+  eq(/TimelineStat/.test(jsx), false, 'the timeline no longer draws its own row of figure tiles');
+  const cards = jsx.slice(jsx.indexOf('function SummaryCardsPanel('), jsx.indexOf('function WithdrawalRatePanel('));
+  ok(/\{ctx\.focus \? <SelectedYearWorthCard ctx=\{ctx\} \/> : \(/.test(cards), 'the At Retirement card follows the timeline while it is shown');
+  ok(/\{ctx\.focus \? <SelectedYearIncomeCard ctx=\{ctx\} \/> : \(/.test(cards), 'and so does Retirement Income');
+  ok(/At Retirement \(Age \{retirementAge\}\)/.test(cards) && /Retirement Income<\/div>/.test(cards), 'the original cards remain for when it is hidden');
+  eq((cards.match(/useFocusAge\(/g) || []).length, 0, 'the summary row itself does not subscribe to the year');
+  ok(/const age = picked != null \? picked : ctx\.retirementAge;/.test(jsx), 'until the reader moves the timeline, the cards show the retirement year, as before');
+
   // The cursor colour: visible on every ground, and never the retirement marker's.
   theme.CHOICES.forEach(({ id }) => {
     const t = theme.resolve(id);

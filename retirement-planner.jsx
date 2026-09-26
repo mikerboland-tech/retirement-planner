@@ -15542,6 +15542,63 @@ function IncomeVsSpendingChart({ data, personalInfo, retirementAge, badge, onHid
 // optional `onHide`. A single bag rather than bespoke prop lists is deliberate:
 // it is what lets the registry below render any of them without knowing which.
 
+// Two of the summary cards follow the Year by year timeline while it is shown.
+// "At Retirement" becomes "At age N" and "Retirement Income" becomes "Income at
+// age N"; the timeline starts on the retirement year, so until the reader moves
+// it they read exactly as before. They subscribe to the year themselves, so the
+// rest of the summary row does not re-render while the plan plays.
+const useSelectedYear = (ctx) => {
+  const picked = useFocusAge(ctx.focus);
+  const age = picked != null ? picked : ctx.retirementAge;
+  const rows = ctx.projections || [];
+  const i = rows.findIndex(r => r.myAge === age);
+  return { age, row: i >= 0 ? rows[i] : null, prev: i > 0 ? rows[i - 1] : null };
+};
+const YearDelta = ({ value, prev, upIsGood, label }) => {
+  if (prev == null) return null;
+  const d = value - prev;
+  if (Math.abs(d) < 1) return <span className="text-slate-500">{label} same as last year</span>;
+  const cls = upIsGood === null ? 'text-slate-500' : ((d > 0) === upIsGood ? 'text-emerald-400' : 'text-red-400');
+  return <span className={cls}>{label} {d > 0 ? '+' : '−'}{formatCurrency(Math.abs(d))} vs last year</span>;
+};
+const yearCardTitle = (age, ctx) => `timeline: age ${age}${age === ctx.retirementAge ? ' (retirement)' : ''} — move the Year by year timeline below to change it`;
+function SelectedYearWorthCard({ ctx }) {
+  const { age, row, prev } = useSelectedYear(ctx);
+  const worth = useTweened(row ? (row.totalNetWorth || 0) : 0);
+  if (!row) return null;
+  return (
+    <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3" title={yearCardTitle(age, ctx)}>
+      <div className="text-slate-500 text-xs mb-0.5">
+        At age {age} · {row.year}{age === ctx.retirementAge ? ' · retirement' : ''}
+      </div>
+      <div className="text-xl font-bold text-slate-100 tabular-nums">{formatCurrency(Math.round(worth))}</div>
+      <div className="text-xs text-slate-500 tabular-nums">Portfolio: {formatCurrency(row.totalPortfolio)}</div>
+      <div className="text-xs tabular-nums">
+        <YearDelta label="portfolio" value={row.totalPortfolio || 0} prev={prev && (prev.totalPortfolio || 0)} upIsGood={true} />
+      </div>
+    </div>
+  );
+}
+function SelectedYearIncomeCard({ ctx }) {
+  const { age, row, prev } = useSelectedYear(ctx);
+  const income = useTweened(row ? (row.totalIncome || 0) : 0);
+  if (!row) return null;
+  return (
+    <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3" title={yearCardTitle(age, ctx)}>
+      <div className="text-slate-500 text-xs mb-0.5">Income at age {age}</div>
+      <div className="text-xl font-bold text-slate-100 tabular-nums">{formatCurrency(Math.round(income))}</div>
+      <div className="text-xs text-slate-500 tabular-nums">SS + Pension + Other: {formatCurrency(row.totalGuaranteedIncome || 0)}</div>
+      <div className="text-xs text-slate-500 tabular-nums">
+        Taxes {formatCurrency(row.totalTax || 0)}
+        {(row.rothConversion || 0) > 0 && <> · converting {formatCurrency(row.rothConversion)} to Roth</>}
+      </div>
+      <div className="text-xs tabular-nums">
+        <YearDelta label="taxes" value={row.totalTax || 0} prev={prev && (prev.totalTax || 0)} upIsGood={false} />
+      </div>
+    </div>
+  );
+}
+
 function SummaryCardsPanel({ ctx, badge, onHide }) {
   const { projections, personalInfo, retirementAge, accounts, assets, incomeStreams,
           oneTimeEvents, recurringExpenses, computeProjections, current,
@@ -15621,16 +15678,20 @@ return (
           <div className="text-xl font-bold text-slate-100">{formatCurrency(current?.totalPortfolio)}</div>
           <div className="text-xs text-slate-500">Retirement funds</div>
         </div>
+        {ctx.focus ? <SelectedYearWorthCard ctx={ctx} /> : (
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           <div className="text-slate-500 text-xs mb-0.5">At Retirement (Age {retirementAge})</div>
           <div className="text-xl font-bold text-slate-100">{formatCurrency(retirementProjection?.totalNetWorth)}</div>
           <div className="text-xs text-slate-500">Portfolio: {formatCurrency(retirementProjection?.totalPortfolio)}</div>
         </div>
+        )}
+        {ctx.focus ? <SelectedYearIncomeCard ctx={ctx} /> : (
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           <div className="text-slate-500 text-xs mb-0.5">Retirement Income</div>
           <div className="text-xl font-bold text-slate-100">{formatCurrency(retirementProjection?.totalGuaranteedIncome)}</div>
           <div className="text-xs text-slate-500">SS + Pension + Other</div>
         </div>
+        )}
         <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
           {/* The age MEASURED, not the age requested. With survivor modelling on
               the plan ends when both spouses have died, which can be before the
@@ -16500,23 +16561,6 @@ const useTweened = (target, ms = 320) => {
   return shown;
 };
 
-const TimelineStat = ({ label, value, prev, upIsGood }) => {
-  const shown = useTweened(value);
-  const d = prev == null ? null : value - prev;
-  const cls = d === null || Math.abs(d) < 1 || upIsGood === null ? 'text-slate-500'
-    : ((d > 0) === upIsGood ? 'text-emerald-400' : 'text-red-400');
-  return (
-    <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
-      <div className="text-xs text-slate-500">{label}</div>
-      <div className="text-xl font-semibold text-slate-100 tabular-nums">{formatCurrency(Math.round(shown))}</div>
-      <div className={`text-xs tabular-nums ${cls}`}>
-        {d === null ? 'first year of the plan' : Math.abs(d) < 1 ? 'same as last year'
-          : `${d > 0 ? '+' : '−'}${formatCurrency(Math.abs(d))} vs last year`}
-      </div>
-    </div>
-  );
-};
-
 function YearTimelinePanel({ ctx, badge, onHide }) {
   const rows = ctx.projections || [];
   const n = rows.length;
@@ -16567,7 +16611,7 @@ function YearTimelinePanel({ ctx, badge, onHide }) {
   }, []);
 
   if (!n) return null;
-  const r = rows[sel], prev = sel > 0 ? rows[sel - 1] : null;
+  const r = rows[sel];
 
   // The ruler. Flight Deck draws it as a tape that scrolls under a fixed caret,
   // like an altimeter; every other theme as a fixed ruler with a moving handle.
@@ -16708,14 +16752,11 @@ function YearTimelinePanel({ ctx, badge, onHide }) {
         </svg>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
-        <TimelineStat label="Portfolio" value={r.totalPortfolio || 0} prev={prev && (prev.totalPortfolio || 0)} upIsGood={true} />
-        <TimelineStat label="Money coming in" value={r.totalIncome || 0} prev={prev && (prev.totalIncome || 0)} upIsGood={null} />
-        <TimelineStat label="Taxes" value={r.totalTax || 0} prev={prev && (prev.totalTax || 0)} upIsGood={false} />
-        <TimelineStat label="Converted to Roth" value={r.rothConversion || 0} prev={prev && (prev.rothConversion || 0)} upIsGood={null} />
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-5 gap-4 mt-4">
+      {/* The year's headline figures are not repeated here: the At age and
+          Income at age cards in the summary row above follow this timeline.
+          This panel carries the breakdown — balances by account, money in by
+          source and out by use — and the years around it. */}
+      <div className="grid grid-cols-1 xl:grid-cols-5 gap-4 mt-3">
         <div className="xl:col-span-2 xl:self-start bg-slate-800/40 border border-slate-700/50 rounded-lg p-4">
           <div className="text-sm font-semibold text-slate-200 mb-3">Age {r.myAge} · {r.year}</div>
           <div className="space-y-2">
