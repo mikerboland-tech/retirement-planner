@@ -707,9 +707,14 @@ function MobilePlanner() {
     return dep ? dep.myAge : null;
   }, [projections, retirementAge]);
   
+  // A theme CHOICE: 'dark', 'light' or one of the four dark looks
+  // (PlannerTheme.CHOICES), as stamped on <html> by the pre-paint script.
   const [themeMode, setThemeMode] = useState(() => {
-    try { return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'; }
-    catch (e) { return 'dark'; }
+    try {
+      const d = document.documentElement;
+      if (d.getAttribute('data-theme') === 'light') return 'light';
+      return PlannerTheme.normalizeChoice(d.getAttribute('data-look'));
+    } catch (e) { return 'dark'; }
   });
 
   const yearsToRetirement = Math.max(0, retirementAge - currentAge);
@@ -717,7 +722,7 @@ function MobilePlanner() {
   const surplusAtLegacy = legacyProj?.totalPortfolio || 0;
   
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+    <div className="app-shell min-h-screen bg-slate-950 text-slate-100" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
       {/* Header */}
       <header className="bg-slate-900 border-b border-slate-800 px-4 py-3 sticky top-0 z-10" style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))' }}>
         <div className="flex items-baseline justify-between gap-2">
@@ -725,23 +730,28 @@ function MobilePlanner() {
           <div className="flex items-center gap-2">
             {/* Mobile draws no charts, so the whole theme switch is the CSS
                 variable flip — no JS palette to keep in step. The preference is
-                the same localStorage key the desktop uses, so choosing light on
-                one lands on the other. */}
-            <button
-              onClick={() => {
-                const next = themeMode === 'dark' ? 'light' : 'dark';
+                the same localStorage key the desktop uses, so a look chosen on
+                one lands on the other. A native select, because on a phone it
+                opens the system picker, which is the easiest list to use. */}
+            <select
+              value={themeMode}
+              onChange={e => {
+                const next = PlannerTheme.normalizeChoice(e.target.value);
                 setThemeMode(next);
                 try {
-                  if (next === 'light') document.documentElement.setAttribute('data-theme', 'light');
-                  else document.documentElement.removeAttribute('data-theme');
-                  localStorage.setItem('retirement_planner_theme', next);
+                  const d = document.documentElement;
+                  if (next === 'light') d.setAttribute('data-theme', 'light');
+                  else d.removeAttribute('data-theme');
+                  if (PlannerTheme.LOOKS[next]) d.setAttribute('data-look', next);
+                  else d.removeAttribute('data-look');
+                  localStorage.setItem(PlannerTheme.STORAGE_KEY, next);
                 } catch (e) { /* storage unavailable — the in-memory switch still holds */ }
               }}
-              className="text-sm px-2 py-0.5 rounded text-slate-400 active:bg-slate-800"
-              aria-label={themeMode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+              className="text-xs max-w-[7.5rem] bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5 text-slate-300"
+              aria-label="Look"
             >
-              {themeMode === 'dark' ? '☀️' : '🌙'}
-            </button>
+              {PlannerTheme.CHOICES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+            </select>
             <span className="text-[10px] text-slate-600 tabular-nums">v{typeof window !== 'undefined' && window.APP_VERSION ? window.APP_VERSION : 'dev'}</span>
           </div>
         </div>

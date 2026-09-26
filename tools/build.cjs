@@ -104,7 +104,7 @@ for (const { file, presets, stripGlobals } of TARGETS) {
 // ---------------------------------------------------------------------------
 const { spawnSync } = require('child_process');
 const CSS_INPUTS = ['retirement-planner.jsx', 'retirement-planner-mobile.jsx', 'theme.js',
-                    'tools/tailwind.config.cjs', 'tools/tailwind.input.css'];
+                    'tools/tailwind.config.cjs', 'tools/tailwind.input.css', 'tools/looks.css'];
 const cssHash = hashSource(CSS_INPUTS.map(f => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\u0000'));
 {
   const bin = path.join(ROOT, 'node_modules', '.bin', process.platform === 'win32' ? 'tailwindcss.cmd' : 'tailwindcss');

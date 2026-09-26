@@ -359,6 +359,103 @@
     },
   };
 
+  // ---------------------------------------------------------------------------
+  // LOOKS
+  //
+  // Four dark looks a user can pick instead of the classic dark or light theme:
+  // Observatory, Aurora, Vault and Flight Deck. A look is a DARK theme with a
+  // character — it changes the ground, the type, the texture and the motion,
+  // and never what a colour means. So the chart series, status colours and
+  // line tiers above are the dark column unchanged in every look (the suite
+  // re-validates each of them against each look's own surface), and a look
+  // only redefines:
+  //
+  //   slate   — the neutral ramp every surface, border and body text uses, so
+  //             the whole UI takes the look's ground and ink through the same
+  //             CSS variables that already carry light mode. Tinted rather than
+  //             grey: ink-blue, violet night, warm charcoal, teal-black. Step
+  //             500 is the muted-label workhorse and is held to 4.5:1 on the
+  //             look's card (800), as slate-500 is in the classic theme.
+  //   chrome  — the chart furniture Recharts needs as plain strings: grounds,
+  //             grid, axis ink and the "you retire here" reference marker,
+  //             which takes the look's accent.
+  //   accent  — the look's own highlight (brass, violet, champagne, cyan), for
+  //             the active nav item and other chrome. Never a status: warnings
+  //             stay amber in every look, because amber means "worth a look".
+  //
+  // Type, texture and motion live in tools/looks.css, keyed on the same
+  // data-look attribute. Everything a look adds is decoration a reader can
+  // lose without losing information, and all of its motion stops under
+  // prefers-reduced-motion.
+  const LOOKS = {
+    observatory: {
+      label: 'Observatory',
+      blurb: 'Ink-blue and brass, figures like instrument readouts, a faint starfield.',
+      accent: '#d9b45a',
+      swatch: ['#0a1020', '#121b33', '#d9b45a'],
+      slate: {
+         50: '#f4f7fc', 100: '#e8edf7', 200: '#d9e0ee', 300: '#c3cbde', 400: '#a6b1c9',
+        500: '#8793b0', 600: '#34436a', 700: '#212e4f', 800: '#121b33', 900: '#0a1020', 950: '#050915',
+      },
+      chrome: { grid: '#1b2744', baseline: '#5f6f92' },
+    },
+    aurora: {
+      label: 'Aurora',
+      blurb: 'Soft panels over a slow, living aurora. The most motion of the four.',
+      accent: '#b69cff',
+      swatch: ['#060819', '#1f8f73', '#5b3fd8'],
+      slate: {
+         50: '#f6f7ff', 100: '#eef0ff', 200: '#dde0fa', 300: '#c7cbee', 400: '#aeb4dc',
+        500: '#8f96c6', 600: '#3a4178', 700: '#252b58', 800: '#141a3d', 900: '#0a0d27', 950: '#05071a',
+      },
+      chrome: { grid: '#20264d', baseline: '#646b9e' },
+    },
+    vault: {
+      label: 'Vault',
+      blurb: 'Warm charcoal, ivory serif figures, engraved chart fills. Quiet luxury.',
+      accent: '#e8cfa6',
+      swatch: ['#0f0c0a', '#1c1713', '#e8cfa6'],
+      slate: {
+         50: '#fbf7f1', 100: '#f3ebe1', 200: '#e4d9ca', 300: '#cfc1ae', 400: '#b8a998',
+        500: '#9d8e7e', 600: '#4a3b30', 700: '#2f2620', 800: '#1c1713', 900: '#100d0b', 950: '#0a0807',
+      },
+      chrome: { grid: '#2a221c', baseline: '#7a6a5b' },
+    },
+    flight: {
+      label: 'Flight Deck',
+      blurb: 'A cockpit display: bracketed panels, scanlines, a cyan sweep across each chart.',
+      accent: '#56d6e8',
+      swatch: ['#04080a', '#0b181c', '#56d6e8'],
+      slate: {
+         50: '#effcfe', 100: '#d9f4f8', 200: '#c3e6ec', 300: '#aacfd6', 400: '#93b6bd',
+        500: '#7499a1', 600: '#1f414a', 700: '#14292f', 800: '#0b181c', 900: '#05090b', 950: '#020405',
+      },
+      chrome: { grid: '#10252b', baseline: '#4f7880' },
+    },
+  };
+  const LOOK_IDS = Object.keys(LOOKS);
+  // Every theme a user can choose, in picker order. The stored preference is one
+  // of these ids; anything else (an old value, a typo) falls back to 'dark'.
+  const CHOICES = [
+    { id: 'dark', label: 'Classic dark', swatch: ['#0f172a', '#1e293b', '#f59e0b'] },
+    { id: 'light', label: 'Light', swatch: ['#f8fafc', '#ffffff', '#b45309'] },
+    ...LOOK_IDS.map(id => ({ id, label: LOOKS[id].label, blurb: LOOKS[id].blurb, swatch: LOOKS[id].swatch })),
+  ];
+  const STORAGE_KEY = 'retirement_planner_theme';
+  const normalizeChoice = (v) => (CHOICES.some(c => c.id === v) ? v : 'dark');
+  // The ground a choice is built on. Every look is dark.
+  const baseMode = (choice) => (choice === 'light' ? 'light' : 'dark');
+  // The rest of a look's chart chrome follows from its ramp, so the two cannot
+  // disagree: the chart ground is the page (900), a raised panel is the card
+  // (800), and axis and ink tokens are the same steps the UI text uses.
+  const lookChrome = (id) => {
+    const l = LOOKS[id], s = l.slate;
+    return Object.assign({
+      surface: s[900], surfaceRaised: s[800], axis: s[500],
+      inkPrimary: s[100], inkSecondary: s[300], inkMuted: s[500], reference: l.accent,
+    }, l.chrome);
+  };
+
   // Tailwind needs the channel TRIPLET, not a hex, or the /50 opacity modifiers
   // have nothing to multiply into.
   const triplet = (hex) => {
@@ -409,6 +506,12 @@
       // loads the toggle still looks right.
       `  :root {\n    ${decls('dark')}\n  }`,
       `  :root[data-theme="light"] {\n    ${decls('light')}\n  }`,
+      // A look redefines only the neutral ramp and adds its accent; every other
+      // family inherits the dark values from :root above.
+      ...LOOK_IDS.map(id => {
+        const slate = ALL_STEPS.map(step => `--c-slate-${step}:${triplet((LOOKS[id].slate[step]) || LOOKS[id].slate[step === 50 ? 100 : 900])};`).join(' ');
+        return `  :root[data-look="${id}"] {\n    ${slate}\n    --look-accent:${triplet(LOOKS[id].accent)};\n  }`;
+      }),
       // The printed reports are dark-on-white in BOTH themes by design — they use
       // text-slate-900 as ink and bg-white as paper. Inverting the ramp under them
       // would print white text on white paper, so they are pinned to the dark
@@ -437,6 +540,14 @@
       '  <style>',
       cssVariables(),
       '  </style>',
+      // The saved choice, applied BEFORE first paint so nobody sees a flash of
+      // the wrong theme. Generated here so the list of looks has one home.
+      // Dark is the default and needs no attribute, so a failure here (private
+      // mode, storage disabled) lands on the default look rather than none.
+      '  <script>(function () { try { var t = localStorage.getItem(' + JSON.stringify(STORAGE_KEY) + '); var d = document.documentElement;'
+        + ' if (t === "light") d.setAttribute("data-theme", "light");'
+        + ' else if (' + JSON.stringify(LOOK_IDS) + '.indexOf(t) !== -1) d.setAttribute("data-look", t);'
+        + ' } catch (e) {} })();</script>',
       HEAD_MARKERS.close,
     ].join('\n');
   };
@@ -444,7 +555,10 @@
   // Resolve every token for one mode. Charts take plain strings rather than CSS
   // variables because Recharts computes legend swatches and tooltip colours in
   // JS, where a var() reference is an opaque string.
-  const resolve = (mode = 'dark') => {
+  // A look resolves as the dark palette with its own chrome on top; out.mode is
+  // always the base ('dark' or 'light') and out.look names the look, if any.
+  const resolve = (choice = 'dark') => {
+    const mode = baseMode(choice);
     const pick = (o) => o[mode] !== undefined ? o[mode] : o.dark;
     const out = { mode, series: {}, status: {}, lines: {}, ink: {}, categorical: CATEGORICAL.map(k => pick(SLOTS[k])), bracket: pick(BRACKET_RAMP), distribution: pick(DISTRIBUTION_RAMP) };
     Object.entries(SERIES).forEach(([k, v]) => { out.series[k] = pick(v); });
@@ -457,6 +571,8 @@
       out.ink[k] = slot ? pick(SLOT_INK[slot]) : pick(v);
     });
     Object.entries(CHROME).forEach(([k, v]) => { out[k] = pick(v); });
+    out.look = LOOKS[choice] ? choice : null;
+    if (out.look) Object.assign(out, lookChrome(choice));
     return out;
   };
 
@@ -469,5 +585,6 @@
   };
 
   return { SLOTS, SERIES, BRACKET_RAMP, DISTRIBUTION_RAMP, LINES, STATUS, CHROME, STACKS, CATEGORICAL, SLOT_INK, TW,
-           triplet, tailwindColors, cssVariables, headBlock, HEAD_MARKERS, resolve, MODES: ['dark', 'light'] };
+           triplet, tailwindColors, cssVariables, headBlock, HEAD_MARKERS, resolve, MODES: ['dark', 'light'],
+           LOOKS, LOOK_IDS, CHOICES, STORAGE_KEY, normalizeChoice, baseMode };
 });

@@ -74,12 +74,17 @@ const {
 // both surface steppings; tests/run-tests.cjs re-derives the colour-vision
 // separation of every adjacent pair, so a palette edit that makes two stacked
 // series indistinguishable fails the suite rather than shipping.
-// Dark is the default; the pre-paint script in index.html has already stamped
-// data-theme on <html> for a returning light-mode user, so reading it back here
-// keeps the JS palette and the CSS variables in agreement from the first frame.
+// Dark is the default; the pre-paint script in the page head has already
+// stamped data-theme (light) or data-look (one of the four dark looks) on
+// <html> for a returning user, so reading it back here keeps the JS palette and
+// the CSS variables in agreement from the first frame. The value is a theme
+// CHOICE — 'dark', 'light' or a look id from PlannerTheme.CHOICES.
 const initialThemeMode = (() => {
-  try { return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'; }
-  catch (e) { return 'dark'; }
+  try {
+    const d = document.documentElement;
+    if (d.getAttribute('data-theme') === 'light') return 'light';
+    return PlannerTheme.normalizeChoice(d.getAttribute('data-look'));
+  } catch (e) { return 'dark'; }
 })();
 // How wide the content column is allowed to get. Deliberately NOT part of the
 // plan and NOT in the export: it depends on the monitor in front of you, so a
@@ -141,6 +146,7 @@ const SERIES = THEME.series;
 // SERIES must stay identical to THEME.series or the two would drift apart on the
 // first switch.
 const applyThemeMode = (mode) => {
+  mode = PlannerTheme.normalizeChoice(mode);
   const next = PlannerTheme.resolve(mode);
   Object.keys(THEME).forEach(k => { if (k !== 'series') delete THEME[k]; });
   Object.assign(THEME, next);
@@ -148,9 +154,12 @@ const applyThemeMode = (mode) => {
   Object.assign(SERIES, next.series);
   THEME.series = SERIES;
   try {
-    if (mode === 'light') document.documentElement.setAttribute('data-theme', 'light');
-    else document.documentElement.removeAttribute('data-theme');
-    localStorage.setItem('retirement_planner_theme', mode);
+    const d = document.documentElement;
+    if (mode === 'light') d.setAttribute('data-theme', 'light');
+    else d.removeAttribute('data-theme');
+    if (PlannerTheme.LOOKS[mode]) d.setAttribute('data-look', mode);
+    else d.removeAttribute('data-look');
+    localStorage.setItem(PlannerTheme.STORAGE_KEY, mode);
   } catch (e) { /* storage unavailable — the in-memory switch still holds */ }
 };
 
@@ -20271,9 +20280,19 @@ const Logo = ({ size = 'large' }) => {
 // Sidebar navigation. At module scope so React keeps one component identity —
 // defined inside RetirementPlanner these were re-created on every render, which
 // remounted the whole sidebar subtree each time any state changed.
+// Three stripes of a theme's own colours: its ground, its card and its accent.
+// Painted with inline hex rather than classes, because the point is to show a
+// theme OTHER than the one currently active.
+const ThemeSwatch = ({ colors }) => (
+  <span aria-hidden="true" className="inline-flex h-3.5 w-5 overflow-hidden rounded-sm border border-slate-600 flex-shrink-0">
+    {colors.map((c, i) => <span key={i} className="flex-1" style={{ background: c }} />)}
+  </span>
+);
+
 const NavItem = ({ id, label, icon, activeTab, setActiveTab, sidebarCollapsed }) => (
   <button
     onClick={() => setActiveTab(id)}
+    aria-current={activeTab === id ? 'page' : undefined}
     className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all ${
       activeTab === id
         ? 'bg-amber-500/20 text-amber-400 border-l-2 border-amber-500'
@@ -21631,11 +21650,12 @@ function RetirementPlanner() {
   // re-render this triggers already reads the new values. Doing it in an effect
   // would paint one frame of the old chart colours against the new surface.
   const [themeMode, setThemeMode] = useState(initialThemeMode);
-  const toggleTheme = () => {
-    const next = themeMode === 'dark' ? 'light' : 'dark';
+  const [themeOpen, setThemeOpen] = useState(false);
+  const chooseTheme = (next) => {
     applyThemeMode(next);
-    setThemeMode(next);
+    setThemeMode(PlannerTheme.normalizeChoice(next));
   };
+  const themeChoice = PlannerTheme.CHOICES.find(c => c.id === themeMode) || PlannerTheme.CHOICES[0];
   const [contentWidth, setContentWidth] = useState(initialContentWidth);
   const [widthOpen, setWidthOpen] = useState(false);
   // Mirrors applyThemeMode: mutate the module object FIRST so the single
@@ -22400,7 +22420,7 @@ function RetirementPlanner() {
   // one component identity and it never remounts mid-entry.
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-100 flex">
+    <div className="app-shell min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-100 flex">
       {/* Hide number input spinners globally for clean table cells */}
       <style>{`
         input[type=number]::-webkit-inner-spin-button,
@@ -22474,14 +22494,42 @@ function RetirementPlanner() {
             <span>{simpleMode ? '◇' : '◆'}</span>
             {!sidebarCollapsed && <span>{simpleMode ? 'Show everything' : 'Simplify'}</span>}
           </button>
+          {/* The look. Six choices: the classic dark and light themes and the
+              four dark looks. Collapsed, the button steps to the next one, since
+              there is no room for the list. */}
           <button
-            onClick={toggleTheme}
+            onClick={() => {
+              if (sidebarCollapsed) {
+                const ids = PlannerTheme.CHOICES.map(c => c.id);
+                chooseTheme(ids[(ids.indexOf(themeMode) + 1) % ids.length]);
+              } else setThemeOpen(o => !o);
+            }}
+            aria-expanded={sidebarCollapsed ? undefined : themeOpen}
             className={`mt-1 w-full flex items-center justify-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 py-1.5 rounded hover:bg-slate-700/50 transition-colors`}
-            title={themeMode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            title={sidebarCollapsed ? `Look: ${themeChoice.label} — click for the next one` : 'Choose how the planner looks. Saved for this browser only; your plan is not affected.'}
           >
-            <span>{themeMode === 'dark' ? '☀️' : '🌙'}</span>
-            {!sidebarCollapsed && <span>{themeMode === 'dark' ? 'Light mode' : 'Dark mode'}</span>}
+            <ThemeSwatch colors={themeChoice.swatch} />
+            {!sidebarCollapsed && <span>{themeChoice.label}</span>}
           </button>
+          {themeOpen && !sidebarCollapsed && (
+            <div className="mt-1 space-y-0.5" role="radiogroup" aria-label="Look">
+              {PlannerTheme.CHOICES.map(c => (
+                <button
+                  key={c.id}
+                  role="radio"
+                  aria-checked={c.id === themeMode}
+                  onClick={() => chooseTheme(c.id)}
+                  title={c.blurb || ''}
+                  className={`w-full flex items-center gap-2 px-2 py-1 rounded text-xs text-left transition-colors ${
+                    c.id === themeMode ? 'bg-slate-700/60 text-slate-100' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/40'}`}
+                >
+                  <ThemeSwatch colors={c.swatch} />
+                  <span className="flex-1">{c.label}</span>
+                  {c.id === themeMode && <span aria-hidden="true">✓</span>}
+                </button>
+              ))}
+            </div>
+          )}
           <button
             onClick={() => setWidthOpen(o => !o)}
             className="mt-1 w-full flex items-center justify-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 py-1.5 rounded hover:bg-slate-700/50 transition-colors"

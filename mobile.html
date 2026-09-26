@@ -5,7 +5,7 @@
   <!-- Content Security Policy — see index.html for the reasoning. Generated
        by tools/build.cjs; must be the first thing in <head>. -->
   <!-- BEGIN GENERATED CSP (tools/build.cjs) -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' blob: 'sha256-4Z5kUaXQV9HaEzKAd5doufvViKsF+SRR0CqDshzJI5Y=' 'sha256-6chNzEjRMV/FbqxnS9Q2Tqz1FdCuJEF224A6CGEMTms=' 'sha256-BIjCZBXQ4Ix3p8YecnH+yqC5R6O5cDCHqpJWKlcYawY=' 'sha256-Jh7tKM+p6nJg/H9UQXd+3XlgUikHSZtETWz2HijyZhs=' 'sha256-wuJJENNnybVY+HebEod36XkxjajBXi/d3rfMVwxsjqw=' 'sha256-v75Oq+BIRf71e7yW1wDvjBycpgXpVFxlmg4QVLCd3pA='; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://api.anthropic.com; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' blob: 'sha256-clmY3UZZXZwEeQ4R0hEDKAfmFgJ8HjUJTjytPzdduYQ=' 'sha256-BsCildmWiWgWjwxinJ7EqtkzKFHtvj1WQhVNVypX+8w=' 'sha256-BIjCZBXQ4Ix3p8YecnH+yqC5R6O5cDCHqpJWKlcYawY=' 'sha256-gLQRWSrsEjIK41uw7cKRWyF+tnVKgb5Apv5agk9dCVc=' 'sha256-wuJJENNnybVY+HebEod36XkxjajBXi/d3rfMVwxsjqw=' 'sha256-v75Oq+BIRf71e7yW1wDvjBycpgXpVFxlmg4QVLCd3pA='; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://api.anthropic.com; object-src 'none'; base-uri 'self'; form-action 'self'">
   <!-- END GENERATED CSP -->
   <!-- viewport-fit=cover lets the page extend under iPhone's notch/safe areas; our CSS uses env() to inset properly -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
@@ -22,14 +22,14 @@
   <!-- No icon file: an empty one stops the browser requesting /favicon.ico and logging a 404. -->
   <link rel="icon" href="data:,">
   <!-- BEGIN GENERATED BUILD STAMP (tools/build.cjs) -->
-  <link rel="stylesheet" href="app.css?h=88718193">
-  <script>window.PLANNER_BUILD = {"src":"43879394","css":"88718193"};</script>
+  <link rel="stylesheet" href="app.css?h=4c6bf6b0">
+  <script>window.PLANNER_BUILD = {"src":"228a5493","css":"4c6bf6b0"};</script>
   <!-- END GENERATED BUILD STAMP -->
   <!-- APP_VERSION — single source of truth. Keep this value in sync with
        index.html so desktop and mobile cache-bust to the same version. The body
        IIFE below loads engine.js dynamically using this value (and awaits it
        before touching window.PlannerEngine), so there is no second place to edit. -->
-  <script>window.APP_VERSION = '2.55.0';</script>
+  <script>window.APP_VERSION = '2.56.0';</script>
   <!-- BEGIN GENERATED THEME TOKENS (tools/build.cjs from theme.js) -->
   <script>window.PLANNER_TW_CONFIG = { theme: { extend: { colors: {
       "slate": {"50":"rgb(var(--c-slate-50) / <alpha-value>)","100":"rgb(var(--c-slate-100) / <alpha-value>)","200":"rgb(var(--c-slate-200) / <alpha-value>)","300":"rgb(var(--c-slate-300) / <alpha-value>)","400":"rgb(var(--c-slate-400) / <alpha-value>)","500":"rgb(var(--c-slate-500) / <alpha-value>)","600":"rgb(var(--c-slate-600) / <alpha-value>)","700":"rgb(var(--c-slate-700) / <alpha-value>)","800":"rgb(var(--c-slate-800) / <alpha-value>)","900":"rgb(var(--c-slate-900) / <alpha-value>)","950":"rgb(var(--c-slate-950) / <alpha-value>)"},
@@ -83,6 +83,22 @@
     --c-indigo-50:55 48 163; --c-indigo-100:55 48 163; --c-indigo-200:55 48 163; --c-indigo-300:67 56 202; --c-indigo-400:70 64 207; --c-indigo-500:79 70 229; --c-indigo-600:67 56 202; --c-indigo-700:55 48 163; --c-indigo-800:220 222 251; --c-indigo-900:235 236 253; --c-indigo-950:235 236 253;
     --c-rose-50:159 18 57; --c-rose-100:159 18 57; --c-rose-200:159 18 57; --c-rose-300:190 18 60; --c-rose-400:194 24 63; --c-rose-500:225 29 72; --c-rose-600:190 18 60; --c-rose-700:159 18 57; --c-rose-800:251 217 224; --c-rose-900:253 234 238; --c-rose-950:253 234 238;
   }
+  :root[data-look="observatory"] {
+    --c-slate-50:244 247 252; --c-slate-100:232 237 247; --c-slate-200:217 224 238; --c-slate-300:195 203 222; --c-slate-400:166 177 201; --c-slate-500:135 147 176; --c-slate-600:52 67 106; --c-slate-700:33 46 79; --c-slate-800:18 27 51; --c-slate-900:10 16 32; --c-slate-950:5 9 21;
+    --look-accent:217 180 90;
+  }
+  :root[data-look="aurora"] {
+    --c-slate-50:246 247 255; --c-slate-100:238 240 255; --c-slate-200:221 224 250; --c-slate-300:199 203 238; --c-slate-400:174 180 220; --c-slate-500:143 150 198; --c-slate-600:58 65 120; --c-slate-700:37 43 88; --c-slate-800:20 26 61; --c-slate-900:10 13 39; --c-slate-950:5 7 26;
+    --look-accent:182 156 255;
+  }
+  :root[data-look="vault"] {
+    --c-slate-50:251 247 241; --c-slate-100:243 235 225; --c-slate-200:228 217 202; --c-slate-300:207 193 174; --c-slate-400:184 169 152; --c-slate-500:157 142 126; --c-slate-600:74 59 48; --c-slate-700:47 38 32; --c-slate-800:28 23 19; --c-slate-900:16 13 11; --c-slate-950:10 8 7;
+    --look-accent:232 207 166;
+  }
+  :root[data-look="flight"] {
+    --c-slate-50:239 252 254; --c-slate-100:217 244 248; --c-slate-200:195 230 236; --c-slate-300:170 207 214; --c-slate-400:147 182 189; --c-slate-500:116 153 161; --c-slate-600:31 65 74; --c-slate-700:20 41 47; --c-slate-800:11 24 28; --c-slate-900:5 9 11; --c-slate-950:2 4 5;
+    --look-accent:86 214 232;
+  }
   #report-print {
     --c-slate-50:248 250 252; --c-slate-100:241 245 249; --c-slate-200:226 232 240; --c-slate-300:203 213 225; --c-slate-400:148 163 184; --c-slate-500:135 148 167; --c-slate-600:71 85 105; --c-slate-700:51 65 85; --c-slate-800:30 41 59; --c-slate-900:15 23 42; --c-slate-950:2 6 23;
     --c-amber-50:254 243 199; --c-amber-100:254 243 199; --c-amber-200:253 230 138; --c-amber-300:252 211 77; --c-amber-400:251 191 36; --c-amber-500:245 158 11; --c-amber-600:217 119 6; --c-amber-700:180 83 9; --c-amber-800:146 64 14; --c-amber-900:120 53 15; --c-amber-950:120 53 15;
@@ -101,20 +117,10 @@
     --c-rose-50:255 228 230; --c-rose-100:255 228 230; --c-rose-200:254 205 211; --c-rose-300:253 164 175; --c-rose-400:251 113 133; --c-rose-500:244 63 94; --c-rose-600:225 29 72; --c-rose-700:190 18 60; --c-rose-800:159 18 57; --c-rose-900:136 19 55; --c-rose-950:136 19 55;
   }
   </style>
+  <script>(function () { try { var t = localStorage.getItem("retirement_planner_theme"); var d = document.documentElement; if (t === "light") d.setAttribute("data-theme", "light"); else if (["observatory","aurora","vault","flight"].indexOf(t) !== -1) d.setAttribute("data-look", t); } catch (e) {} })();</script>
   <!-- END GENERATED THEME TOKENS -->
-  <!-- Theme selection, applied BEFORE first paint so a light-mode user never
-       sees a dark flash. Dark is the default and needs no attribute, so a
-       failure here (private mode, storage disabled) lands on the default look
-       rather than on no look at all. -->
-  <script>
-    (function () {
-      try {
-        if (localStorage.getItem('retirement_planner_theme') === 'light') {
-          document.documentElement.setAttribute('data-theme', 'light');
-        }
-      } catch (e) { /* storage unavailable — dark default stands */ }
-    })();
-  </script>
+  <!-- The saved theme or look is applied before first paint by the last script
+       in the generated block above (theme.js headBlock). -->
   <style>
     /* Reset + dark base. The body matches the slate-950 dark theme. */
     html, body, #root { height: 100%; margin: 0; padding: 0; background: #020617; }
@@ -153,6 +159,26 @@
   </style>
 </head>
 <body>
+  <!-- Decoration for the four dark looks (tools/looks.css): a fixed background
+       layer, and the SVG glow filter and engraving mask that chart shapes
+       reference by id. Hidden and inert in the classic dark and light themes. -->
+  <div class="look-fx" aria-hidden="true"><i></i><i></i><i></i></div>
+  <svg class="look-defs" width="0" height="0" aria-hidden="true" focusable="false">
+    <defs>
+      <!-- userSpaceOnUse, so a flat line (a zero-height bounding box) keeps its glow instead of vanishing -->
+      <filter id="look-glow" filterUnits="userSpaceOnUse" x="-100" y="-100" width="5000" height="3000">
+        <feGaussianBlur stdDeviation="3" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <pattern id="look-engrave-lines" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <rect width="6" height="6" fill="#fff"/>
+        <line x1="0" y1="0" x2="0" y2="6" stroke="#5a5a5a" stroke-width="1.6"/>
+      </pattern>
+      <mask id="look-engrave" maskUnits="userSpaceOnUse" x="-100" y="-100" width="5000" height="3000">
+        <rect x="-100" y="-100" width="5000" height="3000" fill="url(#look-engrave-lines)"/>
+      </mask>
+    </defs>
+  </svg>
   <div id="root">
     <div class="loading">Loading…</div>
   </div>

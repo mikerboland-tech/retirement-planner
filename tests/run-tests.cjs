@@ -15998,6 +15998,125 @@ section('P142 — the phone is one screen of your own numbers');
   ok(/everything stays on this phone/.test(mob), 'along with where the numbers are kept');
 }
 
+section('P143 — four dark looks, chosen per browser');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const theme = require('../theme.js');
+  const jsx = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner.jsx'), 'utf8');
+  const mob = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner-mobile.jsx'), 'utf8');
+  const css = fsMod.readFileSync(pathMod.join(ROOT, 'tools', 'looks.css'), 'utf8');
+  const pages = ['index.html', 'mobile.html'].map(f => [f, fsMod.readFileSync(pathMod.join(ROOT, f), 'utf8')]);
+
+  // The choices: classic dark, light, and the four looks, one list for both apps.
+  eq(theme.CHOICES.map(c => c.id).join(','), 'dark,light,observatory,aurora,vault,flight', 'six choices, in picker order');
+  eq(theme.LOOK_IDS.length, 4, 'four of them are looks');
+  eq(theme.normalizeChoice('vault'), 'vault', 'a look id is kept');
+  eq(theme.normalizeChoice('solarized'), 'dark', 'anything unknown falls back to classic dark');
+  eq(theme.normalizeChoice(null), 'dark', 'as does nothing at all');
+  eq(theme.MODES.join(','), 'dark,light', 'the two base modes are unchanged — every look is built on dark');
+
+  // A look changes the ground, never what a colour means: the series, status
+  // and line colours are the dark palette exactly, and each is re-checked
+  // against the look's own surfaces, since a look moves those.
+  const dark = theme.resolve('dark');
+  theme.LOOK_IDS.forEach(id => {
+    const t = theme.resolve(id);
+    const L = theme.LOOKS[id];
+    eq(t.mode, 'dark', `${id}: resolves on the dark base`);
+    eq(t.look, id, `${id}: and says which look it is`);
+    eq(JSON.stringify(t.series), JSON.stringify(dark.series), `${id}: every series keeps its dark colour`);
+    eq(JSON.stringify(t.status), JSON.stringify(dark.status), `${id}: every status colour too`);
+    eq(JSON.stringify(t.lines), JSON.stringify(dark.lines), `${id}: and every line tier`);
+    const card = L.slate[800];
+    eq(t.surface, L.slate[900], `${id}: the chart ground is the look's page step`);
+    eq(t.surfaceRaised, card, `${id}: and a raised panel is its card step`);
+    Object.entries(t.series).forEach(([k, v]) => {
+      gt(contrast(v, t.surface), 3.0, `${id}: the '${k}' series is visible against the look's chart ground`);
+    });
+    Object.entries(t.lines).forEach(([k, v]) => {
+      gt(contrast(v, t.surface), 4.5, `${id}: the '${k}' line is legible against the look's chart ground`);
+    });
+    Object.entries(t.ink).forEach(([k, v]) => {
+      gt(contrast(v, card), 4.5, `${id}: the '${k}' ink is legible as text on the look's card`);
+    });
+    Object.entries(t.status).forEach(([k, v]) => {
+      gt(contrast(v, card), 4.5, `${id}: the '${k}' status colour is legible on the look's card`);
+    });
+    ['axis', 'inkMuted', 'inkSecondary', 'inkPrimary'].forEach(tok => {
+      gt(contrast(t[tok], card), 4.5, `${id}: '${tok}' is legible as text on the look's card`);
+    });
+    gt(contrast(t.baseline, card), 3.0, `${id}: the baseline bars are visible on a raised panel`);
+    gt(contrast(L.accent, card), 4.5, `${id}: the accent is legible as text — it colours the active page's name`);
+    // slate-500 is the muted-label workhorse; 400 is secondary body text.
+    gt(contrast(L.slate[500], card), 4.5, `${id}: muted labels (slate-500) clear AA on the card`);
+    gt(contrast(L.slate[400], card), 4.5, `${id}: secondary text (slate-400) too`);
+    gt(contrast(L.slate[100], L.slate[950]), 12, `${id}: headings stand well clear of the deepest ground`);
+    // The ramp still reads as a ramp: each step darker than the one before, so
+    // bg-slate-800 on bg-slate-900 is still a raised card.
+    const lum = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950].map(k => contrast(L.slate[k], '#000000'));
+    ok(lum.every((v, i) => i === 0 || v < lum[i - 1]), `${id}: the neutral ramp steps down monotonically`);
+    eq(L.swatch.length, 3, `${id}: the picker swatch shows ground, card and accent`);
+  });
+
+  // The CSS: every look defined by the generated head block, the pre-paint
+  // script generated from the same list, the old hand-written one gone.
+  const head = theme.headBlock();
+  theme.LOOK_IDS.forEach(id => {
+    ok(head.includes(`:root[data-look="${id}"] {`), `${id}: the head block defines its ramp`);
+  });
+  ok(head.includes(JSON.stringify(theme.LOOK_IDS) + '.indexOf(t)'), 'the pre-paint script knows every look, from the same list');
+  pages.forEach(([f, html]) => {
+    ok(html.includes(head), `${f}: carries the current head block`);
+    eq(/if \(localStorage\.getItem\('retirement_planner_theme'\) === 'light'\)/.test(html), false, `${f}: the old light-only pre-paint script is gone`);
+    ok(/<div class="look-fx" aria-hidden="true"><i><\/i><i><\/i><i><\/i><\/div>/.test(html), `${f}: has the look background layer, hidden from screen readers`);
+    ok(/<filter id="look-glow"/.test(html) && /<mask id="look-engrave"/.test(html), `${f}: and the glow and engraving the charts reference`);
+  });
+  ok(/url\(#look-glow\)/.test(css) && /url\(#look-engrave\)/.test(css), 'looks.css references exactly those ids');
+
+  // looks.css: every rule that styles the app is keyed on data-look, so the
+  // classic themes are untouched; every font it names is vendored, and every
+  // vendored font is used; motion stops for reduced motion; nothing prints.
+  const body = css.replace(/\/\*[\s\S]*?\*\//g, '').replace(/@font-face\s*\{[^}]*\}/g, '').replace(/@keyframes[^{]*\{(?:[^{}]*\{[^}]*\})*[^}]*\}/g, '');
+  const bare = body.split('}').map(r => r.split('{')[0].trim()).filter(sel => sel && !/^@media/.test(sel))
+    // split the selector list on TOP-LEVEL commas only — :is(a, b) is one selector
+    .filter(sel => sel.split(/,(?![^()]*\))/).some(part => !/data-look|^\.look-(fx|defs)\b/.test(part.trim())));
+  eq(bare.length, 0, 'every rule is scoped to a look (or is the inert look layer itself): ' + bare.join(' | '));
+  theme.LOOK_IDS.forEach(id => ok(css.includes(`[data-look="${id}"]`), `${id}: has its own rules`));
+  const fontsDir = pathMod.join(ROOT, 'vendor', 'fonts');
+  const files = fsMod.readdirSync(fontsDir).filter(f => f.endsWith('.woff2'));
+  const refs = [...css.matchAll(/url\(vendor\/fonts\/([^)]+)\)/g)].map(m => m[1]);
+  refs.forEach(f => ok(files.includes(f), `the font ${f} is vendored`));
+  files.forEach(f => ok(refs.includes(f), `the vendored font ${f} is used`));
+  files.forEach(f => eq(fsMod.readFileSync(pathMod.join(fontsDir, f)).slice(0, 4).toString(), 'wOF2', `${f} is a real WOFF2 file`));
+  ok(/font-display: swap/.test(css) && !/font-display: (block|auto)/.test(css), 'text shows in a fallback face while a font loads');
+  ok(/@media \(prefers-reduced-motion: reduce\) \{\s*\.look-fx i \{ animation: none !important; \}/.test(css), 'the background stops moving for reduced motion');
+  ok(/prefers-reduced-motion[\s\S]*recharts-wrapper::after \{ display: none; \}/.test(css), 'and the chart sweep is not shown');
+  ok(/@media print \{\s*\.look-fx, \.look-defs \{ display: none !important; \}/.test(css), 'none of it prints');
+  ok(/#report-print \{ font-family: ui-sans-serif/.test(css), 'and the printed report keeps the system face');
+  ok(!/backdrop-filter/.test(css.split(':root[data-look="aurora"] aside')[0]), 'no card-level backdrop blur ahead of the one frosted sidebar');
+  const build = fsMod.readFileSync(pathMod.join(ROOT, 'tools', 'build.cjs'), 'utf8');
+  ok(/'tools\/looks\.css'\]/.test(build), 'looks.css is a stylesheet input, so editing it changes the stamp');
+  ok(/^@import "\.\/looks\.css";/.test(fsMod.readFileSync(pathMod.join(ROOT, 'tools', 'tailwind.input.css'), 'utf8')), 'and is built into app.css');
+  ok(fsMod.readFileSync(pathMod.join(ROOT, 'app.css'), 'utf8').includes('look-engrave'), 'app.css carries it');
+  ok(/font-src 'self' data:/.test(pages[0][1]), 'fonts are still self-hosted only — no third-party font host in the policy');
+
+  // The desktop: one function applies a choice to the palette, the page and
+  // storage; the sidebar offers all six; the active page is marked for CSS and
+  // for screen readers alike.
+  ok(/mode = PlannerTheme\.normalizeChoice\(mode\);/.test(jsx), 'the desktop normalises a choice before applying it');
+  ok(/if \(PlannerTheme\.LOOKS\[mode\]\) d\.setAttribute\('data-look', mode\);/.test(jsx), 'and stamps the look on the page');
+  ok(/localStorage\.setItem\(PlannerTheme\.STORAGE_KEY, mode\)/.test(jsx), 'and saves it under the shared key');
+  ok(/PlannerTheme\.CHOICES\.map\(c => \(/.test(jsx) && /role="radiogroup" aria-label="Look"/.test(jsx), 'the sidebar lists every choice as one radio group');
+  ok(/aria-current=\{activeTab === id \? 'page' : undefined\}/.test(jsx), 'the active page is marked aria-current');
+  ok(/className="app-shell /.test(jsx) && /className="app-shell /.test(mob), 'both apps mark their shell, which the look rules are scoped to');
+  eq(/toggleTheme/.test(jsx), false, 'the two-way light/dark toggle is gone');
+  // The phone: a native select over the same list and the same key.
+  ok(/\{PlannerTheme\.CHOICES\.map\(c => <option key=\{c\.id\} value=\{c\.id\}>\{c\.label\}<\/option>\)\}/.test(mob), 'the phone offers the same six');
+  ok(/localStorage\.setItem\(PlannerTheme\.STORAGE_KEY, next\)/.test(mob), 'under the same key, so a look chosen on one follows to the other');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

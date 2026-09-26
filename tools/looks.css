@@ -1,0 +1,153 @@
+/* ============================================================================
+   THE FOUR DARK LOOKS — type, texture and motion
+   ----------------------------------------------------------------------------
+   Colour lives in theme.js: each look redefines the neutral (slate) ramp and
+   adds an accent, through the same CSS variables light mode uses, and the chart
+   series are the dark palette unchanged. This file adds only what a variable
+   cannot: typefaces, a background layer, card treatments, chart glow and
+   engraving, and a little motion.
+
+   Every rule is keyed on data-look on <html> (set before first paint by the
+   theme block in the page head), so the classic dark and light themes are
+   untouched and never download a font from here. Everything below is
+   decoration: remove it and no information is lost. All motion stops under
+   prefers-reduced-motion, and none of it prints.
+
+   The markup it styles is static in index.html and mobile.html: .look-fx, the
+   fixed background layer behind the app, and .look-defs, an SVG holding the
+   glow filter and the engraving mask that chart shapes reference by id.
+   ========================================================================== */
+
+/* ── Typefaces (vendor/fonts, SIL OFL; Latin subset) ───────────────────── */
+@font-face { font-family: 'IBM Plex Sans'; font-style: normal; font-weight: 400 700; font-display: swap; src: url(vendor/fonts/ibm-plex-sans-var.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url(vendor/fonts/ibm-plex-mono-400.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 500 700; font-display: swap; src: url(vendor/fonts/ibm-plex-mono-500.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'Sora'; font-style: normal; font-weight: 400 700; font-display: swap; src: url(vendor/fonts/sora-var.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'Manrope'; font-style: normal; font-weight: 400 700; font-display: swap; src: url(vendor/fonts/manrope-var.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'Instrument Serif'; font-style: normal; font-weight: 400; font-display: swap; src: url(vendor/fonts/instrument-serif-400.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'Instrument Sans'; font-style: normal; font-weight: 400 700; font-display: swap; src: url(vendor/fonts/instrument-sans-var.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'Chakra Petch'; font-style: normal; font-weight: 400; font-display: swap; src: url(vendor/fonts/chakra-petch-400.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'Chakra Petch'; font-style: normal; font-weight: 500; font-display: swap; src: url(vendor/fonts/chakra-petch-500.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'Chakra Petch'; font-style: normal; font-weight: 600; font-display: swap; src: url(vendor/fonts/chakra-petch-600.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'Chakra Petch'; font-style: normal; font-weight: 700; font-display: swap; src: url(vendor/fonts/chakra-petch-700.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400 600; font-display: swap; src: url(vendor/fonts/jetbrains-mono-var.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+
+/* ── Shared by every look ──────────────────────────────────────────────── */
+/* The page ground moves to <html>, and everything above it goes transparent,
+   so the background layer (z-index -1, fixed) shows through between panels. */
+:root[data-look] { background-color: rgb(var(--c-slate-950)); }
+:root[data-look] body, :root[data-look] #root, :root[data-look] .app-shell { background: transparent; }
+.look-fx { display: none; }
+.look-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+:root[data-look] .look-fx { display: block; position: fixed; inset: 0; z-index: -1; pointer-events: none; overflow: hidden; }
+.look-fx i { display: none; position: absolute; }
+/* The printed report stays in the system face whatever the look: it is a
+   document for paper, and it lives outside .app-shell (a portal off <body>),
+   which every type and chart rule below is scoped to. */
+:root[data-look] #report-print { font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+/* The active page in the sidebar takes the look's accent. */
+:root[data-look] aside [aria-current="page"] { background-color: rgb(var(--look-accent) / .13); color: rgb(var(--look-accent)); border-color: rgb(var(--look-accent)); }
+
+/* ── Observatory: ink-blue, brass, a slow starfield ────────────────────── */
+:root[data-look="observatory"], :root[data-look="observatory"] body { font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+:root[data-look="observatory"] .app-shell .font-mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+:root[data-look="observatory"] .look-fx {
+  background: radial-gradient(1200px 420px at 18% -140px, rgba(79,143,232,.16), transparent 70%),
+              radial-gradient(900px 320px at 92% -90px, rgba(217,180,90,.09), transparent 70%);
+}
+/* Two star fields at different tile sizes, drifting at different speeds, so the
+   repeat never lines up into a visible grid. Each moves exactly one tile per
+   loop, which makes the loop seamless. */
+:root[data-look="observatory"] .look-fx i:nth-child(1),
+:root[data-look="observatory"] .look-fx i:nth-child(2) { display: block; top: 0; left: 0; will-change: transform; }
+:root[data-look="observatory"] .look-fx i:nth-child(1) {
+  right: -360px; bottom: -360px; opacity: .55;
+  background-image:
+    radial-gradient(1px 1px at 40px 60px, #fff, transparent), radial-gradient(1px 1px at 190px 130px, #cfe0ff, transparent),
+    radial-gradient(1.4px 1.4px at 300px 40px, #fff, transparent), radial-gradient(1px 1px at 90px 250px, #ffe9b8, transparent),
+    radial-gradient(1px 1px at 250px 300px, #fff, transparent), radial-gradient(1.2px 1.2px at 330px 210px, #cfe0ff, transparent);
+  background-size: 360px 360px;
+  animation: look-drift-360 240s linear infinite;
+}
+:root[data-look="observatory"] .look-fx i:nth-child(2) {
+  right: -520px; bottom: -520px; opacity: .35;
+  background-image:
+    radial-gradient(1px 1px at 120px 80px, #fff, transparent), radial-gradient(1px 1px at 420px 330px, #cfe0ff, transparent),
+    radial-gradient(1.6px 1.6px at 260px 470px, #fff, transparent), radial-gradient(1px 1px at 30px 400px, #fff, transparent);
+  background-size: 520px 520px;
+  animation: look-drift-520 420s linear infinite, look-twinkle 7s ease-in-out infinite alternate;
+}
+@keyframes look-drift-360 { to { transform: translate3d(-360px, -360px, 0); } }
+@keyframes look-drift-520 { to { transform: translate3d(-520px, -520px, 0); } }
+@keyframes look-twinkle { from { opacity: .2; } to { opacity: .45; } }
+:root[data-look="observatory"] .app-shell .recharts-line-curve,
+:root[data-look="observatory"] .app-shell .recharts-area-curve { filter: url(#look-glow); }
+
+/* ── Aurora: soft panels over a living aurora ──────────────────────────── */
+:root[data-look="aurora"], :root[data-look="aurora"] body { font-family: 'Manrope', system-ui, sans-serif; }
+:root[data-look="aurora"] .app-shell :is(h1, h2, h3, .text-2xl, .text-3xl, .text-4xl) { font-family: 'Sora', 'Manrope', system-ui, sans-serif; letter-spacing: -.01em; }
+:root[data-look="aurora"] .look-fx i { display: block; width: 60vmax; height: 60vmax; border-radius: 50%; filter: blur(80px); will-change: transform;
+  animation: look-aurora 26s ease-in-out infinite alternate; }
+:root[data-look="aurora"] .look-fx i:nth-child(1) { background: #1f8f73; left: -18%; top: -30%; opacity: .42; }
+:root[data-look="aurora"] .look-fx i:nth-child(2) { background: #5b3fd8; right: -22%; top: -12%; opacity: .42; animation-duration: 32s; animation-delay: -8s; }
+:root[data-look="aurora"] .look-fx i:nth-child(3) { background: #b8467f; left: 30%; top: 45%; opacity: .22; animation-duration: 38s; animation-delay: -16s; }
+@keyframes look-aurora { 0% { transform: translate(0, 0) scale(1); } 50% { transform: translate(8%, 6%) scale(1.12); } 100% { transform: translate(-6%, 10%) scale(.94); } }
+/* One frosted pane — the sidebar — rather than every card: a backdrop blur on
+   twenty cards over a moving background would redraw all twenty every frame. */
+:root[data-look="aurora"] aside { background-color: rgb(var(--c-slate-900) / .5); backdrop-filter: blur(22px) saturate(140%); -webkit-backdrop-filter: blur(22px) saturate(140%); }
+:root[data-look="aurora"] .app-shell .rounded-xl { border-radius: 20px; }
+:root[data-look="aurora"] .app-shell .rounded-lg { border-radius: 14px; }
+:root[data-look="aurora"] .app-shell .rounded-xl.border { box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 24px 50px -30px rgba(0,0,0,.8); }
+:root[data-look="aurora"] .app-shell .recharts-line-curve,
+:root[data-look="aurora"] .app-shell .recharts-area-curve { filter: url(#look-glow); }
+
+/* ── Vault: warm charcoal, ivory serif figures, engraved fills ─────────── */
+:root[data-look="vault"], :root[data-look="vault"] body { font-family: 'Instrument Sans', system-ui, sans-serif; }
+/* Instrument Serif has one weight; a synthesized bold of it smears, so the
+   headings and big figures it sets are regular weight, carried by size. */
+:root[data-look="vault"] .app-shell :is(h1, h2, h3, .text-xl, .text-2xl, .text-3xl, .text-4xl) { font-family: 'Instrument Serif', Georgia, serif; font-weight: 400; letter-spacing: .005em; }
+/* It is also narrower than the sans it replaces, so it is set a step larger to
+   keep the same presence in the same width. */
+:root[data-look="vault"] .app-shell .text-xl { font-size: 1.4rem; }
+:root[data-look="vault"] .app-shell .text-2xl { font-size: 1.8rem; }
+:root[data-look="vault"] .app-shell .text-3xl { font-size: 2.1rem; }
+:root[data-look="vault"] .look-fx { background: radial-gradient(900px 300px at 50% -120px, rgba(232,207,166,.07), transparent 70%); }
+:root[data-look="vault"] .app-shell .rounded-xl { border-radius: 6px; }
+:root[data-look="vault"] .app-shell .rounded-lg { border-radius: 4px; }
+/* The double hairline of a printed statement: a faint inner rule inside every
+   bordered panel, drawn as an inset outline so no markup is needed. */
+:root[data-look="vault"] .app-shell .rounded-xl.border { outline: 1px solid rgba(232,207,166,.07); outline-offset: -6px; }
+:root[data-look="vault"] .app-shell .recharts-area-area { mask: url(#look-engrave); }
+
+/* ── Flight Deck: HUD brackets, scanlines, a sweep across each chart ───── */
+:root[data-look="flight"], :root[data-look="flight"] body { font-family: 'Chakra Petch', system-ui, sans-serif; }
+:root[data-look="flight"] .app-shell :is(.font-mono, .text-xl, .text-2xl, .text-3xl) { font-family: 'JetBrains Mono', ui-monospace, monospace; letter-spacing: -.01em; }
+:root[data-look="flight"] .app-shell main :is(h2, h3) { text-transform: uppercase; letter-spacing: .08em; }
+:root[data-look="flight"] .look-fx {
+  background: repeating-linear-gradient(0deg, rgba(86,214,232,.028) 0 1px, transparent 1px 4px),
+              radial-gradient(800px 300px at 50% -100px, rgba(86,214,232,.11), transparent 70%);
+}
+:root[data-look="flight"] .app-shell :is(.rounded-xl, .rounded-lg) { border-radius: 2px; }
+/* Corner brackets on every bordered panel, painted as four background strokes
+   so no card needs a pseudo-element or a position change. */
+:root[data-look="flight"] .app-shell .rounded-xl.border {
+  background-image: linear-gradient(rgb(var(--look-accent) / .75), rgb(var(--look-accent) / .75)), linear-gradient(rgb(var(--look-accent) / .75), rgb(var(--look-accent) / .75)),
+                    linear-gradient(rgb(var(--look-accent) / .75), rgb(var(--look-accent) / .75)), linear-gradient(rgb(var(--look-accent) / .75), rgb(var(--look-accent) / .75));
+  background-size: 12px 2px, 2px 12px, 12px 2px, 2px 12px;
+  background-position: top left, top left, bottom right, bottom right;
+  background-repeat: no-repeat;
+}
+:root[data-look="flight"] .app-shell .recharts-wrapper::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 2px; pointer-events: none; opacity: 0;
+  background: rgb(var(--look-accent)); box-shadow: 0 0 10px rgb(var(--look-accent));
+  animation: look-sweep 1.3s cubic-bezier(.2, .7, .3, 1) 1;
+}
+@keyframes look-sweep { 0% { left: 0; opacity: .9; } 85% { opacity: .9; } 100% { left: 100%; opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .look-fx i { animation: none !important; }
+  :root[data-look] .app-shell .recharts-wrapper::after { display: none; }
+}
+@media print {
+  .look-fx, .look-defs { display: none !important; }
+}
