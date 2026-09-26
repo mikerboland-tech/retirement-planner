@@ -93,7 +93,12 @@
 :root[data-look="aurora"] .look-fx i:nth-child(3) { background: #b8467f; left: 30%; top: 45%; opacity: .22; animation-duration: 38s; animation-delay: -16s; }
 @keyframes look-aurora { 0% { transform: translate(0, 0) scale(1); } 50% { transform: translate(8%, 6%) scale(1.12); } 100% { transform: translate(-6%, 10%) scale(.94); } }
 /* One frosted pane — the sidebar — rather than every card: a backdrop blur on
-   twenty cards over a moving background would redraw all twenty every frame. */
+   twenty cards over a moving background would redraw all twenty every frame.
+   The shared card style carries a light blur of its own, so over the two moving
+   backgrounds it is switched off; the aurora is soft already, and stars behind
+   a translucent card read as depth rather than noise. */
+:root[data-look="aurora"] .app-shell main .backdrop-blur-sm,
+:root[data-look="observatory"] .app-shell main .backdrop-blur-sm { backdrop-filter: none; -webkit-backdrop-filter: none; }
 :root[data-look="aurora"] aside { background-color: rgb(var(--c-slate-900) / .5); backdrop-filter: blur(22px) saturate(140%); -webkit-backdrop-filter: blur(22px) saturate(140%); }
 :root[data-look="aurora"] .app-shell .rounded-xl { border-radius: 20px; }
 :root[data-look="aurora"] .app-shell .rounded-lg { border-radius: 14px; }
@@ -136,6 +141,15 @@
   background-size: 12px 2px, 2px 12px, 12px 2px, 2px 12px;
   background-position: top left, top left, bottom right, bottom right;
   background-repeat: no-repeat;
+}
+/* A card whose fill IS a gradient (the shared cardStyle) keeps it as the last
+   layer under the brackets; replacing it would leave the panel with no fill. */
+:root[data-look="flight"] .app-shell .rounded-xl.border.bg-gradient-to-br {
+  background-image: linear-gradient(rgb(var(--look-accent) / .75), rgb(var(--look-accent) / .75)), linear-gradient(rgb(var(--look-accent) / .75), rgb(var(--look-accent) / .75)),
+                    linear-gradient(rgb(var(--look-accent) / .75), rgb(var(--look-accent) / .75)), linear-gradient(rgb(var(--look-accent) / .75), rgb(var(--look-accent) / .75)),
+                    linear-gradient(to bottom right, var(--tw-gradient-stops));
+  background-size: 12px 2px, 2px 12px, 12px 2px, 2px 12px, 100% 100%;
+  background-position: top left, top left, bottom right, bottom right, 0 0;
 }
 :root[data-look="flight"] .app-shell .recharts-wrapper::after {
   content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 2px; pointer-events: none; opacity: 0;

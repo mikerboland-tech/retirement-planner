@@ -201,6 +201,11 @@
     inkSecondary: { dark: '#b6c2d2', light: '#52514e' },
     inkMuted:     { dark: '#8492a7', light: '#73726b' },
     reference:    { dark: '#e0a832', light: '#a86a06' },  // "you retire here" markers
+    // The year the reader has picked on the Dashboard timeline, drawn as a solid
+    // cursor through the charts. It must not be mistaken for the dashed
+    // retirement marker, so it takes a hue the marker does not: cyan here, the
+    // look's own accent in a look (where the marker goes neutral instead).
+    focus:        { dark: '#67e8f9', light: '#0e7490' },
     // "Everything else" bars: the context an overlay sits on, as in the
     // conversion chart where base income is backdrop and the conversion is the
     // subject. Deliberately NOT a series colour — the previous version drew base
@@ -377,8 +382,11 @@
   //             500 is the muted-label workhorse and is held to 4.5:1 on the
   //             look's card (800), as slate-500 is in the classic theme.
   //   chrome  — the chart furniture Recharts needs as plain strings: grounds,
-  //             grid, axis ink and the "you retire here" reference marker,
-  //             which takes the look's accent.
+  //             grid and axis ink; the selected-year cursor (focus) takes the
+  //             look's accent, and the dashed "you retire here" marker takes a
+  //             hue far from it (the suite holds the pair apart at ΔE 15):
+  //             neutral under Observatory's brass, the classic amber under
+  //             Aurora's violet and Flight Deck's cyan, copper in the Vault.
   //   accent  — the look's own highlight (brass, violet, champagne, cyan), for
   //             the active nav item and other chrome. Never a status: warnings
   //             stay amber in every look, because amber means "worth a look".
@@ -408,7 +416,7 @@
          50: '#f6f7ff', 100: '#eef0ff', 200: '#dde0fa', 300: '#c7cbee', 400: '#aeb4dc',
         500: '#8f96c6', 600: '#3a4178', 700: '#252b58', 800: '#141a3d', 900: '#0a0d27', 950: '#05071a',
       },
-      chrome: { grid: '#20264d', baseline: '#646b9e' },
+      chrome: { grid: '#20264d', baseline: '#646b9e', reference: '#e0a832' },
     },
     vault: {
       label: 'Vault',
@@ -419,7 +427,7 @@
          50: '#fbf7f1', 100: '#f3ebe1', 200: '#e4d9ca', 300: '#cfc1ae', 400: '#b8a998',
         500: '#9d8e7e', 600: '#4a3b30', 700: '#2f2620', 800: '#1c1713', 900: '#100d0b', 950: '#0a0807',
       },
-      chrome: { grid: '#2a221c', baseline: '#7a6a5b' },
+      chrome: { grid: '#2a221c', baseline: '#7a6a5b', reference: '#c77c48' },
     },
     flight: {
       label: 'Flight Deck',
@@ -430,7 +438,7 @@
          50: '#effcfe', 100: '#d9f4f8', 200: '#c3e6ec', 300: '#aacfd6', 400: '#93b6bd',
         500: '#7499a1', 600: '#1f414a', 700: '#14292f', 800: '#0b181c', 900: '#05090b', 950: '#020405',
       },
-      chrome: { grid: '#10252b', baseline: '#4f7880' },
+      chrome: { grid: '#10252b', baseline: '#4f7880', reference: '#e0a832' },
     },
   };
   const LOOK_IDS = Object.keys(LOOKS);
@@ -452,7 +460,7 @@
     const l = LOOKS[id], s = l.slate;
     return Object.assign({
       surface: s[900], surfaceRaised: s[800], axis: s[500],
-      inkPrimary: s[100], inkSecondary: s[300], inkMuted: s[500], reference: l.accent,
+      inkPrimary: s[100], inkSecondary: s[300], inkMuted: s[500], reference: s[400], focus: l.accent,
     }, l.chrome);
   };
 

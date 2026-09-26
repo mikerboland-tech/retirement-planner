@@ -15468,6 +15468,7 @@ section('P134 — the Dashboard and the Sandbox are one page');
   const code = [
     grab('const LEVEL_RANK = ', ';'), grab('const LEVEL_SHOWS = ', ';'),
     grab('const LEGACY_DASHBOARD_SECTIONS = [', '];'),
+    grab('const DEFAULT_DASHBOARD_PANELS = ', '];'),
     grab('const mergedDashboardConfig = ', '\n};'),
   ].join('\n');
   const merge = eval(code + '\nmergedDashboardConfig');
@@ -15475,10 +15476,11 @@ section('P134 — the Dashboard and the Sandbox are one page');
   // A plan that never opened the Sandbox, at the default level, no overrides:
   // exactly the old Dashboard, plus the what-if tiles (invisible until used).
   const fresh = merge(undefined, {}, 'standard');
+  // (The Year by year timeline joins at the end: v2.57.0 adds it to every page.)
   eq(JSON.stringify(fresh.panels), JSON.stringify(['kpis', 'summaryCards', 'netWorth', 'retirementIncome',
-    'cashFlow', 'withdrawalRate', 'taxSummary', 'safeSpending', 'healthcare']),
+    'cashFlow', 'withdrawalRate', 'taxSummary', 'safeSpending', 'healthcare', 'yearByYear']),
     'the old Dashboard\u2019s standard-level panels carry over, healthcare included');
-  eq(fresh.layout, 2, 'and the result is marked migrated');
+  eq(fresh.layout, 3, 'and the result is marked migrated');
   eq(JSON.stringify(fresh.controls), '{}', 'with no levers moved');
 
   // Detail levels: Essentials showed three; Everything showed the advanced two as well.
@@ -15504,8 +15506,17 @@ section('P134 — the Dashboard and the Sandbox are one page');
   eq(sb.views.length, 1, 'and so are saved views');
 
   // Idempotent: once migrated, a panel the reader later removed is never re-added.
-  const mine = { panels: ['netWorth'], controls: {}, layout: 2 };
+  const mine = { panels: ['netWorth'], controls: {}, layout: 3 };
   ok(merge(mine, {}, 'everything') === mine, 'a migrated config is returned untouched on the next load');
+  // A page merged before v2.57.0 gains the timeline exactly once, keeping
+  // everything else it had; after that, hiding it sticks.
+  const v2 = { panels: ['netWorth', 'scenarios'], controls: { spending: 90000 }, layout: 2 };
+  const up = merge(v2, {}, 'standard');
+  eq(JSON.stringify(up.panels), JSON.stringify(['netWorth', 'scenarios', 'yearByYear']), 'a v2 page gains the Year by year timeline');
+  eq(up.layout, 3, 'and is marked so it never gains it again');
+  eq(up.controls.spending, 90000, 'its levers untouched');
+  const hidden = { ...up, panels: ['netWorth', 'scenarios'] };
+  ok(merge(hidden, {}, 'standard') === hidden, 'a reader who then hides the timeline keeps it hidden');
 
   // Wired at every door: first load, import, and reset.
   ok(/mergedDashboardConfig\(savedData\.sandboxConfig, savedData\.sectionVisibility, savedData\.detailLevel\)/.test(jsx),
@@ -16095,7 +16106,12 @@ section('P143 — four dark looks, chosen per browser');
   ok(/prefers-reduced-motion[\s\S]*recharts-wrapper::after \{ display: none; \}/.test(css), 'and the chart sweep is not shown');
   ok(/@media print \{\s*\.look-fx, \.look-defs \{ display: none !important; \}/.test(css), 'none of it prints');
   ok(/#report-print \{ font-family: ui-sans-serif/.test(css), 'and the printed report keeps the system face');
-  ok(!/backdrop-filter/.test(css.split(':root[data-look="aurora"] aside')[0]), 'no card-level backdrop blur ahead of the one frosted sidebar');
+  // The one blur a look ADDS is the Aurora sidebar; the other mentions switch
+  // the shared cards' blur OFF over the moving backgrounds, where it would
+  // redraw every card every frame.
+  const blurs = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{[^}]*?backdrop-filter:\s*([^;]+);/g)].map(m => [m[1].trim(), m[2].trim()]);
+  eq(blurs.filter(([, v]) => v !== 'none').map(([sel]) => sel).join(' | '), ':root[data-look="aurora"] aside', 'the only backdrop blur a look adds is the Aurora sidebar');
+  ok(blurs.some(([sel, v]) => v === 'none' && /aurora/.test(sel) && /observatory/.test(sel)), 'and card blur is off under both moving backgrounds');
   const build = fsMod.readFileSync(pathMod.join(ROOT, 'tools', 'build.cjs'), 'utf8');
   ok(/'tools\/looks\.css'\]/.test(build), 'looks.css is a stylesheet input, so editing it changes the stamp');
   ok(/^@import "\.\/looks\.css";/.test(fsMod.readFileSync(pathMod.join(ROOT, 'tools', 'tailwind.input.css'), 'utf8')), 'and is built into app.css');
@@ -16115,6 +16131,114 @@ section('P143 — four dark looks, chosen per browser');
   // The phone: a native select over the same list and the same key.
   ok(/\{PlannerTheme\.CHOICES\.map\(c => <option key=\{c\.id\} value=\{c\.id\}>\{c\.label\}<\/option>\)\}/.test(mob), 'the phone offers the same six');
   ok(/localStorage\.setItem\(PlannerTheme\.STORAGE_KEY, next\)/.test(mob), 'under the same key, so a look chosen on one follows to the other');
+}
+
+section('P144 — the plan as a timeline you can play');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const ROOT = pathMod.resolve(__dirname, '..');
+  const theme = require('../theme.js');
+  const jsx = fsMod.readFileSync(pathMod.join(ROOT, 'retirement-planner.jsx'), 'utf8');
+  const grab = (start, end) => { const a = jsx.indexOf(start); return jsx.slice(a, jsx.indexOf(end, a) + end.length); };
+  const timelineMilestones = eval(grab('const timelineMilestones = ', '\n};') + '\ntimelineMilestones');
+  const placeTimelineLabels = eval(grab('const placeTimelineLabels = ', '\n};') + '\nplaceTimelineLabels');
+
+  // Milestones are read off the engine's rows. A synthetic couple: retires at
+  // 62, Social Security at 67, converts to the 22% bracket 62–64, survivor
+  // modelling on.
+  const pi = { ...engine.DEFAULT_PLAN_INFO, myAge: 56, spouseAge: 54, myRetirementAge: 62, spouseRetirementAge: 62,
+    filingStatus: 'married_joint', state: 'Colorado', desiredRetirementIncome: 120000, legacyAge: 95,
+    myLifeExpectancy: 88, spouseLifeExpectancy: 94, inflationRate: 0.03, healthcareModel: 'none', ltcModel: 'none',
+    rothConversionBracket: '22%', rothConversionStartAge: 62, rothConversionEndAge: 64, survivorModelEnabled: true };
+  const accts = [
+    { id: 1, name: '401(k)', type: '401k', owner: 'me', balance: 1150000, contribution: 30500, contributionGrowth: 0.02, cagr: 0.065, startAge: 56, stopAge: 62, contributor: 'me' },
+    { id: 2, name: 'Roth IRA', type: 'roth_ira', owner: 'spouse', balance: 260000, contribution: 8000, cagr: 0.07, startAge: 54, stopAge: 60, contributor: 'me' },
+    { id: 3, name: 'Brokerage', type: 'brokerage', owner: 'joint', balance: 420000, contribution: 12000, cagr: 0.06, startAge: 56, stopAge: 62, contributor: 'me', costBasisPercent: 0.6 }];
+  const streams = [
+    { id: 1, type: 'earned_income', owner: 'me', name: 'Salary', amount: 185000, startAge: 56, endAge: 61, cola: 0.03 },
+    { id: 3, type: 'social_security', owner: 'me', name: 'SS', amount: 42000, startAge: 67, endAge: 120, cola: 0.025 },
+    { id: 4, type: 'social_security', owner: 'spouse', name: 'Spouse SS', amount: 24000, startAge: 67, endAge: 120, cola: 0.025 }];
+  const rows = computeProjections(pi, accts, streams, [], [], [], TODAY_YEAR);
+  const ms = timelineMilestones(rows, 62);
+  const at = (label) => (ms.find(m => m.label === label) || {}).age;
+  eq(at('Retire'), 62, 'the Retire flag is at the retirement age');
+  eq(at('Social Security'), rows.find(r => (r.socialSecurity || 0) > 0).myAge, 'Social Security is flagged where the first benefit is paid');
+  const conv = rows.filter(r => (r.rothConversion || 0) > 0);
+  gt(conv.length, 0, 'the synthetic plan converts');
+  eq(at('Conversions begin'), conv[0].myAge, 'conversions begin where the first one is');
+  eq(at('Conversions end'), conv[conv.length - 1].myAge + 1, 'and end the year after the last');
+  ok(rows.some(r => (r.rmd || 0) > 0), 'the synthetic plan leaves pre-tax money for RMDs');
+  eq(at('RMDs begin'), (rows.find(r => (r.rmd || 0) > 0) || {}).myAge, 'RMDs are flagged at the first one the engine takes');
+  const surv = rows.find(r => r.survivorEvent === 'primary_died' || r.survivorEvent === 'spouse_died');
+  ok(surv, 'the synthetic plan has a first death');
+  eq(at('Survivor years'), surv.myAge, 'and survivor years start in that year');
+  eq(at('Money runs out'), undefined, 'a plan that lasts has no runs-out flag');
+  ok(ms.every((m, k) => k === 0 || m.i >= ms[k - 1].i), 'flags come in timeline order');
+  // A plan that fails says so on the timeline.
+  const poor = computeProjections({ ...pi, desiredRetirementIncome: 400000 }, accts, streams, [], [], [], TODAY_YEAR);
+  const out = timelineMilestones(poor, 62).find(m => m.label === 'Money runs out');
+  ok(out, 'a plan that runs out is flagged where it does');
+  eq(out.age, poor.find(r => r.myAge >= 62 && (r.totalPortfolio || 0) <= 0).myAge, 'at the first empty year after retiring');
+  eq(timelineMilestones([], 62).length, 0, 'an empty projection has no flags');
+
+  // Label placement: never two labels overlapping, never off the ruler (except
+  // on the scrolling tape); when there is no room, the flag keeps its dot.
+  const labels = ['Retire', 'Social Security', 'Conversions begin', 'Conversions end', 'RMDs begin'];
+  [[1100, [150, 300, 520, 700, 900]], [320, [40, 70, 90, 120, 300]]].forEach(([W, xs]) => {
+    const spots = placeTimelineLabels(xs, labels, W, false);
+    const boxes = spots.map((sp, k) => sp && { row: sp.row, a: sp.left ? xs[k] - 6 - labels[k].length * 6.1 : xs[k], b: sp.left ? xs[k] : xs[k] + 6 + labels[k].length * 6.1 });
+    boxes.forEach(bx => bx && ok(bx.a >= 0 && bx.b <= W, `at ${W}px a label stays on the ruler`));
+    for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
+      const p = boxes[i], q = boxes[j];
+      if (p && q && p.row === q.row) ok(p.b < q.a || q.b < p.a, `at ${W}px '${labels[i]}' and '${labels[j]}' do not overlap`);
+    }
+    if (W === 1100) eq(spots.filter(Boolean).length, 5, 'with room, every flag is labelled');
+    if (W === 320) ok(spots.some(sp => sp === null), 'on a narrow ruler some flags keep only their dot');
+  });
+
+  // The panel: registered next to the charts it drives, on by default, and
+  // added once to pages saved before it existed (P134 covers the migration).
+  const reg = jsx.slice(jsx.indexOf('const PANEL_REGISTRY = ['), jsx.indexOf('];', jsx.indexOf('const PANEL_REGISTRY = [')));
+  const order = [...reg.matchAll(/\{ id: '(\w+)',/g)].map(m => m[1]);
+  ok(order.indexOf('yearByYear') === order.indexOf('summaryCards') + 1 && order.indexOf('yearByYear') < order.indexOf('netWorth'),
+    'the timeline sits just above the charts it moves');
+  ok(/const DEFAULT_DASHBOARD_PANELS = \[[^\]]*'yearByYear'/.test(jsx), 'and is on by default');
+
+  // Speed. The selected year changes five times a second during play, so it
+  // lives in a store that only the timeline and the chart cursors subscribe to;
+  // the charts themselves never re-render for it.
+  ok(/const focusStore = useMemo\(makeFocusStore, \[\]\);/.test(jsx), 'the Dashboard keeps the year in a store, not in state');
+  ok(/focus: panels\.includes\('yearByYear'\) \? focusStore : null,/.test(jsx), 'handed to panels only while the timeline is shown');
+  const charts = jsx.slice(jsx.indexOf('function NetWorthProjectionChart('), jsx.indexOf('// ── EVERY DASHBOARD PANEL, AS A COMPONENT'));
+  eq((charts.match(/useFocusAge\(/g) || []).length, 0, 'neither chart subscribes to the year, so neither re-renders for it');
+  eq((charts.match(/<ChartYearCursor /g) || []).length, 2, 'each draws it as an overlay that subscribes on its own');
+  eq(/ReferenceLine x=\{focusAge\}/.test(jsx), false, 'rather than as a line inside the chart');
+  eq((charts.match(/\{\.\.\.pickYearProps\(onPickAge\)\}/g) || []).length, 2, 'and a click on either chart picks the year');
+  const cursor = grab('const ChartYearCursor = ', '\n};');
+  ok(/recharts-xAxis \.recharts-cartesian-axis-tick/.test(cursor), 'the overlay is placed from the chart’s own axis ticks');
+  ok(/pointerEvents: 'none'/.test(cursor), 'and never blocks the chart’s own hover and click');
+
+  // Access: the ruler is a real slider, played or stepped from the keyboard.
+  const panel = jsx.slice(jsx.indexOf('function YearTimelinePanel('), jsx.indexOf('// Every panel the app can draw, in one place.'));
+  ok(/role="slider" tabIndex=\{0\} aria-label="Year of the plan"/.test(panel), 'the ruler is a focusable slider');
+  ok(/aria-valuenow=\{r\.myAge\}/.test(panel) && /aria-valuetext=\{`Age \$\{r\.myAge\}/.test(panel), 'announcing the age, year and what happens in it');
+  ['ArrowRight', 'ArrowLeft', 'PageUp', 'PageDown', "'Home'", "'End'"].forEach(k => ok(panel.includes(k), `the ${k.replace(/'/g, '')} key moves it`));
+  ok(/aria-label=\{playing \? 'Pause' : 'Play the plan year by year'\}/.test(panel), 'play and pause are labelled');
+  ok(/aria-live="polite"/.test(panel), 'the year’s events are announced as they change');
+  ok(/touchAction: 'none'/.test(panel), 'a drag on a touch screen scrubs rather than scrolls');
+  ok(/prefersReducedMotion\(\) \? 'none'/.test(panel) && /if \(prefersReducedMotion\(\) \|\| !Number\.isFinite\(target\)\)/.test(jsx),
+    'under reduced motion the handle jumps and numbers do not roll');
+  ok(/const tape = THEME\.look === 'flight';/.test(panel), 'Flight Deck draws it as a scrolling tape');
+  // Nothing new is computed: every figure is a field of the row.
+  eq(/computeProjections|planSolve|runMonteCarlo/.test(panel), false, 'the panel computes nothing of its own');
+
+  // The cursor colour: visible on every ground, and never the retirement marker's.
+  theme.CHOICES.forEach(({ id }) => {
+    const t = theme.resolve(id);
+    gt(contrast(t.focus, t.surface), 3.0, `${id}: the selected-year cursor is visible on the chart ground`);
+    gt(dE(t.focus, t.reference), 15.0, `${id}: and cannot be mistaken for the retirement marker`);
+  });
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

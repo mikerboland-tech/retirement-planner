@@ -13754,7 +13754,7 @@ const SANDBOX_EXTRA_PANELS = [
 // What the old Dashboard showed at its default detail level, plus the what-if
 // tiles — which draw nothing until a lever moves, so a reader who never
 // touches one sees the Dashboard they always had.
-const DEFAULT_DASHBOARD_PANELS = ['kpis', 'summaryCards', 'netWorth', 'retirementIncome',
+const DEFAULT_DASHBOARD_PANELS = ['kpis', 'summaryCards', 'yearByYear', 'netWorth', 'retirementIncome',
   'withdrawalRate', 'taxSummary', 'healthcare', 'safeSpending', 'cashFlow'];
 
 // v2.47.0 folded the Sandbox into the Dashboard. A saved plan arrives with
@@ -13765,7 +13765,13 @@ const DEFAULT_DASHBOARD_PANELS = ['kpis', 'summaryCards', 'netWorth', 'retiremen
 // to do it with. Pure, and idempotent via the `layout` marker, so it can run
 // on every load and import without ever re-adding a panel someone removed.
 const mergedDashboardConfig = (cfg, sectionVisibility, detailLevel) => {
-  if (cfg && cfg.layout === 2) return cfg;
+  if (cfg && cfg.layout === 3) return cfg;
+  // Layout 3 (v2.57.0) adds the Year by year timeline, once, to a page that was
+  // already merged; a reader who hides it afterwards keeps it hidden.
+  if (cfg && cfg.layout === 2) {
+    const list = Array.isArray(cfg.panels) ? cfg.panels : DEFAULT_DASHBOARD_PANELS;
+    return { ...cfg, panels: list.includes('yearByYear') ? list : [...list, 'yearByYear'], layout: 3 };
+  }
   const dashVis = (sectionVisibility && sectionVisibility.dashboard) || {};
   const shows = LEVEL_SHOWS[detailLevel || 'standard'] ?? 1;
   const fromDashboard = LEGACY_DASHBOARD_SECTIONS
@@ -13775,9 +13781,10 @@ const mergedDashboardConfig = (cfg, sectionVisibility, detailLevel) => {
   const union = ['kpis', ...fromDashboard, 'healthcare'];
   const fromSandbox = cfg && Array.isArray(cfg.panels) ? cfg.panels : [];
   fromSandbox.forEach(id => { if (!union.includes(id)) union.push(id); });
-  return { ...(cfg || {}), controls: (cfg && cfg.controls) || {}, panels: union, layout: 2 };
+  if (!union.includes('yearByYear')) union.push('yearByYear');
+  return { ...(cfg || {}), controls: (cfg && cfg.controls) || {}, panels: union, layout: 3 };
 };
-const freshDashboardConfig = () => ({ panels: [...DEFAULT_DASHBOARD_PANELS], controls: {}, layout: 2 });
+const freshDashboardConfig = () => ({ panels: [...DEFAULT_DASHBOARD_PANELS], controls: {}, layout: 3 });
 
 // These two live at module scope, and that is the whole reason the sliders drag
 // smoothly. Defined inside SandboxTab they were a NEW component type on every
@@ -14356,6 +14363,11 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
   // nothing anywhere but the old Dashboard.
   const [openInfoCard, setOpenInfoCard] = useState(null);
   const toggleInfoCard = useCallback((id) => setOpenInfoCard(prev => prev === id ? null : id), []);
+  // The year the Year by year timeline has selected, in a store the timeline
+  // and the two charts subscribe to (see makeFocusStore). Null until the reader
+  // picks one, which they read as the retirement year. With the timeline hidden
+  // the charts get no store, so neither the cursor nor the click.
+  const focusStore = useMemo(makeFocusStore, []);
 
   // Built from whatever the levers compose — the plan itself while none is
   // moved — so a panel never needs to know whether it is drawing a what-if.
@@ -14369,8 +14381,9 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
       retirementAge: liveRetAge,
     }),
     openInfoCard, toggleInfoCard,
+    focus: panels.includes('yearByYear') ? focusStore : null,
   }), [live, scenario, personalInfo, accounts, incomeStreams, assets, oneTimeEvents,
-       recurringExpenses, liveRetAge, openInfoCard, toggleInfoCard]);
+       recurringExpenses, liveRetAge, openInfoCard, toggleInfoCard, focusStore, panels]);
 
   // The plan the health card judges: whatever the page is showing.
   const healthPlan = useMemo(() => {
@@ -15134,7 +15147,90 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
 // its own age range and info-card state, so two of them on two tabs do not
 // fight over one. `onHide` is optional: the Dashboard passes one that
 // unticks the panel in its picker; a caller with no way back passes nothing.
-function NetWorthProjectionChart({ data, personalInfo, retirementAge, badge, onHide }) {
+// The Dashboard timeline's selected year. It changes up to five times a second
+// while the plan plays, so it is NOT page state: a setState on the Dashboard
+// re-rendered all seventeen panels per step (~90 ms, measured), where only the
+// timeline and the two charts that draw the cursor need to. A tiny store they
+// subscribe to keeps every other panel still.
+const makeFocusStore = () => {
+  let value = null;
+  const subs = new Set();
+  return {
+    get: () => value,
+    set: (v) => { if (v !== value) { value = v; subs.forEach(f => f()); } },
+    subscribe: (f) => { subs.add(f); return () => subs.delete(f); },
+  };
+};
+const useFocusAge = (store) => {
+  const [, bump] = useState(0);
+  useEffect(() => (store ? store.subscribe(() => bump(n => n + 1)) : undefined), [store]);
+  return store ? store.get() : null;
+};
+
+// The selected year drawn through a chart as a solid cursor, and a click on the
+// chart picking the year under the pointer. Both are optional: a chart given no
+// store draws exactly as it always has.
+//
+// The cursor is laid OVER the chart rather than drawn inside it. As a Recharts
+// ReferenceLine it re-rendered the whole chart on every step (~25 ms each for
+// these two); as an overlay the chart never re-renders, and the line just slides.
+// Its x comes from the chart's own rendered axis ticks — the first and last
+// visible, interpolated — so it lands exactly where Recharts put that age,
+// whatever the scale, range or width.
+const ChartYearCursor = ({ focus, retirementAge, hostRef, range }) => {
+  const picked = useFocusAge(focus);
+  const age = focus ? (picked != null ? picked : retirementAge) : null;
+  const [pos, setPos] = useState(null);
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || age == null || age < range.start || age > range.end) { setPos(null); return undefined; }
+    let tries = 0, timer = 0;
+    const place = () => {
+      const svg = host.querySelector('svg.recharts-surface');
+      const grid = host.querySelector('.recharts-cartesian-grid');
+      const ticks = [...host.querySelectorAll('.recharts-xAxis .recharts-cartesian-axis-tick')].map(t => {
+        const line = t.querySelector('line'), text = t.querySelector('text');
+        return { age: Number(text && text.textContent), x: Number(line && line.getAttribute('x1')) };
+      }).filter(t => Number.isFinite(t.age) && Number.isFinite(t.x));
+      if (!svg || !grid || ticks.length < 2) {
+        // ResponsiveContainer draws after it has measured; try again shortly.
+        if (tries++ < 20) timer = setTimeout(place, 100);
+        return;
+      }
+      const a = ticks[0], b = ticks[ticks.length - 1];
+      const x = a.x + (age - a.age) * (b.x - a.x) / ((b.age - a.age) || 1);
+      const g = grid.getBBox();
+      const off = svg.getBoundingClientRect().left - host.getBoundingClientRect().left;
+      const next = { x: x + off, top: g.y, height: g.height };
+      // Only a real move is a state change, or re-measuring after every render
+      // (below) would render forever.
+      setPos(prev => (prev && Math.abs(prev.x - next.x) < 0.5 && prev.top === next.top
+        && prev.height === next.height ? prev : next));
+    };
+    place();
+    const ro = window.ResizeObserver ? new ResizeObserver(() => { tries = 0; place(); }) : null;
+    if (ro) ro.observe(host);
+    return () => { clearTimeout(timer); if (ro) ro.disconnect(); };
+    // No dependency list: re-measured after every render of the chart it sits
+    // in, since an edit to the plan can move the axis without moving the age.
+  });
+  if (!pos) return null;
+  return (
+    <div aria-hidden="true" className="chart-year-cursor" style={{
+      position: 'absolute', left: 0, top: pos.top, height: pos.height, width: 2, marginLeft: -1,
+      background: THEME.focus, pointerEvents: 'none', transform: `translateX(${pos.x}px)`,
+      transition: prefersReducedMotion() ? 'none' : 'transform .16s ease', boxShadow: `0 0 8px ${THEME.focus}66`,
+    }} />
+  );
+};
+const pickYearProps = (onPickAge) => (onPickAge ? {
+  onClick: (s) => { if (s && s.activeLabel != null && Number.isFinite(Number(s.activeLabel))) onPickAge(Number(s.activeLabel)); },
+  style: { cursor: 'pointer' },
+} : {});
+
+function NetWorthProjectionChart({ data, personalInfo, retirementAge, badge, onHide, focus }) {
+  const onPickAge = focus ? focus.set : undefined;
+  const plotRef = useRef(null);
   const [range, setRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || MAX_AGE });
   const [infoOpen, setInfoOpen] = useState(false);
   const rows = useMemo(
@@ -15223,9 +15319,9 @@ function NetWorthProjectionChart({ data, personalInfo, retirementAge, badge, onH
             </div>
           </div>
         </div>
-        <div style={chartBox(288)}>
+        <div ref={plotRef} style={{ ...chartBox(288), position: 'relative' }}>
           <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={rows}>
+            <ComposedChart data={rows} {...pickYearProps(onPickAge)}>
               <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
               <XAxis dataKey="myAge" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
               <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1e6).toFixed(1)}M`} />
@@ -15246,12 +15342,15 @@ function NetWorthProjectionChart({ data, personalInfo, retirementAge, badge, onH
               <ReferenceLine x={retirementAge} stroke={THEME.reference} strokeDasharray="5 5" />
             </ComposedChart>
           </ResponsiveContainer>
+          <ChartYearCursor focus={focus} retirementAge={retirementAge} hostRef={plotRef} range={range} />
         </div>
       </div>
   );
 }
 
-function IncomeVsSpendingChart({ data, personalInfo, retirementAge, badge, onHide }) {
+function IncomeVsSpendingChart({ data, personalInfo, retirementAge, badge, onHide, focus }) {
+  const onPickAge = focus ? focus.set : undefined;
+  const plotRef = useRef(null);
   const [range, setRange] = useState({ start: personalInfo.myAge, end: personalInfo.legacyAge || MAX_AGE });
   const [infoOpen, setInfoOpen] = useState(false);
   const [showConversions, setShowConversions] = useState(true);
@@ -15362,9 +15461,9 @@ function IncomeVsSpendingChart({ data, personalInfo, retirementAge, badge, onHid
             </div>
           </div>
         </div>
-        <div style={chartBox(288)}>
+        <div ref={plotRef} style={{ ...chartBox(288), position: 'relative' }}>
           <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={rows}>
+            <ComposedChart data={rows} {...pickYearProps(onPickAge)}>
               <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
               <XAxis dataKey="myAge" stroke={THEME.axis} tick={{ fill: THEME.axis }} />
               <YAxis stroke={THEME.axis} tick={{ fill: THEME.axis }} tickFormatter={v => `$${(v/1000).toFixed(0)}K`} />
@@ -15393,6 +15492,7 @@ function IncomeVsSpendingChart({ data, personalInfo, retirementAge, badge, onHid
               <ReferenceLine x={retirementAge} stroke={THEME.reference} strokeDasharray="5 5" />
             </ComposedChart>
           </ResponsiveContainer>
+          <ChartYearCursor focus={focus} retirementAge={retirementAge} hostRef={plotRef} range={range} />
         </div>
         <p className="text-xs text-slate-500 mt-2">
           Bars show gross income sources. <span style={{ color: THEME.lines.target }}>Bright solid line</span> = desired spending.
@@ -16292,6 +16392,376 @@ const buildPanelCtx = ({ projections, personalInfo, accounts, assets, incomeStre
   };
 };
 
+// ── YEAR BY YEAR ─────────────────────────────────────────────────────────────
+// The plan as a timeline. One year is "selected": the reader drags along the
+// ruler, clicks a year on it, on the net-worth or income chart, or in the table,
+// steps with the arrow keys, or presses play and watches the plan run. The
+// figures, the year card, the table window and a cursor through both charts all
+// follow that one year. Nothing here computes anything: every number is a field
+// of the projection row the rest of the page already draws.
+//
+// Milestones are READ OFF the rows rather than restated from the inputs, so a
+// flag lands where the engine actually did the thing — Social Security where
+// the first benefit is paid, not where a claiming age was typed.
+const timelineMilestones = (rows, retirementAge) => {
+  const out = [];
+  const add = (i, label) => { if (i >= 0 && rows[i]) out.push({ i, age: rows[i].myAge, label }); };
+  const find = (pred) => rows.findIndex(pred);
+  add(find(r => r.myAge === retirementAge), 'Retire');
+  add(find(r => (r.socialSecurity || 0) > 0), 'Social Security');
+  const conv = rows.map((r, k) => ((r.rothConversion || 0) > 0 ? k : -1)).filter(k => k >= 0);
+  if (conv.length) {
+    add(conv[0], 'Conversions begin');
+    if (conv[conv.length - 1] + 1 < rows.length) add(conv[conv.length - 1] + 1, 'Conversions end');
+  }
+  add(find(r => (r.rmd || 0) > 0), 'RMDs begin');
+  add(find((r, k) => k > 0 && r.myAge >= retirementAge
+    && (rows[k - 1].brokerageBalance || 0) > 1 && (r.brokerageBalance || 0) <= 1), 'Brokerage spent');
+  add(find(r => r.survivorEvent === 'primary_died' || r.survivorEvent === 'spouse_died'), 'Survivor years');
+  add(find(r => r.myAge >= retirementAge && (r.totalPortfolio || 0) <= 0), 'Money runs out');
+  return out.sort((a, b) => a.i - b.i);
+};
+
+// What is happening in one year, as short chips beside the readout.
+const timelineEvents = (rows, i, milestones) => {
+  const r = rows[i];
+  if (!r) return [];
+  const out = milestones.filter(m => m.i === i).map(m => (m.label === 'Retire' ? 'Retirement year' : m.label));
+  if ((r.rothConversion || 0) > 0) out.push(`Converting ${formatCurrency(r.rothConversion)} to Roth`);
+  if ((r.rmd || 0) > 0) out.push(`RMD ${formatCurrency(r.rmd)}`);
+  if ((r.unfundedShortfall || 0) > 0) out.push(`Short ${formatCurrency(r.unfundedShortfall)}`);
+  return out;
+};
+
+// Flags whose labels would collide take turns: right of the flag, left of it,
+// then a second row; with no room at all the flag keeps its dot and loses its
+// label (the chip beside the readout still names it when that year is picked).
+const placeTimelineLabels = (xs, labels, width, tape) => {
+  const taken = [0, 1].map(() => xs.map((x, k) => [x - 3, x + 3, k]));
+  const free = (row, a, b, own) => taken[row].every(([p, q, k]) => k === own || b < p - 4 || a > q + 4);
+  return xs.map((x, k) => {
+    const w = labels[k].length * 6.1;
+    const spot = [[0, false], [0, true], [1, false], [1, true]].find(([row, left]) => {
+      const a = left ? x - 6 - w : x, b = left ? x : x + 6 + w;
+      return (tape || (a >= 0 && b <= width)) && free(row, a, b, k);
+    });
+    if (!spot) return null;
+    const [row, left] = spot;
+    taken[row].push(left ? [x - 6 - w, x, k] : [x, x + 6 + w, k]);
+    return { row, left };
+  });
+};
+
+const prefersReducedMotion = () => {
+  try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return false; }
+};
+
+// A number that rolls to its new value rather than jumping, so scrubbing reads
+// as movement. Instant under reduced motion.
+const useTweened = (target, ms = 320) => {
+  const [shown, setShown] = useState(target);
+  const fromRef = useRef(target);
+  useEffect(() => {
+    if (prefersReducedMotion() || !Number.isFinite(target)) { fromRef.current = target; setShown(target); return; }
+    const from = fromRef.current, t0 = performance.now();
+    let raf = 0;
+    const step = (now) => {
+      const t = Math.min(1, (now - t0) / ms), e = 1 - Math.pow(1 - t, 3);
+      const v = from + (target - from) * e;
+      fromRef.current = v; setShown(v);
+      if (t < 1) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [target, ms]);
+  return shown;
+};
+
+const TimelineStat = ({ label, value, prev, upIsGood }) => {
+  const shown = useTweened(value);
+  const d = prev == null ? null : value - prev;
+  const cls = d === null || Math.abs(d) < 1 || upIsGood === null ? 'text-slate-500'
+    : ((d > 0) === upIsGood ? 'text-emerald-400' : 'text-red-400');
+  return (
+    <div className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-4 py-3">
+      <div className="text-xs text-slate-500">{label}</div>
+      <div className="text-xl font-semibold text-slate-100 tabular-nums">{formatCurrency(Math.round(shown))}</div>
+      <div className={`text-xs tabular-nums ${cls}`}>
+        {d === null ? 'first year of the plan' : Math.abs(d) < 1 ? 'same as last year'
+          : `${d > 0 ? '+' : '−'}${formatCurrency(Math.abs(d))} vs last year`}
+      </div>
+    </div>
+  );
+};
+
+function YearTimelinePanel({ ctx, badge, onHide }) {
+  const rows = ctx.projections || [];
+  const n = rows.length;
+  const retirementAge = ctx.retirementAge;
+  const milestones = useMemo(() => timelineMilestones(rows, retirementAge), [rows, retirementAge]);
+  // The selected year lives in the page's focus store, not here, because the
+  // charts draw it too. Until the reader picks one it is the retirement year.
+  const picked = useFocusAge(ctx.focus);
+  const wanted = picked != null ? picked : retirementAge;
+  let sel = rows.findIndex(r => r.myAge === wanted);
+  if (sel < 0) sel = n ? (wanted < rows[0].myAge ? 0 : n - 1) : 0;
+  const selRef = useRef(sel);
+  selRef.current = sel;
+  const pick = (k) => {
+    if (!n || !ctx.focus) return;
+    ctx.focus.set(rows[Math.max(0, Math.min(n - 1, k))].myAge);
+  };
+
+  // Play: one year every 190 ms, stopping at the end. Pressing play at the end
+  // starts again from the first year; any other interaction stops it.
+  const [playing, setPlaying] = useState(false);
+  useEffect(() => {
+    if (!playing) return undefined;
+    const t = setInterval(() => {
+      if (selRef.current >= n - 1) { setPlaying(false); return; }
+      pick(selRef.current + 1);
+    }, 190);
+    return () => clearInterval(t);
+  }, [playing, n]);
+  const togglePlay = () => {
+    if (playing) { setPlaying(false); return; }
+    if (sel >= n - 1) pick(0);
+    setPlaying(true);
+  };
+
+  const wrapRef = useRef(null);
+  const drag = useRef(null);
+  const [W, setW] = useState(800);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return undefined;
+    const measure = () => setW(Math.max(280, Math.round(el.getBoundingClientRect().width)));
+    measure();
+    if (!window.ResizeObserver) return undefined;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  if (!n) return null;
+  const r = rows[sel], prev = sel > 0 ? rows[sel - 1] : null;
+
+  // The ruler. Flight Deck draws it as a tape that scrolls under a fixed caret,
+  // like an altimeter; every other theme as a fixed ruler with a moving handle.
+  const tape = THEME.look === 'flight';
+  const H = 74, pad = 14;
+  const step = tape ? Math.max(28, W / 16) : (W - pad * 2) / Math.max(1, n - 1);
+  const xAt = (k) => (tape ? k * step : pad + k * step);        // within the ruler group
+  const shift = tape ? W / 2 - sel * step : 0;                  // the tape's offset
+  const flagXs = milestones.map(m => xAt(m.i) + shift);
+  const spots = placeTimelineLabels(flagXs, milestones.map(m => m.label), W, tape);
+  const indexAt = (clientX) => {
+    const rect = wrapRef.current.getBoundingClientRect();
+    const x = clientX - rect.left;
+    return Math.round(tape ? sel + (x - W / 2) / step : (x - pad) / step);
+  };
+  const onPointerDown = (e) => {
+    setPlaying(false);
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* older browsers */ }
+    drag.current = { x: e.clientX, sel, moved: false };
+    if (!tape) pick(indexAt(e.clientX));
+  };
+  const onPointerMove = (e) => {
+    const d = drag.current;
+    if (!d) return;
+    const dx = e.clientX - d.x;
+    if (Math.abs(dx) > 3) d.moved = true;
+    if (!d.moved) return;
+    pick(tape ? d.sel - Math.round(dx / step) : indexAt(e.clientX));
+  };
+  const onPointerUp = (e) => {
+    const d = drag.current;
+    drag.current = null;
+    if (d && tape && !d.moved) pick(indexAt(e.clientX));
+  };
+  const onKeyDown = (e) => {
+    const k = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1, PageUp: 5, PageDown: -5 }[e.key];
+    if (k) { e.preventDefault(); setPlaying(false); pick(sel + k); return; }
+    if (e.key === 'Home') { e.preventDefault(); setPlaying(false); pick(0); }
+    if (e.key === 'End') { e.preventDefault(); setPlaying(false); pick(n - 1); }
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); togglePlay(); }
+  };
+  const move = prefersReducedMotion() ? 'none' : `transform ${playing ? 0.16 : 0.22}s ease`;
+
+  const events = timelineEvents(rows, sel, milestones);
+  const guaranteed = r.totalGuaranteedIncome || 0;
+  const fromSavings = (r.portfolioWithdrawal || 0) + (r.conversionTaxWithdrawal || 0);
+  const hasHsa = rows.some(x => (x.hsaBalance || 0) > 0);
+  const balMax = Math.max(1, ...rows.map(x => Math.max(x.preTaxBalance || 0, x.rothBalance || 0,
+    x.brokerageBalance || 0, x.hsaBalance || 0)));
+  const balances = [['Pre-tax', r.preTaxBalance, SERIES.preTax], ['Roth', r.rothBalance, SERIES.roth],
+    ['Brokerage', r.brokerageBalance, SERIES.brokerage], ...(hasHsa ? [['HSA', r.hsaBalance, SERIES.hsa]] : [])];
+  const win0 = Math.max(0, Math.min(n - 11, sel - 5));
+  const windowRows = rows.slice(win0, win0 + 11);
+
+  return (
+    <div className={cardStyle} data-tour="year-timeline">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="text-lg font-semibold text-slate-100">Year by year</h3>{badge}
+          <span className="text-xs text-slate-500">Drag, click a year here or on a chart, use ← →, or press play</span>
+        </div>
+        {onHide && (
+          <button onClick={onHide}
+            className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors shrink-0"
+            title="Hide this panel — turn it back on from the picker at the top">
+            Hide
+          </button>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3 mb-1">
+        <button onClick={togglePlay}
+          className="w-9 h-9 rounded-full border border-slate-500 text-slate-100 hover:bg-slate-700/60 flex items-center justify-center shrink-0"
+          aria-label={playing ? 'Pause' : 'Play the plan year by year'} title={playing ? 'Pause' : 'Play the plan year by year'}>
+          <span aria-hidden="true">{playing ? '❚❚' : '▶'}</span>
+        </button>
+        <div className="flex items-baseline gap-2">
+          <span className="text-3xl font-semibold text-slate-100 tabular-nums">Age {r.myAge}</span>
+          <span className="text-sm text-slate-500 tabular-nums">{r.year}</span>
+        </div>
+        <div className="flex flex-wrap gap-1.5" aria-live="polite">
+          {events.map(ev => (
+            <span key={ev} className="text-xs px-2 py-0.5 rounded-full bg-slate-700/60 text-slate-200">{ev}</span>
+          ))}
+        </div>
+      </div>
+
+      <div ref={wrapRef}
+        role="slider" tabIndex={0} aria-label="Year of the plan"
+        aria-valuemin={rows[0].myAge} aria-valuemax={rows[n - 1].myAge} aria-valuenow={r.myAge}
+        aria-valuetext={`Age ${r.myAge}, ${r.year}${events.length ? ' — ' + events.join(', ') : ''}`}
+        onKeyDown={onKeyDown} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
+        onPointerCancel={() => { drag.current = null; }}
+        className="year-timeline select-none cursor-pointer rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+        style={{ touchAction: 'none' }}>
+        <svg width={W} height={H} style={{ display: 'block', overflow: 'hidden' }}>
+          <g style={{ transform: `translateX(${shift}px)`, transition: tape ? move : 'none' }}>
+            {rows.map((row, k) => {
+              const major = row.myAge % 5 === 0;
+              const x = xAt(k);
+              return (
+                <g key={row.myAge}>
+                  <line x1={x} x2={x} y1={major ? 40 : 46} y2={56} stroke={THEME.axis} strokeOpacity={major ? 0.9 : 0.45} strokeWidth={major ? 1.3 : 1} />
+                  {(major || (tape && step > 34)) && (
+                    <text x={x} y={70} fontSize="11" textAnchor="middle" fill={THEME.inkMuted}>{row.myAge}</text>
+                  )}
+                </g>
+              );
+            })}
+          </g>
+          <g style={{ transform: `translateX(${shift}px)`, transition: tape ? move : 'none' }}>
+          {milestones.map((m, k) => {
+            // Placed on screen coordinates, drawn inside the group, so on the
+            // tape the flags travel with the ticks rather than jumping ahead.
+            const x = xAt(m.i), spot = spots[k], cy = spot && spot.row ? 28 : 16;
+            return (
+              <g key={m.label + m.i}>
+                <line x1={x} x2={x} y1={cy} y2={56} stroke={THEME.reference} strokeOpacity={0.55} strokeDasharray="2 3" />
+                <circle cx={x} cy={cy} r={3} fill={THEME.reference} />
+                {spot && (
+                  <text x={spot.left ? x - 6 : x + 6} y={cy + 3.5} fontSize="10.5" textAnchor={spot.left ? 'end' : 'start'} fill={THEME.inkSecondary}>{m.label}</text>
+                )}
+              </g>
+            );
+          })}
+          </g>
+          <g className="tl-handle" style={{ transform: `translateX(${tape ? W / 2 : xAt(sel)}px)`, transition: tape ? 'none' : move }}>
+            {tape ? (
+              <path d="M-6 30 L6 30 L0 38 Z" fill={THEME.focus} />
+            ) : (
+              <>
+                <circle cx={0} cy={48} r={11} fill={THEME.focus} fillOpacity={0.16} />
+                <circle cx={0} cy={48} r={6} fill={THEME.focus} />
+              </>
+            )}
+            <line x1={0} x2={0} y1={tape ? 36 : 30} y2={58} stroke={THEME.focus} strokeWidth={2} />
+          </g>
+        </svg>
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
+        <TimelineStat label="Portfolio" value={r.totalPortfolio || 0} prev={prev && (prev.totalPortfolio || 0)} upIsGood={true} />
+        <TimelineStat label="Money coming in" value={r.totalIncome || 0} prev={prev && (prev.totalIncome || 0)} upIsGood={null} />
+        <TimelineStat label="Taxes" value={r.totalTax || 0} prev={prev && (prev.totalTax || 0)} upIsGood={false} />
+        <TimelineStat label="Converted to Roth" value={r.rothConversion || 0} prev={prev && (prev.rothConversion || 0)} upIsGood={null} />
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-5 gap-4 mt-4">
+        <div className="xl:col-span-2 xl:self-start bg-slate-800/40 border border-slate-700/50 rounded-lg p-4">
+          <div className="text-sm font-semibold text-slate-200 mb-3">Age {r.myAge} · {r.year}</div>
+          <div className="space-y-2">
+            {balances.map(([label, v, color]) => (
+              <div key={label} className="grid grid-cols-[5.5rem_1fr_7.5rem] items-center gap-3 text-sm">
+                <span className="text-slate-400">{label}</span>
+                <span className="h-1.5 rounded-full bg-slate-700/60 overflow-hidden">
+                  <span className="block h-full rounded-full" style={{ width: `${Math.max(0, (v || 0) / balMax * 100)}%`, background: color,
+                    transition: prefersReducedMotion() ? 'none' : 'width .25s ease' }} />
+                </span>
+                <span className="text-slate-200 tabular-nums text-right">{formatCurrency(v || 0)}</span>
+              </div>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 gap-4 mt-4 pt-3 border-t border-slate-700/50 text-sm">
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">Money in</div>
+              {[['Work', r.earnedIncome], ['Social Security', r.socialSecurity],
+                ['Pensions & other', guaranteed - (r.socialSecurity || 0)], ['From savings', fromSavings]]
+                .filter(([, v]) => (v || 0) > 0).map(([label, v]) => (
+                  <div key={label} className="flex justify-between gap-2"><span className="text-slate-400">{label}</span><span className="text-slate-200 tabular-nums">{formatCurrency(v)}</span></div>
+                ))}
+            </div>
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">Money out</div>
+              {[['Spending', r.desiredIncome], ['Taxes', r.totalTax], ['To Roth (a transfer)', r.rothConversion]]
+                .filter(([, v]) => (v || 0) > 0).map(([label, v]) => (
+                  <div key={label} className="flex justify-between gap-2"><span className="text-slate-400">{label}</span><span className="text-slate-200 tabular-nums">{formatCurrency(v)}</span></div>
+                ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="xl:col-span-3 overflow-x-auto">
+          <table className="w-full text-sm tabular-nums">
+            <thead>
+              <tr className="text-xs text-slate-500 border-b border-slate-700/60">
+                {['Age', 'Year', 'Income', 'From savings', 'Converted', 'Taxes', 'Spending', 'Portfolio'].map((h, k) => (
+                  <th key={h} className={`py-1.5 px-2 font-medium ${k < 2 ? 'text-left' : 'text-right'}`}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {windowRows.map((row, j) => {
+                const k = win0 + j, on = k === sel;
+                return (
+                  <tr key={row.myAge} onClick={() => { setPlaying(false); pick(k); }}
+                    aria-selected={on}
+                    className={`cursor-pointer border-b border-slate-700/40 ${on ? 'bg-slate-700/60 text-slate-100' : 'text-slate-300 hover:bg-slate-700/30'}`}
+                    style={on ? { boxShadow: `inset 3px 0 0 ${THEME.focus}` } : undefined}>
+                    <td className="py-1.5 px-2">{row.myAge}</td>
+                    <td className="py-1.5 px-2">{row.year}</td>
+                    <td className="py-1.5 px-2 text-right">{formatCurrency((row.earnedIncome || 0) + (row.totalGuaranteedIncome || 0))}</td>
+                    <td className="py-1.5 px-2 text-right">{formatCurrency((row.portfolioWithdrawal || 0) + (row.conversionTaxWithdrawal || 0))}</td>
+                    <td className="py-1.5 px-2 text-right">{(row.rothConversion || 0) > 0 ? formatCurrency(row.rothConversion) : '—'}</td>
+                    <td className="py-1.5 px-2 text-right">{formatCurrency(row.totalTax || 0)}</td>
+                    <td className="py-1.5 px-2 text-right">{formatCurrency(row.desiredIncome || 0)}</td>
+                    <td className="py-1.5 px-2 text-right">{formatCurrency(row.totalPortfolio || 0)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Every panel the app can draw, in one place. `render` adapts each component's
 // own props from the shared ctx, so the registry can put any panel on any page
 // without the panels having to agree on a signature they never needed.
@@ -16321,12 +16791,16 @@ const PanelCard = ({ title, badge, onHide, children }) => (
 const PANEL_REGISTRY = [
   { id: 'summaryCards',     label: 'Headline summary cards',
     render: (ctx, badge, onHide) => <SummaryCardsPanel ctx={ctx} badge={badge} onHide={onHide} /> },
+  { id: 'yearByYear',       label: 'Year by year — play the plan',
+    render: (ctx, badge, onHide) => <YearTimelinePanel ctx={ctx} badge={badge} onHide={onHide} /> },
   { id: 'netWorth',         label: 'Net worth projection',
     render: (ctx, badge, onHide) => <NetWorthProjectionChart data={ctx.projections}
-      personalInfo={ctx.personalInfo} retirementAge={ctx.retirementAge} badge={badge} onHide={onHide} /> },
+      personalInfo={ctx.personalInfo} retirementAge={ctx.retirementAge} badge={badge} onHide={onHide}
+      focus={ctx.focus} /> },
   { id: 'retirementIncome', label: 'Income vs spending',
     render: (ctx, badge, onHide) => <IncomeVsSpendingChart data={ctx.projections}
-      personalInfo={ctx.personalInfo} retirementAge={ctx.retirementAge} badge={badge} onHide={onHide} /> },
+      personalInfo={ctx.personalInfo} retirementAge={ctx.retirementAge} badge={badge} onHide={onHide}
+      focus={ctx.focus} /> },
   { id: 'withdrawalRate',   label: 'Withdrawal rate over time',
     render: (ctx, badge, onHide) => <WithdrawalRatePanel ctx={ctx} badge={badge} onHide={onHide} /> },
   { id: 'taxSummary',       label: 'Lifetime tax summary',
