@@ -14451,6 +14451,23 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
                                 borderRadius: 8, fontSize: 12, color: THEME.inkPrimary } };
 
   const panelOn = (id) => panels.includes(id);
+  // A panel hidden from its own header leaves a one-line note in its place for
+  // the rest of the visit, with a button that brings it straight back. Before
+  // this the way back was the Panels picker at the top of the page, named only
+  // in the Hide button's tooltip — a panel hidden by accident looked gone.
+  const [justHidden, setJustHidden] = useState([]);
+  const hidePanel = (id) => {
+    if (panelOn(id)) togglePanel(id);
+    setJustHidden(prev => (prev.includes(id) ? prev : [...prev, id]));
+  };
+  const showPanelAgain = (id) => {
+    if (!panelOn(id)) togglePanel(id);
+    setJustHidden(prev => prev.filter(x => x !== id));
+  };
+  const hiddenNote = (id) => (justHidden.includes(id) && !panelOn(id)
+    ? <HiddenPanelNote key={'hidden-' + id} label={panelLabel(id)} onShow={() => showPanelAgain(id)}
+        onDismiss={() => setJustHidden(prev => prev.filter(x => x !== id))} />
+    : null);
 
   // Everything moved, in words, for the header while the card is folded.
   const leverSummary = [
@@ -15003,9 +15020,9 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
       {panelOn('kpis') && thenM && (
         <div>
           <div className="flex justify-end mb-1">
-            <button onClick={() => togglePanel('kpis')}
+            <button onClick={() => hidePanel('kpis')}
               className="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 rounded hover:bg-slate-700/50 transition-colors"
-              title="Hide these — turn them back on from the picker above">
+              title="Hide these — a note stays here to bring them back, and so does the Panels picker above">
               Hide
             </button>
           </div>
@@ -15055,14 +15072,18 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
       {/* Everything the app can draw, drawn by the app's own components. A
           change to any of these lands on the Dashboard and here at once, which
           is the entire reason they were extracted. */}
-      {PANEL_REGISTRY.filter(e => panelOn(e.id)).map(e => (
+      {hiddenNote('kpis')}
+      {PANEL_REGISTRY.filter(e => panelOn(e.id) || justHidden.includes(e.id)).map(e => (
         <React.Fragment key={e.id}>
-          {e.render(sandboxCtx, previewing ? whatIfBadge : null, () => togglePanel(e.id))}
+          {panelOn(e.id)
+            ? e.render(sandboxCtx, previewing ? whatIfBadge : null, () => hidePanel(e.id))
+            : hiddenNote(e.id)}
         </React.Fragment>
       ))}
 
+      {hiddenNote('balances')}
       {panelOn('balances') && ResponsiveContainer && (
-        <PanelCard title="Balances by tax treatment" badge={previewing ? whatIfBadge : null} onHide={() => togglePanel('balances')}>
+        <PanelCard title="Balances by tax treatment" badge={previewing ? whatIfBadge : null} onHide={() => hidePanel('balances')}>
           <ResponsiveContainer width="100%" height={280}>
             <ComposedChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" stroke={THEME.grid} />
@@ -15085,8 +15106,9 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
           same SERIES.rothConversion colour, in the context of the income it is
           competing with. A second chart of one series is a legend, not a view. */}
 
+      {hiddenNote('changes')}
       {panelOn('changes') && (
-        <PanelCard title="What the controls changed" onHide={() => togglePanel('changes')}>
+        <PanelCard title="What the controls changed" onHide={() => hidePanel('changes')}>
           {!previewing ? (
             <p className="text-sm text-slate-400">Nothing yet — every control is following your plan.</p>
           ) : scenario.moved.length === 0 ? (
@@ -15117,6 +15139,7 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
           than the composed one, which is deliberate: a scenario is an
           alternative to the baseline, and the baseline is what it has to be
           measured against. */}
+      {hiddenNote('scenarios')}
       {panelOn('scenarios') && (
         <ScenarioComparisonPanel
           activeScenarioId={activeScenarioId}
@@ -15129,7 +15152,7 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
           projections={projections}
           recurringExpenses={recurringExpenses}
           scenarios={scenarios}
-          onHide={() => togglePanel('scenarios')}
+          onHide={() => hidePanel('scenarios')}
         />
       )}
     </div>
@@ -16847,6 +16870,25 @@ const PANEL_REGISTRY = [
         <CharitableGivingPanel ctx={ctx} />
       </PanelCard>) },
 ];
+
+// The name a panel goes by in the Panels picker, which is also what a hidden
+// panel's note calls it, so the note names the same thing the picker lists.
+const panelLabel = (id) => ((PANEL_REGISTRY.find(e => e.id === id) || SANDBOX_EXTRA_PANELS.find(e => e.id === id) || {}).label) || id;
+
+// What a panel hidden from its own header leaves behind for the rest of the
+// visit: where it was, how to get it back, and where all panels come back from.
+const HiddenPanelNote = ({ label, onShow, onDismiss }) => (
+  <div role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 rounded-lg border border-dashed border-slate-600 text-sm text-slate-400">
+    <span><span className="text-slate-200">{label}</span> is hidden.</span>
+    <button onClick={onShow}
+      className="px-2.5 py-0.5 rounded border border-slate-500 text-slate-200 hover:bg-slate-700/60 transition-colors">
+      Show it again
+    </button>
+    <span className="text-xs text-slate-500">Any hidden panel can also come back from <strong className="text-slate-400">Panels</strong> at the top of this page.</span>
+    <button onClick={onDismiss} aria-label="Dismiss this note" title="Dismiss this note — the panel stays hidden"
+      className="ml-auto text-slate-500 hover:text-slate-300 px-1">×</button>
+  </div>
+);
 
 // The per-year bracket / conversion-room table the Tax Planning panels read.
 // Hoisted to module scope so a panel that needs it can be rendered anywhere

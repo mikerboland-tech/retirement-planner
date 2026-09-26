@@ -16241,6 +16241,34 @@ section('P144 — the plan as a timeline you can play');
   });
 }
 
+section('P145 — a hidden panel always has a visible way back');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const jsx = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+  const dash = jsx.slice(jsx.indexOf('function DashboardTab('), jsx.indexOf('// ── EVERY DASHBOARD PANEL, AS A COMPONENT'));
+  // Every Hide on the Dashboard goes through hidePanel, which leaves a note.
+  eq((dash.match(/onHide=\{\(\) => togglePanel\(/g) || []).length, 0, 'no panel header hides through the bare toggle');
+  eq((dash.match(/onClick=\{\(\) => togglePanel\('kpis'\)\}/g) || []).length, 0, 'nor does the what-if figures row');
+  ok(/\(\) => hidePanel\(e\.id\)/.test(dash), 'every registry panel hides through hidePanel');
+  ['kpis', 'balances', 'changes', 'scenarios'].forEach(id => {
+    ok(dash.includes(`hidePanel('${id}')`), `the '${id}' panel hides through hidePanel`);
+    ok(dash.includes(`{hiddenNote('${id}')}`), `and leaves its note where it was`);
+  });
+  ok(/panelOn\(e\.id\)\s*\? e\.render\([\s\S]{0,120}: hiddenNote\(e\.id\)/.test(dash), 'a hidden registry panel is replaced by its note, in place');
+  // The note names the panel as the picker does, brings it straight back, and
+  // points at the picker; dismissing it hides the note, never the way back.
+  const note = jsx.slice(jsx.indexOf('const HiddenPanelNote = '), jsx.indexOf('// The per-year bracket / conversion-room table'));
+  ok(/Show it again/.test(note), 'the note has a button that brings the panel back');
+  ok(/come back from <strong[^>]*>Panels<\/strong>/.test(note), 'and says where every hidden panel comes back from');
+  ok(/role="status"/.test(note), 'and is announced when it appears');
+  ok(/const showPanelAgain = \(id\) => \{\s*if \(!panelOn\(id\)\) togglePanel\(id\);/.test(dash), 'Show it again turns the panel back on');
+  // The picker lists every panel there is — the way back that never goes away.
+  ok(/\{\[\.\.\.PANEL_REGISTRY\.map\(e => \(\{ id: e\.id, label: e\.label \}\)\), \.\.\.SANDBOX_EXTRA_PANELS\]\.map\(p => \(/.test(dash),
+    'the Panels picker lists every registry and extra panel, hidden or not');
+  ok(/const panelLabel = /.test(jsx) && /label=\{panelLabel\(id\)\}/.test(dash), 'the note uses the picker’s own name for the panel');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {
