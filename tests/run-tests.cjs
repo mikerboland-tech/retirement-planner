@@ -16281,6 +16281,74 @@ section('P145 — a hidden panel always has a visible way back');
   ok(/const panelLabel = /.test(jsx) && /label=\{panelLabel\(id\)\}/.test(dash), 'the note uses the picker’s own name for the panel');
 }
 
+section('P146 — the what-if edits accounts, for building a bridge');
+
+{
+  const fsMod = require('fs'), pathMod = require('path');
+  const jsx = fsMod.readFileSync(pathMod.join(pathMod.resolve(__dirname, '..'), 'retirement-planner.jsx'), 'utf8');
+  const { sandboxScenario } = engine;
+  const pi = { ...engine.DEFAULT_PLAN_INFO, myAge: 45, myRetirementAge: 52, filingStatus: 'single',
+    desiredRetirementIncome: 70000, legacyAge: 90, state: 'Texas' };
+  const accts = [
+    { id: 1, name: '401k', type: '401k', owner: 'me', balance: 700000, contributionMode: 'percent',
+      employeePercent: 0.115, employerMatchPercent: 0.04, cagr: 0.07, startAge: 45, stopAge: 52, contributor: 'me' },
+    { id: 2, name: 'Brokerage', type: 'brokerage', owner: 'me', balance: 50000, contribution: 0, contributionGrowth: 0.02,
+      cagr: 0.06, startAge: 45, stopAge: 45, contributor: 'me', costBasisPercent: 0.8 },
+    { id: 3, name: 'Match', type: '401k', owner: 'me', balance: 0, contribution: 5000, cagr: 0.07, startAge: 45, stopAge: 52, contributor: 'employer' }];
+  const streams = [
+    { id: 1, type: 'earned_income', owner: 'me', name: 'Salary', amount: 200000, startAge: 45, endAge: 51, cola: 0.03 },
+    { id: 2, type: 'social_security', owner: 'me', name: 'SS', amount: 30000, startAge: 67, endAge: 120, cola: 0.02 }];
+  const base = { pi, accts, streams };
+
+  // Untouched is untouched.
+  const same = sandboxScenario(base, { accountAdjustments: { 1: { employee: 23000 } } });
+  ok(same.accts[0] === accts[0] && same.moved.length === 0, 'an edit equal to the plan changes nothing and reports nothing');
+  const none = sandboxScenario(base, { accountAdjustments: { 99: { employee: 1 } } });
+  ok(none.accts.every((a, i) => a === accts[i]), 'an id no longer in the plan is ignored');
+
+  const sc = sandboxScenario(base, { accountAdjustments: { 1: { employee: 5000 }, 2: { employee: 18000 }, 3: { employee: 0 } } });
+  const [k, b, m] = sc.accts;
+  eq(k.contributionMode, 'percent', 'a percent-of-pay 401(k) stays percent of pay, so it still grows with salary');
+  eq(+(k.employeePercent * 200000).toFixed(2), 5000, 'at the new dollars, re-expressed against the salary');
+  eq(k.employerMatchPercent, 0.04, 'and the employer match is untouched');
+  eq(b.contribution, 18000, 'a fixed-dollar account takes the new dollars');
+  eq(b.contributionGrowth, 0.02, 'keeping its contribution growth');
+  eq(b.startAge, 45, 'a closed contribution window reopens from today');
+  eq(b.stopAge, 52, 'to the retirement age');
+  ok(m === accts[2], 'an employer-only row is not the saver’s to move');
+  ok(sc.moved.some(x => x.kind === 'account' && x.id === 1 && x.field === 'contribution' && x.from === '$23,000' && x.to === '$5,000'),
+    'each edit is reported with its before and after');
+
+  // Stop ages: an explicit one wins, and it applies after a retirement shift.
+  const later = sandboxScenario(base, { myRetirementAge: 55, accountAdjustments: { 1: { stopAge: 50 } } });
+  eq(later.accts[0].stopAge, 50, 'an explicit stop age beats the one the retirement slider would set');
+  eq(later.accts[2].stopAge, 55, 'while untouched accounts still follow the retirement slider');
+
+  // The point of it: moved into brokerage and drawn first, the bridge cuts the
+  // early-withdrawal penalties of an early retirement.
+  const pen = (r) => r.reduce((sum, x) => sum + (x.earlyWithdrawalPenalty || 0), 0);
+  const run = (c) => { const s2 = sandboxScenario(base, c); return engine.computeProjections(s2.pi, s2.accts, s2.streams, [], [], []); };
+  const planPen = pen(run({}));
+  const bridged = pen(run({ accountAdjustments: { 1: { employee: 0 }, 2: { employee: 23000 } }, withdrawalPriority: ['brokerage', 'pretax', 'roth'] }));
+  gt(planPen, 0, 'retiring at 52 on 401(k) money pays early-withdrawal penalties');
+  lt(bridged, planPen * 0.75, 'a brokerage bridge, drawn first, cuts them by more than a quarter');
+  const undrawn = pen(run({ accountAdjustments: { 1: { employee: 0 }, 2: { employee: 23000 } } }));
+  gt(undrawn, bridged, 'left behind a pre-tax-first order the same bridge saves less — which is why the drawer says so');
+
+  // The drawer.
+  const dash = jsx.slice(jsx.indexOf('function DashboardTab('), jsx.indexOf('// ── EVERY DASHBOARD PANEL, AS A COMPONENT'));
+  ok(/accountAdjustments: acctAdjCount \? acctAdj : undefined,/.test(dash), 'account edits reach the scenario');
+  ok(/filter\(a => a && \(a\.contributor \|\| 'me'\) !== 'employer'\)/.test(dash), 'employer-only rows are not offered');
+  ok(/const savingsMoved = acctAdjCount === 0 && /.test(dash), 'account edits and the savings-rate slider take turns');
+  ok(/disabled=\{acctAdjCount > 0\}/.test(dash) && /set by your account edits below/.test(dash), 'the slider shows the edits’ rate, locked, while accounts are edited');
+  ok(/\.\.\.streamSummary, \.\.\.acctSummary,/.test(dash), 'edited accounts are named on the folded What if… header');
+  ok(/Early-withdrawal penalties, whole plan/.test(dash) && /Brokerage at retirement/.test(dash) && /You save each year/.test(dash),
+    'the drawer shows the bridge: saving, brokerage at retirement, penalties');
+  ok(/onClick=\{\(\) => setControl\('withdrawalOrder', 'brokerage'\)\}/.test(dash), 'and offers brokerage-first when pre-tax-first is paying penalties');
+  ok(/const stopShown = Number\.isFinite\(x\.stopAge\) \? x\.stopAge : baseStop\(a\);/.test(dash), 'stop ages shown are the what-if’s, after the retirement slider');
+  ok(/m\.field !== 'contribution' \|\| \(m\.from != null && m\.to != null\)/.test(dash), 'the changes panel lists account edits');
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(60)}`);
 if (fail === 0) {

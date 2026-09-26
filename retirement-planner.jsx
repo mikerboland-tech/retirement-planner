@@ -51,7 +51,7 @@ const {
   detailedCurrentYearDecision, irmaaTierOptions, irmaaTierCeiling, IRMAA_TIER_LOOKBACK_YEARS, nextIRMAAThreshold,
   planAtRetirementAge, streamsAtClaimAges, sandboxScenario,
   irmaaLastFreeAge, irmaaChargedAtAge, MEDICARE_ELIGIBILITY_AGE,
-  earnedIncomeByOwner, projectedWithdrawalCost,
+  earnedIncomeByOwner, projectedWithdrawalCost, employeeDollarsOf,
   rothConversionIsPlanned, withoutRothConversions, withRothConversionTarget,
   rothConversionModeLabel, rothConversionModeOf,
   taxBreakpoints, marginalCostOfNextDollar,
@@ -13800,7 +13800,7 @@ const freshDashboardConfig = () => ({ panels: [...DEFAULT_DASHBOARD_PANELS], con
 // "spend exactly $118,000" — so both drive the same control. The box clamps to
 // the slider's own range, because a value outside it would move the thumb off
 // the end and leave the two disagreeing about what the control says.
-const SandboxSlider = ({ label, value, onChange, min, max, step = 1, planValue, format, suffix }) => {
+const SandboxSlider = ({ label, value, onChange, min, max, step = 1, planValue, format, suffix, disabled, note }) => {
   const commit = (raw) => {
     const n = Number(raw);
     if (!Number.isFinite(n)) return;
@@ -13812,7 +13812,7 @@ const SandboxSlider = ({ label, value, onChange, min, max, step = 1, planValue, 
         <label className="text-xs text-slate-400">{label}</label>
         <div className="flex items-center gap-1.5">
           <input
-            type="number" min={min} max={max} step={step} value={value}
+            type="number" min={min} max={max} step={step} value={value} disabled={disabled}
             onChange={e => commit(e.target.value)}
             aria-label={`${label} (value)`}
             className="w-24 bg-slate-800 border border-slate-600 rounded px-2 py-0.5 text-sm
@@ -13821,12 +13821,13 @@ const SandboxSlider = ({ label, value, onChange, min, max, step = 1, planValue, 
           {suffix && <span className="text-sm font-semibold text-amber-400">{suffix}</span>}
         </div>
       </div>
-      <input type="range" min={min} max={max} step={step} value={value}
+      <input type="range" min={min} max={max} step={step} value={value} disabled={disabled}
              onChange={e => onChange(Number(e.target.value))}
-             aria-label={label} className="w-full accent-amber-500" />
+             aria-label={label} className={`w-full accent-amber-500 ${disabled ? 'opacity-40' : ''}`} />
       <div className="text-[11px] text-slate-500">
         plan: {format ? format(planValue) : planValue}{suffix || ''}
         {value !== planValue && <span className="text-amber-500/80"> · changed</span>}
+        {note && <span className="text-amber-500/80"> · {note}</span>}
       </div>
     </div>
   );
@@ -14257,6 +14258,67 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
     if (Number.isFinite(a.endAge)) bits.push(`to ${a.endAge}`);
     return `${st.name} ${bits.join(', ')}`;
   }).filter(Boolean);
+  // ── Accounts ──────────────────────────────────────────────────────────────
+  // Where the saving goes, account by account: what the saver puts into each
+  // one and the age it stops. The question it is built for is the early
+  // retiree's — put less into the 401(k), more into the brokerage account, and
+  // see whether the plan can bridge the years before 59½ without penalties.
+  //
+  // Stored as { [accountId]: { employee, stopAge } } holding only departures
+  // from the plan, like the streams; ids no longer in the plan are dropped on
+  // read. `employee` is the saver's own dollars this year — the employer's
+  // match is not theirs to move and stays as the plan has it.
+  //
+  // It and the savings-rate slider both set contributions, so they take turns:
+  // with any account edited the slider shows the rate the edits add up to, and
+  // with the slider moved the accounts wait for it to go back to plan.
+  const accountsOpen = !!cfg.accountsOpen;
+  const salariesNow = useMemo(() => earnedIncomeByOwner(incomeStreams), [incomeStreams]);
+  const editableAccounts = useMemo(() => (accounts || []).filter(a => a && (a.contributor || 'me') !== 'employer'),
+    [accounts]);
+  const planEmployee = (a) => employeeDollarsOf(a, salariesNow);
+  // The stop age an account has once the retirement sliders have had their say
+  // — they move it — so "Stops at age" shows the what-if's age, and an edit is
+  // measured against that rather than against the saved plan.
+  const shiftedStop = useMemo(() => {
+    const target = {};
+    if (myRet !== planMyRet) target.myRetirementAge = myRet;
+    if (married && spRet !== planSpRet) target.spouseRetirementAge = spRet;
+    const list = Object.keys(target).length
+      ? planAtRetirementAge(personalInfo, accounts, incomeStreams, target).accts : accounts;
+    const out = {};
+    (list || []).forEach(a => { if (a) out[a.id] = a.stopAge; });
+    return out;
+  }, [myRet, spRet, planMyRet, planSpRet, married, personalInfo, accounts, incomeStreams]);
+  const baseStop = (a) => (shiftedStop[a.id] !== undefined ? shiftedStop[a.id] : a.stopAge);
+  const rawAcctAdj = (controls.acctAdj && typeof controls.acctAdj === 'object') ? controls.acctAdj : {};
+  const acctAdj = useMemo(() => {
+    const out = {};
+    editableAccounts.forEach(a => {
+      const x = rawAcctAdj[a.id];
+      if (x && typeof x === 'object' && Object.keys(x).length) out[a.id] = x;
+    });
+    return out;
+  }, [rawAcctAdj, editableAccounts]);
+  const acctAdjCount = Object.keys(acctAdj).length;
+  const setAcctAdj = (a, patch) => {
+    const merged = { ...(rawAcctAdj[a.id] || {}), ...patch };
+    if (!Number.isFinite(merged.employee) || Math.abs(merged.employee - planEmployee(a)) < 0.5) delete merged.employee;
+    if (!Number.isFinite(merged.stopAge) || merged.stopAge === baseStop(a)) delete merged.stopAge;
+    const next = { ...rawAcctAdj };
+    if (Object.keys(merged).length) next[a.id] = merged; else delete next[a.id];
+    setControl('acctAdj', next);
+  };
+  const acctSummary = editableAccounts.map(a => {
+    const x = acctAdj[a.id];
+    if (!x) return null;
+    const bits = [];
+    // formatCurrency, not the page's money(): that is declared further down,
+    // and this runs during render before it is initialised.
+    if (Number.isFinite(x.employee)) bits.push(`${formatCurrency(x.employee)}/yr`);
+    if (Number.isFinite(x.stopAge)) bits.push(`to ${x.stopAge}`);
+    return `${a.name} ${bits.join(', ')}`;
+  }).filter(Boolean);
   const tierWord = (i) => (irmaaChoices.find(o => o.value === i) || {}).label || `tier ${i}`;
   const strategySummary = [
     rothOn !== rothConversionIsPlanned(personalInfo) && (rothOn ? 'conversions on' : 'conversions off'),
@@ -14271,9 +14333,12 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
     givingPct > 0 && !qcdOn && 'no QCD',
   ].filter(Boolean);
 
+  // Account edits outrank the slider when both are somehow set (an older saved
+  // scenario, say), matching the engine, which applies them after it.
+  const savingsMoved = acctAdjCount === 0 && Math.abs(savingsRate - planSavingsRate) > 0.05;
   const touched = myRet !== planMyRet || spRet !== planSpRet
     || claimMe !== planClaimMe || claimSp !== planClaimSp
-    || Math.abs(savingsRate - planSavingsRate) > 0.05 || spend !== planSpend
+    || savingsMoved || acctAdjCount > 0 || spend !== planSpend
     || rothOn !== rothConversionIsPlanned(personalInfo)
     || survivorOn !== planSurvivor || guardrailsOn || !qcdOn
     || convMode !== 'plan' || wdFill !== 'plan' || wdOrder !== 'plan' || ltcChoice !== 'plan'
@@ -14287,9 +14352,10 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
         spouseRetirementAge: married && spRet !== planSpRet ? spRet : undefined,
         claimAges: { me: claimMe !== planClaimMe ? claimMe : undefined,
                      spouse: married && claimSp !== planClaimSp ? claimSp : undefined },
-        savings: Math.abs(savingsRate - planSavingsRate) > 0.05 && baseEarned > 0
+        savings: savingsMoved && baseEarned > 0
           ? { targetDollars: (savingsRate / 100) * baseEarned, currentPersonal: basePersonal }
           : undefined,
+        accountAdjustments: acctAdjCount ? acctAdj : undefined,
         desiredRetirementIncome: spend !== planSpend ? spend : undefined,
         rothConversions: rothOn === rothConversionIsPlanned(personalInfo) ? undefined : rothOn,
         // A bracket only means anything while conversions are on; switching them
@@ -14317,6 +14383,7 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
   }, [touched, myRet, spRet, claimMe, claimSp, savingsRate, spend, rothOn, married,
       survivorOn, guardrailsOn, qcdOn, planSurvivor,
       convMode, convBracketPick, convTierPick, wdFill, wdOrder, ltcChoice, streamAdj, streamAdjCount,
+      acctAdj, acctAdjCount, savingsMoved,
       personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
       planMyRet, planSpRet, planClaimMe, planClaimSp, planSpend, planSavingsRate,
       baseEarned, basePersonal]);
@@ -14324,6 +14391,30 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
   const live = (scenario && !scenario.error) ? scenario.proj : projections;
   const liveRetAge = (scenario && !scenario.error) ? (scenario.pi.myRetirementAge || planMyRet) : planMyRet;
   const previewing = live !== projections;
+
+  // What the account edits add up to, measured exactly as planSavingsRate is,
+  // so the (locked) slider shows the rate the edits produce.
+  const editedSavingsRate = useMemo(() => {
+    if (!acctAdjCount || !scenario || scenario.error || !(baseEarned > 0)) return null;
+    const row = scenario.proj.find(p => p.myAge === personalInfo.myAge) || scenario.proj[0];
+    const per = (row && row.perAccountContributions) || {};
+    const mine = (scenario.accts || []).reduce((sum, a) => sum + myContribShare(a, per[a.id] || 0), 0);
+    return (mine / baseEarned) * 100;
+  }, [acctAdjCount, scenario, baseEarned, personalInfo.myAge]);
+  // The bridge, plan against what-if: the saver's own dollars this year, the
+  // taxable money waiting at retirement, and the early-withdrawal penalties
+  // paid over the whole plan — the figure a working bridge drives to zero.
+  const bridge = useMemo(() => {
+    const brokAt = (proj, age) => ((proj || []).find(p => p.myAge === age) || {}).brokerageBalance || 0;
+    const penalties = (proj) => (proj || []).reduce((sum, p) => sum + (p.earlyWithdrawalPenalty || 0), 0);
+    const saved = (accts) => (accts || []).reduce((sum, a) => sum + employeeDollarsOf(a, salariesNow), 0);
+    const sc = (scenario && !scenario.error) ? scenario : null;
+    return {
+      planSaved: saved(accounts), nowSaved: saved(sc ? sc.accts : accounts),
+      planBrok: brokAt(projections, planMyRet), nowBrok: brokAt(live, liveRetAge),
+      planPen: penalties(projections), nowPen: penalties(live),
+    };
+  }, [accounts, scenario, projections, live, planMyRet, liveRetAge, salariesNow]);
 
   const resetAll = () => setSandboxConfig(prev => ({ ...(prev || {}), controls: {} }));
 
@@ -14477,7 +14568,7 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
     married && claimSp !== planClaimSp && `spouse claims at ${claimSp}`,
     Math.abs(savingsRate - planSavingsRate) > 0.05 && `save ${savingsRate.toFixed(1)}%`,
     spend !== planSpend && `spend ${money(spend)}/yr`,
-    ...strategySummary, ...streamSummary,
+    ...strategySummary, ...streamSummary, ...acctSummary,
   ].filter(Boolean);
   const pickerOpen = !!cfg.pickerOpen;
   // Values the Guided Setup filled from a benchmark rather than from the user.
@@ -14630,9 +14721,12 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
             <SandboxSlider label="Spouse SS claim age" value={claimSp}
                     onChange={v => setControl('claimSpouse', v)} min={62} max={70} planValue={planClaimSp} />
           )}
-          <SandboxSlider label="Savings rate while working" value={+savingsRate.toFixed(1)}
+          <SandboxSlider label="Savings rate while working"
+                  value={+(acctAdjCount && editedSavingsRate !== null ? editedSavingsRate : acctAdjCount ? planSavingsRate : savingsRate).toFixed(1)}
                   onChange={v => setControl('savingsRate', v)} min={0} max={60} step={0.5}
-                  planValue={+planSavingsRate.toFixed(1)} suffix="%" />
+                  planValue={+planSavingsRate.toFixed(1)} suffix="%"
+                  disabled={acctAdjCount > 0}
+                  note={acctAdjCount > 0 ? 'set by your account edits below' : null} />
           <SandboxSlider label="Spending in retirement (after tax)" value={spend}
                   onChange={v => setControl('spending', v)} min={0}
                   max={Math.max(300000, Math.round((planSpend || 100000) * 2))} step={2500}
@@ -14775,6 +14869,145 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
             planLabel={givingPct > 0 ? `giving ${givingPct}% of spending` : 'no charitable giving set'}
             note={givingPct > 0 ? null : 'set a % on Personal Info'} />
         </div>
+        )}
+
+        {/* ── Accounts drawer ───────────────────────────────────────────── */}
+        {editableAccounts.length > 0 && (
+          <div className="mt-3 pt-3 border-t border-slate-700/50">
+            <button
+              onClick={() => setCfg({ accountsOpen: !accountsOpen })}
+              aria-expanded={accountsOpen}
+              className="flex items-center gap-2 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+            >
+              <span className="text-[10px] text-slate-500">{accountsOpen ? '▾' : '▸'}</span>
+              <span className="uppercase tracking-wide">Accounts</span>
+              {!accountsOpen && acctSummary.length > 0 && (
+                <span className="text-amber-400/90 normal-case">{acctSummary.join(' · ')}</span>
+              )}
+              {!accountsOpen && acctSummary.length === 0 && (
+                <span className="text-slate-600 normal-case">following your plan</span>
+              )}
+            </button>
+
+            {accountsOpen && (
+              <div className="mt-3 space-y-2">
+                <p className="text-[11px] text-slate-500">
+                  Change what you put into each account and when it stops — for example, less into a 401(k) and more
+                  into brokerage to build a bridge to an early retirement. Your employer’s match stays as your plan has
+                  it. Nothing changes in your plan until you save a scenario or make this the plan.
+                </p>
+                {/* The three numbers the bridge question turns on, plan → what-if. */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                  {[['You save each year', bridge.planSaved, bridge.nowSaved, null],
+                    [`Brokerage at retirement (age ${liveRetAge})`, bridge.planBrok, bridge.nowBrok, true],
+                    ['Early-withdrawal penalties, whole plan', bridge.planPen, bridge.nowPen, false]].map(([label, was, now, upIsGood]) => {
+                    const d = now - was;
+                    const cls = Math.abs(d) < 1 || upIsGood === null ? 'text-slate-200'
+                      : ((d > 0) === upIsGood ? 'text-emerald-400' : 'text-red-400');
+                    return (
+                      <div key={label} className="rounded-lg border border-slate-700/60 bg-slate-800/30 px-3 py-2">
+                        <div className="text-slate-500">{label}</div>
+                        <div className={`text-sm font-semibold tabular-nums ${cls}`}>{money(now)}</div>
+                        <div className="text-[11px] text-slate-500 tabular-nums">
+                          {Math.abs(d) < 1 ? 'same as your plan' : `plan ${money(was)}`}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* A bridge only works if it is drawn first. The engine follows the
+                    withdrawal order literally, before 59½ as after, so with
+                    pre-tax first it pays the 10% penalty on 401(k) money while the
+                    brokerage account sits untouched — measured on a plan retiring
+                    at 52, switching the order roughly halved the penalties. Said
+                    here, with the fix one click away, because it is exactly the
+                    trap this drawer is for. */}
+                {bridge.nowPen > 0 && bridge.nowBrok > 0
+                  && ((wdOrder === 'plan' ? planOrderArr : WD_ORDERS[wdOrder]) || [])[0] === 'pretax' && (
+                  <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-200/90">
+                    <span className="flex-1 min-w-[240px]">
+                      Your withdrawal order spends pre-tax money first, even before 59½ — so the plan pays the 10%
+                      penalty while the brokerage bridge waits. Drawing brokerage first is what makes a bridge work.
+                    </span>
+                    <button onClick={() => setControl('withdrawalOrder', 'brokerage')}
+                      className="px-2.5 py-1 rounded border border-amber-500/50 text-amber-200 hover:bg-amber-500/15 transition-colors">
+                      Draw brokerage first
+                    </button>
+                  </div>
+                )}
+                {savingsMoved && (
+                  <p className="text-[11px] text-amber-400/90">
+                    The savings-rate slider is moved. Put it back to your plan’s rate to set accounts one by one —
+                    the two would otherwise both be deciding where your saving goes.
+                  </p>
+                )}
+                {editableAccounts.map(a => {
+                  const x = acctAdj[a.id] || {};
+                  const plan = planEmployee(a);
+                  const shown = Number.isFinite(x.employee) ? x.employee : plan;
+                  const typeLabel = (ACCOUNT_TYPES.find(t => t.value === a.type) || {}).label || a.type;
+                  const owner = a.owner === 'spouse' ? 'spouse' : a.owner === 'joint' ? 'joint' : 'me';
+                  const isPercent = a.contributionMode === 'percent';
+                  const salary = owner === 'spouse' ? salariesNow.spouse : owner === 'me' ? salariesNow.me : 0;
+                  // A percent-of-salary row needs a salary to be a percent of.
+                  const cannot = isPercent && !(salary > 0);
+                  const locked = savingsMoved || cannot;
+                  const stopShown = Number.isFinite(x.stopAge) ? x.stopAge : baseStop(a);
+                  const changed = !!acctAdj[a.id];
+                  const max = Math.max(60000, Math.ceil(plan * 2 / 1000) * 1000);
+                  const matchPct = isPercent ? (a.employerMatchPercent || 0) : 0;
+                  return (
+                    <div key={a.id}
+                         className={`rounded-lg border px-3 py-2 ${changed ? 'border-amber-500/40 bg-amber-500/5' : 'border-slate-700/60 bg-slate-800/30'}`}>
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                        <div className="min-w-[180px] flex-1">
+                          <div className="text-sm font-medium text-slate-200">{a.name}</div>
+                          <div className="text-[11px] text-slate-500">
+                            {typeLabel} · plan {money(plan)}/yr{isPercent && salary > 0 ? ` (${((a.employeePercent || 0) * 100).toFixed(1)}% of pay)` : ''}
+                            {matchPct > 0 ? ` + ${(matchPct * 100).toFixed(1)}% match` : ''}, contributing to age {a.stopAge}
+                          </div>
+                        </div>
+                        <label className={`flex items-center gap-2 text-xs ${locked ? 'opacity-40' : ''}`}>
+                          <span className="text-slate-400">You put in</span>
+                          <input type="range" min={0} max={max} step={500} value={Math.min(max, shown)} disabled={locked}
+                                 aria-label={`${a.name}: your contribution per year`}
+                                 onChange={e => setAcctAdj(a, { employee: Number(e.target.value) })}
+                                 className="w-28 accent-amber-500" />
+                          <input type="number" min={0} step={500} value={Math.round(shown)} disabled={locked}
+                                 aria-label={`${a.name}: your contribution per year, dollars`}
+                                 onChange={e => {
+                                   const v = Number(e.target.value);
+                                   if (Number.isFinite(v) && v >= 0) setAcctAdj(a, { employee: v });
+                                 }}
+                                 className={`w-24 bg-slate-800 border rounded px-2 py-0.5 text-right tabular-nums ${Number.isFinite(x.employee) ? 'border-amber-500/50 text-amber-300' : 'border-slate-600 text-slate-200'}`} />
+                          <span className="text-slate-500">/yr</span>
+                        </label>
+                        <label className={`flex items-center gap-2 text-xs ${savingsMoved ? 'opacity-40' : ''}`}>
+                          <span className="text-slate-400">Stops at age</span>
+                          <input type="number" min={1} max={100} value={stopShown} disabled={savingsMoved}
+                                 aria-label={`${a.name}: age contributions stop`}
+                                 onChange={e => {
+                                   const v = Number(e.target.value);
+                                   if (Number.isFinite(v) && v > 0) setAcctAdj(a, { stopAge: v });
+                                 }}
+                                 className={`w-16 bg-slate-800 border rounded px-2 py-0.5 text-center ${Number.isFinite(x.stopAge) ? 'border-amber-500/50 text-amber-300' : 'border-slate-600 text-slate-200'}`} />
+                        </label>
+                        {cannot && (
+                          <span className="text-[11px] text-slate-500">a percent of pay, with no salary in the plan to take it from</span>
+                        )}
+                        {changed && (
+                          <button onClick={() => setAcctAdj(a, { employee: plan, stopAge: baseStop(a) })}
+                                  className="text-[11px] text-slate-500 hover:text-slate-300 underline decoration-dotted">
+                            back to plan
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         )}
 
         {/* ── Income streams drawer ─────────────────────────────────────── */}
@@ -15117,12 +15350,16 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
             </p>
           ) : (
             <p className="text-xs text-slate-400 leading-relaxed">
-              {scenario.moved.filter(m => m.field !== 'contribution').map((m, i) => (
+              {/* The savings slider's placements carry no from/to (they are
+                  shares of one total), so they stay out; an account edit has
+                  both and is shown like any other change. */}
+              {scenario.moved.filter(m => m.field !== 'contribution' || (m.from != null && m.to != null)).map((m, i) => (
                 <span key={i} className="whitespace-nowrap">
                   {i > 0 && <span className="text-slate-600"> · </span>}
                   <span className="text-slate-300">{m.name}</span>
                   <span className="text-slate-500">{' '}{m.field === 'endAge' ? 'last yr'
-                    : m.field === 'startAge' ? 'starts' : m.field === 'stopAge' ? 'stop' : m.field}{' '}</span>
+                    : m.field === 'startAge' ? 'starts' : m.field === 'stopAge' ? 'stop'
+                    : m.field === 'contribution' ? 'you put in' : m.field}{' '}</span>
                   <span className="text-slate-400">{m.from}→{m.to}</span>
                 </span>
               ))}

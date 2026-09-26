@@ -8571,6 +8571,66 @@ const sandboxScenario = (base = {}, controls = {}) => {
     }
   }
 
+  // Individual accounts — what the saver puts into each one, and the age the
+  // contributions stop. The question it answers is where the saving goes, not
+  // how much: cut the 401(k), fund the brokerage, and see whether the plan can
+  // bridge an early retirement without penalties. Keyed by account id; each
+  // entry may set `employee` (the saver's own dollars this year) and `stopAge`.
+  //
+  // After the savings lever on purpose, so an explicit per-account figure wins
+  // over the bulk fill for that account (the UI offers one or the other).
+  //
+  // The saver's dollars only. A percent-of-salary row keeps its employer match
+  // and its link to salary: the new dollars are re-expressed as a percent of
+  // the owner's salary, so they still grow with pay. A fixed-dollar row keeps
+  // its contribution growth. Employer-only rows are not the saver's to move and
+  // are left alone. An account whose contribution window has already closed
+  // (a brokerage account that was never funded) is reopened from today to the
+  // owner's retirement age when it is given dollars, unless a stop age is set.
+  // Ids no longer in the plan are ignored.
+  const acctAdj = controls.accountAdjustments;
+  if (acctAdj && typeof acctAdj === 'object') {
+    const money = (v) => '$' + Math.round(v).toLocaleString('en-US');
+    const salaries = earnedIncomeByOwner(streams);
+    accts = accts.map(a => {
+      const x = a && acctAdj[a.id];
+      if (!x || typeof x !== 'object') return a;
+      if ((a.contributor || 'me') === 'employer') return a;
+      const owner = a.owner === 'spouse' ? 'spouse' : a.owner === 'joint' ? 'joint' : 'me';
+      const ownerAge = owner === 'spouse' ? (pi.spouseAge || 0)
+        : owner === 'joint' ? Math.max(pi.myAge || 0, pi.spouseAge || 0) : (pi.myAge || 0);
+      const ownerRetire = owner === 'spouse' ? (pi.spouseRetirementAge || pi.myRetirementAge || 65)
+        : (pi.myRetirementAge || 65);
+      let next = a;
+      if (Number.isFinite(x.employee) && x.employee >= 0) {
+        const was = employeeDollarsOf(a, salaries);
+        if (Math.abs(was - x.employee) >= 0.5) {
+          if (a.contributionMode === 'percent') {
+            const sal = owner === 'spouse' ? salaries.spouse : owner === 'me' ? salaries.me : 0;
+            if (sal > 0) next = { ...next, employeePercent: x.employee / sal };
+          } else {
+            next = { ...next, contribution: x.employee };
+          }
+          if (next !== a) {
+            const closed = !(ownerAge >= (a.startAge ?? 0) && ownerAge < (a.stopAge ?? 0));
+            if (x.employee > 0 && closed && !Number.isFinite(x.stopAge)) {
+              next = { ...next, startAge: ownerAge, stopAge: Math.max(ownerAge + 1, ownerRetire) };
+            }
+            moved.push({ kind: 'account', id: a.id, name: a.name, field: 'contribution',
+                         from: money(was), to: money(x.employee) });
+          }
+        }
+      }
+      if (Number.isFinite(x.stopAge) && x.stopAge !== next.stopAge) {
+        moved.push({ kind: 'account', id: a.id, name: a.name, field: 'stopAge',
+                     from: next.stopAge, to: x.stopAge });
+        next = { ...next, stopAge: x.stopAge,
+                 startAge: Math.min(next.startAge ?? ownerAge, x.stopAge) };
+      }
+      return next;
+    });
+  }
+
   if (Number.isFinite(controls.desiredRetirementIncome)) {
     pi = { ...pi, desiredRetirementIncome: Math.max(0, controls.desiredRetirementIncome) };
   }
