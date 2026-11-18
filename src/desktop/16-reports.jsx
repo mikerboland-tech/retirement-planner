@@ -274,8 +274,9 @@ function NextYearReport({ projections, personalInfo, accounts, incomeStreams, on
 
         <p style={{ fontSize: 11, color: '#64748b', marginTop: 24, lineHeight: 1.5, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
           This report is a directional planning tool generated from the assumptions in your plan, not tax or
-          investment advice. Figures are estimates based on current-year projections and 2026 tax parameters.
-          Confirm amounts and deadlines with a qualified professional before acting.
+          investment advice. Figures are estimates from the plan's projection, using the tax figures the IRS
+          has published for the year (later years grown at the indexes the law uses). Confirm amounts and
+          deadlines with a qualified professional before acting.
         </p>
       </div>
     </div>
@@ -330,6 +331,8 @@ function PlanSummaryReport({ projections, personalInfo, accounts, incomeStreams,
   const rothStrategy = conversionIsActive(pi)
     ? conversionModeLabel(pi).replace(/^filling to the/, 'Fill the').replace(/^staying under/, 'Stay under')
     : 'None planned';
+  // The same list the Assumptions tab shows (engine planAssumptions).
+  const assumptions = PlannerEngine.planAssumptions(pi, accounts || []);
 
   const overlay = (
     <div className="report-overlay fixed inset-0 bg-black/60 flex items-start justify-center z-50 overflow-y-auto py-8 px-4">
@@ -368,6 +371,24 @@ function PlanSummaryReport({ projections, personalInfo, accounts, incomeStreams,
           <div style={statBox}><p style={statLabel}>Lifetime IRMAA</p><p style={statValue}>{fmtK(lifetimeIRMAA)}</p></div>
           {lifetimeConversions > 0 && <div style={statBox}><p style={statLabel}>Total Roth Converted</p><p style={statValue}>{fmtK(lifetimeConversions)}</p></div>}
         </div>
+
+        <h2 style={h2}>What the Plan Assumes</h2>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }} data-report-assumptions>
+          <tbody>
+            {assumptions.map((a, i) => (
+              <React.Fragment key={a.group + a.label}>
+                {(i === 0 || assumptions[i - 1].group !== a.group) && (
+                  <tr><td colSpan={3} style={{ ...td, fontWeight: 700, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.03em', color: '#334155', paddingTop: 10 }}>{a.group}</td></tr>
+                )}
+                <tr style={{ breakInside: 'avoid' }}>
+                  <td style={{ ...td, width: '20%', color: '#475569' }}>{a.label}</td>
+                  <td style={{ ...td, width: '28%', fontWeight: 600 }}>{a.value}</td>
+                  <td style={{ ...td, fontSize: 11, color: '#475569' }}>{a.note}{a.source ? <span style={{ color: '#94a3b8' }}> Source: {a.source}.</span> : null}</td>
+                </tr>
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
 
         <h2 style={h2}>Investment Accounts</h2>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -449,8 +470,9 @@ function PlanSummaryReport({ projections, personalInfo, accounts, incomeStreams,
 
         <p style={{ fontSize: 11, color: '#64748b', marginTop: 24, lineHeight: 1.5, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
           This report is a directional planning tool generated from the assumptions in your plan, not tax or
-          investment advice. Projections use 2026 tax parameters inflated forward and your entered growth
-          assumptions; actual results will differ. Confirm decisions with a qualified professional.
+          investment advice. Projections use the official {PlannerEngine.LATEST_PUBLISHED_TAX_YEAR - 1} and {PlannerEngine.LATEST_PUBLISHED_TAX_YEAR} tax
+          figures, grown after that at the indexes the law uses, and the assumptions listed above; actual results
+          will differ. Confirm decisions with a qualified professional.
         </p>
       </div>
     </div>
@@ -796,7 +818,8 @@ function SurvivorTaxReport({ projections, personalInfo, incomeStreams, onClose }
 
         <p style={{ fontSize: 11, color: '#64748b', marginTop: 24, lineHeight: 1.5, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
           This report is a directional planning tool generated from the assumptions in your plan, not tax or
-          investment advice. It prices each year twice under 2026 tax law inflated forward; it does not model
+          investment advice. It prices each year twice under today's tax law (the published {PlannerEngine.LATEST_PUBLISHED_TAX_YEAR - 1} and{' '}
+          {PlannerEngine.LATEST_PUBLISHED_TAX_YEAR} figures, grown after that at the indexes the law uses); it does not model
           estate tax, step-up in basis, beneficiary elections, or the year-of-death return itself (which is
           still filed jointly). Confirm decisions with a qualified professional.
         </p>
@@ -1535,9 +1558,10 @@ function RothRoadmapReport({ computeProjections, projections, personalInfo, acco
         <p style={{ fontSize: 11, color: '#64748b', marginTop: 24, lineHeight: 1.5, borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
           This report is a directional planning tool generated from the assumptions in your plan, not tax or
           investment advice. The comparison runs your plan twice — once as configured, once with every
-          conversion setting cleared — under 2026 tax law inflated forward at your stated inflation rate.
-          It does not model state-specific conversion treatment beyond your state's own schedule, the
-          five-year rule on converted principal, or recharacterization (repealed for conversions).
+          conversion setting cleared — under today's tax law (the published {PlannerEngine.LATEST_PUBLISHED_TAX_YEAR - 1} and{' '}
+          {PlannerEngine.LATEST_PUBLISHED_TAX_YEAR} figures, grown after that at the indexes the law uses). The five-year
+          clock on converted dollars is applied. It does not model state-specific conversion treatment beyond your
+          state's own schedule, or recharacterization (repealed for conversions).
           Confirm decisions with a qualified professional.
         </p>
       </div>

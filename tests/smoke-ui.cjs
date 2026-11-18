@@ -244,6 +244,13 @@ const check = async (browser, base, name, opts, fn) => {
       await v.page.waitForTimeout(400);
       ok(/Every Social Security payment in the plan/.test(await v.page.$eval('[data-ss-shortfall]', (el) => el.innerText)),
         'choosing the Trustees’ cut says what it does');
+      // The Assumptions tab lists what the plan rests on, from the live plan.
+      await tab(v.page, 'faq');
+      const card = await v.page.$eval('[data-plan-assumptions]', (el) => el.innerText);
+      ok(/Inflation: 3\.0% a year/.test(card) && /Investment growth: \d+\.\d% a year/.test(card),
+        'the Assumptions tab opens with what the plan assumes');
+      ok(/Benefits: cut to 78% from 2033/.test(card), 'and follows the plan: the Social Security cut just chosen');
+      ok(/Source: 2026 Social Security Trustees Report/.test(card), 'with the source of each outside figure');
     });
 
     // ── 3. The look picker ───────────────────────────────────────────────────
@@ -305,8 +312,9 @@ const check = async (browser, base, name, opts, fn) => {
           if (button === 'What Breaks First') {
             ok(strategy === 'percent' ? text.includes('Spending has no row') : /\nSpending\t/.test(text),
               `${strategy}: the spending edge is ${strategy === 'percent' ? 'left out, with the reason' : 'measured'}`);
-          } else if (strategy === 'percent') {
-            ok(/Withdrawal Strategy/i.test(text) && text.includes('Fixed percentage'), 'percent: the summary names the strategy');
+          } else {
+            ok(/What the Plan Assumes/.test(text) && /Money has to last/.test(text), `${strategy}: the summary lists what the plan assumes`);
+            if (strategy === 'percent') ok(/Withdrawal Strategy/i.test(text) && text.includes('Fixed percentage'), 'percent: the summary names the strategy');
           }
           await v.page.click('#report-print >> button:text-is("Close")');
           await v.page.waitForTimeout(200);

@@ -393,14 +393,18 @@ const getFederalDeduction = (filingStatus, yearsFromNow = 0, inflationRate = 0.0
 // handled by the config-driven engine below and ignore these values.
 // Rates are 2026. Several flat states enacted rate cuts effective 1/1/2026:
 //   GA 5.49→4.99, KY 4.0→3.5, IN 3.15→2.95, MS 5.0→4.0, NC 4.75→3.99,
-//   UT 4.65→4.45, and OH dropped its top progressive bracket to a flat 2.75%
+//   UT 4.65→4.45, and OH dropped its top progressive bracket to a flat 2.75%.
+//   ID cut 5.695→5.3% from 2025 (HB 40); IA went flat at 3.8% from 2025 (SF 2442).
+//   IA, GA, MI, CO, KY and LA are flat too, but each has a retirement exclusion
+//   large enough to matter, so they run through STATE_TAX_CONFIG; their values
+//   here only feed the dropdowns.
 //   (OH technically exempts the first ~$26,050; approximated here via the
 //   standard-deduction subtraction in the flat path).
 const STATE_TAX_RATES = {
   'None': 0, 'Alabama': 0.05, 'Alaska': 0, 'Arizona': 0.025, 'Arkansas': 0.044,
   'California': 0.093, 'Colorado': 0.044, 'Connecticut': 0.0699, 'Delaware': 0.066,
-  'Florida': 0, 'Georgia': 0.0499, 'Hawaii': 0.11, 'Idaho': 0.058, 'Illinois': 0.0495,
-  'Indiana': 0.0295, 'Iowa': 0.057, 'Kansas': 0.057, 'Kentucky': 0.035, 'Louisiana': 0.03,
+  'Florida': 0, 'Georgia': 0.0499, 'Hawaii': 0.11, 'Idaho': 0.053, 'Illinois': 0.0495,
+  'Indiana': 0.0295, 'Iowa': 0.038, 'Kansas': 0.057, 'Kentucky': 0.035, 'Louisiana': 0.03,
   'Maine': 0.0715, 'Maryland': 0.0575, 'Massachusetts': 0.05, 'Michigan': 0.0425,
   'Minnesota': 0.0985, 'Mississippi': 0.04, 'Missouri': 0.048, 'Montana': 0.059,
   'Nebraska': 0.0584, 'Nevada': 0, 'New Hampshire': 0, 'New Jersey': 0.1075,
@@ -456,13 +460,17 @@ const STATES_EXEMPT_ALL_RETIREMENT_DISTRIBUTIONS = new Set([
 // Key Alabama-specific rules implemented here:
 //   1. Progressive brackets: 2% on first $500 (S) / $1,000 (MFJ), 
 //      4% on next $2,500 (S) / $5,000 (MFJ), 5% on the remainder.
-//   2. Alabama standard deduction uses a sliding scale based on AGI:
-//      MFJ: $7,500 (AGI ≤ $20,000), phasing to $4,000 (AGI ≥ $30,000+)
-//      Single: $2,500 (AGI ≤ $20,000), phasing to $2,000 (AGI ≥ $30,000+)
+//   2. Alabama standard deduction uses a sliding scale on Alabama AGI (before
+//      the federal tax deduction), in $500 steps above $25,999:
+//      MFJ $8,500 → $5,000, Single $3,000 → $2,500, HoH $5,200 → $2,500;
+//      MFS $4,250 → $2,500 in $250 steps above $12,999. (These maximums plus the
+//      personal exemption are the 2025 Form 40 filing thresholds: $11,500 /
+//      $4,500 / $8,200 / $5,750.)
 //   3. Personal exemption: $1,500 (S) / $3,000 (MFJ) — NOT inflation-adjusted.
-//   4. Federal income tax paid is deductible from Alabama taxable income (this is
-//      one of only 3 states that allow this — it creates a circular dependency
-//      resolved by iteration).
+//   4. Federal income tax paid is deductible from Alabama taxable income — the
+//      only state that still allows it in full (Missouri and Oregon allow a
+//      capped amount; Iowa and Louisiana repealed theirs). It creates a circular
+//      dependency resolved by iteration.
 //   5. Social Security income is fully exempt from Alabama state tax.
 //   6. Government/military pensions (including FERS/CSRS/military) are exempt.
 //   7. Over-65 retirement income exclusion: up to $6,000/year excluded.
@@ -492,26 +500,25 @@ const ALABAMA_TAX_BRACKETS = {
   ]
 };
 
-// Alabama standard deduction: sliding scale based on AGI
-// MFJ: $7,500 at ≤$20,000 AGI → phases to $4,000 at $30,000+ AGI
-// Single/HoH: $2,500 at ≤$20,000 AGI → phases to $2,000 at $30,000+ AGI
-// MFS: Half of MFJ amounts
-const getAlabamaStandardDeduction = (agi, filingStatus) => {
-  if (filingStatus === 'married_joint') {
-    if (agi <= 20000) return 7500;
-    if (agi >= 30000) return 4000;
-    // Linear phase-out between $20K and $30K
-    return Math.round(7500 - (agi - 20000) / 10000 * 3500);
-  } else if (filingStatus === 'married_separate') {
-    if (agi <= 10000) return 3750;
-    if (agi >= 15000) return 2000;
-    return Math.round(3750 - (agi - 10000) / 5000 * 1750);
-  } else {
-    // Single and Head of Household
-    if (agi <= 20000) return 2500;
-    if (agi >= 30000) return 2000;
-    return Math.round(2500 - (agi - 20000) / 10000 * 500);
-  }
+// Alabama standard deduction: Code of Alabama §40-18-15(b), as the 2025 Form 40
+// chart applies it. Full amount up to $25,999 of Alabama AGI ($12,999 married
+// separate), then reduced for each $500 ($250) band above, never below the floor.
+// Every status reaches its floor after 20 bands, about $36,000 of AGI.
+// The chart reads Alabama AGI, BEFORE the federal income tax deduction: the
+// progressive engine passes that as extra.stateAGI (the first argument is the
+// running figure after it, kept for callers that have nothing else).
+const ALABAMA_STD_DEDUCTION = {
+  married_joint:     { max: 8500, floor: 5000, step: 175, over: 25999, band: 500 },
+  single:            { max: 3000, floor: 2500, step: 25,  over: 25999, band: 500 },
+  head_of_household: { max: 5200, floor: 2500, step: 135, over: 25999, band: 500 },
+  married_separate:  { max: 4250, floor: 2500, step: 88,  over: 12999, band: 250 },
+};
+const getAlabamaStandardDeduction = (agi, filingStatus, _inf, extra = {}) => {
+  const t = ALABAMA_STD_DEDUCTION[filingStatus] || ALABAMA_STD_DEDUCTION.single;
+  const base = Number.isFinite(extra && extra.stateAGI) ? extra.stateAGI : agi;
+  if (base <= t.over) return t.max;
+  const bands = Math.floor((base - t.over - 1) / t.band) + 1;
+  return Math.max(t.floor, t.max - bands * t.step);
 };
 
 // Alabama personal exemption (NOT inflation-adjusted)
@@ -564,12 +571,13 @@ const resolveStateStdDeduction = (cfg, agi, filingStatus, inf, extra = {}) => {
     const hiScaled = (hi === undefined || hi === Infinity) ? Infinity : hi * inf;
     return Math.min(Math.max(amt, lo), hiScaled);
   }
-  if (cfg.mode === 'federal_taxable') {
-    return (STANDARD_DEDUCTION_2026[filingStatus] || STANDARD_DEDUCTION_2026.single) * inf;
-  }
-  if (cfg.mode === 'federal_plus') {
-    const base = (STANDARD_DEDUCTION_2026[filingStatus] || STANDARD_DEDUCTION_2026.single);
-    return (base + (cfg.offset || 0)) * inf;
+  if (cfg.mode === 'federal_taxable' || cfg.mode === 'federal_plus') {
+    const offset = cfg.mode === 'federal_plus' ? (cfg.offset || 0) * inf : 0;
+    if (Number.isFinite(extra.yearsFromNow)) {
+      const sd = publishedFor('stdDeduction', extra.yearsFromNow, extra.inflationRate ?? 0.03);
+      return (sd.table[filingStatus] || sd.table.single) * sd.factor + offset;
+    }
+    return (STANDARD_DEDUCTION_2026[filingStatus] || STANDARD_DEDUCTION_2026.single) * inf + offset;
   }
   if (cfg.mode === 'federal_agi') return 0;
   // 'fixed' (default)
@@ -948,7 +956,142 @@ const scRetirementExclusion = ({ retirementIncome, qualifiedWithdrawals, filingS
 
 // Per-state progressive tax configuration. Keyed by state name. Add states here
 // to route them through calculateStateTaxProgressive instead of the flat path.
+// ── FLAT-RATE STATES WITH RETIREMENT BREAKS ──────────────────────────────────
+// One rate each, but a retirement exclusion large enough to change a retiree's
+// bill by thousands a year, so they run through the configured engine below
+// instead of the flat path. Each function gets the household's pension income
+// and its pre-tax withdrawals and RMDs (Roth conversions are not counted, which
+// errs toward more tax) and the two ages. Where the law applies the break per
+// person, the household's income is shared between the people who qualify.
+const flatStateBrackets = (rate) => ({ single: [{ min: 0, max: Infinity, rate }] });
+const stateAges = (primaryAge, spouseAge, filingStatus) =>
+  filingStatus === 'married_joint' ? [primaryAge || 0, spouseAge || 0] : [primaryAge || 0];
+const retirementBase = (retirementIncome, qualifiedWithdrawals) =>
+  Math.max(0, (retirementIncome || 0) + (qualifiedWithdrawals || 0));
+
+// IOWA — Iowa Code §422.7 (HF 2317, 2022): from 2023 all retirement income is
+// excluded for a taxpayer 55 or older (Iowa Dept. of Revenue). Per person in law;
+// the plan does not record whose account a withdrawal came from, so the
+// household's is excluded once either spouse qualifies.
+const iaRetirementExclusion = ({ retirementIncome, qualifiedWithdrawals, primaryAge, spouseAge, filingStatus }) =>
+  stateAges(primaryAge, spouseAge, filingStatus).some(a => a >= 55) ? retirementBase(retirementIncome, qualifiedWithdrawals) : 0;
+
+// GEORGIA — O.C.G.A. §48-7-27(a)(5); Georgia DOR, Retirement Income Exclusion:
+// up to $35,000 a person aged 62–64 and $65,000 at 65+, each spouse separately,
+// not indexed. Georgia's exclusion also covers interest, dividends, capital gains
+// and rents, which the engine does not pass here, so this is a lower bound.
+const gaRetirementExclusion = ({ retirementIncome, qualifiedWithdrawals, primaryAge, spouseAge, filingStatus }) => {
+  const cap = stateAges(primaryAge, spouseAge, filingStatus).reduce((t, a) => t + (a >= 65 ? 65000 : a >= 62 ? 35000 : 0), 0);
+  return Math.min(cap, retirementBase(retirementIncome, qualifiedWithdrawals));
+};
+
+// MICHIGAN — Public Act 4 of 2023, fully phased in for 2026 (Michigan Treasury;
+// Office of Retirement Services): every retiree may deduct retirement and
+// pension benefits up to $67,610 single / $135,220 joint, indexed. Pensions
+// count at any age; IRA and 401(k) withdrawals from 59½ (taken here as 60).
+const miRetirementDeduction = ({ retirementIncome, qualifiedWithdrawals, primaryAge, spouseAge, filingStatus, inf }) => {
+  const of60 = stateAges(primaryAge, spouseAge, filingStatus).some(a => a >= 60);
+  const cap = (filingStatus === 'married_joint' ? 135220 : 67610) * (inf || 1);
+  return Math.min(cap, Math.max(0, retirementIncome || 0) + (of60 ? Math.max(0, qualifiedWithdrawals || 0) : 0));
+};
+
+// COLORADO — C.R.S. §39-22-104(4)(f), (4)(g); Colorado DOR, Social Security,
+// Pensions and Annuities (2025). Social Security is subtracted in full from 65,
+// and from 55 when federal AGI is under $75,000 ($95,000 joint), otherwise up to
+// $20,000. The pension subtraction is $24,000 a person at 65+ and $20,000 at
+// 55–64, less the Social Security already subtracted. Colorado is in
+// STATES_THAT_TAX_SS, so the taxable benefit is still in AGI when this runs.
+const coRetirementSubtraction = ({ retirementIncome, qualifiedWithdrawals, taxableSS, primaryAge, spouseAge, filingStatus, grossIncome }) => {
+  const ages = stateAges(primaryAge, spouseAge, filingStatus);
+  const n65 = ages.filter(a => a >= 65).length;
+  const n55 = ages.filter(a => a >= 55 && a < 65).length;
+  if (!n65 && !n55) return 0;
+  const ss = Math.max(0, taxableSS || 0);
+  const underLine = grossIncome <= (filingStatus === 'married_joint' ? 95000 : 75000);
+  const ssSub = (n65 || underLine) ? ss : Math.min(ss, 20000 * n55);
+  const room = Math.max(0, 24000 * n65 + 20000 * n55 - ssSub);
+  return ssSub + Math.min(room, retirementBase(retirementIncome, qualifiedWithdrawals));
+};
+
+// KENTUCKY — KRS 141.019; 2025 Form 740 instructions: up to $31,110 of pension,
+// annuity, IRA and 401(k) income a person, any age, each spouse separately. Not
+// indexed (so the function ignores `inf`).
+const kyPensionExclusion = ({ retirementIncome, qualifiedWithdrawals, filingStatus }) =>
+  Math.min(31110 * (filingStatus === 'married_joint' ? 2 : 1), retirementBase(retirementIncome, qualifiedWithdrawals));
+
+// LOUISIANA — Act 11 of the 2024 Third Extraordinary Session; Louisiana DOR: from
+// 2025, $12,000 of retirement income a person at 65+, CPI-indexed. Federal and
+// Louisiana public pensions are exempt in full, but the plan does not record a
+// pension's payer, so they get only this exemption here (errs toward more tax).
+const laRetirementExemption = ({ retirementIncome, qualifiedWithdrawals, primaryAge, spouseAge, filingStatus, inf }) => {
+  const n65 = stateAges(primaryAge, spouseAge, filingStatus).filter(a => a >= 65).length;
+  return Math.min(12000 * n65 * (inf || 1), retirementBase(retirementIncome, qualifiedWithdrawals));
+};
+
 const STATE_TAX_CONFIG = {
+  // ── THE FLAT-RATE STATES WITH RETIREMENT BREAKS (functions above) ──
+  // Iowa: flat 3.8% from 2025 (SF 2442); from 2023 Iowa starts from federal
+  // taxable income. Social Security exempt.
+  Iowa: {
+    inflationIndexed: false,
+    brackets: flatStateBrackets(0.038),
+    stdDeduction: { mode: 'federal_taxable' },
+    exemption: null, federalDeductible: false,
+    retirement: { exclusionFn: iaRetirementExclusion },
+    recapture: null,
+  },
+  // Georgia: 4.99% for 2026 (HB 463, signed May 11, 2026; further cuts are
+  // conditional and not assumed). Standard deduction $15,000, $30,000 joint, not
+  // indexed; no personal exemption since 2024. Social Security exempt.
+  Georgia: {
+    inflationIndexed: false,
+    brackets: flatStateBrackets(0.0499),
+    stdDeduction: { mode: 'fixed', single: 15000, married_separate: 15000, head_of_household: 15000, married_joint: 30000 },
+    exemption: null, federalDeductible: false,
+    retirement: { exclusionFn: gaRetirementExclusion },
+    recapture: null,
+  },
+  // Michigan: 4.25%. No standard deduction; a personal exemption of $5,900 a
+  // person (2026), indexed. Social Security exempt.
+  Michigan: {
+    inflationIndexed: true,
+    brackets: flatStateBrackets(0.0425),
+    stdDeduction: { mode: 'none' },
+    exemption: { mode: 'deduction', single: 5900, married_separate: 5900, head_of_household: 5900, married_joint: 11800 },
+    federalDeductible: false,
+    retirement: { exclusionFn: miRetirementDeduction },
+    recapture: null,
+  },
+  // Colorado: 4.4%, on federal taxable income.
+  Colorado: {
+    inflationIndexed: false,
+    brackets: flatStateBrackets(0.044),
+    stdDeduction: { mode: 'federal_taxable' },
+    exemption: null, federalDeductible: false,
+    retirement: { exclusionFn: coRetirementSubtraction },
+    recapture: null,
+  },
+  // Kentucky: 3.5% for 2026. Standard deduction $3,360 (2026), indexed; a
+  // married couple filing a combined return takes one each. Social Security exempt.
+  Kentucky: {
+    inflationIndexed: true,
+    brackets: flatStateBrackets(0.035),
+    stdDeduction: { mode: 'fixed', single: 3360, married_separate: 3360, head_of_household: 3360, married_joint: 6720 },
+    exemption: null, federalDeductible: false,
+    retirement: { exclusionFn: kyPensionExclusion },
+    recapture: null,
+  },
+  // Louisiana: flat 3% from 2025 (Act 11). Standard deduction $12,500, doubled
+  // for joint and head of household, CPI-indexed from 2026. Social Security exempt.
+  Louisiana: {
+    inflationIndexed: true,
+    brackets: flatStateBrackets(0.03),
+    stdDeduction: { mode: 'fixed', single: 12500, married_separate: 12500, head_of_household: 25000, married_joint: 25000 },
+    exemption: null, federalDeductible: false,
+    retirement: { exclusionFn: laRetirementExemption },
+    recapture: null,
+  },
+
   // ── ALABAMA ── reference implementation (sliding std deduction, full federal
   // deductibility, over-65 exclusion, SS + pension exempt, NOT inflation-indexed).
   // Source: Alabama DOR §40-18-15/§40-18-19.
@@ -1852,6 +1995,7 @@ const calculateStateTaxProgressive = (grossIncome, state, filingStatus, yearsFro
   }
 
   agi = Math.max(0, agi);
+  const stateAGI = agi; // after the state's exclusions, before any federal-tax deduction
 
   // Federal income tax deductibility (AL full; MO/MT/OR capped). Creates a
   // circular dependency resolved by the projection solver passing federalTaxPaid.
@@ -1875,7 +2019,8 @@ const calculateStateTaxProgressive = (grossIncome, state, filingStatus, yearsFro
   // `agi` here is after the state's own exclusions. A deduction that phases out
   // on FEDERAL AGI (South Carolina's SCIAD) needs the pre-exclusion figure, so it
   // is passed alongside; the other sliding functions ignore it.
-  const stdDed = resolveStateStdDeduction(config.stdDeduction, agi, filingStatus, inf, { federalAGI: grossIncome });
+  const stdDed = resolveStateStdDeduction(config.stdDeduction, agi, filingStatus, inf,
+    { federalAGI: grossIncome, stateAGI, yearsFromNow, inflationRate });
 
   // Personal exemption taken as a deduction (vs. credit-mode handled after brackets).
   let exemptionDeduction = 0;
@@ -1885,6 +2030,9 @@ const calculateStateTaxProgressive = (grossIncome, state, filingStatus, yearsFro
   }
 
   const taxableIncome = Math.max(0, agi - stdDed - exemptionDeduction);
+  // A caller that shows the figure (the year's Tax Snapshot) asks for it, so
+  // what is shown is what was taxed.
+  if (extraParams.detail) extraParams.detail.taxableIncome = taxableIncome;
 
   const brackets = config.brackets[filingStatus] || config.brackets.single;
   let tax = applyStateBrackets(taxableIncome, brackets, inf);
@@ -4283,10 +4431,9 @@ const calculateStateTax = (grossIncome, state, filingStatus, yearsFromNow = 0, i
   }
 
   // ── FLAT-TAX STATES: Simplified flat-rate approximation ──
-  // Apply inflation-adjusted standard deduction for state tax too (simplified)
-  const baseDeduction = STANDARD_DEDUCTION_2026[filingStatus] || STANDARD_DEDUCTION_2026.married_joint;
-  const inflationFactor = indexTo(1, yearsFromNow, inflationRate);
-  const adjustedDeduction = baseDeduction * inflationFactor;
+  // The rate on income less the federal standard deduction for the year.
+  const sd = publishedFor('stdDeduction', yearsFromNow, inflationRate);
+  const adjustedDeduction = (sd.table[filingStatus] || sd.table.married_joint) * sd.factor;
   // Exclude taxable SS from state income for states that don't tax it (41 of 50 states)
   const ssExclusion = STATES_THAT_TAX_SS.has(state) ? 0 : taxableSS;
   // Pension exclusion (most states with retirement-income exemption only exempt pensions).
@@ -4296,6 +4443,7 @@ const calculateStateTax = (grossIncome, state, filingStatus, yearsFromNow = 0, i
   const qualifiedExclusion = STATES_EXEMPT_ALL_RETIREMENT_DISTRIBUTIONS.has(state) ? qualifiedWithdrawals : 0;
   const stateGrossIncome = grossIncome - ssExclusion - pensionExclusion - qualifiedExclusion;
   const taxableIncome = Math.max(0, stateGrossIncome - adjustedDeduction);
+  if (extraParams.detail) extraParams.detail.taxableIncome = taxableIncome;
   return (STATE_TAX_RATES[state] || 0) * taxableIncome;
 };
 
@@ -8713,6 +8861,122 @@ const activeAdvancedSettings = (pi, fmt = (v) => '$' + Math.round(v).toLocaleStr
   return out;
 };
 
+// ── WHAT THE PLAN ASSUMES ────────────────────────────────────────────────────
+// Every assumption the plan's numbers rest on, in plain words, with the value
+// in use and where it comes from — one list for the Assumptions tab and the
+// Plan Summary report, so what is printed and what is on screen cannot differ.
+// activeAdvancedSettings above names only the unusual switches that are on;
+// this names everything, defaults included, because a default is still an
+// assumption someone may want to change.
+// Each item: { group, label, value, note, source? }.
+const HEALTHCARE_MODEL_WORDS = {
+  none: ['not costed separately', null],
+  in_spending: ['already in your spending', null],
+  basic: ['Basic', 'Medicare premiums and modest out-of-pocket costs from 65; a flat cost before 65.'],
+  moderate: ['Moderate', 'Medicare, a Medigap policy and out-of-pocket costs from 65; a flat cost before 65.'],
+  comprehensive: ['Comprehensive', 'Medicare, a Medigap policy and out-of-pocket costs from 65; a flat cost before 65.'],
+  custom: ['your own figures', 'The costs you entered for before and after 65.'],
+};
+const planAssumptions = (pi = {}, accts = []) => {
+  const pct = (v) => `${(Math.round(v * 1000) / 10).toFixed(1)}%`;
+  const money = (v) => '$' + Math.round(v || 0).toLocaleString('en-US');
+  const married = pi.filingStatus === 'married_joint';
+  const out = [];
+  const add = (group, label, value, note, source) => out.push({ group, label, value, note: note || null, source: source || null });
+  const medInfl = pi.medicalInflation || MEDICAL_INFLATION_RATE;
+
+  // Money and markets.
+  const infl = pi.inflationRate ?? 0.03;
+  add('Money and markets', 'Inflation', `${pct(infl)} a year`,
+    'Grows your spending and anything else stated in today’s dollars.');
+  const invested = (accts || []).filter(a => (a.balance || 0) > 0 && Number.isFinite(a.cagr));
+  const total = invested.reduce((sum, a) => sum + a.balance, 0);
+  if (total > 0) {
+    const w = invested.reduce((sum, a) => sum + a.balance * a.cagr, 0) / total;
+    add('Money and markets', 'Investment growth', `${pct(w)} a year`,
+      `The rates you gave your accounts, averaged by balance: about ${pct(w - infl)} more than inflation. The same every year here; Will it last? tests uneven markets.`);
+  }
+  add('Money and markets', 'Healthcare costs', `grow ${pct(medInfl)} a year`,
+    'Faster than general inflation, as they have run historically. Applies to Medicare premiums and any care costs.');
+
+  // How long.
+  const legacy = pi.legacyAge || 95;
+  if (Number.isFinite(pi.myAge)) {
+    add('How long', 'Money has to last', `until ${married ? 'the younger of you is' : 'you are'} ${legacy}`,
+      `Chance ${married ? 'at least one of you reaches' : 'you reach'} ${legacy}: ${Math.round(householdChanceAliveAt(pi, legacy) * 100)}%. Planning past the likely age is what keeps a long life from running the money out.`,
+      'US life tables (CDC, 2022)');
+  }
+  if (married && pi.survivorModelEnabled) {
+    const firstIsMe = survivorOf(pi) === 'spouse';
+    const planned = plannedLifespans(pi);
+    add('How long', 'First death', `${firstIsMe ? 'you' : 'your spouse'} at ${firstIsMe ? pi.myLifeExpectancy : pi.spouseLifeExpectancy}`,
+      `Your life expectancies decide who goes first. The survivor is planned through ${firstIsMe ? planned.spouseLifeExpectancy : planned.myLifeExpectancy}, files single from the next year, and spends ${Math.round((pi.survivorSpendingFactor ?? 0.75) * 100)}% of the couple’s budget.`);
+  } else if (married) {
+    add('How long', 'Deaths', 'not modelled', 'You are both planned through the planning age. Turn on survivor planning to see a death’s effect on taxes and income.');
+  }
+
+  // Spending.
+  const strat = withdrawalStrategyOf(pi);
+  if (strat === 'target') {
+    add('Spending', 'How much you spend', `${money(pi.desiredRetirementIncome)} a year after tax, in today’s dollars`,
+      'Rises with inflation. The plan finds the withdrawals and taxes that pay for it.');
+  } else {
+    add('Spending', 'How much you spend', withdrawalStrategySummary(pi),
+      'Your spending follows the withdrawal rule, so it moves with your portfolio.');
+  }
+  if (pi.spendingPhasesEnabled) add('Spending', 'Spending phases', 'on', 'Spending steps down in later retirement, as it does for most retirees.');
+  const hc = HEALTHCARE_MODEL_WORDS[pi.healthcareModel || 'none'] || [String(pi.healthcareModel), null];
+  const aca = pi.pre65Coverage === 'aca';
+  add('Spending', 'Healthcare', hc[0], healthcareCostsModeled(pi)
+    ? (aca ? hc[1].replace('a flat cost before 65', 'ACA premiums before 65, priced from your income') : hc[1])
+    : 'Medicare Part B and D premiums are still added from 65. Anything else is assumed to be inside your spending.');
+  const care = ltcPlanFor(pi);
+  if (!care) {
+    add('Spending', 'Long-term care', 'none planned', 'About 7 in 10 people who reach 65 need some care; Personal Info can plan for it.',
+      'US Department of Health and Human Services');
+  } else {
+    const who = (p) => p && p.months > 0;
+    const me = care.me, sp = care.spouse;
+    const one = (p) => `${p.months} months at ${money(p.monthly)} a month`;
+    const value = married && who(me) && who(sp) && me.months === sp.months && me.monthly === sp.monthly
+      ? `${one(me)}, each of you`
+      : [who(me) ? `${married ? 'you' : ''} ${one(me)}`.trim() : null, married && who(sp) ? `your spouse ${one(sp)}` : null].filter(Boolean).join('; ');
+    add('Spending', 'Long-term care', value || 'none',
+      'In today’s dollars, in the last months of each life, growing with healthcare costs.',
+      'Genworth Cost of Care Survey, 2024 medians');
+  }
+
+  // Social Security.
+  const cut = SS_SHORTFALL_PRESETS[pi.ssShortfall] || (pi.ssShortfall === 'custom'
+    ? { year: pi.ssShortfallYear, payable: pi.ssShortfallPayable } : null);
+  add('Social Security', 'Benefits', cut ? `cut to ${Math.round(cut.payable * 100)}% from ${cut.year}` : 'paid in full',
+    cut ? 'The trust-fund shortfall, if Congress does nothing.'
+      : 'As promised. The Trustees project an automatic cut to 78% in 2033 if Congress does nothing; Personal Info can plan for it.',
+    '2026 Social Security Trustees Report');
+
+  // Taxes.
+  const years = Object.keys(PUBLISHED_FIGURES.brackets.years).map(Number);
+  const status = { married_joint: 'married filing jointly', married_separate: 'married filing separately',
+    head_of_household: 'head of household', single: 'single' }[pi.filingStatus || 'single'] || pi.filingStatus;
+  add('Taxes', 'Federal tax', `today’s law, ${status}`,
+    `Official figures for ${years.join(' and ')}. After that each grows at the index the law uses: brackets and deductions by chained CPI, about a quarter point a year less than inflation.`,
+    `IRS, SSA, CMS and HHS figures for ${years.join(' and ')}`);
+  add('Taxes', 'Senior deduction', `$${SENIOR_DEDUCTION_AMOUNT.toLocaleString('en-US')} per person 65+, through ${SENIOR_DEDUCTION_LAST_YEAR}`,
+    'Then it ends, as the 2025 tax law says. It shrinks above $75,000 of income ($150,000 joint).');
+  if (pi.state) {
+    const rate = STATE_TAX_RATES[pi.state] || 0;
+    add('Taxes', 'State tax', pi.state, STATE_TAX_CONFIG[pi.state]
+      ? 'Its own rates, deductions and rules for Social Security, pensions and retirement-account withdrawals.'
+      : rate === 0 ? 'No state income tax.'
+        : `A flat ${+(rate * 100).toFixed(2)}% on income above the federal standard deduction${STATES_EXEMPT_ALL_RETIREMENT_DISTRIBUTIONS.has(pi.state) ? '; retirement income is exempt' : ''}.`);
+  }
+  if (aca && healthcareCostsModeled(pi)) {
+    add('Taxes', 'ACA credits before 65', 'today’s law',
+      'The extra credits expired after 2025, so income above 400% of the poverty line gets no credit at all.');
+  }
+  return out;
+};
+
 // ── READING A SAVED PLAN ────────────────────────────────────────────────────
 // The projection-relevant normalisation of a saved file, in one place, so the
 // desktop and the phone project the same plan identically.
@@ -11926,37 +12190,14 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
     // For IL/MS/PA, ALL qualified retirement distributions (pre-tax 401k/IRA + RMDs) are also
     // exempt — pass that figure via extraParams so calculateStateTax can subtract it (B9).
     const qualifiedRetirementWithdrawals = preTaxWithdrawals + totalRMD;
-    // Pass extraParams for Alabama progressive tax engine (federal deductibility, age-based exclusions)
-    const stateExtraParams = { totalSS: totalSocialSecurity, federalTaxPaid: federalTax, primaryAge: myAge, spouseAge: spouseAge, qualifiedRetirementWithdrawals };
+    // extraParams carry what the configured states need (federal deductibility,
+    // ages for age-based exclusions); `detail` brings back the taxable income the
+    // state calculation actually used, for the year's Tax Snapshot.
+    const stateDetail = {};
+    const stateExtraParams = { totalSS: totalSocialSecurity, federalTaxPaid: federalTax, primaryAge: myAge, spouseAge: spouseAge, qualifiedRetirementWithdrawals, detail: stateDetail };
     stateTax = calculateStateTax(finalTotalTaxableIncome, pi.state, effectiveFilingStatus, taxIndexYears, pi.inflationRate, finalTaxableSS, finalRetirementIncome, stateExtraParams);
-    
-    // Calculate state taxable income (for display in detailed table)
-    // For Alabama: mirror the progressive engine's deductions (federal tax, over-65, personal exemption)
-    // For others: mirror the simplified flat-rate logic
-    let stateTaxableIncome;
-    if (pi.state === 'Alabama') {
-      // Reconstruct Alabama taxable income for display
-      let alAGI = finalTotalTaxableIncome;
-      alAGI -= (STATES_THAT_TAX_SS.has('Alabama') ? 0 : finalTaxableSS); // SS exempt
-      alAGI -= finalRetirementIncome; // Pension exempt
-      let over65Ex = 0;
-      if (myAge >= 65) over65Ex += ALABAMA_OVER_65_RETIREMENT_EXCLUSION;
-      if (effectiveFilingStatus === 'married_joint' && spouseAge >= 65) over65Ex += ALABAMA_OVER_65_RETIREMENT_EXCLUSION;
-      alAGI -= Math.min(over65Ex, Math.max(0, alAGI));
-      alAGI = Math.max(0, alAGI - federalTax); // Federal tax deductibility
-      const alStdDed = getAlabamaStandardDeduction(alAGI, effectiveFilingStatus);
-      const alPersonalEx = ALABAMA_PERSONAL_EXEMPTION[effectiveFilingStatus] || ALABAMA_PERSONAL_EXEMPTION.single;
-      stateTaxableIncome = Math.max(0, alAGI - alStdDed - alPersonalEx);
-    } else {
-      const stateSSExclusion = STATES_THAT_TAX_SS.has(pi.state) ? 0 : finalTaxableSS;
-      const stateRetExclusion = STATES_EXEMPT_RETIREMENT_INCOME.has(pi.state) ? finalRetirementIncome : 0;
-      const stateBroadExclusion = STATES_EXEMPT_ALL_RETIREMENT_DISTRIBUTIONS.has(pi.state) ? qualifiedRetirementWithdrawals : 0;
-      const stateGrossForCalc = finalTotalTaxableIncome - stateSSExclusion - stateRetExclusion - stateBroadExclusion;
-      const sdState = publishedFor('stdDeduction', taxIndexYears, pi.inflationRate);
-      const stateDeduction = (sdState.table[effectiveFilingStatus] || sdState.table.married_joint) * sdState.factor;
-      stateTaxableIncome = Math.max(0, stateGrossForCalc - stateDeduction);
-    }
-    
+    const stateTaxableIncome = stateDetail.taxableIncome || 0;
+
     // Determine the LTCG stacking position. The "income below the gains" is ordinary
     // taxable income with capital gains EXCLUDED (federalOrdinaryTaxableIncome), after the
     // standard deduction. calculateCapitalGainsTax expects TOTAL taxable income (ordinary +
@@ -13012,7 +13253,7 @@ const describePlanPatch = (state, patch) => {
     calculateSpousalBenefit,
     mortalityQx, lifeExpectancyAt, sampleAgeAtDeath, MORTALITY_MIN_AGE,
     survivorOf, plannedLifespans, chanceAliveAt, householdChanceAliveAt,
-    SS_SHORTFALL_PRESETS, ssPayableShare,
+    SS_SHORTFALL_PRESETS, ssPayableShare, planAssumptions,
     FEDERAL_TAX_BRACKETS_2027, STANDARD_DEDUCTION_2027, ADDITIONAL_STD_DEDUCTION_65_2027,
     CAPITAL_GAINS_THRESHOLDS_2027, IRMAA_THRESHOLDS_2027, ACA_FPL_2026, ACA_APPLICABLE_PCT_2027,
     PUBLISHED_FIGURES, publishedFor, bracketsFor, indexGrowth, CHAINED_CPI_GAP, REAL_WAGE_GROWTH,

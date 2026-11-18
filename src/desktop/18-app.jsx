@@ -1062,7 +1062,7 @@ function RetirementPlanner() {
               </WillItLastTab>
             )}
             {activeTab === 'assistant' && <AiAssistantTab computeProjections={displayComputeProjections} onApply={applyAiPlan} plan={livePlan} projections={displayProjections} />}
-            {activeTab === 'faq' && <FAQTab />}
+            {activeTab === 'faq' && <FAQTab personalInfo={personalInfo} accounts={accounts} />}
           </div>
         </main>
         

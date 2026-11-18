@@ -954,35 +954,38 @@ section('Unit — calculateSSEarningsTestReduction');
 // ── 8. Alabama state tax engine ──────────────────────────────────────────────
 section('Unit — calculateAlabamaTax progressive brackets');
 {
+  // The standard deduction reads Alabama AGI before the federal tax deduction
+  // (2025 Form 40 chart): MFJ $8,500 to $25,999, less $175 a $500 band, floor
+  // $5,000; single $3,000, less $25 a band, floor $2,500.
   // Test 1: simple wage earner, MFJ, age 50
-  // AGI 50k → minus fed tax 4k = 46k → std deduction 4k (AGI >= 30k) → minus exempt 3k = 39k
-  // Brackets MFJ: 2%*1k + 4%*5k + 5%*(39k-6k) = 20 + 200 + 1650 = 1870
-  approx(calculateAlabamaTax(50000, 4000, 'married_joint', 0, 0, 50, 50, false), 1870,
-    'MFJ $50k wages, $4k fed tax → ~$1,870 AL tax', 0.01);
+  // AL AGI 50k → std deduction at its $5,000 floor. 50k − fed 4k − 5k − exempt 3k = 38k
+  // Brackets MFJ: 2%*1k + 4%*5k + 5%*(38k-6k) = 20 + 200 + 1600 = 1820
+  approx(calculateAlabamaTax(50000, 4000, 'married_joint', 0, 0, 50, 50, false), 1820,
+    'MFJ $50k wages, $4k fed tax → ~$1,820 AL tax', 0.01);
 
   // Test 2: SS exempt
-  // AGI 50k - SS 20k = 30k. minus fed 2k = 28k. std deduction at AGI 28k = 7500 - (8000/10000)*3500 = 4700
-  // minus exempt 3k = 20,300. Tax = 20 + 200 + 5%*14,300 = 935
-  approx(calculateAlabamaTax(50000, 2000, 'married_joint', 20000, 0, 50, 50, false), 935,
-    'MFJ SS exempt from AL → ~$935', 0.01);
+  // AL AGI 50k - SS 20k = 30k: 9 bands over $25,999 → 8,500 − 9×175 = 6,925.
+  // 30k − fed 2k − 6,925 − exempt 3k = 18,075. Tax = 20 + 200 + 5%*12,075 = 823.75
+  approx(calculateAlabamaTax(50000, 2000, 'married_joint', 20000, 0, 50, 50, false), 823.75,
+    'MFJ SS exempt from AL → ~$824', 0.01);
 
   // Test 3: government pension exempt
-  // AGI 80k - pension 30k = 50k. minus fed 5k = 45k. std deduction 4k - exempt 3k = 38k
-  // Tax = 20 + 200 + 5%*32k = 1820
-  approx(calculateAlabamaTax(80000, 5000, 'married_joint', 0, 30000, 50, 50, true), 1820,
-    'MFJ govt pension exempt → ~$1,820', 0.01);
+  // AL AGI 80k - pension 30k = 50k → $5,000 floor. 50k − fed 5k − 5k − exempt 3k = 37k
+  // Tax = 20 + 200 + 5%*31k = 1770
+  approx(calculateAlabamaTax(80000, 5000, 'married_joint', 0, 30000, 50, 50, true), 1770,
+    'MFJ govt pension exempt → ~$1,770', 0.01);
 
   // Test 4: over-65 exclusion (both spouses 65+, $6k each)
-  // AGI 50k - 12k over65 = 38k. minus fed 4k = 34k. std deduction at 34k = 4k. minus exempt 3k = 27k
-  // Tax = 20 + 200 + 5%*21k = 1270
-  approx(calculateAlabamaTax(50000, 4000, 'married_joint', 0, 0, 66, 66, false), 1270,
-    'MFJ over-65 exclusion (both spouses) → ~$1,270', 0.01);
+  // AL AGI 50k - 12k over65 = 38k → $5,000 floor. 38k − fed 4k − 5k − exempt 3k = 26k
+  // Tax = 20 + 200 + 5%*20k = 1220
+  approx(calculateAlabamaTax(50000, 4000, 'married_joint', 0, 0, 66, 66, false), 1220,
+    'MFJ over-65 exclusion (both spouses) → ~$1,220', 0.01);
 
   // Test 5: hits all brackets (single, low income)
-  // AGI 10k. std deduction 2500 (AGI < 20k). exempt 1500. taxable 6000.
-  // Single brackets: 2%*500 + 4%*2500 + 5%*3000 = 10 + 100 + 150 = 260
-  approx(calculateAlabamaTax(10000, 0, 'single', 0, 0, 40, 0, false), 260,
-    'Single $10k → walks all 3 brackets → $260', 0.01);
+  // AGI 10k. std deduction $3,000 (AGI ≤ $25,999). exempt 1500. taxable 5500.
+  // Single brackets: 2%*500 + 4%*2500 + 5%*2500 = 10 + 100 + 125 = 235
+  approx(calculateAlabamaTax(10000, 0, 'single', 0, 0, 40, 0, false), 235,
+    'Single $10k → walks all 3 brackets → $235', 0.01);
 
   // Test 6: zero income
   eq(calculateAlabamaTax(0, 0, 'married_joint', 0, 0, 0, 0, false), 0, 'zero income → 0 tax');
@@ -15907,8 +15910,8 @@ section('P139 — Personal Info keeps what you type, and the FAQ describes the e
   const progressive = Object.keys(engine.STATE_TAX_CONFIG);
   const states = progressive.filter(k => k !== 'District of Columbia').length;
   ok(progressive.includes('District of Columbia'), 'DC is among the progressive jurisdictions');
-  ok(faq.indexOf(`progressive brackets for ${states} states and DC`) > 0,
-    `and the answer's count of progressive states (${states} + DC) matches the engine`);
+  ok(faq.indexOf(`own brackets, deductions and retirement rules for ${states} states and DC`) > 0,
+    `and the answer's count of fully modelled states (${states} + DC) matches the engine`);
 }
 
 section('P140 — the pages load the build, not the compilers');
@@ -17209,6 +17212,120 @@ section('P157 — official 2027 figures, and each figure grown at its own index'
   // same tax tables.
   const from26 = engine.computeProjections(pi, accts, ss, [], [], [], 2026, {});
   eq(from26.find(r => r.year === 2027).federalDeduction, y27.federalDeduction, 'the tax year, not the starting year, picks the tables');
+}
+
+section('P158 — what the plan assumes, in plain words');
+
+{
+  // planAssumptions is the one list behind the Assumptions tab's card and the
+  // Plan Summary's "What the Plan Assumes": every item a group, a label, the
+  // value in use and a note; outside figures carry their source.
+  const base = { ...engine.DEFAULT_PLAN_INFO, myAge: 60, spouseAge: 58, filingStatus: 'married_joint', state: 'Colorado',
+    inflationRate: 0.03, legacyAge: 95, survivorModelEnabled: true, myLifeExpectancy: 84, spouseLifeExpectancy: 88,
+    healthcareModel: 'none', ltcModel: 'none', ssShortfall: '', withdrawalStrategy: 'target', desiredRetirementIncome: 90000 };
+  const accts = [{ balance: 750000, cagr: 0.07 }, { balance: 250000, cagr: 0.03 }, { balance: 0, cagr: 0.2 }];
+  const list = engine.planAssumptions(base, accts);
+  const get = (l, label) => l.find(a => a.label === label);
+  ok(list.every(a => a.group && a.label && typeof a.value === 'string' && a.value.length), 'every item has a group, a label and a value');
+  eq([...new Set(list.map(a => a.group))].join(' | '), 'Money and markets | How long | Spending | Social Security | Taxes', 'grouped in reading order');
+  eq(get(list, 'Inflation').value, '3.0% a year', 'inflation as set');
+  eq(get(list, 'Investment growth').value, '6.0% a year', 'growth averaged by balance (an empty account does not count)');
+  ok(/about 3\.0% more than inflation/.test(get(list, 'Investment growth').note), 'and said in real terms');
+  eq(get(list, 'Money has to last').value, 'until the younger of you is 95', 'a couple’s plan runs until the younger is at the planning age');
+  ok(/at least one of you reaches 95: \d+%/.test(get(list, 'Money has to last').note), 'with the odds of getting there');
+  eq(get(list, 'First death').value, 'you at 84', 'the first death is the earlier life expectancy');
+  ok(/survivor is planned through 95/.test(get(list, 'First death').note), 'and the survivor runs to the planning age');
+  eq(get(list, 'How much you spend').value, '$90,000 a year after tax, in today’s dollars', 'a spending target, stated');
+  eq(get(list, 'Healthcare').value, 'not costed separately', 'healthcare off says so');
+  eq(get(list, 'Long-term care').value, 'none planned', 'and no care planned says so');
+  eq(get(list, 'Benefits').value, 'paid in full', 'Social Security in full by default');
+  ok(/Trustees Report/.test(get(list, 'Benefits').source), 'citing the Trustees');
+  ok(/2026 and 2027/.test(get(list, 'Federal tax').note), 'federal tax names the years it has official figures for');
+  eq(get(list, 'State tax').value, 'Colorado', 'the state');
+  ok(!get(list, 'ACA credits before 65'), 'no ACA item without ACA coverage');
+
+  const other = engine.planAssumptions({ ...base, filingStatus: 'single', ssShortfall: 'oasi', ltcModel: 'default',
+    healthcareModel: 'moderate', pre65Coverage: 'aca', withdrawalStrategy: 'guardrails' }, accts);
+  eq(get(other, 'Money has to last').value, 'until you are 95', 'single: until you are 95');
+  ok(!get(other, 'First death') && !get(other, 'Deaths'), 'single: no death line');
+  eq(get(other, 'Benefits').value, 'cut to 78% from 2033', 'the Trustees’ cut, when chosen');
+  eq(get(other, 'Long-term care').value, '28 months at $5,900 a month', 'the default care plan, in numbers');
+  ok(/ACA premiums before 65/.test(get(other, 'Healthcare').note), 'ACA coverage replaces the flat pre-65 cost in the note');
+  ok(get(other, 'ACA credits before 65'), 'and the ACA law item appears');
+  ok(/guardrails/i.test(get(other, 'How much you spend').value), 'a withdrawal strategy is named instead of a target');
+
+  const couple = engine.planAssumptions({ ...base, ltcModel: 'default', survivorModelEnabled: false }, accts);
+  eq(get(couple, 'Long-term care').value, '28 months at $5,900 a month, each of you', 'a couple’s identical care plans are said once');
+  eq(get(couple, 'Deaths').value, 'not modelled', 'survivor planning off says so');
+  const custom = engine.planAssumptions({ ...base, ssShortfall: 'custom', ssShortfallYear: 2035, ssShortfallPayable: 0.8 }, accts);
+  eq(get(custom, 'Benefits').value, 'cut to 80% from 2035', 'a custom cut reads back as entered');
+  ok(engine.planAssumptions({}, []).length > 0, 'an empty plan still describes itself without throwing');
+}
+
+section('P159 — the flat-tax states’ retirement breaks, and Alabama’s current deduction');
+
+{
+  // Six flat-rate states have retirement exclusions large enough to change a
+  // retiree's bill by thousands a year; they now run through the configured
+  // engine. Sources: Iowa DOR (3.8% from 2025, all retirement income excluded
+  // from 55); Georgia DOR (up to $35,000 at 62–64, $65,000 at 65+, a person;
+  // 4.99% for 2026 under HB 463); Michigan Treasury (PA 4 of 2023: $67,610 /
+  // $135,220 for 2026; exemption $5,900); Colorado DOR (Social Security from 65,
+  // pension $24,000 at 65+ less that); Kentucky DOR ($31,110 a person; 3.5%,
+  // standard deduction $3,360 for 2026); Louisiana DOR (3%, $12,500 standard
+  // deduction, $12,000 at 65+).
+  const st = (state, gross, fs, { ss = 0, pension = 0, ira = 0, ages = [50, 50], years = 0 } = {}) =>
+    engine.calculateStateTax(gross, state, fs, years, 0.03, ss, pension,
+      { primaryAge: ages[0], spouseAge: ages[1], qualifiedRetirementWithdrawals: ira, federalTaxPaid: 0 });
+
+  approx(st('Iowa', 100000, 'married_joint'), (100000 - 32200) * 0.038, 'Iowa: 3.8% of income above the federal deduction', 1e-9);
+  eq(st('Iowa', 100000, 'married_joint', { ira: 80000, pension: 20000, ages: [60, 58] }), 0, 'Iowa: retirement income is excluded from 55');
+  approx(st('Iowa', 100000, 'married_joint', { years: 1 }), (100000 - 33200) * 0.038, 'and 2027 uses the published 2027 federal deduction', 1e-9);
+
+  // Georgia, 66 and 63: caps $65,000 + $35,000 = $100,000 of the $120,000 of
+  // retirement income; $150,000 − $100,000 − $30,000 standard deduction = $20,000.
+  approx(st('Georgia', 150000, 'married_joint', { pension: 30000, ira: 90000, ages: [66, 63] }), 20000 * 0.0499,
+    'Georgia: $65,000 at 65+, $35,000 at 62–64, each spouse', 1e-9);
+  approx(st('Georgia', 150000, 'married_joint', { pension: 30000, ira: 90000, ages: [61, 60] }), 120000 * 0.0499,
+    'and nothing before 62', 1e-9);
+
+  // Michigan, single at 62: $80,000 of IRA withdrawals, $67,610 deductible.
+  approx(st('Michigan', 100000, 'single', { ira: 80000, ages: [62, 0] }), (100000 - 67610 - 5900) * 0.0425,
+    'Michigan: the 2026 retirement deduction, then the $5,900 exemption', 1e-9);
+  approx(st('Michigan', 70000, 'single', { ira: 50000, pension: 20000, ages: [58, 0] }), (70000 - 20000 - 5900) * 0.0425,
+    'before 60 a pension counts but IRA withdrawals do not', 1e-9);
+  approx(st('Michigan', 100000, 'married_joint'), (100000 - 11800) * 0.0425, 'and a working couple has no standard deduction', 1e-9);
+
+  // Colorado, both 67: $40,000 of taxable Social Security out in full; the
+  // $48,000 pension room less it leaves $8,000 for IRA withdrawals.
+  approx(st('Colorado', 100000, 'married_joint', { ss: 40000, ira: 60000, ages: [67, 67] }), (100000 - 48000 - 32200) * 0.044,
+    'Colorado: Social Security from 65, and the pension subtraction net of it', 1e-9);
+
+  // Kentucky: $31,110 a person at any age.
+  approx(st('Kentucky', 100000, 'married_joint', { ira: 40000 }), (100000 - 40000 - 6720) * 0.035,
+    'Kentucky: up to $31,110 a person of retirement income, any age', 1e-9);
+  // Louisiana: $12,000 at 65+, then the $12,500 standard deduction.
+  approx(st('Louisiana', 30000, 'single', { ira: 30000, ages: [70, 0] }), (30000 - 12000 - 12500) * 0.03,
+    'Louisiana: $12,000 of retirement income at 65+', 1e-9);
+  eq(engine.STATE_TAX_RATES.Idaho, 0.053, 'Idaho: 5.3% since 2025 (HB 40)');
+
+  // Alabama's chart: full to $25,999, less a step each $500 band, to a floor.
+  const al = (agi, fs) => engine.getAlabamaStandardDeduction(agi, fs);
+  eq([al(25999, 'married_joint'), al(26000, 'married_joint'), al(26499, 'married_joint'), al(26500, 'married_joint'), al(40000, 'married_joint')].join(),
+    '8500,8325,8325,8150,5000', 'Alabama joint: $8,500, less $175 a band, floor $5,000');
+  eq([al(20000, 'single'), al(30000, 'single'), al(50000, 'single')].join(), '3000,2775,2500', 'single: $3,000 to $2,500');
+  eq([al(20000, 'head_of_household'), al(50000, 'head_of_household')].join(), '5200,2500', 'head of family: $5,200 to $2,500');
+  eq([al(12999, 'married_separate'), al(13000, 'married_separate'), al(50000, 'married_separate')].join(), '4250,4162,2500', 'married separate: $4,250 in $250 bands to $2,500');
+
+  // The year's state taxable income is the one the tax used.
+  const pi = { ...engine.DEFAULT_PLAN_INFO, myAge: 66, spouseAge: 64, myRetirementAge: 66, spouseRetirementAge: 64,
+    filingStatus: 'married_joint', state: 'Georgia', desiredRetirementIncome: 90000, legacyAge: 90, inflationRate: 0.03,
+    survivorModelEnabled: false, healthcareModel: 'none', ltcModel: 'none' };
+  const accts = [{ id: 1, name: 'IRA', type: 'traditional_ira', owner: 'me', balance: 1500000, contribution: 0, cagr: 0.05, startAge: 66, stopAge: 66, contributor: 'me' }];
+  const ss = [{ id: 1, type: 'social_security', owner: 'me', name: 'SS', amount: 30000, startAge: 67, endAge: 120, cola: 0.025 }];
+  const rows = engine.computeProjections(pi, accts, ss, [], [], [], 2026, {});
+  ok(rows.slice(0, 5).every(r => Math.abs(r.stateTax - r.stateTaxableIncome * 0.0499) < 1), 'Georgia’s shown taxable income times its rate is its tax, every year');
+  eq(Object.keys(engine.STATE_TAX_CONFIG).length, 32, '31 states and DC run through the configured engine');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

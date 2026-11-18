@@ -441,7 +441,41 @@ function AiAssistantTab({ computeProjections, plan, projections, onApply }) {
   );
 }
 
-function FAQTab() {
+// What this plan assumes, from the engine's planAssumptions: the same list the
+// Plan Summary report prints, so the screen and the paper cannot disagree.
+function PlanAssumptionsCard({ personalInfo, accounts }) {
+  const items = useMemo(() => PlannerEngine.planAssumptions(personalInfo, accounts), [personalInfo, accounts]);
+  const groups = [];
+  items.forEach(it => {
+    let g = groups.find(x => x.name === it.group);
+    if (!g) groups.push(g = { name: it.group, items: [] });
+    g.items.push(it);
+  });
+  return (
+    <div className={cardStyle} data-plan-assumptions>
+      <h3 className="text-xl font-semibold text-slate-100 mb-1">What your plan assumes</h3>
+      <p className="text-slate-400 text-sm mb-4">Every number in the plan rests on these. Each one can be changed: most on Personal Info, investment growth on Accounts.</p>
+      <div className="md:columns-2 gap-x-8">
+        {groups.map(g => (
+          <div key={g.name} className="break-inside-avoid mb-5">
+            <h4 className="text-sm font-semibold text-amber-400 uppercase tracking-wide mb-2">{g.name}</h4>
+            <dl className="space-y-3">
+              {g.items.map(it => (
+                <div key={it.label} data-assumption={it.label}>
+                  <dt className="text-sm text-slate-300">{it.label}: <span className="font-semibold text-slate-100">{it.value}</span></dt>
+                  {it.note && <dd className="text-xs text-slate-400 mt-0.5 leading-relaxed">{it.note}</dd>}
+                  {it.source && <dd className="text-[11px] text-slate-500 mt-0.5 italic">Source: {it.source}</dd>}
+                </div>
+              ))}
+            </dl>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FAQTab({ personalInfo, accounts }) {
   const [openSection, setOpenSection] = useState(null);
   
   const faqs = [
@@ -479,7 +513,7 @@ function FAQTab() {
         },
         {
           q: "What's the difference between Pre-Tax, Roth, and Brokerage accounts?",
-          a: "Pre-Tax accounts (401k, Traditional IRA, 403b, 457b): employee contributions are deducted from taxable income as an above-the-line deduction, withdrawals are fully taxable as ordinary income, and Required Minimum Distributions begin at age 73 or 75 depending on your birth year (SECURE 2.0: born 1951-1959 start at 73, born 1960 or later at 75). Withdrawals before age 59.5 also carry the 10% early withdrawal penalty unless an exception applies — see the early retirement question below. Roth accounts (Roth 401k, Roth IRA, Roth 457b): withdrawals are tax-free and no RMDs are required. Brokerage accounts: each account carries its own cost basis percentage, so only the gain portion of a withdrawal is taxed, at long-term capital gains rates (0%/15%/20%) rather than ordinary rates. Brokerage accounts also generate taxable dividends each year (2% of the balance by default) whether or not you sell anything. HSA withdrawals are treated as tax-free qualified medical spending."
+          a: "Pre-Tax accounts (401k, Traditional IRA, 403b, 457b): employee contributions are deducted from taxable income as an above-the-line deduction, withdrawals are fully taxable as ordinary income, and Required Minimum Distributions begin at age 73 or 75 depending on your birth year (SECURE 2.0: born 1951-1959 start at 73, born 1960 or later at 75). Withdrawals before age 59.5 also carry the 10% early withdrawal penalty unless an exception applies — see the early retirement question below. Roth accounts (Roth 401k, Roth IRA, Roth 457b): withdrawals are tax-free and no RMDs are required. Brokerage accounts: each account carries its own cost basis percentage, so only the gain portion of a withdrawal is taxed, at long-term capital gains rates (0%/15%/20%) rather than ordinary rates. Brokerage accounts also generate taxable dividends each year (2% of the balance by default) whether or not you sell anything. HSA withdrawals are tax-free up to the year's medical costs: the plan's healthcare costs plus any qualified expenses you enter on Personal Info. Beyond that they are taxed as income, with a 20% penalty before 65."
         },
         {
           q: "How are Required Minimum Distributions (RMDs) calculated?",
@@ -492,7 +526,7 @@ function FAQTab() {
       items: [
         {
           q: "How are federal taxes calculated?",
-          a: "Federal taxes use the 2026 progressive tax brackets (per IRS Revenue Procedure 2025-32) for your selected filing status, with the standard deduction applied first. Both the standard deduction and tax brackets are adjusted for inflation each year using your specified inflation rate. The brackets are: 10%, 12%, 22%, 24%, 32%, 35%, and 37%. FICA payroll taxes (6.2% Social Security up to the wage base + 1.45% Medicare + 0.9% Additional Medicare Tax for high earners) are also applied to earned income."
+          a: "Federal income tax uses the progressive brackets for your filing status (10%, 12%, 22%, 24%, 32%, 35% and 37%) after the standard deduction (see What is the standard deduction?). 2026 and 2027 use the brackets the IRS has published (Rev. Proc. 2025-32 and Rev. Proc. 2026-35); later years grow from 2027 by chained CPI, the index the law uses, which runs about a quarter point a year below your inflation rate. Long-term capital gains and qualified dividends are taxed at 0%, 15% or 20% on top of ordinary income, and the 3.8% net investment income tax applies above $200,000 of MAGI ($250,000 joint), a threshold the law does not index. FICA payroll taxes apply to earned income: 6.2% Social Security up to the wage cap, 1.45% Medicare, and the 0.9% Additional Medicare Tax on wages above $200,000 ($250,000 joint)."
         },
         {
           q: "What happens if I retire before 59½?",
@@ -504,19 +538,19 @@ function FAQTab() {
         },
         {
           q: "How are state taxes calculated?",
-          a: "Most states use a simplified flat rate approximation with the inflation-adjusted standard deduction applied. For example, Texas and Florida are 0%, California is 9.3%, New York is 10.9%. Alabama uses a full progressive tax engine with its actual 2%/4%/5% brackets, sliding-scale standard deduction, personal exemption, federal income tax deductibility (Alabama is one of only 3 states that allows this), Social Security exemption, government pension exemption, and an over-65 retirement income exclusion of $6,000 per person. States that fully exempt retirement income — including Illinois, Mississippi, Pennsylvania, and Hawaii — automatically exclude those amounts from state taxable income. Social Security is also excluded from state tax in the 41 states that don't tax it."
+          a: "Each state on its own terms. 31 states and DC run through the app's state engine with their own brackets or flat rate, their own standard deduction or exemptions, and their own retirement rules: for example Georgia's exclusion of up to $65,000 of retirement income a person from 65, Michigan's retirement deduction (up to $67,610, or $135,220 joint, in 2026), Iowa's exclusion of all retirement income from 55, Kentucky's $31,110 a person, New York's $20,000 pension exclusion, and Alabama's deduction of federal income tax. The ten other flat-tax states (Arizona, Idaho, Illinois, Indiana, Massachusetts, Mississippi, North Carolina, Ohio, Pennsylvania and Utah) charge their rate on income above the federal standard deduction; Illinois, Mississippi and Pennsylvania exempt retirement income in full. The nine states with no income tax charge nothing. Social Security is left out of state income in the states that exempt it. Not modelled: local income taxes (New York City, Maryland counties, Ohio cities and the like), and a Roth conversion is taxed by the state in full even where a state's retirement exclusion might cover it."
         },
         {
           q: "What income is considered taxable?",
-          a: "Gross income includes: 100% of earned income, pension/annuity/other income, and portfolio withdrawals from pre-tax accounts (taxed as ordinary income). Social Security is taxed progressively based on 'combined income' (AGI + 50% of SS benefits): For married filing jointly, 0% is taxable if combined income is under $32,000, up to 50% taxable between $32,000-$44,000, and up to 85% taxable above $44,000. Brokerage withdrawals are taxed as long-term capital gains at 15%. Roth withdrawals are not taxable. The standard deduction is then subtracted from ordinary income to calculate taxable income."
+          a: "Gross income includes 100% of earned income, pension, annuity and other income, and withdrawals from pre-tax accounts (taxed as ordinary income). Social Security is taxed on 'combined income' (AGI plus half of your benefits): married filing jointly, none of it is taxable under $32,000, up to 50% between $32,000 and $44,000, and up to 85% above $44,000. Brokerage withdrawals are taxed only on the gain above each account's cost basis, at the long-term capital gains rates (0%, 15% or 20%), and a brokerage account's dividends (2% of its balance a year by default) are taxed as they are paid. Roth withdrawals are not taxable, nor are HSA withdrawals up to the year's medical costs. The standard deduction is then subtracted from ordinary income to reach taxable income."
         },
         {
           q: "Are tax brackets adjusted for inflation?",
-          a: "Yes! Both the federal tax brackets and standard deduction are adjusted each year using your specified inflation rate (default 3%). This prevents 'bracket creep' where inflation pushes you into higher tax brackets over time. The adjustment uses the same rate as your retirement income inflation adjustment."
+          a: "Yes, but not at your inflation rate. The brackets, the standard deduction and the capital-gains thresholds grow by chained CPI, the index the tax law has used since 2018, which runs about a quarter point a year below ordinary inflation. 2026 and 2027 use the figures the IRS has published; later years grow from 2027 by chained CPI worked out from your inflation rate. So an income that rises with inflation slowly moves into higher brackets, as it does in real life. Some thresholds are not indexed at all: the ones that decide how much Social Security is taxed ($32,000 and $44,000 joint), the 3.8% net investment income tax threshold, and the senior deduction's phase-out."
         },
         {
-          q: "What are the 2026 tax bracket thresholds?",
-          a: "For Married Filing Jointly: 10% up to $24,800, 12% up to $100,800, 22% up to $211,400, 24% up to $403,550, 32% up to $512,450, 35% up to $768,700, and 37% above. For Single filers, the brackets are roughly half these amounts. These thresholds are adjusted for inflation in future projection years."
+          q: "What are the tax bracket thresholds?",
+          a: "Married filing jointly, 2026: 10% to $24,800, 12% to $100,800, 22% to $211,400, 24% to $403,550, 32% to $512,450, 35% to $768,700, and 37% above. 2027 (IRS Rev. Proc. 2026-35): 10% to $25,600, 12% to $104,050, 22% to $218,250, 24% to $416,650, 32% to $529,100, 35% to $793,650. Single, 2027: 10% to $12,800, 12% to $52,025, 22% to $109,125, 24% to $208,325, 32% to $264,550, 35% to $661,375: half the joint figures through the 32% bracket. Later years grow from 2027 by chained CPI."
         },
         {
           q: "How is Social Security taxed?",
@@ -528,7 +562,7 @@ function FAQTab() {
         },
         {
           q: "How are brokerage account withdrawals taxed?",
-          a: "Brokerage account withdrawals use a 50% cost basis estimate (i.e., half is return of principal, half is gain). The gain portion is taxed at long-term capital gains rates using the tiered 0%/15%/20% structure based on your total taxable income. For married filing jointly in 2025, gains are taxed at 0% up to ~$96,700 of taxable income, 15% up to ~$600,000, and 20% above that. These thresholds are inflation-adjusted each year. The Net Investment Income Tax (NIIT) of 3.8% also applies for high earners above $250,000 MAGI (married filing jointly)."
+          a: "Each brokerage account carries its own cost basis, the share of its balance that is money you put in (50% unless you set it on the account). Only the gain is taxed, at the long-term capital gains rates: 0%, 15% or 20%, depending on where the gain lands on top of your other taxable income. Married filing jointly, the 0% rate runs to $98,900 of taxable income in 2026 and $102,100 in 2027, and 15% to $613,700 and $633,600; single, 0% to $49,450 and $51,050, and 15% to $545,500 and $563,200. Later years grow by chained CPI. Dividends (2% of the balance a year by default) are taxed each year as qualified dividends. The 3.8% net investment income tax applies above $250,000 of MAGI joint ($200,000 single), which is not indexed."
         }
       ]
     },
@@ -549,15 +583,15 @@ function FAQTab() {
         },
         {
           q: "How long does the plan assume we live?",
-          a: "As long as your Planning / Legacy Age on About you (95 unless you change it). That is the age the money has to last to, and under the field the app shows the odds of anyone reaching it, from US population life tables (CDC, 2022): for a couple both 65, about a 64% chance at least one of you is alive at 87, 47% at 90 and 19% at 95. For a couple, survivor modelling uses your two life expectancies to decide who is likely to die first, and when: that death ends their income and changes the household's Social Security and taxes. Whoever outlives the other is then planned through the planning age, not only to their own life expectancy, because a life expectancy is an average and about half of people outlive theirs. (Until v2.65 the plan stopped at the second life expectancy, which for the default couple meant age 87.) The Will it last? simulations can instead draw a lifespan for each person in each simulated life, around your life expectancies, and judge the money to the end of each one."
+          a: "As long as your Planning / Legacy Age on Personal Info (95 unless you change it). That is the age the money has to last to, and under the field the app shows the odds of anyone reaching it, from US population life tables (CDC, 2022): for a couple both 65, about a 64% chance at least one of you is alive at 87, 47% at 90 and 19% at 95. For a couple, survivor modelling uses your two life expectancies to decide who is likely to die first, and when: that death ends their income and changes the household's Social Security and taxes. Whoever outlives the other is then planned through the planning age, not only to their own life expectancy, because a life expectancy is an average and about half of people outlive theirs. (Until v2.65 the plan stopped at the second life expectancy, which for the default couple meant age 87.) The Will it last? simulations can instead draw a lifespan for each person in each simulated life, around your life expectancies, and judge the money to the end of each one."
         },
         {
           q: "Will Social Security pay what it promises?",
-          a: "Not in full, unless Congress acts. The 2026 Trustees Report projects that the retirement and survivors trust fund (OASI) runs out in late 2032. From then on, by law, benefits can only be paid from Social Security's incoming taxes, which would cover about 78% of what is scheduled. If the retirement and disability funds were combined, the money would last into 2034 and then cover about 83%. The share would shrink slowly after that, to roughly 62–65% by 2100. Congress has always acted before a fund ran out, which is why the plan assumes full benefits unless you choose otherwise under About you → Social Security's Trust Fund (or try it in the What if… box under Strategy). Choosing a cut lowers every Social Security payment in the plan from that year on, survivor benefits included, and the portfolio makes up the difference. A flat cut is a planning simplification of the Trustees' slowly shrinking share."
+          a: "Not in full, unless Congress acts. The 2026 Trustees Report projects that the retirement and survivors trust fund (OASI) runs out in late 2032. From then on, by law, benefits can only be paid from Social Security's incoming taxes, which would cover about 78% of what is scheduled. If the retirement and disability funds were combined, the money would last into 2034 and then cover about 83%. The share would shrink slowly after that, to roughly 62–65% by 2100. Congress has always acted before a fund ran out, which is why the plan assumes full benefits unless you choose otherwise under Personal Info → Social Security's Trust Fund (or try it in the What if… box under Strategy). Choosing a cut lowers every Social Security payment in the plan from that year on, survivor benefits included, and the portfolio makes up the difference. A flat cut is a planning simplification of the Trustees' slowly shrinking share."
         },
         {
           q: "Which accounts are withdrawals taken from?",
-          a: "Withdrawals follow the priority order you set in Personal Info (under Withdrawal Priority). The default is: Pre-Tax first, then Brokerage & HSA, then Roth. Pre-tax withdrawals are fully taxable, brokerage withdrawals use a 50% cost basis estimate taxed at capital gains rates, and Roth withdrawals are tax-free. You can drag to reorder the priority — for example, drawing from Roth first to keep taxable income low in early retirement. The 'Fill a tax bracket' setting under the same heading layers bracket management on top of the order: each retirement year, spending comes from pre-tax first until ordinary taxable income reaches the top of the bracket you chose, then from the rest of the order, and pre-tax is drawn past the bracket only if the other accounts run out. A Roth conversion set to fill a higher bracket picks up from where those withdrawals stop."
+          a: "Withdrawals follow the priority order you set in Personal Info (under Withdrawal Priority). The default is: Pre-Tax first, then Brokerage & HSA, then Roth. Pre-tax withdrawals are fully taxable, brokerage withdrawals are taxed only on their gain, at capital gains rates, and Roth withdrawals are tax-free. You can drag to reorder the priority — for example, drawing from Roth first to keep taxable income low in early retirement. The 'Fill a tax bracket' setting under the same heading layers bracket management on top of the order: each retirement year, spending comes from pre-tax first until ordinary taxable income reaches the top of the bracket you chose, then from the rest of the order, and pre-tax is drawn past the bracket only if the other accounts run out. A Roth conversion set to fill a higher bracket picks up from where those withdrawals stop."
         },
         {
           q: "How are expenses dated before I retire handled?",
@@ -591,7 +625,7 @@ function FAQTab() {
         },
         {
           q: "What are Qualified Charitable Distributions (QCDs)?",
-          a: "QCDs allow you to donate directly from a traditional IRA to charity after age 70½, up to $111,000/year per person in 2026 and $114,000 in 2027 (indexed annually for inflation under SECURE 2.0). The donated amount counts toward your RMD but is excluded from taxable income. The model automatically uses QCDs to offset charitable giving when you have RMDs, reducing your tax bill."
+          a: "QCDs allow you to donate directly from a traditional IRA to charity after age 70½, up to $111,000/year per person in 2026 and $114,000 in 2027 (indexed annually for inflation under SECURE 2.0). The donated amount counts toward your RMD but is excluded from taxable income. From 70½ the model automatically gives your charitable giving as QCDs, out of that year's IRA withdrawals and RMDs (a conversion cannot be given), which keeps it out of your taxable income."
         }
       ]
     },
@@ -621,15 +655,15 @@ function FAQTab() {
       items: [
         {
           q: "What are recurring expenses and how are they different from desired retirement income?",
-          a: "Recurring expenses are specific, named spending categories that add on top of your base desired retirement income. Examples: travel budget, healthcare premiums, club memberships, property taxes. Each expense has its own inflation rate, age range, and optional spouse-contingent toggle. The planner sums all active recurring expenses for each year and adds them to your base income target before calculating withdrawals."
+          a: "Recurring expenses are specific, named spending categories that add on top of your base desired retirement income. Examples: travel budget, healthcare premiums, club memberships, property taxes. Each expense has its own inflation rate and age range, measured on your age or your spouse's. The planner sums all active recurring expenses for each year and adds them to your base income target before calculating withdrawals."
         },
         {
           q: "Can recurring expenses have different inflation rates?",
-          a: "Yes — each recurring expense has its own COLA (cost-of-living adjustment). Healthcare expenses often inflate faster than general inflation (6–8% is historically common). Travel or discretionary spending might match general inflation (2–3%). Setting per-expense inflation rates produces more accurate long-term projections than a single blanket rate."
+          a: "Yes — each recurring expense has its own COLA (cost-of-living adjustment). Healthcare costs have usually risen faster than general inflation; the app's own healthcare model uses 5% a year. Travel or discretionary spending might match general inflation (2–3%). Setting per-expense inflation rates produces more accurate long-term projections than a single blanket rate."
         },
         {
-          q: "What does the 'spouse contingent' option do?",
-          a: "When 'spouse contingent' is enabled, the expense stops when a spouse passes away (if survivor modeling is active). This is useful for expenses that depend on having two people — a two-person travel budget or a second car, for example. Expenses not marked contingent continue at the same level regardless of survivor status."
+          q: "What happens to recurring expenses when a spouse dies?",
+          a: "With survivor modelling on, every recurring expense drops to the survivor's share once one of you has died: the same percentage as your base spending (75% by default, set on Personal Info). There is no per-expense switch. An expense that should stop entirely, such as a second car, can be given an end age on the spouse who is expected to die first."
         }
       ]
     },
@@ -647,7 +681,7 @@ function FAQTab() {
       items: [
         {
           q: "What does survivor modeling do?",
-          a: "When enabled (Personal Info → Survivor Modeling), the projection models what happens financially when the first spouse passes away at their specified life expectancy. The surviving spouse inherits the higher of the two Social Security benefits, loses the deceased spouse's other income, switches to Single filing status (with its lower bracket thresholds and standard deduction), and continues drawing from all accounts."
+          a: "When it is on (Personal Info → Survivor Modeling), the spouse with the earlier life expectancy dies at that age, and the plan follows the survivor through the planning age. The survivor keeps the larger of the two Social Security benefits, loses the deceased spouse's own income, spends a set share of the couple's budget (75% by default), files jointly for the year of the death and as Single from the next year (with its lower brackets, standard deduction and IRMAA tiers), and draws from all the accounts, the inherited ones included."
         },
         {
           q: "Why does survivor modeling change my plan significantly?",
@@ -684,11 +718,11 @@ function FAQTab() {
         },
         {
           q: "How are Medicare IRMAA surcharges modeled?",
-          a: "IRMAA (Income-Related Monthly Adjustment Amount) adds surcharges to Medicare Part B and Part D premiums when your MAGI exceeds certain thresholds. The model calculates IRMAA for each person age 65+ based on that year's MAGI, using the 2025 CMS brackets adjusted for inflation. The surcharge is included in total taxes and increases your withdrawal need — different SS claiming ages produce different MAGI profiles, which can push you into or out of IRMAA tiers. For married couples, each eligible spouse pays their own surcharge."
+          a: "IRMAA (Income-Related Monthly Adjustment Amount) adds surcharges to Medicare Part B and Part D premiums when your MAGI exceeds certain thresholds. The model calculates IRMAA for each person 65+ from the MAGI of two years earlier, as Medicare does, using the tiers CMS has published for 2026 and 2027 (grown by CPI after that, as the law indexes them). The surcharge is included in total taxes and increases your withdrawal need — different SS claiming ages produce different MAGI profiles, which can push you into or out of IRMAA tiers. For married couples, each eligible spouse pays their own surcharge."
         },
         {
           q: "What is the Social Security earnings test?",
-          a: "If you claim SS before Full Retirement Age (FRA) and are still earning above the annual limit ($24,480 in 2026, inflation-adjusted), $1 of SS benefits is withheld for every $2 earned above the limit. In the year you reach FRA, the limit is higher ($65,160 in 2026) and only $1 per $3 is withheld. After FRA there is no limit. The model automatically applies this reduction to any year where you are collecting SS, earning income, and below FRA. Note: SSA recalculates your benefit upward at FRA to credit the withheld months, but the cash flow impact during those years is real and affects portfolio withdrawals."
+          a: "If you claim SS before Full Retirement Age (FRA) and are still earning above the annual limit ($24,480 in 2026 and $25,560 in 2027, then growing with average wages), $1 of SS benefits is withheld for every $2 earned above the limit. In the year you reach FRA, the limit is higher ($65,160 in 2026, $67,920 in 2027) and only $1 per $3 is withheld. After FRA there is no limit. The model automatically applies this reduction to any year where you are collecting SS, earning income, and below FRA. Note: SSA recalculates your benefit upward at FRA to credit the withheld months, but the cash flow impact during those years is real and affects portfolio withdrawals."
         }
       ]
     },
@@ -702,10 +736,6 @@ function FAQTab() {
         {
           q: "What CAGR should I use for investments?",
           a: "Historical stock market returns average 7-10% nominally, or 4-7% after inflation. A 7% CAGR is a common assumption for a balanced portfolio. Conservative investors might use 5-6%, aggressive investors 8-9%. Remember: past performance doesn't guarantee future results."
-        },
-        {
-          q: "Are the tax brackets adjusted for inflation?",
-          a: "Yes! Tax brackets and the standard deduction are both adjusted each year using your specified inflation rate. This prevents 'bracket creep' and provides more realistic long-term tax projections."
         }
       ]
     },
@@ -742,7 +772,7 @@ function FAQTab() {
         },
         {
           q: "How should I use the percentile bands?",
-          a: "The bands show the range of possible outcomes. The 50th percentile (median) is the most likely outcome. The 10th-25th percentile shows poor scenarios to plan for. If even your 25th percentile outcome is acceptable, your plan is robust. If your 50th percentile barely works, you have significant risk."
+          a: "The bands show the range of possible outcomes. The 50th percentile (median) is the middle outcome: half the simulated markets did better and half worse. The 10th-25th percentile shows poor scenarios to plan for. If even your 25th percentile outcome is acceptable, your plan is robust. If your 50th percentile barely works, you have significant risk."
         }
       ]
     },
@@ -776,11 +806,11 @@ function FAQTab() {
       items: [
         {
           q: "How does the Alabama tax calculation work?",
-          a: "Alabama uses a full progressive tax engine instead of a flat rate approximation. The engine implements Alabama's actual 2%/4%/5% tax brackets, the sliding-scale standard deduction (which phases from $7,500 to $4,000 for MFJ based on AGI), personal exemptions ($3,000 MFJ / $1,500 Single), federal income tax deductibility (Alabama is one of only 3 states that allows deducting federal taxes paid), Social Security exemption, government pension exemption, and the over-65 retirement income exclusion of $6,000 per person."
+          a: "Alabama uses a full progressive tax engine instead of a flat rate approximation. The engine implements Alabama's actual 2%/4%/5% tax brackets, the sliding-scale standard deduction (from $8,500 for a married couple down to $5,000 as income rises from $26,000 to about $36,000), personal exemptions ($3,000 MFJ / $1,500 Single), federal income tax deductibility (Alabama is now the only state that allows deducting all federal tax paid), Social Security exemption, government pension exemption, and the over-65 retirement income exclusion of $6,000 per person."
         },
         {
           q: "What is federal tax deductibility and why does it matter?",
-          a: "Alabama allows you to deduct your federal income tax liability from your Alabama taxable income. This is a significant benefit — for example, if you pay $15,000 in federal taxes, your Alabama taxable income is reduced by that full $15,000 before Alabama's own brackets are applied. This typically reduces Alabama state taxes by $500-$750 compared to a flat-rate estimate. Only Alabama, Iowa, and Louisiana currently offer this deduction."
+          a: "Alabama allows you to deduct your federal income tax liability from your Alabama taxable income. This is a significant benefit — for example, if you pay $15,000 in federal taxes, your Alabama taxable income is reduced by that full $15,000 before Alabama's own brackets are applied. This typically reduces Alabama state taxes by $500-$750 compared to a flat-rate estimate. Alabama is now the only state that allows the full deduction; Missouri and Oregon allow a capped amount, and Iowa and Louisiana have repealed theirs."
         },
         {
           q: "What is the over-65 retirement income exclusion?",
@@ -896,7 +926,7 @@ function FAQTab() {
       items: [
         {
           q: "What are the main limitations of this tool?",
-          a: "What it leaves out or simplifies: The year-by-year projection takes the standard deduction every year (plus the age-65 addition and the 2025–2028 senior deduction); itemizing — mortgage interest, state and local tax, charity under the 2026 rules (the 0.5%-of-AGI floor and the 35% benefit cap) — is modeled only for this year, on the Current Year tab's tax return. QCDs are modeled separately as an exclusion from income. Each account grows at the single rate you give it: there is no separate asset allocation, rebalancing or fee drag, so net any fees out of that rate. Brokerage cost basis defaults to 50% of each account's balance unless you set it on the account. Contributions above the 2026 IRS limits are flagged with a warning, not trimmed. There is no tax-loss harvesting, no estate or gift tax, and no state-level early-distribution penalty (such as California's extra 2.5%). What it models: federal income tax on 2026 brackets indexed forward; state income tax for every state — progressive brackets for 25 states and DC, a flat rate where the state's tax is flat, nothing where there is none — including each state's treatment of Social Security and retirement income; FICA; long-term capital gains at 0/15/20%, qualified dividends and the 3.8% NIIT; Medicare IRMAA (Part B and D) on the two-year lookback; ACA premium subsidies before 65; Social Security taxation, the earnings test and survivor benefits; RMDs under SECURE 2.0; the 10% early-withdrawal penalty with the 457(b), rule-of-55 and 72(t) exceptions; Roth accounts tracked in layers so the 5-year clock and ordering rules apply; Roth conversions by fixed amount, bracket fill, IRMAA tier or a staged schedule, with a pre-tax floor and an optional pause after bad years; withdrawal order with an optional bracket fill; QCDs and charitable giving; pensions, annuities and QLACs; HSAs; healthcare and long-term care; one-time events and recurring expenses; and Monte Carlo (sampled or replayed from history), specific-crash stress tests and sensitivity analysis — all through the same projection engine. Results are estimates for planning, not tax or investment advice."
+          a: "What it leaves out or simplifies: The year-by-year projection takes the standard deduction every year (plus the age-65 addition and the 2025–2028 senior deduction); itemizing — mortgage interest, state and local tax, charity under the 2026 rules (the 0.5%-of-AGI floor and the 35% benefit cap) — is modeled only for this year, on the Current Year tab's tax return. QCDs are modeled separately as an exclusion from income. Each account grows at the single rate you give it: there is no separate asset allocation, rebalancing or fee drag, so net any fees out of that rate. Brokerage cost basis defaults to 50% of each account's balance unless you set it on the account. Contributions above the year's IRS limits are flagged with a warning, not trimmed. There is no tax-loss harvesting, no estate or gift tax, and no state-level early-distribution penalty (such as California's extra 2.5%). What it models: federal income tax on the IRS's published 2026 and 2027 brackets, grown after that by chained CPI; state income tax for every state — its own brackets, deductions and retirement rules for 31 states and DC, a flat rate on income above the federal standard deduction for the ten other flat-tax states, nothing where there is none — including each state's treatment of Social Security and retirement income; FICA; long-term capital gains at 0/15/20%, qualified dividends and the 3.8% NIIT; Medicare IRMAA (Part B and D) on the two-year lookback; ACA premium subsidies before 65; Social Security taxation, the earnings test and survivor benefits; RMDs under SECURE 2.0; the 10% early-withdrawal penalty with the 457(b), rule-of-55 and 72(t) exceptions; Roth accounts tracked in layers so the 5-year clock and ordering rules apply; Roth conversions by fixed amount, bracket fill, IRMAA tier or a staged schedule, with a pre-tax floor and an optional pause after bad years; withdrawal order with an optional bracket fill; QCDs and charitable giving; pensions, annuities and QLACs; HSAs; healthcare and long-term care; one-time events and recurring expenses; and Monte Carlo (sampled or replayed from history), specific-crash stress tests and sensitivity analysis — all through the same projection engine. Results are estimates for planning, not tax or investment advice."
         },
         {
           q: "Should I use this for actual financial decisions?",
@@ -908,7 +938,7 @@ function FAQTab() {
         },
         {
           q: "What tax calculations are included?",
-          a: "Federal income tax uses 2026 brackets (inflation-adjusted) with standard deduction. Capital gains uses tiered rates (0%/15%/20%) based on taxable income. Net Investment Income Tax (NIIT) of 3.8% applies to high earners. Social Security taxation uses correct IRS thresholds. Alabama uses a full progressive state tax engine with 2%/4%/5% brackets, federal tax deductibility, over-65 exclusions, and pension exemptions. All other states use simplified flat rates with retirement income exemptions for qualifying states. FICA payroll taxes (Social Security 6.2% + Medicare 1.45%) are calculated on earned income during working years, including Additional Medicare Tax (0.9%) for high earners."
+          a: "Federal income tax on the IRS's published 2026 and 2027 brackets, grown after that by chained CPI, with the standard deduction, the age-65 addition and the 2025–2028 senior deduction. Long-term capital gains and qualified dividends at 0%, 15% or 20%, and the 3.8% net investment income tax. Social Security taxation on the IRS thresholds. State income tax for every state (see How are state taxes calculated?). FICA payroll taxes on earned income: Social Security 6.2% up to the wage cap, Medicare 1.45%, and the 0.9% Additional Medicare Tax. Medicare IRMAA surcharges, the ACA premium credit before 65, the 10% early-withdrawal penalty and the HSA penalty."
         }
       ]
     }
@@ -920,8 +950,9 @@ function FAQTab() {
   
   return (
     <div className="space-y-6">
+      {personalInfo && <PlanAssumptionsCard personalInfo={personalInfo} accounts={accounts || []} />}
       <div>
-        <h3 className="text-xl font-semibold text-slate-100 mb-2">Assumptions & Methodology FAQ</h3>
+        <h3 className="text-xl font-semibold text-slate-100 mb-2">How the planner works</h3>
         <p className="text-slate-400 text-sm">Understanding how this retirement planner calculates your projections. Click each question to expand.</p>
       </div>
       
