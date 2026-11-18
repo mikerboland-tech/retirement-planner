@@ -15442,7 +15442,7 @@ section('P132 — Sandbox: income streams you do not control, switched off, scal
     const jsx = DESKTOP_SRC;
     ok(/\|\| streamAdjCount > 0;/.test(jsx), 'a stream lever makes the Sandbox a what-if');
     ok(/streamAdjustments: streamAdjCount \? streamAdj : undefined,/.test(jsx), 'and reaches the engine');
-    ok(/ltcChoice, streamAdj, streamAdjCount,/.test(jsx), 'and re-runs the what-if when it changes');
+    ok(/\}, \[touched,[^\]]*\bstreamAdj, streamAdjCount,/.test(jsx), 'and re-runs the what-if when it changes');
     ok(/incomeStreams: sc \? sc\.streams : incomeStreams,/.test(jsx),
       '"Save as scenario" keeps the streams the what-if ran on — so the saved scenario is the tested one');
     ok(/!streamsOpen && streamSummary\.length > 0/.test(jsx),
@@ -17075,6 +17075,51 @@ section('P155 — the survivor is planned through the planning age');
   ok(/data-survivor-rule/.test(DESKTOP_SRC) && /data-longevity-odds/.test(DESKTOP_SRC), 'About you explains the rule and shows the odds');
   eq(/changes from Married Joint to Single after 2 years/.test(DESKTOP_SRC), false,
     'and no longer says the filing status changes after 2 years — it changes the year after the death');
+}
+
+section('P156 — planning for the Social Security trust-fund shortfall');
+
+{
+  // 2026 Trustees Report: the retirement fund (OASI) runs out late 2032, then
+  // pays 78%; the combined funds (OASDI) last into 2034, then pay 83%.
+  eq(engine.ssPayableShare({}, 2040), 1, 'full benefits unless the plan says otherwise');
+  eq(engine.ssPayableShare({ ssShortfall: 'oasi' }, 2032), 1, 'the retirement fund pays in full through 2032');
+  eq(engine.ssPayableShare({ ssShortfall: 'oasi' }, 2033), 0.78, 'and 78% from 2033');
+  eq(engine.ssPayableShare({ ssShortfall: 'combined' }, 2033), 1, 'the combined funds last through 2033');
+  eq(engine.ssPayableShare({ ssShortfall: 'combined' }, 2034), 0.83, 'and pay 83% from 2034');
+  eq(engine.ssPayableShare({ ssShortfall: 'custom', ssShortfallYear: 2040, ssShortfallPayable: 0.7 }, 2040), 0.7, 'a custom cut is the reader’s own');
+  eq(engine.ssPayableShare({ ssShortfall: 'custom' }, 2040), 1, 'and a custom cut with nothing entered cuts nothing');
+  eq(engine.ssPayableShare({ ssShortfall: 'custom', ssShortfallYear: 2030, ssShortfallPayable: 1.4 }, 2031), 1, 'a share over 100% is held to 100%');
+
+  // Every Social Security dollar in a year is cut — survivor benefits included.
+  const pi = { ...engine.DEFAULT_PLAN_INFO, myAge: 64, spouseAge: 62, myRetirementAge: 64, spouseRetirementAge: 62,
+    filingStatus: 'married_joint', state: 'Texas', desiredRetirementIncome: 80000, legacyAge: 95, inflationRate: 0.03,
+    survivorModelEnabled: true, myLifeExpectancy: 80, spouseLifeExpectancy: 90, healthcareModel: 'none', ltcModel: 'none' };
+  const accts = [{ id: 1, name: 'IRA', type: 'traditional_ira', owner: 'me', balance: 1200000, contribution: 0, cagr: 0.05, startAge: 64, stopAge: 64, contributor: 'me' }];
+  const streams = [
+    { id: 1, type: 'social_security', owner: 'me', name: 'SS', amount: 36000, startAge: 67, endAge: 120, cola: 0.025 },
+    { id: 2, type: 'social_security', owner: 'spouse', name: 'SS2', amount: 18000, startAge: 67, endAge: 120, cola: 0.025 }];
+  const full = engine.computeProjections(pi, accts, streams, [], [], [], 2026, {});
+  const cut = engine.computeProjections({ ...pi, ssShortfall: 'oasi' }, accts, streams, [], [], [], 2026, {});
+  const at = (rows, y) => rows.find(r => r.year === y);
+  eq(at(cut, 2032).socialSecurity, at(full, 2032).socialSecurity, 'before 2033 nothing changes');
+  approx(at(cut, 2035).socialSecurity, at(full, 2035).socialSecurity * 0.78, 'from 2033 every benefit is paid at 78%', 0.002);
+  const widowYear = full.find(r => r.primaryAlive === false && r.spouseAlive !== false).year;
+  approx(at(cut, widowYear + 1).socialSecurity, at(full, widowYear + 1).socialSecurity * 0.78, 'the survivor benefit too', 0.002);
+  approx(at(cut, 2035).ssShortfallReduction, at(full, 2035).socialSecurity - at(cut, 2035).socialSecurity, 'the row says how much was cut', 0.002);
+  eq(at(full, 2035).ssShortfallReduction, 0, 'and a plan with full benefits cuts nothing');
+  lt(cut[cut.length - 1].totalPortfolio, full[full.length - 1].totalPortfolio, 'the portfolio makes up the difference');
+  lt(Math.max(...cut.map(r => Math.abs(r.solverResidual))), 25, 'and the solver lands on every year');
+  approx(engine.deflateProjections([{ year: 2026 }, { year: 2036, ssShortfallReduction: 1000 }], { inflationRate: 0.03 })[1].ssShortfallReduction,
+    1000 / Math.pow(1.03, 10), 'the cut is money, restated in today’s dollars', 1e-9);
+
+  // The what-if can try it without touching the plan.
+  const sc = engine.sandboxScenario({ pi, accts, streams }, { ssShortfall: 'oasi' });
+  eq(sc.pi.ssShortfall, 'oasi', 'the what-if composes the cut onto the plan');
+  eq(engine.sandboxScenario({ pi, accts, streams }, { ssShortfall: '' }).pi === pi || engine.sandboxScenario({ pi, accts, streams }, { ssShortfall: '' }).pi.ssShortfall === pi.ssShortfall, true,
+    'and choosing full benefits on a full-benefits plan changes nothing');
+  ok(/data-ss-shortfall/.test(DESKTOP_SRC), 'About you offers the choice');
+  ok(/label="Social Security"\s+value=\{ssCutChoice\}/.test(DESKTOP_SRC), 'and so does the what-if');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

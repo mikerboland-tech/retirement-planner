@@ -1338,6 +1338,53 @@ function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWa
           </HideableBlock>
         )}
         
+        {/* Social Security's own funding. A plan assumption, like inflation:
+            full benefits unless the reader chooses to plan for the cut the
+            Trustees project. */}
+        <div className="border-t border-slate-700/50 mt-5 pt-5" data-ss-shortfall>
+          <h4 className="text-sm font-semibold text-slate-300 mb-1 uppercase tracking-wide">Social Security's Trust Fund</h4>
+          <p className="text-xs text-slate-500 mb-3">
+            The 2026 Trustees Report projects the retirement fund runs out in late 2032. Unless Congress acts, benefits
+            would then be cut to what Social Security's income can pay. Congress has always acted so far, so full
+            benefits are the default; planning for the cut shows how much of your plan rests on that.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className={compactLabelStyle}>Plan for</label>
+              <select value={localInfo.ssShortfall || ''} onChange={e => handleChange('ssShortfall', e.target.value)}
+                className={compactInputStyle} aria-label="Social Security shortfall">
+                <option value="">Full benefits, as promised</option>
+                <option value="oasi">Cut to 78% from 2033 (retirement fund on its own)</option>
+                <option value="combined">Cut to 83% from 2034 (if the retirement and disability funds are combined)</option>
+                <option value="custom">My own cut…</option>
+              </select>
+            </div>
+            {localInfo.ssShortfall === 'custom' && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={compactLabelStyle}>From year</label>
+                  <input type="number" min="2026" max="2100" value={localInfo.ssShortfallYear ?? 2033}
+                    onChange={e => handleChange('ssShortfallYear', Math.min(2100, Math.max(2026, Number(e.target.value) || 2033)))}
+                    className={compactInputStyle} aria-label="Shortfall starts in year" />
+                </div>
+                <div>
+                  <label className={compactLabelStyle}>Benefits paid (%)</label>
+                  <input type="number" min="0" max="100" step="1" value={Math.round((localInfo.ssShortfallPayable ?? 0.78) * 100)}
+                    onChange={e => handleChange('ssShortfallPayable', Math.min(1, Math.max(0, (Number(e.target.value) || 0) / 100)))}
+                    className={compactInputStyle} aria-label="Share of benefits paid, percent" />
+                </div>
+              </div>
+            )}
+          </div>
+          {localInfo.ssShortfall && (
+            <p className="text-xs text-amber-300/90 mt-2">
+              Every Social Security payment in the plan, survivor benefits included, is cut from that year on. The
+              Trustees project the share paid would then shrink slowly over the decades; a flat cut is the usual
+              planning simplification.
+            </p>
+          )}
+        </div>
+
         {/* Healthcare Expense Modeling */}
         <div className="border-t border-slate-700/50 mt-5 pt-5">
           <div className="flex items-center justify-between mb-3">
@@ -1469,7 +1516,7 @@ function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWa
           <div className="flex items-center justify-between mb-3">
             <div>
               <h4 className="text-sm font-semibold text-slate-300 uppercase tracking-wide">Long-Term Care</h4>
-              <p className="text-xs text-slate-500 mt-1">Bills assisted-living cost over the final months of life expectancy (one window per spouse)</p>
+              <p className="text-xs text-slate-500 mt-1">Bills assisted-living cost over the final months of each person's life in the plan (one window per spouse)</p>
             </div>
           </div>
           <div className="p-3 bg-slate-800/60 border border-slate-700/50 rounded-lg">
@@ -1510,7 +1557,7 @@ function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWa
             <p className="text-xs text-slate-500 mt-2">
               {localInfo.ltcModel === 'stress'
                 ? `Stress case: ${LTC_STRESS_MONTHS / 12} years of nursing-home care at $${LTC_MONTHLY_NURSING_HOME_2025.toLocaleString()}/mo (Genworth 2024 private-room median) for whichever of you is planned to live longer, and none for the other — the case with no spouse left to give informal care and the estate at its lowest. Roughly 1 in 7 people who need care need it this long.`
-                : `Default models $${LTC_MONTHLY_ASSISTED_LIVING_2025.toLocaleString()}/mo assisted living for ${LTC_DEFAULT_DURATION_MONTHS} months before death (Genworth 2024 median) — about the average across everyone, including the 30% who never need paid care. Cost compounds at the medical inflation rate and appears as a spike in the final years before each spouse's life expectancy.`}
+                : `Default models $${LTC_MONTHLY_ASSISTED_LIVING_2025.toLocaleString()}/mo assisted living for ${LTC_DEFAULT_DURATION_MONTHS} months before death (Genworth 2024 median) — about the average across everyone, including the 30% who never need paid care. Cost compounds at the medical inflation rate and appears as a spike in the final years of each spouse's life in the plan — for a surviving spouse, before the planning age.`}
               {' '}Long-term care is billed whichever healthcare model is chosen above. Will it last? (thousands of markets) can draw a different episode for every run instead.
             </p>
           </div>

@@ -2203,6 +2203,30 @@ const QCD_START_AGE = 70; // Must be 70½ or older (we use 70 for simplicity)
 // Year of FRA: $1 withheld per $3 earned above higher limit (only months before FRA)
 // After FRA: no limit
 // Names kept for stability; values are 2026.
+// ── SOCIAL SECURITY TRUST-FUND SHORTFALL ─────────────────────────────────────
+// 2026 Trustees Report (intermediate assumptions): the retirement and
+// survivors fund (OASI) runs out in late 2032, after which its income pays 78%
+// of scheduled benefits; if it were combined with the disability fund (OASDI),
+// the combined reserves last into 2034 and then pay 83%. By law, benefits are
+// cut to what the fund's income can pay unless Congress acts — it always has
+// so far, which is why full benefits stay the default. The payable share then
+// declines slowly (to about 62–65% by 2100); a flat cut from the depletion
+// year is the conventional planning simplification, stated as such.
+const SS_SHORTFALL_PRESETS = Object.freeze({
+  oasi: Object.freeze({ year: 2033, payable: 0.78 }),
+  combined: Object.freeze({ year: 2034, payable: 0.83 }),
+});
+// The share of scheduled Social Security this plan assumes is paid in `year`:
+// 1 unless pi.ssShortfall names a cut ('oasi', 'combined', or 'custom' with
+// pi.ssShortfallYear and pi.ssShortfallPayable).
+const ssPayableShare = (pi = {}, year) => {
+  const mode = pi.ssShortfall;
+  const cut = SS_SHORTFALL_PRESETS[mode] || (mode === 'custom'
+    ? { year: Number(pi.ssShortfallYear), payable: Number(pi.ssShortfallPayable) } : null);
+  if (!cut || !Number.isFinite(cut.year) || !Number.isFinite(cut.payable)) return 1;
+  return year >= cut.year ? Math.min(1, Math.max(0, cut.payable)) : 1;
+};
+
 const SS_EARNINGS_TEST_LIMIT_2025 = 24480;     // Annual limit for years before FRA year
 const SS_EARNINGS_TEST_FRA_LIMIT_2025 = 65160;  // Annual limit in the year you reach FRA
 
@@ -3464,6 +3488,7 @@ const REAL_DOLLAR_FIELDS = [
   'annuityIncome', 'annuityExcluded', 'annuityPremium',
   'hsaBalance',
   'guardrailAdjustment', 'strategyDraw',
+  'ssShortfallReduction',
 ];
 // Objects whose VALUES are money and whose keys are ids or category names.
 const REAL_DOLLAR_MAPS = ['perAccountBalances', 'perAccountContributions', 'recurringExpensesByCategory'];
@@ -8799,6 +8824,13 @@ const sandboxScenario = (base = {}, controls = {}) => {
   if (typeof controls.survivorModel === 'boolean') {
     pi = { ...pi, survivorModelEnabled: controls.survivorModel };
   }
+  // The Social Security shortfall is an assumption about the plan's income,
+  // so it goes on pi too: '' for full benefits, or a preset name.
+  if (typeof controls.ssShortfall === 'string' && controls.ssShortfall !== (pi.ssShortfall || '')) {
+    moved.push({ kind: 'note', name: 'Social Security', field: '',
+                 from: pi.ssShortfall || 'full', to: controls.ssShortfall || 'full' });
+    pi = { ...pi, ssShortfall: controls.ssShortfall };
+  }
 
   // These two are projection OPTIONS, not plan facts. Guardrails are a rule
   // about how spending reacts to a bad year, and QCDs are switched off to price
@@ -9998,6 +10030,13 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Apply reduction to total SS
       totalSocialSecurity = Math.max(0, totalSocialSecurity - ssEarningsTestReduction);
     }
+
+    // The trust-fund shortfall, when the plan assumes one: everything paid
+    // from Social Security this year — own, spousal and survivor benefits —
+    // is cut to the payable share (see ssPayableShare).
+    const ssShare = ssPayableShare(pi, year);
+    const ssShortfallReduction = ssShare < 1 ? totalSocialSecurity * (1 - ssShare) : 0;
+    totalSocialSecurity -= ssShortfallReduction;
     
     // ── ONE-TIME EVENTS ─────────────────────────────────────────────────────────
     // Process one-time income/expense events for this year
@@ -11996,6 +12035,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       desiredIncome: Math.round(desiredIncome),
       earnedIncome: Math.round(earnedIncome),
       socialSecurity: Math.round(totalSocialSecurity),
+      ssShortfallReduction: Math.round(ssShortfallReduction),
       pension: Math.round(totalPension),
       otherIncome: Math.round(totalOtherIncome),
       // Annuities: payouts received this year (inside pension above), the part
@@ -12756,6 +12796,7 @@ const describePlanPatch = (state, patch) => {
     calculateSpousalBenefit,
     mortalityQx, lifeExpectancyAt, sampleAgeAtDeath, MORTALITY_MIN_AGE,
     survivorOf, plannedLifespans, chanceAliveAt, householdChanceAliveAt,
+    SS_SHORTFALL_PRESETS, ssPayableShare,
     ANNUITY_PRICING, QLAC_PREMIUM_LIMIT_2026, QLAC_MAX_START_AGE, annuityPayoutRate, annuityFactor,
     annuityExclusionRatio, annuityPurchaseOf, annuityIsQLAC,
     HSA_NONQUALIFIED_PENALTY_RATE, HSA_PENALTY_END_AGE,

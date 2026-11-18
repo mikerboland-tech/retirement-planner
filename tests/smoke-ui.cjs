@@ -234,6 +234,18 @@ const check = async (browser, base, name, opts, fn) => {
       }
     });
 
+    // ── 2c. Planning for the Social Security shortfall ─────────────────────
+    section('About you: the Social Security shortfall');
+    await check(browser, base, 'SS shortfall', {}, async (v) => {
+      await tab(v.page, 'personal');
+      ok(/Chance at least one of you is alive at \d+: \d+%/.test(await v.page.$eval('[data-longevity-odds]', (el) => el.innerText)),
+        'the planning age shows the odds of reaching it');
+      await v.page.selectOption('select[aria-label="Social Security shortfall"]', 'oasi');
+      await v.page.waitForTimeout(400);
+      ok(/Every Social Security payment in the plan/.test(await v.page.$eval('[data-ss-shortfall]', (el) => el.innerText)),
+        'choosing the Trustees’ cut says what it does');
+    });
+
     // ── 3. The look picker ───────────────────────────────────────────────────
     section('The look picker');
     await check(browser, base, 'Looks', {}, async (v) => {

@@ -492,6 +492,7 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
   const wdFill = val('withdrawalBracketFill', 'plan');
   const wdOrder = val('withdrawalOrder', 'plan');
   const ltcChoice = val('ltcModel', 'plan');
+  const ssCutChoice = val('ssShortfall', 'plan');
 
   // The plan's own settings, so every control can say what it is departing from.
   const planConvLabel = rothConversionIsPlanned(personalInfo)
@@ -508,6 +509,8 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
   const orderWords = { pretax: 'Pre-tax', brokerage: 'Brokerage', roth: 'Roth' };
   const planOrderLabel = 'plan: ' + planOrderArr.map(k => orderWords[k] || k).join(' → ');
   const planLtc = personalInfo.ltcModel || 'none';
+  const planSsCut = personalInfo.ssShortfall || '';
+  const SS_CUT_WORDS = { '': 'full', oasi: '78% from 2033', combined: '83% from 2034', custom: 'your own cut' };
   const LTC_WORDS = { none: 'none', default: '28 months', custom: 'custom', stress: '5-year stress' };
 
   // ── The strategy drawer ───────────────────────────────────────────────────
@@ -637,6 +640,7 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
     wdFill !== 'plan' && (wdFill === 'off' ? 'no pre-tax fill' : `spend pre-tax to ${wdFill}`),
     wdOrder !== 'plan' && `${({ pretax: 'pre-tax', brokerage: 'brokerage', roth: 'Roth' })[wdOrder]} first`,
     ltcChoice !== 'plan' && `care: ${({ none: 'none', default: '28 months', stress: '5-yr stress' })[ltcChoice] || ltcChoice}`,
+    ssCutChoice !== 'plan' && `Social Security ${SS_CUT_WORDS[ssCutChoice] || ssCutChoice}`,
     married && survivorOn !== planSurvivor && `survivor ${survivorOn ? 'on' : 'off'}`,
     strategyMoved && `${strategyLabel(strategyPick)}`,
     givingPct > 0 && !qcdOn && 'no QCD',
@@ -650,7 +654,7 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
     || savingsMoved || acctAdjCount > 0 || spend !== planSpend
     || rothOn !== rothConversionIsPlanned(personalInfo)
     || survivorOn !== planSurvivor || strategyMoved || !qcdOn
-    || convMode !== 'plan' || wdFill !== 'plan' || wdOrder !== 'plan' || ltcChoice !== 'plan'
+    || convMode !== 'plan' || wdFill !== 'plan' || wdOrder !== 'plan' || ltcChoice !== 'plan' || ssCutChoice !== 'plan'
     || streamAdjCount > 0;
 
   const scenario = useMemo(() => {
@@ -677,6 +681,7 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
         withdrawalBracketFill: wdFill === 'plan' ? undefined : (wdFill === 'off' ? '' : wdFill),
         withdrawalPriority: wdOrder === 'plan' ? undefined : WD_ORDERS[wdOrder],
         ltcModel: ltcChoice === 'plan' ? undefined : ltcChoice,
+        ssShortfall: ssCutChoice === 'plan' ? undefined : ssCutChoice,
         survivorModel: married && survivorOn !== planSurvivor ? survivorOn : undefined,
         withdrawalStrategy: strategyMoved ? strategyPick : undefined,
         qcd: qcdOn ? undefined : false,
@@ -691,7 +696,7 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
     } catch (e) { return { error: e.message }; }
   }, [touched, myRet, spRet, claimMe, claimSp, savingsRate, spend, rothOn, married,
       survivorOn, strategyPick, strategyMoved, qcdOn, planSurvivor,
-      convMode, convBracketPick, convTierPick, wdFill, wdOrder, ltcChoice, streamAdj, streamAdjCount,
+      convMode, convBracketPick, convTierPick, wdFill, wdOrder, ltcChoice, ssCutChoice, streamAdj, streamAdjCount,
       acctAdj, acctAdjCount, savingsMoved,
       personalInfo, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
       planMyRet, planSpRet, planClaimMe, planClaimSp, planSpend, planSavingsRate,
@@ -1184,6 +1189,19 @@ function DashboardTab({ accounts, activeScenarioId, applyPlanAsBaseline, assets,
             ]}
             planLabel={`plan: ${LTC_WORDS[planLtc] || planLtc}`}
             note={ltcChoice === 'stress' ? 'the tail long-term care insurance exists for' : null} />
+
+          <SandboxChoice
+            label="Social Security"
+            value={ssCutChoice}
+            onChange={v => setControl('ssShortfall', v)}
+            options={[
+              { value: 'plan', label: 'Plan' },
+              { value: '', label: 'Full', title: 'Benefits paid in full, as promised' },
+              { value: 'oasi', label: '78% from 2033', title: 'The 2026 Trustees projection for the retirement fund on its own' },
+              { value: 'combined', label: '83% from 2034', title: 'If the retirement and disability funds are combined' },
+            ]}
+            planLabel={`plan: ${SS_CUT_WORDS[planSsCut] || planSsCut}`}
+            note={ssCutChoice !== 'plan' && ssCutChoice !== planSsCut && ssCutChoice ? 'the Trustees’ cut, if Congress does not act' : null} />
 
           <SandboxSwitch
             label="Survivor modelling" on={married && survivorOn}
