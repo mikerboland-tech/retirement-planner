@@ -848,20 +848,17 @@ function SetupWizard({ onComplete, onExplore, existingData, hasSavedPlan }) {
     return true;
   };
 
-  // IRS 401(k)/403(b) limits (2025/2026). 402(g) = employee elective deferral;
-  // 415(c) = combined employee + employer "annual additions". Age-50 catch-up and
-  // the SECURE 2.0 ages-60–63 super catch-up raise both ceilings.
+  // This year's IRS 401(k)/403(b) limits, from the engine (contributionLimitsFor).
+  // 402(g) = employee elective deferral; 415(c) = combined employee + employer
+  // "annual additions". Age-50 catch-up and the SECURE 2.0 ages-60–63 super
+  // catch-up raise both ceilings: catch-ups sit ON TOP of the 415(c) limit
+  // (they don't reduce it), so the combined personal cap is base + catch-up.
   const irs401kLimits = (age) => {
-    // 2026 IRS limits (Notice 2025-67 / IR-2025-111): 402(g) elective deferral
-    // $24,500; 415(c) annual additions $72,000; age-50 catch-up $8,000; ages
-    // 60–63 SECURE 2.0 super catch-up $11,250. Catch-ups sit ON TOP of the
-    // 415(c) limit (they don't reduce it), so the combined personal cap is
-    // base + catch-up.
+    const L = PlannerEngine.contributionLimitsFor();
     const a = num(age);
-    let catchUp = 0;
-    if (a >= 50) catchUp = (a >= 60 && a <= 63) ? 11250 : 8000;
+    const catchUp = PlannerEngine.workplaceCatchUp(a, L);
     const note = catchUp > 0 ? ` (includes the $${catchUp.toLocaleString()} age-${a >= 60 && a <= 63 ? '60–63 super' : '50'} catch-up)` : '';
-    return { deferral: 24500 + catchUp, additions: 72000 + catchUp, note };
+    return { deferral: L.deferral + catchUp, additions: L.additions + catchUp, note };
   };
 
   // Year-1 contribution check for one person's 401(k)/403(b) plan. Trad + Roth

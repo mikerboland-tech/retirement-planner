@@ -5,7 +5,8 @@
   "scripts": {
     "build": "node tools/build.cjs",
     "test": "node tests/run-tests.cjs",
-    "smoke": "node tests/smoke-ui.cjs"
+    "smoke": "node tests/smoke-ui.cjs",
+    "fuzz": "node tests/fuzz-solver.cjs"
   },
   "devDependencies": {
     "tailwindcss": "3.4.17"

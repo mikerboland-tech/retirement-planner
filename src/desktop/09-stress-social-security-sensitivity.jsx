@@ -1664,20 +1664,20 @@ function SensitivityTab({ detailLevel, sectionVisibility, setSectionVisibility, 
       formatStep: (base, delta) => formatCurrency(base + delta),
       formatDelta: (delta) => `${delta > 0 ? '+' : ''}${formatCurrency(delta)}`,
       apply: (delta) => {
-        // IRS annual contribution limits (2026: Notice 2025-67 / IR-2025-111; HSA: Rev. Proc. 2025-19)
-        // These are EMPLOYEE limits — employer match is separate and not capped here.
-        // Accounts with contributor='employer' or 'both' may exceed these limits because
-        // the combined amount includes employer match. We only cap 'me' contributions.
+        // This year's IRS limits, from the engine (contributionLimitsFor), so a
+        // new year's limits arrive in one place. These are EMPLOYEE limits —
+        // employer match is separate and not capped here. Accounts with
+        // contributor='employer' or 'both' may exceed them because the combined
+        // amount includes employer match. We only cap 'me' contributions.
+        const L = PlannerEngine.contributionLimitsFor();
+        const plan = { base: L.deferral, catchUp50: L.catchUp50, superCatchUp60: L.catchUp60to63 };
+        const plan457 = { base: L.deferral, catchUp50: L.catchUp50, superCatchUp60: 0 };
+        const ira = { base: L.ira, catchUp50: L.iraCatchUp, superCatchUp60: 0 };
         const CONTRIBUTION_LIMITS = {
-          '401k':           { base: 24500, catchUp50: 8000, superCatchUp60: 11250 },
-          'roth_401k':      { base: 24500, catchUp50: 8000, superCatchUp60: 11250 },
-          '403b':           { base: 24500, catchUp50: 8000, superCatchUp60: 11250 },
-          'roth_403b':      { base: 24500, catchUp50: 8000, superCatchUp60: 11250 },
-          '457b':           { base: 24500, catchUp50: 8000, superCatchUp60: 0 },
-          'roth_457b':      { base: 24500, catchUp50: 8000, superCatchUp60: 0 },
-          'traditional_ira':{ base: 7500,  catchUp50: 1100, superCatchUp60: 0 },
-          'roth_ira':       { base: 7500,  catchUp50: 1100, superCatchUp60: 0 },
-          'hsa':            { base: 4400,  catchUp55: 1000 },  // Single; family is $8,750
+          '401k': plan, 'roth_401k': plan, '403b': plan, 'roth_403b': plan,
+          '457b': plan457, 'roth_457b': plan457,
+          'traditional_ira': ira, 'roth_ira': ira,
+          'hsa':            { base: L.hsaSelf, catchUp55: L.hsaCatchUp55 },  // self-only; family below
           'brokerage':      { base: Infinity } // No limit
         };
         
@@ -1685,7 +1685,7 @@ function SensitivityTab({ detailLevel, sectionVisibility, setSectionVisibility, 
           const limits = CONTRIBUTION_LIMITS[accountType];
           if (!limits) return Infinity;
           if (accountType === 'hsa') {
-            let limit = filingStatus === 'married_joint' ? 8750 : limits.base;
+            let limit = filingStatus === 'married_joint' ? L.hsaFamily : limits.base;
             if (ownerAge >= 55) limit += (limits.catchUp55 || 0);
             return limit;
           }

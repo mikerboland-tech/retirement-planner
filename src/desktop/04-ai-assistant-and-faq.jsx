@@ -500,7 +500,7 @@ function FAQTab() {
         },
         {
           q: "What is the standard deduction?",
-          a: "The standard deduction is subtracted from your gross income before calculating taxes. 2026 base amounts: Single $16,100, Married Filing Jointly $32,200, Married Filing Separately $16,100, Head of Household $24,150. These amounts are adjusted upward each year by the inflation rate you specify. Two extra deductions apply once you turn 65, and the projection applies both automatically. (1) The additional standard deduction for age 65+ (IRC §63(f)): $2,050 per person for Single/Head of Household, $1,650 per person if married — permanent, and inflation-adjusted like the base amount. (2) The 'senior deduction' created by the 2025 OBBBA tax law: $6,000 per person age 65+, on top of the standard deduction. It is NOT inflation-adjusted, it phases out at 6% of MAGI above $75,000 (Single) / $150,000 (Married Filing Jointly) — disappearing entirely at $175,000 / $250,000 — and under current law it applies only to tax years 2025 through 2028. The projection models that expiry, so you will see the deduction drop starting in 2029 unless Congress extends it. The Tax Year Snapshot shows the exact deduction used for any year."
+          a: "The standard deduction is subtracted from your gross income before calculating taxes. 2026 amounts: Single $16,100, Married Filing Jointly $32,200, Married Filing Separately $16,100, Head of Household $24,150. 2027, as the IRS has published them: Single $16,600, Married Filing Jointly $33,200, Married Filing Separately $16,600, Head of Household $24,925. Later years grow by chained CPI, the index the IRS uses, which runs about a quarter point a year below the inflation rate you set (see How is inflation applied?). Two extra deductions apply once you turn 65, and the projection applies both automatically. (1) The additional standard deduction for age 65+ (IRC §63(f)): $2,050 per person for Single/Head of Household, $1,650 per person if married in 2026 ($2,100 and $1,700 in 2027) — permanent, and indexed like the base amount. (2) The 'senior deduction' created by the 2025 OBBBA tax law: $6,000 per person age 65+, on top of the standard deduction. It is NOT inflation-adjusted, it phases out at 6% of MAGI above $75,000 (Single) / $150,000 (Married Filing Jointly) — disappearing entirely at $175,000 / $250,000 — and under current law it applies only to tax years 2025 through 2028. The projection models that expiry, so you will see the deduction drop starting in 2029 unless Congress extends it. The Tax Year Snapshot shows the exact deduction used for any year."
         },
         {
           q: "How are state taxes calculated?",
@@ -591,7 +591,7 @@ function FAQTab() {
         },
         {
           q: "What are Qualified Charitable Distributions (QCDs)?",
-          a: "QCDs allow you to donate directly from a traditional IRA to charity after age 70½, up to $111,000/year per person (2026 limit, indexed annually for inflation under SECURE 2.0). The donated amount counts toward your RMD but is excluded from taxable income. The model automatically uses QCDs to offset charitable giving when you have RMDs, reducing your tax bill."
+          a: "QCDs allow you to donate directly from a traditional IRA to charity after age 70½, up to $111,000/year per person in 2026 and $114,000 in 2027 (indexed annually for inflation under SECURE 2.0). The donated amount counts toward your RMD but is excluded from taxable income. The model automatically uses QCDs to offset charitable giving when you have RMDs, reducing your tax bill."
         }
       ]
     },
@@ -697,7 +697,7 @@ function FAQTab() {
       items: [
         {
           q: "How is inflation applied?",
-          a: "The inflation rate you specify (default 3%) is applied to: (1) your desired retirement income target, (2) the standard deduction, and (3) federal tax brackets. It compounds annually. Income stream COLAs are separate and specified per stream."
+          a: "The inflation rate you set (default 3%) grows your spending target and anything else stated in today's dollars. Tax figures follow the law instead. Where the government has already published a year's figures, that year uses them exactly: the app has the 2026 and 2027 tax brackets, standard deduction, capital-gains rates, Medicare premiums and IRMAA tiers, Social Security wage cap and earnings test, contribution limits, QCD limit and ACA tables. Later years grow from the latest published year at the index the law uses for each: income-tax brackets, deductions and capital-gains thresholds by chained CPI, which runs about a quarter point a year below your inflation rate (so an income that keeps pace with inflation slowly creeps into higher brackets, as it does in real life); Medicare IRMAA tiers, the QCD limit and the poverty line by ordinary CPI (your rate); the Social Security wage cap and earnings test by average wages, about a point above it. The senior deduction, Social Security taxation thresholds and NIIT thresholds are fixed dollar amounts in law and do not grow; the SALT cap follows its own schedule in the law (1% a year through 2029). Income stream COLAs are separate and set per stream."
         },
         {
           q: "What CAGR should I use for investments?",

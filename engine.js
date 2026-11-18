@@ -115,6 +115,47 @@ const FEDERAL_TAX_BRACKETS_2026 = {
   ]
 };
 
+// 2027 brackets — IRS Rev. Proc. 2026-35 (IR-2026-133, November 5, 2026).
+// Used for 2027 exactly; see PUBLISHED_FIGURES for how later years grow.
+const FEDERAL_TAX_BRACKETS_2027 = {
+  single: [
+    { min: 0, max: 12800, rate: 0.10 },
+    { min: 12800, max: 52025, rate: 0.12 },
+    { min: 52025, max: 109125, rate: 0.22 },
+    { min: 109125, max: 208325, rate: 0.24 },
+    { min: 208325, max: 264550, rate: 0.32 },
+    { min: 264550, max: 661375, rate: 0.35 },
+    { min: 661375, max: Infinity, rate: 0.37 }
+  ],
+  married_joint: [
+    { min: 0, max: 25600, rate: 0.10 },
+    { min: 25600, max: 104050, rate: 0.12 },
+    { min: 104050, max: 218250, rate: 0.22 },
+    { min: 218250, max: 416650, rate: 0.24 },
+    { min: 416650, max: 529100, rate: 0.32 },
+    { min: 529100, max: 793650, rate: 0.35 },
+    { min: 793650, max: Infinity, rate: 0.37 }
+  ],
+  married_separate: [
+    { min: 0, max: 12800, rate: 0.10 },
+    { min: 12800, max: 52025, rate: 0.12 },
+    { min: 52025, max: 109125, rate: 0.22 },
+    { min: 109125, max: 208325, rate: 0.24 },
+    { min: 208325, max: 264550, rate: 0.32 },
+    { min: 264550, max: 396825, rate: 0.35 },
+    { min: 396825, max: Infinity, rate: 0.37 }
+  ],
+  head_of_household: [
+    { min: 0, max: 18250, rate: 0.10 },
+    { min: 18250, max: 69650, rate: 0.12 },
+    { min: 69650, max: 109125, rate: 0.22 },
+    { min: 109125, max: 208325, rate: 0.24 },
+    { min: 208325, max: 264550, rate: 0.32 },
+    { min: 264550, max: 661375, rate: 0.35 },
+    { min: 661375, max: Infinity, rate: 0.37 }
+  ]
+};
+
 // Map UI bracket labels to FEDERAL_TAX_BRACKETS_2026 indices.
 // Used by Roth conversion bracket-fill mode. An unrecognized label resolves
 // to undefined and the caller skips the conversion that year, rather than
@@ -131,6 +172,14 @@ const STANDARD_DEDUCTION_2026 = {
   head_of_household: 24150
 };
 
+// 2027 — IRS Rev. Proc. 2026-35.
+const STANDARD_DEDUCTION_2027 = {
+  single: 16600,
+  married_joint: 33200,
+  married_separate: 16600,
+  head_of_household: 24925
+};
+
 // ── AGE-65 FEDERAL DEDUCTIONS ────────────────────────────────────────────────
 // Two separate provisions, with different rules. Both matter enormously for a
 // retirement projection, where most years are lived at 65+.
@@ -144,6 +193,13 @@ const ADDITIONAL_STD_DEDUCTION_65_2026 = {
   head_of_household: 2050,
   married_joint: 1650,
   married_separate: 1650
+};
+// 2027 — IRS Rev. Proc. 2026-35.
+const ADDITIONAL_STD_DEDUCTION_65_2027 = {
+  single: 2100,
+  head_of_household: 2100,
+  married_joint: 1700,
+  married_separate: 1700
 };
 
 // 2. The OBBBA "senior deduction" (P.L. 119-21 §70103): $6,000 per person 65+,
@@ -322,11 +378,13 @@ const seniorDeduction = (age65Count, taxYear, magi, filingStatus) => {
 // Callers that pass no opts get exactly the old behavior (plain standard
 // deduction), so every existing call site is unaffected until it opts in.
 const getFederalDeduction = (filingStatus, yearsFromNow = 0, inflationRate = 0.03, opts = {}) => {
-  const base = STANDARD_DEDUCTION_2026[filingStatus] || STANDARD_DEDUCTION_2026.married_joint;
+  const sd = publishedFor('stdDeduction', yearsFromNow, inflationRate);
+  const a65 = publishedFor('age65Deduction', yearsFromNow, inflationRate);
   const maxAge65 = filingStatus === 'married_joint' ? 2 : 1;
   const age65Count = Math.min(Math.max(0, opts.age65Count || 0), maxAge65);
-  const per65 = ADDITIONAL_STD_DEDUCTION_65_2026[filingStatus] || ADDITIONAL_STD_DEDUCTION_65_2026.married_joint;
-  const indexed = indexTo(base + age65Count * per65, yearsFromNow, inflationRate);
+  const base = (sd.table[filingStatus] || sd.table.married_joint) * sd.factor;
+  const per65 = (a65.table[filingStatus] || a65.table.married_joint) * a65.factor;
+  const indexed = base + age65Count * per65;
   return indexed + seniorDeduction(age65Count, opts.taxYear, opts.magi, filingStatus);
 };
 
@@ -1876,9 +1934,9 @@ const FICA_ADDITIONAL_MEDICARE_THRESHOLD = {
 const calculateFICA = (earnedIncome, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
   if (earnedIncome <= 0) return { socialSecurity: 0, medicare: 0, total: 0 };
   
-  // Inflate the SS wage base
-  const inflationFactor = indexTo(1, yearsFromNow, inflationRate);
-  const wageBase = FICA_SS_WAGE_BASE_2025 * inflationFactor;
+  // The wage base for the year (it follows average wages, not prices).
+  const wb = publishedFor('wageBase', yearsFromNow, inflationRate);
+  const wageBase = wb.table * wb.factor;
   
   // Social Security tax (capped at wage base)
   const ssTax = Math.min(earnedIncome, wageBase) * FICA_SS_RATE;
@@ -2148,6 +2206,32 @@ const IRMAA_THRESHOLDS_2025 = {
   ]
 };
 
+// 2027 — CMS fact sheet, November 17, 2026. The tiers read against 2025 MAGI.
+// Part B is the total monthly premium in the tier; Part D the monthly add-on.
+const IRMAA_THRESHOLDS_2027 = {
+  single: [
+    { maxIncome: 112000, partB: 209.40, partD: 0 },
+    { maxIncome: 141000, partB: 293.10, partD: 15.40 },
+    { maxIncome: 177000, partB: 418.80, partD: 39.70 },
+    { maxIncome: 212000, partB: 544.40, partD: 64.00 },
+    { maxIncome: 500000, partB: 670.00, partD: 88.30 },
+    { maxIncome: Infinity, partB: 711.80, partD: 96.40 }
+  ],
+  married_joint: [
+    { maxIncome: 224000, partB: 209.40, partD: 0 },
+    { maxIncome: 282000, partB: 293.10, partD: 15.40 },
+    { maxIncome: 354000, partB: 418.80, partD: 39.70 },
+    { maxIncome: 424000, partB: 544.40, partD: 64.00 },
+    { maxIncome: 750000, partB: 670.00, partD: 88.30 },
+    { maxIncome: Infinity, partB: 711.80, partD: 96.40 }
+  ],
+  married_separate: [
+    { maxIncome: 112000, partB: 209.40, partD: 0 },
+    { maxIncome: 388000, partB: 670.00, partD: 88.30 },
+    { maxIncome: Infinity, partB: 711.80, partD: 96.40 }
+  ]
+};
+
 // Social Security Full Retirement Age by birth year
 const SS_FULL_RETIREMENT_AGE = {
   1943: 66, 1944: 66, 1945: 66, 1946: 66, 1947: 66, 1948: 66, 1949: 66, 1950: 66, 1951: 66, 1952: 66, 1953: 66, 1954: 66,
@@ -2179,6 +2263,11 @@ const ACA_FPL_2025 = {
   1: 15650, 2: 21150, 3: 26650, 4: 32150, 5: 37650, 6: 43150, 7: 48650, 8: 54150
 };
 
+// 2026 HHS poverty guidelines (48 states and DC), which set 2027 coverage.
+const ACA_FPL_2026 = {
+  1: 15960, 2: 21640, 3: 27320, 4: 33000, 5: 38680, 6: 44360, 7: 50040, 8: 55720
+};
+
 // Post-ARPA applicable-percentage table for 2026 (IRS Rev. Proc. 2025-25).
 // The enhanced ARPA/IRA subsidies expired 12/31/2025: the 400% FPL hard cliff is
 // BACK, and the required contribution runs 2.10% → 9.96% of MAGI with linear
@@ -2191,6 +2280,17 @@ const ACA_APPLICABLE_PCT_2026 = [
   { lo: 200, hi: 250, pctLo: 0.0660, pctHi: 0.0844 },
   { lo: 250, hi: 300, pctLo: 0.0844, pctHi: 0.0996 },
   { lo: 300, hi: 400, pctLo: 0.0996, pctHi: 0.0996 },
+];
+
+// 2027 — IRS Rev. Proc. 2026-26. The enhanced credits have not been restored,
+// so the 400% cliff stands; the band edges are the 2026 ones.
+const ACA_APPLICABLE_PCT_2027 = [
+  { lo: 100, hi: 133, pctLo: 0.0215, pctHi: 0.0215 },
+  { lo: 133, hi: 150, pctLo: 0.0323, pctHi: 0.0430 },
+  { lo: 150, hi: 200, pctLo: 0.0430, pctHi: 0.0678 },
+  { lo: 200, hi: 250, pctLo: 0.0678, pctHi: 0.0866 },
+  { lo: 250, hi: 300, pctLo: 0.0866, pctHi: 0.1022 },
+  { lo: 300, hi: 400, pctLo: 0.1022, pctHi: 0.1022 },
 ];
 
 // QCD (Qualified Charitable Distribution) constants
@@ -2264,8 +2364,8 @@ const STATES_THAT_TAX_SS = new Set([
 // filing jointly can be a dollar from the edge as a survivor.
 const nextIRMAAThreshold = (magi, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
   const lookupStatus = filingStatus === 'head_of_household' ? 'single' : filingStatus;
-  const thresholds = IRMAA_THRESHOLDS_2025[lookupStatus] || IRMAA_THRESHOLDS_2025.married_joint;
-  const inflationFactor = indexTo(1, yearsFromNow, inflationRate);
+  const { table: irmaaTable, factor: inflationFactor } = publishedFor('irmaa', yearsFromNow, inflationRate);
+  const thresholds = irmaaTable[lookupStatus] || irmaaTable.married_joint;
   const income = Math.max(0, magi || 0);
   for (let i = 0; i < thresholds.length; i++) {
     const max = thresholds[i].maxIncome;
@@ -2281,8 +2381,8 @@ const nextIRMAAThreshold = (magi, filingStatus, yearsFromNow = 0, inflationRate 
 const calculateIRMAA = (magi, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
   // Head of household uses single thresholds per CMS rules
   const lookupStatus = filingStatus === 'head_of_household' ? 'single' : filingStatus;
-  const thresholds = IRMAA_THRESHOLDS_2025[lookupStatus] || IRMAA_THRESHOLDS_2025.married_joint;
-  const inflationFactor = indexTo(1, yearsFromNow, inflationRate);
+  const { table: irmaaTable, factor: inflationFactor } = publishedFor('irmaa', yearsFromNow, inflationRate);
+  const thresholds = irmaaTable[lookupStatus] || irmaaTable.married_joint;
 
   // Find the applicable tier.
   //
@@ -2333,7 +2433,8 @@ const calculateIRMAASurcharge = (magi, filingStatus, yearsFromNow = 0, inflation
   const irmaa = calculateIRMAA(magi, filingStatus, yearsFromNow, inflationRate);
   // Standard premium indexed by the same rate as the tier premiums above, so the
   // surcharge (tier premium − standard premium) scales consistently in nominal dollars.
-  const standardPartB = indexTo(MEDICARE_PART_B_STANDARD_2025, yearsFromNow, inflationRate);
+  const pb = publishedFor('partB', yearsFromNow, inflationRate);
+  const standardPartB = pb.table * pb.factor;
   const surchargePerPerson = Math.max(0, irmaa.partBMonthly - standardPartB) * 12 + irmaa.partDAnnual;
   return {
     surchargePerPerson: Math.round(surchargePerPerson),
@@ -2351,17 +2452,17 @@ const calculateSSEarningsTestReduction = (earnedIncome, claimAge, fra, yearsFrom
   // No reduction at or after FRA
   if (claimAge >= fra) return 0;
   
-  const inflationFactor = indexTo(1, yearsFromNow, inflationRate);
+  const et = publishedFor('earningsTest', yearsFromNow, inflationRate);
   
   // Check if this is the year you reach FRA (use higher limit, $1 per $3)
   const isFRAYear = Math.floor(claimAge) === Math.floor(fra);
   
   if (isFRAYear) {
-    const limit = SS_EARNINGS_TEST_FRA_LIMIT_2025 * inflationFactor;
+    const limit = et.table.fraYear * et.factor;
     const excess = Math.max(0, earnedIncome - limit);
     return excess / 3; // $1 withheld per $3 over
   } else {
-    const limit = SS_EARNINGS_TEST_LIMIT_2025 * inflationFactor;
+    const limit = et.table.under * et.factor;
     const excess = Math.max(0, earnedIncome - limit);
     return excess / 2; // $1 withheld per $2 over
   }
@@ -2619,7 +2720,8 @@ const LIMIT_HSA_SELF = 4400;
 const LIMIT_HSA_FAMILY = 8750;
 const LIMIT_HSA_CATCHUP_55 = 1000;
 
-const workplaceCatchUp = (age) => age >= 60 && age <= 63 ? LIMIT_CATCHUP_60_63 : (age >= 50 ? LIMIT_CATCHUP_50 : 0);
+const workplaceCatchUp = (age, L = contributionLimitsFor()) =>
+  age >= 60 && age <= 63 ? L.catchUp60to63 : (age >= 50 ? L.catchUp50 : 0);
 
 // SECURE 2.0 §603: from 2026, a participant whose PRIOR-YEAR FICA wages from the
 // employer sponsoring the plan exceeded this threshold may only make catch-up
@@ -2652,7 +2754,9 @@ const IRA_TYPES = new Set(['traditional_ira', 'roth_ira']);
 // salaries: { me, spouse } current earned income, needed to size percent-mode
 // contributions. Percent-mode rows are skipped when the relevant salary is 0,
 // since their dollar amount cannot be known.
-const checkContributionLimits = (accounts, pi, salaries = {}) => {
+const checkContributionLimits = (accounts, pi, salaries = {}, year = new Date().getFullYear()) => {
+  // This year's contributions, against this year's limits.
+  const L = contributionLimitsFor(year);
   const out = [];
   if (!accounts || !accounts.length) return out;
   const owners = ['me', 'spouse'];
@@ -2693,9 +2797,9 @@ const checkContributionLimits = (accounts, pi, salaries = {}) => {
       else if (a.type === 'hsa') hsa += s.employee + s.employer;
     }
 
-    const cu = workplaceCatchUp(age);
-    const deferralCap = LIMIT_402G + cu;
-    const additionsCap = LIMIT_415C + cu;
+    const cu = workplaceCatchUp(age, L);
+    const deferralCap = L.deferral + cu;
+    const additionsCap = L.additions + cu;
     const note = cu > 0 ? ` (including the $${cu.toLocaleString()} age-${age >= 60 && age <= 63 ? '60–63 super' : '50'} catch-up)` : '';
 
     if (deferral > deferralCap + 1) out.push({ owner, kind: 'deferral', amount: deferral, limit: deferralCap,
@@ -2706,20 +2810,20 @@ const checkContributionLimits = (accounts, pi, salaries = {}) => {
     // catch-up room: deferrals above the $24,500 base are catch-up by definition.
     // Deferrals beyond the cap are already reported as a violation above, so the
     // catch-up actually in play is capped at the legal maximum.
-    const catchUpUsed = Math.max(0, Math.min(deferral, deferralCap) - LIMIT_402G);
-    if (cu > 0 && catchUpUsed > 0 && salaryOf(owner) > ROTH_CATCHUP_WAGE_THRESHOLD
+    const catchUpUsed = Math.max(0, Math.min(deferral, deferralCap) - L.deferral);
+    if (cu > 0 && catchUpUsed > 0 && salaryOf(owner) > L.rothCatchUpWages
         && rothDeferral < catchUpUsed - 1) {
       out.push({ owner, kind: 'roth_catchup', amount: rothDeferral, limit: catchUpUsed,
-        message: `${who} catch-up contributions are $${Math.round(catchUpUsed).toLocaleString()}/yr, but only $${Math.round(rothDeferral).toLocaleString()} of ${owner === 'spouse' ? 'their' : 'your'} workplace deferrals go to a Roth account. From 2026, SECURE 2.0 requires catch-up to be Roth for anyone whose prior-year wages from that employer exceeded $${ROTH_CATCHUP_WAGE_THRESHOLD.toLocaleString()} — check how your plan is set up.` });
+        message: `${who} catch-up contributions are $${Math.round(catchUpUsed).toLocaleString()}/yr, but only $${Math.round(rothDeferral).toLocaleString()} of ${owner === 'spouse' ? 'their' : 'your'} workplace deferrals go to a Roth account. From 2026, SECURE 2.0 requires catch-up to be Roth for anyone whose prior-year wages from that employer exceeded $${L.rothCatchUpWages.toLocaleString()} — check how your plan is set up.` });
     }
 
-    const iraCap = LIMIT_IRA + (age >= 50 ? LIMIT_IRA_CATCHUP : 0);
+    const iraCap = L.ira + (age >= 50 ? L.iraCatchUp : 0);
     if (ira > iraCap + 1) out.push({ owner, kind: 'ira', amount: ira, limit: iraCap,
       message: `${who} IRA contributions total $${Math.round(ira).toLocaleString()}/yr, above the $${iraCap.toLocaleString()} limit. Traditional and Roth IRAs share it.` });
     // This is the INDIVIDUAL ceiling. For a married couple the family limit is
     // also the household's total (see the shared check below), so one spouse
     // alone cannot exceed it either.
-    const hsaCap = (pi.filingStatus === 'married_joint' ? LIMIT_HSA_FAMILY : LIMIT_HSA_SELF) + (age >= 55 ? LIMIT_HSA_CATCHUP_55 : 0);
+    const hsaCap = (pi.filingStatus === 'married_joint' ? L.hsaFamily : L.hsaSelf) + (age >= 55 ? L.hsaCatchUp55 : 0);
     if (hsa > hsaCap + 1) out.push({ owner, kind: 'hsa', amount: hsa, limit: hsaCap,
       message: `${who} HSA contributions total $${Math.round(hsa).toLocaleString()}/yr, above the $${hsaCap.toLocaleString()} limit.` });
   }
@@ -2736,11 +2840,11 @@ const checkContributionLimits = (accounts, pi, salaries = {}) => {
       const s = split(a);
       if (s) household += s.employee + s.employer;
     }
-    const cap = LIMIT_HSA_FAMILY
-      + ((pi.myAge || 0) >= 55 ? LIMIT_HSA_CATCHUP_55 : 0)
-      + ((pi.spouseAge || 0) >= 55 ? LIMIT_HSA_CATCHUP_55 : 0);
+    const cap = L.hsaFamily
+      + ((pi.myAge || 0) >= 55 ? L.hsaCatchUp55 : 0)
+      + ((pi.spouseAge || 0) >= 55 ? L.hsaCatchUp55 : 0);
     if (household > cap + 1) out.push({ owner: 'household', kind: 'hsa_family', amount: household, limit: cap,
-      message: `Your household's HSA contributions total $${Math.round(household).toLocaleString()}/yr, above the $${cap.toLocaleString()} family limit. A married couple under family coverage shares one HSA limit between them — it is not $${LIMIT_HSA_FAMILY.toLocaleString()} each — though anyone 55 or older adds their own $${LIMIT_HSA_CATCHUP_55.toLocaleString()} catch-up on top.` });
+      message: `Your household's HSA contributions total $${Math.round(household).toLocaleString()}/yr, above the $${cap.toLocaleString()} family limit. A married couple under family coverage shares one HSA limit between them — it is not $${L.hsaFamily.toLocaleString()} each — though anyone 55 or older adds their own $${L.hsaCatchUp55.toLocaleString()} catch-up on top.` });
   }
   return out;
 };
@@ -3341,12 +3445,11 @@ const conversionCostAudit = (withProj, withoutProj, age, convertedAmount) => {
 // same factor the tax calculator uses, so the comparison stays honest in future
 // years rather than drifting against unindexed 2026 thresholds.
 const topMarginalBracket = (taxableIncome, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
-  const brackets = FEDERAL_TAX_BRACKETS_2026[filingStatus] || FEDERAL_TAX_BRACKETS_2026.single;
-  const factor = indexTo(1, yearsFromNow, inflationRate);
+  const brackets = bracketsFor(FEDERAL_TAX_BRACKETS_2026[filingStatus] ? filingStatus : 'single', yearsFromNow, inflationRate);
   const income = Math.max(0, taxableIncome || 0);
   let rate = brackets[0].rate;
   for (const b of brackets) {
-    if (income >= Math.round(b.min * factor)) rate = b.rate;
+    if (income >= Math.round(b.min)) rate = b.rate;
     else break;
   }
   return rate;
@@ -3630,9 +3733,10 @@ const getSpendingPhaseMultiplier = (pi, myAge) => {
 // Applicable percentage (required contribution as a fraction of MAGI) for a
 // given % of FPL, per the 2026 post-ARPA table. Returns null when the household
 // is outside the 100%–400% eligibility window.
-const getACAApplicablePercentage = (fplPercent) => {
+const getACAApplicablePercentage = (fplPercent, taxIndexYears = 0) => {
   if (fplPercent < 100 || fplPercent > 400) return null;
-  const row = ACA_APPLICABLE_PCT_2026.find(r => fplPercent <= r.hi) || ACA_APPLICABLE_PCT_2026[ACA_APPLICABLE_PCT_2026.length - 1];
+  const pct = publishedFor('acaPercentages', taxIndexYears).table;
+  const row = pct.find(r => fplPercent <= r.hi) || pct[pct.length - 1];
   const span = row.hi - row.lo;
   const t = span > 0 ? Math.min(Math.max((fplPercent - row.lo) / span, 0), 1) : 0;
   return row.pctLo + (row.pctHi - row.pctLo) * t;
@@ -3644,10 +3748,10 @@ const getACAApplicablePercentage = (fplPercent) => {
 // ACA MAGI = AGI + tax-exempt interest + UNTAXED Social Security (the caller is
 // responsible for building that base — see computeProjections).
 const calculateACAPremiumCredit = ({ magi, householdSize, benchmarkPremium, yearsFromNow = 0, inflationRate = 0.03 }) => {
-  const inf = indexTo(1, yearsFromNow, inflationRate);
-  const fpl = (ACA_FPL_2025[Math.min(Math.max(householdSize, 1), 8)] || ACA_FPL_2025[1]) * inf;
+  const fp = publishedFor('fpl', yearsFromNow, inflationRate);
+  const fpl = (fp.table[Math.min(Math.max(householdSize, 1), 8)] || fp.table[1]) * fp.factor;
   const fplPercent = fpl > 0 ? (magi / fpl) * 100 : Infinity;
-  const applicablePct = getACAApplicablePercentage(fplPercent);
+  const applicablePct = getACAApplicablePercentage(fplPercent, yearsFromNow);
   if (applicablePct === null) {
     // Below 100% FPL (Medicaid territory in expansion states) or above the 400%
     // hard cliff (back since 1/1/2026): no marketplace credit — full premium.
@@ -4142,13 +4246,13 @@ const getValidStartYears = (numYears, allowWrap = false) => {
 // This mirrors applyStateBrackets, which the state engine already separates the
 // same way for the same reason.
 const federalTaxOnTaxableIncome = (taxableIncome, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
-  const baseBrackets = FEDERAL_TAX_BRACKETS_2026[filingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
+  const yearBrackets = bracketsFor(filingStatus, yearsFromNow, inflationRate);
   let tax = 0;
   let remainingIncome = Math.max(0, taxableIncome);
-  for (const bracket of baseBrackets) {
+  for (const bracket of yearBrackets) {
     if (remainingIncome <= 0) break;
     const width = bracket.max === Infinity ? Infinity : bracket.max - bracket.min;
-    const taxableInBracket = Math.min(remainingIncome, indexTo(width, yearsFromNow, inflationRate));
+    const taxableInBracket = Math.min(remainingIncome, width);
     tax += taxableInBracket * bracket.rate;
     remainingIncome -= taxableInBracket;
   }
@@ -4304,13 +4408,22 @@ const CAPITAL_GAINS_THRESHOLDS_2025 = {
   head_of_household: { zeroRate: 66200, fifteenRate: 579700 }
 };
 
+// 2027 — IRS Rev. Proc. 2026-35 §3.03 (the top of the 0% and 15% rates).
+const CAPITAL_GAINS_THRESHOLDS_2027 = {
+  single: { zeroRate: 51050, fifteenRate: 563200 },
+  married_joint: { zeroRate: 102100, fifteenRate: 633600 },
+  married_separate: { zeroRate: 51050, fifteenRate: 316800 },
+  head_of_household: { zeroRate: 68350, fifteenRate: 598400 }
+};
+
 // Calculate long-term capital gains tax based on taxable income and filing status
 // Returns the capital gains tax amount
 const calculateCapitalGainsTax = (capitalGains, taxableIncome, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
   if (capitalGains <= 0) return 0;
   
-  const thresholds = CAPITAL_GAINS_THRESHOLDS_2025[filingStatus] || CAPITAL_GAINS_THRESHOLDS_2025.married_joint;
-  const inflationFactor = indexTo(1, yearsFromNow, inflationRate);
+ const cg = publishedFor('capitalGains', yearsFromNow, inflationRate);
+  const thresholds = cg.table[filingStatus] || cg.table.married_joint;
+  const inflationFactor = cg.factor;
   
   // Adjust thresholds for inflation
   const zeroRateThreshold = thresholds.zeroRate * inflationFactor;
@@ -4512,6 +4625,87 @@ const QBI_MINIMUM_QBI_REQUIRED = 1000;
 // the cap bleeds off at 30 cents per dollar but never below $10,000 — which
 // creates a band where an extra dollar of income costs far more than the bracket
 // rate, and is exactly the sort of thing a marginal-rate readout must catch.
+// ── OFFICIAL FIGURES BY YEAR ─────────────────────────────────────────────────
+// Every table above is written in 2026 dollars (BASE_TAX_YEAR). Each autumn
+// the IRS, SSA, CMS and HHS publish the next year's figures; once they have,
+// that year uses them exactly, and later years grow from the latest published
+// year at the rate the law actually indexes that figure by:
+//   'chained'  income-tax brackets, deductions, capital-gains thresholds. The
+//              IRS has indexed these by chained CPI-U since 2018 (made
+//              permanent in 2025), which runs about a quarter point a year
+//              below ordinary CPI. Growing them at full inflation understated
+//              every future year's tax — about 7% narrower brackets in real
+//              terms after 30 years, ignored.
+//   'cpi'      IRMAA tiers and premiums, the QCD limit, the poverty line.
+//   'wages'    the Social Security wage cap and earnings-test limits, which
+//              follow the national average wage index: about a point above
+//              inflation in the Trustees' intermediate projection.
+//   'fixed'    percentages that are re-set each year rather than indexed: the
+//              latest published table stands.
+// Years before the first published year shrink from it at the plan's rate.
+// To add a year: write its tables beside the 2026 ones and list them here.
+const CHAINED_CPI_GAP = 0.0025;
+const REAL_WAGE_GROWTH = 0.011;
+const PUBLISHED_FIGURES = {
+  brackets:       { index: 'chained', years: { 2026: FEDERAL_TAX_BRACKETS_2026, 2027: FEDERAL_TAX_BRACKETS_2027 } },
+  stdDeduction:   { index: 'chained', years: { 2026: STANDARD_DEDUCTION_2026, 2027: STANDARD_DEDUCTION_2027 } },
+  age65Deduction: { index: 'chained', years: { 2026: ADDITIONAL_STD_DEDUCTION_65_2026, 2027: ADDITIONAL_STD_DEDUCTION_65_2027 } },
+  capitalGains:   { index: 'chained', years: { 2026: CAPITAL_GAINS_THRESHOLDS_2025, 2027: CAPITAL_GAINS_THRESHOLDS_2027 } },
+  irmaa:          { index: 'cpi', years: { 2026: IRMAA_THRESHOLDS_2025, 2027: IRMAA_THRESHOLDS_2027 } },
+  partB:          { index: 'cpi', years: { 2026: 202.90, 2027: 209.40 } },
+  wageBase:       { index: 'wages', years: { 2026: 184500, 2027: 192300 } },
+  earningsTest:   { index: 'wages', years: { 2026: { under: 24480, fraYear: 65160 }, 2027: { under: 25560, fraYear: 67920 } } },
+  qcd:            { index: 'cpi', years: { 2026: 111000, 2027: 114000 } },
+  // A coverage year's credit is measured against the PRIOR year's guidelines.
+  fpl:            { index: 'cpi', years: { 2026: ACA_FPL_2025, 2027: ACA_FPL_2026 } },
+  acaPercentages: { index: 'fixed', years: { 2026: ACA_APPLICABLE_PCT_2026, 2027: ACA_APPLICABLE_PCT_2027 } },
+};
+// The growth rate past the last published year, for an index kind.
+const indexGrowth = (index, inflationRate = 0.03) => {
+  if (index === 'fixed') return 0;
+  if (index === 'chained') return inflationRate > 0 ? Math.max(0, inflationRate - CHAINED_CPI_GAP) : inflationRate;
+  if (index === 'wages') return inflationRate + REAL_WAGE_GROWTH;
+  return inflationRate;
+};
+// The table that applies `taxIndexYears` after 2026, and the factor its dollar
+// amounts scale by: 1 for a published year.
+const publishedFor = (name, taxIndexYears = 0, inflationRate = 0.03) => {
+  const f = PUBLISHED_FIGURES[name];
+  const year = BASE_TAX_YEAR + taxIndexYears;
+  if (f.years[year] !== undefined) return { table: f.years[year], factor: 1, year, published: true };
+  const ys = Object.keys(f.years).map(Number);
+  const first = Math.min(...ys), last = Math.max(...ys);
+  if (year > last) {
+    return { table: f.years[last], factor: Math.pow(1 + indexGrowth(f.index, inflationRate), year - last),
+             year, published: false, from: last };
+  }
+  return { table: f.years[first], factor: Math.pow(1 + inflationRate, year - first), year, published: false, from: first };
+};
+// Brackets for a filing status and year, edges already scaled.
+const bracketsFor = (filingStatus, taxIndexYears = 0, inflationRate = 0.03) => {
+  const { table, factor } = publishedFor('brackets', taxIndexYears, inflationRate);
+  const rows = table[filingStatus] || table.married_joint;
+  return factor === 1 ? rows : rows.map(b => ({ ...b, min: b.min * factor, max: b.max * factor }));
+};
+// The latest year with published figures, for anything that says which
+// figures a plan is using.
+const LATEST_PUBLISHED_TAX_YEAR = Math.max(...Object.keys(PUBLISHED_FIGURES.brackets.years).map(Number));
+
+// Plan contribution limits by year (IRS Notice 2025-67 for 2026, Notice
+// 2026-66 for 2027; HSA from Rev. Proc. 2025-19 and 2026-24). These are
+// checked against THIS year's contributions, so they are read for the
+// calendar year, not projected.
+const CONTRIBUTION_LIMITS_BY_YEAR = {
+  2026: { deferral: 24500, additions: 72000, catchUp50: 8000, catchUp60to63: 11250, ira: 7500, iraCatchUp: 1100,
+          hsaSelf: 4400, hsaFamily: 8750, hsaCatchUp55: 1000, rothCatchUpWages: 150000 },
+  2027: { deferral: 25500, additions: 75000, catchUp50: 8500, catchUp60to63: 11750, ira: 7500, iraCatchUp: 1100,
+          hsaSelf: 4500, hsaFamily: 9000, hsaCatchUp55: 1000, rothCatchUpWages: 155000 },
+};
+const contributionLimitsFor = (year = new Date().getFullYear()) => {
+  const ys = Object.keys(CONTRIBUTION_LIMITS_BY_YEAR).map(Number);
+  return CONTRIBUTION_LIMITS_BY_YEAR[Math.min(Math.max(year, Math.min(...ys)), Math.max(...ys))];
+};
+
 const SALT_CAP_2025 = 40000;
 const SALT_CAP_2026 = 40400;
 const SALT_CAP_ANNUAL_GROWTH = 0.01;
@@ -4752,12 +4946,10 @@ const computeScheduleD = ({ shortTerm = 0, longTerm = 0,
 const qbiDeduction = ({ businesses = [], taxableIncomeBeforeQBI = 0, netCapitalGain = 0,
                         filingStatus = 'married_joint', taxYear = BASE_TAX_YEAR,
                         yearsFromNow = 0, inflationRate = 0.03 } = {}) => {
-  const threshold = indexTo(
-    QBI_THRESHOLD_2026[filingStatus] ?? QBI_THRESHOLD_2026.married_joint,
-    yearsFromNow, inflationRate);
-  const range = indexTo(
-    QBI_PHASEIN_RANGE_2026[filingStatus] ?? QBI_PHASEIN_RANGE_2026.married_joint,
-    yearsFromNow, inflationRate);
+  // Chained CPI, as the IRS indexes them (see PUBLISHED_FIGURES).
+  const qbiIndex = Math.pow(1 + indexGrowth('chained', inflationRate), yearsFromNow);
+  const threshold = (QBI_THRESHOLD_2026[filingStatus] ?? QBI_THRESHOLD_2026.married_joint) * qbiIndex;
+  const range = (QBI_PHASEIN_RANGE_2026[filingStatus] ?? QBI_PHASEIN_RANGE_2026.married_joint) * qbiIndex;
 
   const excess = Math.max(0, n_(taxableIncomeBeforeQBI) - threshold);
   // 0 below the threshold, 1 at or above the top of the range.
@@ -4922,8 +5114,8 @@ const computeScheduleA = ({ stateIncomeTax = 0, stateSalesTax = 0, propertyTax =
 // which income exceeds the 37% threshold.
 const applyItemizedBenefitCap = (itemizedTotal, agi, filingStatus, taxYear, yearsFromNow, inflationRate) => {
   if (!taxYear || taxYear < ITEMIZED_BENEFIT_CAP_FIRST_YEAR) return { reduction: 0, allowed: itemizedTotal };
-  const brackets = FEDERAL_TAX_BRACKETS_2026[filingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
-  const topStart = indexTo(brackets[brackets.length - 1].min, yearsFromNow, inflationRate);
+  const brackets = bracketsFor(filingStatus, yearsFromNow, inflationRate);
+  const topStart = brackets[brackets.length - 1].min;
   const taxableWithDeductions = Math.max(0, n_(agi) - n_(itemizedTotal));
   const overTop = Math.max(0, taxableWithDeductions + n_(itemizedTotal) - topStart);
   const reduction = ITEMIZED_BENEFIT_REDUCTION_FRACTION * Math.min(n_(itemizedTotal), overTop);
@@ -4939,7 +5131,8 @@ const applyItemizedBenefitCap = (itemizedTotal, agi, filingStatus, taxYear, year
 const computeScheduleSE = (seEarnings, w2SocialSecurityWages, yearsFromNow = 0, inflationRate = 0.03) => {
   const net = Math.max(0, n_(seEarnings)) * SE_NET_EARNINGS_FACTOR;
   if (net <= 0) return { netEarnings: 0, socialSecurity: 0, medicare: 0, total: 0, deductibleHalf: 0 };
-  const wageBase = indexTo(FICA_SS_WAGE_BASE_2025, yearsFromNow, inflationRate);
+  const wb = publishedFor('wageBase', yearsFromNow, inflationRate);
+  const wageBase = wb.table * wb.factor;
   const baseRemaining = Math.max(0, wageBase - Math.max(0, n_(w2SocialSecurityWages)));
   const ssPortion = Math.min(net, baseRemaining) * SE_TAX_SS_RATE;
   const medicarePortion = net * SE_TAX_MEDICARE_RATE;
@@ -5415,8 +5608,9 @@ const projectPayrollYearEnd = (row = {}, opts = {}) => {
   // §402(g) is a per-PERSON, per-YEAR cap across traditional and Roth together.
   // A solo 401(k) or a second employer's plan shares this one limit — a trap
   // worth surfacing rather than discovering on a corrective distribution.
-  const catchUp = workplaceCatchUp(n_(opts.age));
-  const deferralCap = LIMIT_402G + catchUp;
+  const L = contributionLimitsFor(opts.taxYear || new Date().getFullYear());
+  const catchUp = workplaceCatchUp(n_(opts.age), L);
+  const deferralCap = L.deferral + catchUp;
   const ytdDeferral = n_(ytd.preTax401kTraditional) + n_(ytd.roth401k);
   const roomRemaining = Math.max(0, deferralCap - ytdDeferral);
 
@@ -5633,15 +5827,16 @@ const IRMAA_FILL_SAFETY_MARGIN = 1000;
 // actually paid. `tierIndex` is the tier you want to STAY IN, so the ceiling is
 // that tier's own maxIncome. The top tier has no ceiling and returns null.
 const irmaaTierCeiling = (tierIndex, filingStatus, yearsFromNow = 0, inflationRate = 0.03) => {
-  const table = IRMAA_THRESHOLDS_2025[filingStatus]
-    || IRMAA_THRESHOLDS_2025[filingStatus === 'head_of_household' ? 'single' : 'married_joint']
-    || IRMAA_THRESHOLDS_2025.married_joint;
+  const { table: byStatus, factor } = publishedFor('irmaa', yearsFromNow + IRMAA_TIER_LOOKBACK_YEARS, inflationRate);
+  const table = byStatus[filingStatus]
+    || byStatus[filingStatus === 'head_of_household' ? 'single' : 'married_joint']
+    || byStatus.married_joint;
   const tier = table[tierIndex];
   if (!tier || tier.maxIncome === Infinity) return null;
   // Indexed to Y+2 because that is the year whose thresholds the surcharge is
   // measured against — using this year's would tighten the ceiling every year by
   // exactly one year of indexation.
-  return indexTo(tier.maxIncome, yearsFromNow + IRMAA_TIER_LOOKBACK_YEARS, inflationRate);
+  return tier.maxIncome * factor;
 };
 
 // ── ORDINARY BRACKET ROOM ────────────────────────────────────────────────────
@@ -5666,8 +5861,9 @@ const ordinaryBracketRoom = (bracket, {
 } = {}) => {
   const idx = RATE_TO_BRACKET_IDX[bracket];
   if (idx === undefined) return 0;
-  const brackets = FEDERAL_TAX_BRACKETS_2026[filingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
-  const cap = brackets[idx].max * inflationFactor;
+  // The year's own bracket edge. (inflationFactor is no longer read: a caller's
+  // factor measured from today put the edge a year's inflation off in 2027+.)
+  const cap = bracketsFor(filingStatus, taxIndexYears, inflationRate)[idx].max;
   if (!Number.isFinite(cap)) return 0; // the top bracket has no top to fill to
   const base = Math.max(0, ordinaryBase);
   const deductionAt = (magi) => getFederalDeduction(filingStatus, taxIndexYears, inflationRate, fedOpts(magi));
@@ -5690,10 +5886,11 @@ const ordinaryBracketRoom = (bracket, {
 // Labels for the tier picker, priced per household so the choice is legible.
 // The surcharge shown is what STAYING IN this tier costs per year once on
 // Medicare, which is what makes "one tier lower" a quantified decision.
-const irmaaTierOptions = (filingStatus, numMedicareEligible = 2) => {
-  const table = IRMAA_THRESHOLDS_2025[filingStatus]
-    || IRMAA_THRESHOLDS_2025[filingStatus === 'head_of_household' ? 'single' : 'married_joint']
-    || IRMAA_THRESHOLDS_2025.married_joint;
+const irmaaTierOptions = (filingStatus, numMedicareEligible = 2, year = new Date().getFullYear()) => {
+  const { table: byStatus } = publishedFor('irmaa', Math.min(year, LATEST_PUBLISHED_TAX_YEAR) - BASE_TAX_YEAR);
+  const table = byStatus[filingStatus]
+    || byStatus[filingStatus === 'head_of_household' ? 'single' : 'married_joint']
+    || byStatus.married_joint;
   return table.map((t, i) => ({
     index: i,
     ceiling: t.maxIncome === Infinity ? null : t.maxIncome,
@@ -6250,7 +6447,8 @@ const taxBreakpoints = ({ row, pi = {}, numMedicareEligible = null } = {}) => {
   const fs = row.effectiveFilingStatus || row.filingStatus || pi.filingStatus || 'married_joint';
   const idx = (row.year || BASE_TAX_YEAR) - BASE_TAX_YEAR;
   const infl = pi.inflationRate ?? 0.03;
-  const ix = (v) => indexTo(v, idx, infl);
+  // Chained CPI, as the IRS indexes the thresholds that index at all.
+  const ix = (v) => v * Math.pow(1 + indexGrowth('chained', infl), idx);
 
   const magi = row.magi || 0;
   const agi = row.taxableIncome || 0;                  // the row's AGI, before deductions
@@ -6295,11 +6493,12 @@ const taxBreakpoints = ({ row, pi = {}, numMedicareEligible = null } = {}) => {
   // ── IRMAA, on MAGI, landing two years later ──────────────────────────────
   {
     const eligible = numMedicareEligible !== null ? numMedicareEligible : (row.age65Count || 0);
-    const table = IRMAA_THRESHOLDS_2025[fs]
-      || IRMAA_THRESHOLDS_2025[fs === 'head_of_household' ? 'single' : 'married_joint'];
+    const ir = publishedFor('irmaa', idx + IRMAA_TIER_LOOKBACK_YEARS, infl);
+    const table = ir.table[fs]
+      || ir.table[fs === 'head_of_household' ? 'single' : 'married_joint'];
     if (table) {
       for (let i = 0; i < table.length - 1; i++) {
-        const edge = indexTo(table[i].maxIncome, idx + IRMAA_TIER_LOOKBACK_YEARS, infl);
+        const edge = table[i].maxIncome * ir.factor;
         const step = ((table[i + 1].partB + table[i + 1].partD) - (table[i].partB + table[i].partD))
                    * 12 * Math.max(1, eligible || 1);
         add({ label: `IRMAA tier ${i + 1} begins`, basis: 'MAGI',
@@ -6331,7 +6530,10 @@ const taxBreakpoints = ({ row, pi = {}, numMedicareEligible = null } = {}) => {
     const taxYear = row.year || BASE_TAX_YEAR;
     const age65 = row.age65OnReturn || row.age65Count || 0;
     if (age65 > 0 && taxYear >= SENIOR_DEDUCTION_FIRST_YEAR && taxYear <= SENIOR_DEDUCTION_LAST_YEAR) {
-      const start = ix(SENIOR_DEDUCTION_PHASEOUT_START[fs] ?? SENIOR_DEDUCTION_PHASEOUT_START.single);
+      // Statutory and NOT indexed — exactly what seniorDeduction applies. This
+      // was indexed here, so 2027–28 showed a phase-out start the engine
+      // did not use.
+      const start = SENIOR_DEDUCTION_PHASEOUT_START[fs] ?? SENIOR_DEDUCTION_PHASEOUT_START.single;
       add({ label: 'Senior deduction starts phasing out', basis: 'MAGI',
             threshold: start, current: magi, kind: 'phase',
             crossingCostRate: SENIOR_DEDUCTION_PHASEOUT_RATE,
@@ -6353,13 +6555,13 @@ const taxBreakpoints = ({ row, pi = {}, numMedicareEligible = null } = {}) => {
 
   // ── Ordinary brackets, on taxable income ─────────────────────────────────
   {
-    const brackets = FEDERAL_TAX_BRACKETS_2026[fs] || FEDERAL_TAX_BRACKETS_2026.married_joint;
+    const brackets = bracketsFor(fs, idx, infl);
     brackets.forEach((b, i) => {
       if (b.max === Infinity) return;
       const next = brackets[i + 1];
       if (!next) return;
       add({ label: `${(next.rate * 100).toFixed(0)}% bracket begins`, basis: 'taxable income',
-            threshold: ix(b.max), current: ordinaryTaxable, kind: 'rate',
+            threshold: b.max, current: ordinaryTaxable, kind: 'rate',
             crossingCostRate: next.rate - b.rate,
             note: `Rate goes from ${(b.rate * 100).toFixed(0)}% to ${(next.rate * 100).toFixed(0)}% from here on.` });
     });
@@ -6367,14 +6569,16 @@ const taxBreakpoints = ({ row, pi = {}, numMedicareEligible = null } = {}) => {
 
   // ── Long-term capital gains rates, on taxable income ─────────────────────
   {
-    const t = CAPITAL_GAINS_THRESHOLDS_2025[fs] || CAPITAL_GAINS_THRESHOLDS_2025.married_joint;
+    const cgy = publishedFor('capitalGains', idx, infl);
+    const t = cgy.table[fs] || cgy.table.married_joint;
+    const cgx = (v) => v * cgy.factor;
     add({ label: 'Capital gains 15% rate begins', basis: 'taxable income',
-          threshold: ix(t.zeroRate), current: taxable, kind: 'rate',
+          threshold: cgx(t.zeroRate), current: taxable, kind: 'rate',
           crossingCostRate: 0.15,
           note: 'Below this, long-term gains and qualified dividends are taxed at 0%.',
           inactive: preferential <= 0 });
     add({ label: 'Capital gains 20% rate begins', basis: 'taxable income',
-          threshold: ix(t.fifteenRate), current: taxable, kind: 'rate',
+          threshold: cgx(t.fifteenRate), current: taxable, kind: 'rate',
           crossingCostRate: 0.05,
           note: 'Long-term gains go from 15% to 20% from here on.',
           inactive: preferential <= 0 });
@@ -7064,10 +7268,10 @@ const convertEverythingAnalysis = (ctx, { steps = 14 } = {}) => {
   const unusedLowBrackets = (proj) => retired(proj).reduce((sum, r) => {
     const fs = r.filingStatus || pi.filingStatus || 'married_joint';
     const idx = r.year - BASE_TAX_YEAR;
-    const brackets = FEDERAL_TAX_BRACKETS_2026[fs] || FEDERAL_TAX_BRACKETS_2026.married_joint;
+    const brackets = bracketsFor(fs, idx, pi.inflationRate ?? 0.03);
     const twelve = brackets.find(b => b.rate === 0.12);
     if (!twelve || !Number.isFinite(twelve.max)) return sum;
-    const ceiling = twelve.max * indexTo(1, idx, pi.inflationRate ?? 0.03) + (r.federalDeduction || 0);
+    const ceiling = twelve.max + (r.federalDeduction || 0);
     const ordinary = Math.max(0, (r.taxableIncome || 0) - (r.realizedCapitalGains || 0)
                                  - (r.brokerageDividends || 0));
     return sum + Math.max(0, ceiling - ordinary);
@@ -7491,9 +7695,10 @@ const employeeDollarsOf = (a, salaries = {}) => {
 // own HSA. So `shared` carries the household pool and `room[owner]` the
 // individual ceiling; a fill has to respect both, and for the HSA the binding
 // one is usually `shared`.
-const savingsHeadroom = (accts, pi = {}, salaries = {}) => {
+const savingsHeadroom = (accts, pi = {}, salaries = {}, year = new Date().getFullYear()) => {
+  const L = contributionLimitsFor(year);
   const married = pi.filingStatus === 'married_joint';
-  const hsaBase = married ? LIMIT_HSA_FAMILY : LIMIT_HSA_SELF;
+  const hsaBase = married ? L.hsaFamily : L.hsaSelf;
   const room = { shared: {} };
   let hsaHousehold = 0;
   ['me', 'spouse'].forEach(owner => {
@@ -7508,11 +7713,11 @@ const savingsHeadroom = (accts, pi = {}, salaries = {}) => {
       else if (b === 'hsa') hsa += d;
     });
     hsaHousehold += hsa;
-    const cu = workplaceCatchUp(age);
+    const cu = workplaceCatchUp(age, L);
     room[owner] = {
-      workplace: Math.max(0, (LIMIT_402G + cu) - deferral),
-      ira: Math.max(0, (LIMIT_IRA + (age >= 50 ? LIMIT_IRA_CATCHUP : 0)) - ira),
-      hsa: Math.max(0, hsaBase + (age >= 55 ? LIMIT_HSA_CATCHUP_55 : 0) - hsa),
+      workplace: Math.max(0, (L.deferral + cu) - deferral),
+      ira: Math.max(0, (L.ira + (age >= 50 ? L.iraCatchUp : 0)) - ira),
+      hsa: Math.max(0, hsaBase + (age >= 55 ? L.hsaCatchUp55 : 0) - hsa),
       taxable: Infinity,
     };
   });
@@ -7520,8 +7725,8 @@ const savingsHeadroom = (accts, pi = {}, salaries = {}) => {
   // above is the whole story, so the shared pool must not bind.
   room.shared.hsa = married
     ? Math.max(0, hsaBase
-        + ((pi.myAge || 0) >= 55 ? LIMIT_HSA_CATCHUP_55 : 0)
-        + ((pi.spouseAge || 0) >= 55 ? LIMIT_HSA_CATCHUP_55 : 0)
+        + ((pi.myAge || 0) >= 55 ? L.hsaCatchUp55 : 0)
+        + ((pi.spouseAge || 0) >= 55 ? L.hsaCatchUp55 : 0)
         - hsaHousehold)
     : Infinity;
   return room;
@@ -10502,8 +10707,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // A let: under a withdrawal-led strategy the gift is re-sized from the
       // spending the strategy's draw delivers (see the strategy block below).
       let charitableGiving = charitablePercent > 0 ? desiredIncome * (charitablePercent / 100) : 0;
-      // Use pre-calculated inflation factor for QCD limit
-      const adjustedQCDLimit = QCD_ANNUAL_LIMIT * inflationFactor;
+      // The year's QCD limit, indexed from its published year — not grown from
+      // today with the year's realized inflation, which in 2027+ put it a
+      // year off and in a simulation moved it with the simulated prices.
+      const qcdY = publishedFor('qcd', taxIndexYears, pi.inflationRate);
+      const adjustedQCDLimit = qcdY.table * qcdY.factor;
       const householdQCDLimit = effectiveFilingStatus === 'married_joint' ? adjustedQCDLimit * 2 : adjustedQCDLimit;
       // opts.disableQCD runs the identical plan with the exclusion switched off,
       // so the QCD's worth can be measured as a difference rather than estimated
@@ -11154,7 +11362,11 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
         // (Not modeled: filling the ordinary bracket can push stacked gains from
         // the 0%/15% LTCG rate into 15%/20%. The bracket label refers to the
         // ordinary bracket, as the UI presents it.)
-        const baseBrackets = FEDERAL_TAX_BRACKETS_2026[effectiveFilingStatus] || FEDERAL_TAX_BRACKETS_2026.married_joint;
+        // The tax year's own brackets — the ones the tax is computed on. The
+        // edge used to be grown from today with the year's realized inflation,
+        // which in 2027+ aimed every conversion a year's inflation below the
+        // real edge, and in a simulation moved it with simulated prices.
+        const baseBrackets = bracketsFor(effectiveFilingStatus, taxIndexYears, pi.inflationRate);
         // Full federal deduction including the 65+ amounts — every extra dollar of
         // deduction is another dollar of cheap conversion headroom. The senior
         // deduction's own phaseout depends on the conversion, so it is evaluated
@@ -11178,7 +11390,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           ? Math.min(
               desiredIncome * (charitablePercent / 100),
               totalRMD + spendingPreTaxWithdrawals,
-              (effectiveFilingStatus === 'married_joint' ? 2 : 1) * QCD_ANNUAL_LIMIT * inflationFactor)
+              (effectiveFilingStatus === 'married_joint' ? 2 : 1)
+                * publishedFor('qcd', taxIndexYears, pi.inflationRate).table
+                * publishedFor('qcd', taxIndexYears, pi.inflationRate).factor)
           : 0;
         const ordinaryBeforeConversion = Math.max(0,
           nonSSIncomeAfterDeduction + totalRMD + preTaxWithdrawals - anticipatedQCD);
@@ -11199,7 +11413,7 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
           targetConversion = 0;
         } else {
           const bracketCap = conversionIrmaaTier !== null
-            ? Infinity : baseBrackets[bracketIdx].max * inflationFactor;
+            ? Infinity : baseBrackets[bracketIdx].max;
           // Taxable income produced by converting X: the conversion plus the
           // extra taxable SS it drags in, less the deduction that X's own MAGI
           // supports. Capital gains are in the Pub 915 combined-income base (they
@@ -11632,8 +11846,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       // Calculate desired charitable giving as % of retirement spending
       const charitableGiving = desiredIncome * (charitablePercent / 100);
       
-      // QCD annual limit ($105,000 per person, inflation-adjusted) - use pre-calculated factor
-      const adjustedQCDLimit = QCD_ANNUAL_LIMIT * inflationFactor;
+      // QCD annual limit per person for the tax year (see the solver's note).
+      const qcdF = publishedFor('qcd', taxIndexYears, pi.inflationRate);
+      const adjustedQCDLimit = qcdF.table * qcdF.factor;
       
       // For married couples, each spouse can do their own QCD from their own IRA
       const householdQCDLimit = effectiveFilingStatus === 'married_joint' ? adjustedQCDLimit * 2 : adjustedQCDLimit;
@@ -11737,7 +11952,8 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
       const stateRetExclusion = STATES_EXEMPT_RETIREMENT_INCOME.has(pi.state) ? finalRetirementIncome : 0;
       const stateBroadExclusion = STATES_EXEMPT_ALL_RETIREMENT_DISTRIBUTIONS.has(pi.state) ? qualifiedRetirementWithdrawals : 0;
       const stateGrossForCalc = finalTotalTaxableIncome - stateSSExclusion - stateRetExclusion - stateBroadExclusion;
-      const stateDeduction = (STANDARD_DEDUCTION_2026[effectiveFilingStatus] || STANDARD_DEDUCTION_2026.married_joint) * inflationFactor;
+      const sdState = publishedFor('stdDeduction', taxIndexYears, pi.inflationRate);
+      const stateDeduction = (sdState.table[effectiveFilingStatus] || sdState.table.married_joint) * sdState.factor;
       stateTaxableIncome = Math.max(0, stateGrossForCalc - stateDeduction);
     }
     
@@ -12797,6 +13013,10 @@ const describePlanPatch = (state, patch) => {
     mortalityQx, lifeExpectancyAt, sampleAgeAtDeath, MORTALITY_MIN_AGE,
     survivorOf, plannedLifespans, chanceAliveAt, householdChanceAliveAt,
     SS_SHORTFALL_PRESETS, ssPayableShare,
+    FEDERAL_TAX_BRACKETS_2027, STANDARD_DEDUCTION_2027, ADDITIONAL_STD_DEDUCTION_65_2027,
+    CAPITAL_GAINS_THRESHOLDS_2027, IRMAA_THRESHOLDS_2027, ACA_FPL_2026, ACA_APPLICABLE_PCT_2027,
+    PUBLISHED_FIGURES, publishedFor, bracketsFor, indexGrowth, CHAINED_CPI_GAP, REAL_WAGE_GROWTH,
+    LATEST_PUBLISHED_TAX_YEAR, CONTRIBUTION_LIMITS_BY_YEAR, contributionLimitsFor,
     ANNUITY_PRICING, QLAC_PREMIUM_LIMIT_2026, QLAC_MAX_START_AGE, annuityPayoutRate, annuityFactor,
     annuityExclusionRatio, annuityPurchaseOf, annuityIsQLAC,
     HSA_NONQUALIFIED_PENALTY_RATE, HSA_PENALTY_END_AGE,

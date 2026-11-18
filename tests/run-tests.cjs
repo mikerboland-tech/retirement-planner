@@ -861,11 +861,14 @@ section('Unit — calculateIRMAA tier boundaries');
   eq(calculateIRMAA(218001, 'married_joint', 0, 0.03).tier, 1, 'tier index 1 for MFJ first cliff');
 
   // Inflation indexing: at year 10, $218k MAGI should still be tier 0 (thresholds inflated).
-  // Premium DOLLARS index forward too (R2026-07b), so tier-0 Part B = 202.90 × 1.03^10.
+  // Premium DOLLARS index forward too (R2026-07b): from 2027's published $209.40
+  // (CMS), then nine years of CPI.
   eq(calculateIRMAA(218000, 'married_joint', 10, 0.03).tier, 0,
-    'MFJ MAGI=$218k at year 10 still tier 0 (threshold inflated to ~$293k)');
-  approx(calculateIRMAA(218000, 'married_joint', 10, 0.03).partBMonthly, 202.90 * Math.pow(1.03, 10),
-    'tier-0 Part B premium indexed forward 10 years', 0.001);
+    'MFJ MAGI=$218k at year 10 still tier 0 (threshold inflated to ~$292k)');
+  approx(calculateIRMAA(218000, 'married_joint', 10, 0.03).partBMonthly, 209.40 * Math.pow(1.03, 9),
+    'tier-0 Part B premium indexed forward from 2027’s published figure', 0.001);
+  eq(calculateIRMAA(220000, 'married_joint', 1, 0.03).partBMonthly, 209.40, '2027 uses CMS’s published premium exactly');
+  eq(calculateIRMAA(222000, 'married_joint', 1, 0.03).tier, 0, 'and its published $224,000 edge');
 }
 
 section('Unit — calculateIRMAASurcharge');
@@ -1998,15 +2001,18 @@ section('R2026-07b — IRMAA premium dollars index forward with the thresholds')
   eq(s0.totalSurcharge, 6355, 'base-year surcharge unchanged by the indexing fix', 1);
   eq(s0.tier, 4, 'MAGI $300k lands in tier 4 (single)');
   // 20 years out with the same REAL income (MAGI scaled by inflation): the tier is
-  // unchanged and the nominal surcharge scales by the same inflation factor.
+  // unchanged and the nominal surcharge scales from 2027's published table
+  // (CMS: tier 4 is $670.00 + $88.30 against a $209.40 standard premium) by
+  // the 19 years of CPI after it.
   const factor = Math.pow(1.03, 20);
   const s20 = calculateIRMAASurcharge(300000 * factor, 'single', 20, 0.03, 1);
   eq(s20.tier, 4, 'inflation-scaled MAGI stays in the same tier 20 years out');
-  approx(s20.totalSurcharge, 6355.2 * factor, 'surcharge scales with inflation (was frozen at base-year dollars)', 0.005);
+  const surcharge2027 = (670.00 - 209.40) * 12 + 88.30 * 12;
+  approx(s20.totalSurcharge, surcharge2027 * Math.pow(1.03, 19), 'surcharge scales with inflation (was frozen at base-year dollars)', 0.005);
   // The IRMAA detail premiums scale too (consumed by display + healthcare totals).
   const d20 = calculateIRMAA(300000 * factor, 'single', 20, 0.03);
-  approx(d20.partBMonthly, 649.20 * factor, 'Part B tier premium indexed', 0.005);
-  approx(d20.partDMonthly, 83.30 * factor, 'Part D surcharge indexed', 0.005);
+  approx(d20.partBMonthly, 670.00 * Math.pow(1.03, 19), 'Part B tier premium indexed', 0.005);
+  approx(d20.partDMonthly, 88.30 * Math.pow(1.03, 19), 'Part D surcharge indexed', 0.005);
 }
 
 section('R2026-07c — recurring expenses step down for the survivor');
@@ -2477,8 +2483,12 @@ section('P14 — additional standard deduction (65+) and the OBBBA senior deduct
   eq(getFederalDeduction('head_of_household', 0, 0, { age65Count: 1, taxYear: 2030 }), 24150 + 2050,
     'head of household 65+ uses the single-rate $2,050');
   // It is indexed, like the base deduction.
+  // From 2027's published $16,600 + $2,100, then chained CPI (a quarter point
+  // under the plan's 3%) for the nine years after it.
   approx(getFederalDeduction('single', 10, 0.03, { age65Count: 1, taxYear: 2040 }),
-    (SD_S + 2050) * Math.pow(1.03, 10), 'the 65+ additional deduction is inflation-indexed', 0.0001);
+    (16600 + 2100) * Math.pow(1.0275, 9), 'the 65+ additional deduction is inflation-indexed', 0.0001);
+  eq(getFederalDeduction('single', 1, 0.03, { age65Count: 1, taxYear: 2030 }), 16600 + 2100,
+    '2027 uses the IRS’s published amounts exactly (Rev. Proc. 2026-35)');
 
   // ── The temporary OBBBA senior deduction ──
   eq(getFederalDeduction('single', 0, 0, { age65Count: 1, taxYear: 2026, magi: 60000 }), SD_S + 2050 + 6000,
@@ -2493,9 +2503,10 @@ section('P14 — additional standard deduction (65+) and the OBBBA senior deduct
   eq(getFederalDeduction('married_joint', 0, 0, { age65Count: 2, taxYear: 2026, magi: 250000 }), SD_J + 3300,
     'senior deduction is fully phased out at $250,000 (joint)');
   // Statutory dollars — NOT inflation-indexed, unlike the §63(f) amount.
-  eq(getFederalDeduction('single', 2, 0, { age65Count: 1, taxYear: 2028, magi: 60000 }), SD_S + 2050 + 6000,
+  // (At zero inflation 2028–29 hold 2027's published amounts: $16,600 + $2,100.)
+  eq(getFederalDeduction('single', 2, 0, { age65Count: 1, taxYear: 2028, magi: 60000 }), 16600 + 2100 + 6000,
     'the senior deduction still applies in 2028, its final year');
-  eq(getFederalDeduction('single', 3, 0, { age65Count: 1, taxYear: 2029, magi: 60000 }), SD_S + 2050,
+  eq(getFederalDeduction('single', 3, 0, { age65Count: 1, taxYear: 2029, magi: 60000 }), 16600 + 2100,
     'the senior deduction is gone in 2029 (sunsets after 2028)');
   eq(getFederalDeduction('single', 0, 0, { age65Count: 1, taxYear: 2024, magi: 60000 }), SD_S + 2050,
     'the senior deduction did not exist before 2025');
@@ -2519,10 +2530,11 @@ section('P14 — additional standard deduction (65+) and the OBBBA senior deduct
   // 2026: 16,100 + 2,050 + (6,000 − 6% × 5,000 over the $75k threshold = 5,700) = 23,850
   //   taxable 56,150 → 12,400×10% + 38,000×12% + 5,750×22% = 1,240 + 4,560 + 1,265 = 7,065
   eq(proj[0].federalTax, 7065, '2026 tax reflects both the 65+ and (partly phased-out) senior deductions');
-  // 2029 (age 69): senior deduction gone → 16,100 + 2,050 = 18,150
-  //   taxable 61,850 → 1,240 + 4,560 + 11,450×22% = 2,519 → 8,319
+  // 2029 (age 69): senior deduction gone. With no inflation, 2029 holds 2027's
+  // published figures (Rev. Proc. 2026-35): 16,600 + 2,100 = 18,700
+  //   taxable 61,300 → 12,800×10% + 39,225×12% + 9,275×22% = 1,280 + 4,707 + 2,040.5 → 8,028
   const y2029 = proj.find(r => r.year === 2029);
-  eq(y2029.federalTax, 8319, '2029 tax drops the sunset senior deduction but keeps the 65+ amount');
+  eq(y2029.federalTax, 8028, '2029 tax drops the sunset senior deduction but keeps the 65+ amount');
   // Regression: the pre-fix engine used a flat 16,100 → taxable 63,900 → 8,770.
   lt(proj[0].federalTax, 8770, 'the 66-year-old is no longer taxed as if under 65');
 
@@ -4466,8 +4478,8 @@ section('IRMAA cliff proximity (nextIRMAAThreshold)');
   // Compare a FIXED tier across time — at 20 years the income above has moved to
   // a different tier, so comparing its "next edge" would be two different edges.
   approx(nextIRMAAThreshold(0, 'married_joint', 20, 0.03).threshold,
-    mfj[0].maxIncome * Math.pow(1.03, 20),
-    'a given edge inflates at the given rate', 0.001);
+    engine.IRMAA_THRESHOLDS_2027.married_joint[0].maxIncome * Math.pow(1.03, 19),
+    'a given edge inflates at the given rate, from the latest published one', 0.001);
 
   // Guards.
   eq(nextIRMAAThreshold(0, 'married_joint').tier, 0, 'zero income is in the bottom tier');
@@ -4539,13 +4551,16 @@ section('P39 — tax tables index from BASE_TAX_YEAR, not from whatever year it 
   eq(federalTaxOnTaxableIncome(-5000, 'married_joint', 0, 0.03), 0,
     'a negative taxable income floors at zero rather than producing a credit');
 
-  // Indexing the brackets is equivalent to deflating the income into base-year
-  // dollars — the schedule shifts, the shape does not.
-  for (const y of [1, 3, 7]) {
-    approx(federalTaxOnTaxableIncome(indexTo(200000, y, 0.03), 'married_joint', y, 0.03),
-           indexTo(federalTaxOnTaxableIncome(200000, 'married_joint', 0, 0.03), y, 0.03),
-      `${y} years out, an equally-indexed income pays an equally-indexed tax`, 1e-6);
+  // Past the last published year (2027), indexing the brackets is equivalent
+  // to deflating the income into 2027 dollars at the brackets' own rate —
+  // chained CPI — so the schedule shifts and the shape does not.
+  const chained = 1 + engine.indexGrowth('chained', 0.03);
+  for (const k of [1, 3, 7]) {
+    approx(federalTaxOnTaxableIncome(200000 * Math.pow(chained, k), 'married_joint', 1 + k, 0.03),
+           federalTaxOnTaxableIncome(200000, 'married_joint', 1, 0.03) * Math.pow(chained, k),
+      `${k} years past 2027, an income indexed like the brackets pays a tax indexed like them`, 1e-6);
   }
+  eq(engine.indexGrowth('chained', 0.03), 0.0275, 'chained CPI is taken as a quarter point under the plan’s inflation');
 
   // ── The projection's tax clock is anchored to BASE_TAX_YEAR ────────────────
   // Identical plan, identical ages, different calendar years. Only the tax
@@ -4579,8 +4594,8 @@ section('P39 — tax tables index from BASE_TAX_YEAR, not from whatever year it 
   // was zero.
   // Row fields are rounded to whole dollars on the way out, so compare rounded.
   eq(at2029.federalDeduction,
-     Math.round(indexTo(STANDARD_DEDUCTION_2026.married_joint, 3, 0.03)),
-    'a 2029 projection year indexes the standard deduction three years forward');
+     Math.round(engine.STANDARD_DEDUCTION_2027.married_joint * Math.pow(1.0275, 2)),
+    'a 2029 projection year indexes 2027’s published deduction two years forward, at chained CPI');
   gt(at2029.federalDeduction, at2026.federalDeduction,
     'and that is strictly more deduction than the base year — the bug was giving less');
 
@@ -5183,16 +5198,19 @@ section('P42 — the projected withdrawal rate, which is the other half of the t
   eq(only.sample, 3, 'working years are not part of the withdrawal-rate estimate');
   eq(only.rate, 0.12, 'so a high-earning pre-retirement year cannot inflate it');
 
-  // Brackets are indexed from the row's own calendar year (see P39), so a plan
-  // whose nominal income grows with inflation does not drift up a bracket for
-  // that reason alone.
-  const flat = projectedWithdrawalRate(
-    [{ myAge: 70, year: 2046, filingStatus: 'married_joint',
-       taxableIncome: 100000 * Math.pow(1.03, 20) + 32200 * Math.pow(1.03, 20),
-       federalDeduction: 32200 * Math.pow(1.03, 20) }],
-    { myRetirementAge: 65, filingStatus: 'married_joint', inflationRate: 0.03 });
-  eq(flat.rate, topMarginalBracket(100000, 'married_joint', 0, 0.03),
-    'an income that merely kept pace with inflation lands in the same real bracket 20 years out');
+  // Brackets are indexed from the row's own calendar year (see P39). An income
+  // indexed exactly as the brackets are stays in its bracket; one that grows at
+  // full inflation drifts up over the decades, because the IRS indexes by
+  // chained CPI, which runs about a quarter point lower — real bracket creep.
+  const bracketIx = engine.publishedFor('brackets', 20, 0.03).factor
+    * (engine.FEDERAL_TAX_BRACKETS_2027.married_joint[1].max / engine.FEDERAL_TAX_BRACKETS_2026.married_joint[1].max);
+  const rowAt = (ix) => [{ myAge: 70, year: 2046, filingStatus: 'married_joint',
+    taxableIncome: 100000 * ix + 32200 * ix, federalDeduction: 32200 * ix }];
+  const plan = { myRetirementAge: 65, filingStatus: 'married_joint', inflationRate: 0.03 };
+  eq(projectedWithdrawalRate(rowAt(bracketIx), plan).rate, topMarginalBracket(100000, 'married_joint', 0, 0.03),
+    'an income indexed as the brackets are lands in the same real bracket 20 years out');
+  eq(projectedWithdrawalRate(rowAt(Math.pow(1.03, 20)), plan).rate, 0.22,
+    'one that grew at full inflation has crept up a bracket — chained CPI indexing does that');
 
   // Degenerate inputs: a plan with no retirement years yet must not throw.
   const none = projectedWithdrawalRate([], { myRetirementAge: 65 });
@@ -5371,20 +5389,25 @@ section('P44 — filling to an IRMAA tier, which is a different target from fill
   {
     eq(IRMAA_TIER_LOOKBACK_YEARS, 2, 'IRMAA runs on a two-year lookback');
     const mfj = IRMAA_THRESHOLDS_2025.married_joint;
-    eq(irmaaTierCeiling(0, 'married_joint', 0, 0), mfj[0].maxIncome,
-      'with no inflation the tier-0 ceiling is the published edge');
+    // A conversion this year (2026) sets the premium paid in 2028, whose tiers
+    // start from 2027's published edge (CMS: $224,000 joint).
+    const mfj27 = engine.IRMAA_THRESHOLDS_2027.married_joint;
+    eq(irmaaTierCeiling(0, 'married_joint', 0, 0), mfj27[0].maxIncome,
+      'with no inflation the tier-0 ceiling is the latest published edge');
+    eq(irmaaTierCeiling(0, 'married_joint', -1, 0.03), mfj27[0].maxIncome,
+      'and a 2025 conversion, paid in 2027, meets 2027’s published edge exactly');
     // A conversion made now sets the premium paid two years from now, so the
     // edge that binds is the one indexed to THAT year. Indexing to this year
     // instead would tighten the ceiling by a year of indexation, every year.
     approx(irmaaTierCeiling(0, 'married_joint', 0, 0.03),
-           mfj[0].maxIncome * Math.pow(1.03, 2),
+           mfj27[0].maxIncome * 1.03,
       'and is indexed two years forward — the year the surcharge is actually paid', 1e-6);
     eq(irmaaTierCeiling(mfj.length - 1, 'married_joint', 0, 0.03), null,
       'the top tier has no ceiling above it, so it returns null rather than Infinity');
     eq(irmaaTierCeiling(99, 'married_joint', 0, 0.03), null, 'and an out-of-range tier does too');
     // HoH has no IRMAA table of its own and is priced on the single table.
     eq(irmaaTierCeiling(0, 'head_of_household', 0, 0),
-       IRMAA_THRESHOLDS_2025.single[0].maxIncome, 'head of household uses the single table');
+       engine.IRMAA_THRESHOLDS_2027.single[0].maxIncome, 'head of household uses the single table');
   }
 
   // ── The picker prices each tier per household ────────────────────────────
@@ -5921,7 +5944,7 @@ section('P49 — the income-threshold table: every edge a year can cross, on the
     const inflated = taxBreakpoints({ row: { ...row, year: TODAY_YEAR },
       pi: { ...pi, inflationRate: 0.03 }, numMedicareEligible: 2 });
     const tier1 = inflated.find(b => /IRMAA tier 1/.test(b.label));
-    approx(tier1.threshold, IRMAA_THRESHOLDS_2025.married_joint[0].maxIncome * Math.pow(1.03, 2),
+    approx(tier1.threshold, engine.IRMAA_THRESHOLDS_2027.married_joint[0].maxIncome * Math.pow(1.03, TODAY_YEAR + 2 - 2027),
       'the IRMAA edge is indexed two years forward, not to this year', 1e-6);
     eq(tier1.appliesAtAge, row.myAge + 2, 'and the row says which age actually pays it');
   }
@@ -17120,6 +17143,72 @@ section('P156 — planning for the Social Security trust-fund shortfall');
     'and choosing full benefits on a full-benefits plan changes nothing');
   ok(/data-ss-shortfall/.test(DESKTOP_SRC), 'About you offers the choice');
   ok(/label="Social Security"\s+value=\{ssCutChoice\}/.test(DESKTOP_SRC), 'and so does the what-if');
+}
+
+section('P157 — official 2027 figures, and each figure grown at its own index');
+
+{
+  // Sources: IRS Rev. Proc. 2026-35 (brackets, deductions, capital gains),
+  // SSA's 2027 COLA fact sheet (wage cap, earnings test), CMS's 2027 Parts A & B
+  // fact sheet (Part B, IRMAA), IRS Notice 2026-66 (plan limits, QCD), IRS
+  // Rev. Proc. 2026-24 (HSA), Rev. Proc. 2026-26 and HHS's 2026 guidelines
+  // (ACA). Each is used EXACTLY for 2027; later years grow from it.
+  const fed = (taxable, fs, y) => engine.federalTaxOnTaxableIncome(taxable, fs, y - 2026, 0.03);
+  eq(engine.bracketsFor('married_joint', 1, 0.03)[2].max, 218250, '2027: the 22% bracket ends at $218,250 joint');
+  eq(engine.bracketsFor('single', 1, 0.03)[6].min, 661375, 'and 37% starts at $661,375 single');
+  eq(engine.bracketsFor('head_of_household', 1, 0.03)[1].max, 69650, 'head of household’s 12% runs to $69,650');
+  eq(fed(25600, 'married_joint', 2027), 2560, '$25,600 of 2027 joint taxable income is all at 10%');
+  eq(engine.getFederalDeduction('married_joint', 1, 0.03, { age65Count: 2, taxYear: 2030 }), 33200 + 2 * 1700,
+    'the 2027 deduction: $33,200 joint, plus $1,700 for each spouse 65+');
+  const cg = engine.publishedFor('capitalGains', 1, 0.03);
+  eq(cg.table.married_joint.zeroRate, 102100, '0% capital gains to $102,100 joint taxable income in 2027');
+  eq(engine.calculateIRMAA(224000, 'married_joint', 1, 0.03).tier, 0, 'IRMAA: $224,000 joint is still tier 0 in 2027');
+  eq(engine.calculateIRMAA(224001, 'married_joint', 1, 0.03).partBMonthly, 293.10, 'one dollar more is tier 1, $293.10 a month');
+  eq(engine.calculateFICA(250000, 'single', 1, 0.03).socialSecurity, 192300 * 0.062, 'the 2027 wage cap is $192,300');
+  eq(engine.calculateSSEarningsTestReduction(35560, 63, 67, 1, 0.03), 5000, 'the 2027 earnings test: $1 per $2 over $25,560');
+  eq(engine.publishedFor('qcd', 1).table, 114000, 'the 2027 QCD limit is $114,000 a person');
+  eq(engine.publishedFor('fpl', 1).table[2], 21640, '2027 coverage measures against the 2026 poverty line ($21,640 for two)');
+  approx(engine.getACAApplicablePercentage(400, 1), 0.1022, 'and the 2027 required contribution tops out at 10.22%', 1e-9);
+  approx(engine.getACAApplicablePercentage(400, 0), 0.0996, '(2026’s at 9.96%)', 1e-9);
+  eq(engine.contributionLimitsFor(2027).deferral, 25500, '2027 401(k) deferral limit $25,500');
+  eq(engine.contributionLimitsFor(2027).additions, 75000, 'annual additions $75,000');
+  eq(engine.contributionLimitsFor(2027).catchUp60to63, 11750, 'ages 60–63 catch-up $11,750');
+  eq(engine.contributionLimitsFor(2027).hsaFamily, 9000, 'HSA family $9,000');
+  eq(engine.contributionLimitsFor(2040).deferral, 25500, 'a year past the published ones reads the latest');
+  eq(engine.contributionLimitsFor(2019).deferral, 24500, 'and one before them the earliest');
+  eq(engine.LATEST_PUBLISHED_TAX_YEAR, 2027, 'the app knows which year it has official figures for');
+
+  // Past 2027, each figure grows at the index the law gives it.
+  eq(engine.indexGrowth('chained', 0.03), 0.0275, 'income-tax figures: chained CPI, a quarter point under inflation');
+  eq(engine.indexGrowth('cpi', 0.03), 0.03, 'IRMAA, QCD, poverty line: CPI');
+  approx(engine.indexGrowth('wages', 0.03), 0.041, 'wage cap and earnings test: average wages', 1e-12);
+  eq(engine.indexGrowth('fixed', 0.03), 0, 'ACA percentages: the latest table stands');
+  eq(engine.indexGrowth('chained', 0.001), 0, 'chained growth never turns negative from a small positive inflation');
+  approx(engine.bracketsFor('married_joint', 11, 0.03)[2].max, 218250 * Math.pow(1.0275, 10), '2037: ten years of chained CPI on 2027’s edge', 1e-12);
+  approx(engine.calculateFICA(400000, 'single', 11, 0.03).socialSecurity / 0.062, 192300 * Math.pow(1.041, 10), 'the wage cap grows with wages', 1e-9);
+
+  // The projection's own uses: a conversion filling the 22% bracket in 2027
+  // fills to the published edge, not to 2026's grown by a year of today's
+  // inflation (which aimed it about $6,000 short for a couple).
+  const pi = { ...engine.DEFAULT_PLAN_INFO, myAge: 66, spouseAge: 66, myBirthYear: 1961, spouseBirthYear: 1961,
+    myRetirementAge: 66, spouseRetirementAge: 66,
+    filingStatus: 'married_joint', state: 'Texas', desiredRetirementIncome: 60000, legacyAge: 90, inflationRate: 0.03,
+    survivorModelEnabled: false, healthcareModel: 'none', ltcModel: 'none', rothConversionBracket: '22%' };
+  const accts = [
+    { id: 1, name: 'IRA', type: 'traditional_ira', owner: 'me', balance: 2000000, contribution: 0, cagr: 0.05, startAge: 66, stopAge: 66, contributor: 'me' },
+    { id: 2, name: 'Brok', type: 'brokerage', owner: 'joint', balance: 1500000, contribution: 0, cagr: 0.05, startAge: 66, stopAge: 66, contributor: 'me', costBasisPercent: 1 },
+    { id: 3, name: 'Roth', type: 'roth_ira', owner: 'me', balance: 1000, contribution: 0, cagr: 0.05, startAge: 66, stopAge: 66, contributor: 'me' }];
+  const ss = [];
+  const rows = engine.computeProjections(pi, accts, ss, [], [], [], 2027, {});
+  const y27 = rows.find(r => r.year === 2027);
+  ok(y27.rothConversion > 0, '(the plan converts in 2027)');
+  const ordinaryTaxable = y27.taxableIncome - y27.federalDeduction - (y27.realizedCapitalGains || 0) - (y27.brokerageDividends || 0);
+  approx(ordinaryTaxable, 218250, 'a 2027 conversion fills the 22% bracket to its published $218,250 edge', 0.01);
+
+  // A plan started in 2027 and the same year inside a 2026 plan see the
+  // same tax tables.
+  const from26 = engine.computeProjections(pi, accts, ss, [], [], [], 2026, {});
+  eq(from26.find(r => r.year === 2027).federalDeduction, y27.federalDeduction, 'the tax year, not the starting year, picks the tables');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────
