@@ -200,19 +200,23 @@ const healthSeed = (str) => {   // FNV-1a — a stable seed per plan
 };
 const roundDownTo = (v, step) => Math.floor(v / step) * step;
 // Pure, so the tiers are testable without a worker.
-const planHealthVerdict = ({ fails, shortAge, lastAge, mc }) => {
+// `through` says whose age the plan ends at, when it is not simply yours: a
+// couple's plan follows the survivor, so "through age 97" would be read against
+// a planning age of 95 that is the spouse's.
+const planHealthVerdict = ({ fails, shortAge, lastAge, mc, through }) => {
   const pct = Number.isFinite(mc) ? Math.round(mc * 20) * 5 : null;    // nearest 5
+  const until = through || `age ${lastAge}`;
   const odds = pct === null ? null : `in about ${pct}% of ${HEALTH_SIMS} simulated markets`;
   if (fails) return { tone: 'risk', label: 'At risk',
     text: `At average returns your money runs short at age ${shortAge}` + (odds ? `, and it lasts ${odds}.` : '.') };
   if (pct === null) return { tone: 'pending', label: 'Checking',
-    text: `Your money lasts through age ${lastAge} at average returns. Testing it against ${HEALTH_SIMS} simulated markets…` };
+    text: `Your money lasts through ${until} at average returns. Testing it against ${HEALTH_SIMS} simulated markets…` };
   if (mc < HEALTH_AT_RISK) return { tone: 'risk', label: 'At risk',
-    text: `It lasts through age ${lastAge} at average returns, but only ${odds} — a poor run of markets early in retirement would leave it short.` };
+    text: `It lasts through ${until} at average returns, but only ${odds} — a poor run of markets early in retirement would leave it short.` };
   if (mc < HEALTH_ON_TRACK) return { tone: 'warn', label: 'Worth a look',
-    text: `Your money lasts through age ${lastAge} at average returns, and ${odds}. A margin would make it sturdier.` };
+    text: `Your money lasts through ${until} at average returns, and ${odds}. A margin would make it sturdier.` };
   return { tone: 'good', label: 'On track',
-    text: `Your money lasts through age ${lastAge} at average returns, and ${odds}.` };
+    text: `Your money lasts through ${until} at average returns, and ${odds}.` };
 };
 
 function PlanHealthCard({ plan, opts, currentYearReturn, live, isWhatIf, actions,
@@ -255,8 +259,11 @@ function PlanHealthCard({ plan, opts, currentYearReturn, live, isWhatIf, actions
   const short = useMemo(() => planShortfall(live, { retirementAge: retireAge }), [live, retireAge]);
   if (!short || !live || !live.length) return null;
   const firstShort = short.firstShortYear || short.depletedYear;
-  const lastAge = live[live.length - 1].myAge;
-  const v = planHealthVerdict({ fails: short.fails, shortAge: firstShort ? firstShort.myAge : null, lastAge, mc });
+  const lastRow = live[live.length - 1];
+  const lastAge = lastRow.myAge;
+  const spouseOutlives = live.some(r => r.primaryAlive === false && r.spouseAlive !== false);
+  const through = spouseOutlives && Number.isFinite(lastRow.spouseAge) ? `your spouse’s age ${lastRow.spouseAge}` : null;
+  const v = planHealthVerdict({ fails: short.fails, shortAge: firstShort ? firstShort.myAge : null, lastAge, mc, through });
 
   // What to do about it, most useful first. The plan-level levers come first
   // when there is a gap to close; this year's to-dos fill the rest.

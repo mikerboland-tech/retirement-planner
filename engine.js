@@ -2862,6 +2862,53 @@ const estimateAnnualSocialSecurity = (salary) => {
 // Extending is self-limiting: the projection already stops the year both spouses
 // have died, so a longer horizon adds rows only while someone is still alive.
 // Capped at MAX_AGE so an implausible life-expectancy entry cannot run away.
+// ── WHO OUTLIVES WHOM ────────────────────────────────────────────────────────
+// Survivor modelling needs two answers: when the first of a couple dies, and
+// how long the survivor's money has to last. The life expectancies answer the
+// first — who is likely to go first, and roughly when. But they are averages:
+// for a couple both 65, the chance at least one is still alive at 87 is 64%,
+// and at 95 it is 19% (this file's mortality table). Ending the projection at
+// the second life expectancy stopped testing the money exactly where most
+// survivors still need it, and quietly overrode "Plan through age" — the
+// default plan was judged to 87 while the reader had asked for 95.
+//
+// So the survivor is planned through the planning age (legacyAge, in their own
+// years, as getPlanningHorizonYears counts it) whenever their own life
+// expectancy is shorter. The first death is unchanged. A missing life
+// expectancy means that person is never modelled as dying, as before.
+// Monte Carlo's drawn lifespans are used as drawn (opts.lifespansDrawn).
+const lifeExpOrNever = (v) => (Number.isFinite(v) ? v : Infinity);
+// 'me' or 'spouse': whoever is expected to live longer, counted in calendar
+// years from now (not in ages, which differ between spouses). A tie goes to
+// 'me', the convention the long-term-care stress case has always used.
+const survivorOf = (pi = {}) => {
+  const mine = lifeExpOrNever(pi.myLifeExpectancy) - (pi.myAge || 0);
+  const theirs = lifeExpOrNever(pi.spouseLifeExpectancy) - (pi.spouseAge || 0);
+  return theirs > mine ? 'spouse' : 'me';
+};
+const plannedLifespans = (pi = {}) => {
+  if (!(pi.survivorModelEnabled && pi.filingStatus === 'married_joint')) return pi;
+  const planAge = pi.legacyAge;
+  if (!Number.isFinite(planAge)) return pi;
+  const key = survivorOf(pi) === 'spouse' ? 'spouseLifeExpectancy' : 'myLifeExpectancy';
+  return lifeExpOrNever(pi[key]) >= planAge ? pi : { ...pi, [key]: planAge };
+};
+// The chance someone now `age` is alive at `toAge`, from the mortality table.
+const chanceAliveAt = (age, toAge) => {
+  let p = 1;
+  for (let a = Math.floor(age); a < toAge; a++) p *= (1 - mortalityQx(a));
+  return p;
+};
+// The chance that at least one of the household is alive when each reaches
+// `toAge` in their own years — the question "how long must the money last"
+// actually asks. Population averages (see MORTALITY_QX): a household with a
+// reason to expect longer or shorter lives should read it as a guide.
+const householdChanceAliveAt = (pi = {}, toAge) => {
+  const mine = chanceAliveAt(pi.myAge || 0, toAge);
+  if (pi.filingStatus !== 'married_joint' || !Number.isFinite(pi.spouseAge)) return mine;
+  return 1 - (1 - mine) * (1 - chanceAliveAt(pi.spouseAge, toAge));
+};
+
 const getPlanningHorizonYears = (pi) => {
   const legacyAge = pi.legacyAge || MAX_AGE;
   const isMarried = pi.filingStatus === 'married_joint';
@@ -3695,7 +3742,8 @@ const ltcPlanFor = (pi) => {
   }
   if (model === 'stress') {
     const married = pi.filingStatus === 'married_joint';
-    const spouseSurvives = married && (pi.spouseLifeExpectancy || 87) > (pi.myLifeExpectancy || 85);
+    const spouseSurvives = married && survivorOf({ ...pi,
+      myLifeExpectancy: pi.myLifeExpectancy || 85, spouseLifeExpectancy: pi.spouseLifeExpectancy || 87 }) === 'spouse';
     const hit = { months: LTC_STRESS_MONTHS, monthly: LTC_MONTHLY_NURSING_HOME_2025 };
     const none = { months: 0, monthly: 0 };
     return spouseSurvives ? { me: none, spouse: hit } : { me: hit, spouse: none };
@@ -9381,6 +9429,9 @@ function computeProjections(pi, accts, streams, assetList, events = [], recurrin
   // instead of NaN, and an account with no contribution window funds nothing
   // at all, which is never what the row means. See the two helpers above.
   ({ pi, accts, streams } = sanitizePlanInputs(pi, accts, streams));
+  // The survivor's money is tested through the planning age, not just to an
+  // average lifespan (see plannedLifespans). Drawn lifespans are left alone.
+  if (!opts.lifespansDrawn) pi = plannedLifespans(pi);
   accts = normalizeContributionWindow(accts, pi);
   const years = [];
   let accountBalances = accts.reduce((acc, account) => ({ ...acc, [account.id]: account.balance }), {});
@@ -12704,6 +12755,7 @@ const describePlanPatch = (state, patch) => {
     calculateSSBenefit, calculateSSEarningsTestReduction, inferPiaFromBenefit,
     calculateSpousalBenefit,
     mortalityQx, lifeExpectancyAt, sampleAgeAtDeath, MORTALITY_MIN_AGE,
+    survivorOf, plannedLifespans, chanceAliveAt, householdChanceAliveAt,
     ANNUITY_PRICING, QLAC_PREMIUM_LIMIT_2026, QLAC_MAX_START_AGE, annuityPayoutRate, annuityFactor,
     annuityExclusionRatio, annuityPurchaseOf, annuityIsQLAC,
     HSA_NONQUALIFIED_PENALTY_RATE, HSA_PENALTY_END_AGE,

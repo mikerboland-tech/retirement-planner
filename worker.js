@@ -345,7 +345,7 @@ function runMonteCarlo(jobId, payload, hooks) {
     const proj = computeProjections(
       piForSim, accounts, incomeStreams, assets, oneTimeEvents, recurringExpenses,
       undefined, { yearOverrides: overrides, spendingRule: guardrails || false,
-                   currentYearReturn }
+                   currentYearReturn, lifespansDrawn: longevity }
     );
 
     // Build per-sim portfolio path from simSettings.startAge onward.
@@ -865,7 +865,7 @@ function runSocialSecurityGrid(jobId, payload, withMC) {
     const proj = computeProjections(pi, adjustedAccounts,
       reindexSS(modifiedStreams, seq.geoMeanInflation), assets,
       oneTimeEvents, recurringExpenses, undefined,
-      { yearOverrides: seq.years, currentYearReturn });
+      { yearOverrides: seq.years, currentYearReturn, lifespansDrawn: mcLongevity });
     // rowAtOrLast, not find(): a survivor-modelled plan ends the year both
     // spouses die, so the measurement age can legitimately have no row. Treating
     // that miss as a zero portfolio scored every scenario as a total failure.

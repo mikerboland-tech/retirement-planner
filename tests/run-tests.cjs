@@ -396,9 +396,11 @@ section('Integration — 30-year run with conversions does not crash or go negat
     state: 'Alabama',  // exercise the progressive engine path
   });
   const proj = run(s, 95);
-  // B7: with survivorModelEnabled and primary dying at 92, projection truncates at age 92.
-  // 65→92 inclusive = 28 rows (was 31 pre-B7 fix).
-  eq(proj.length, 28, 'projection truncates when both die (B7) — 28 rows for 65→92');
+  // The spouse dies first, at 88; the primary is the survivor, and a survivor
+  // is planned through the planning age, not just to their life expectancy of
+  // 92. 65→95 inclusive = 31 rows. (B7's truncation is tested on its own below,
+  // with lifespans a Monte Carlo run has drawn.)
+  eq(proj.length, 31, 'the survivor is planned through the planning age — 31 rows for 65→95');
   // Every year should have a defined federalTax and totalPortfolio
   for (const row of proj) {
     if (typeof row.federalTax !== 'number' || isNaN(row.federalTax)) {
@@ -443,11 +445,16 @@ section('B7 — both_died terminates the projection loop');
     spouseLifeExpectancy: 72,
     legacyAge: 95,  // planning runs through 95
   });
-  const proj = run(s, 95);
+  // Lifespans a Monte Carlo run has drawn are used as drawn — the survivor is
+  // not extended to the planning age — so this is where the loop can still
+  // end early, and must stop in the year both are dead.
+  const proj = computeProjections(s.pi, s.accts, s.streams, s.assets, s.events, s.recurring, TODAY_YEAR, { lifespansDrawn: true });
   // Pre-fix: 36 rows (age 60 → 95). Post-fix: should stop in the year both are dead.
   // Spouse dies at 72 (the later death); both dead in/after age-72 row for primary,
   // which is age 72 for both since they share birth year.
   lt(proj.length, 36, 'projection truncated after both spouses die (was 36 pre-fix)');
+  // From the plan's own inputs, the spouse — the survivor — is planned to 95.
+  eq(run(s, 95).length, 36, 'from the plan’s own life expectancies the survivor is planned to 95');
   const last = proj[proj.length - 1];
   eq(last.primaryAlive, false, 'last row: primary is dead');
   eq(last.spouseAlive, false, 'last row: spouse is dead');
@@ -2647,7 +2654,12 @@ section('P16 — the projection runs until the YOUNGER spouse reaches legacyAge'
     survivorModelEnabled: true, myLifeExpectancy: 80, spouseLifeExpectancy: 75,
   });
   const svp = computeProjections(sv.pi, sv.accts, sv.streams, [], [], [], TODAY_YEAR);
-  eq(svp[svp.length - 1].spouseAge, 75, 'survivor mode still ends the plan at the second death');
+  // The spouse is the survivor (20 years to go against the primary's 10), so
+  // they are planned through the planning age rather than to 75.
+  eq(svp[svp.length - 1].spouseAge, 90, 'survivor mode plans the survivor through the planning age');
+  eq(svp.find(r => !r.primaryAlive).myAge, 80, 'and the first death stays at its life expectancy');
+  const drawn = computeProjections(sv.pi, sv.accts, sv.streams, [], [], [], TODAY_YEAR, { lifespansDrawn: true });
+  eq(drawn[drawn.length - 1].spouseAge, 75, 'drawn lifespans still end the plan at the second death');
 
   // Non-regression: an equal-age couple and a single filer are untouched.
   const h = baseScenario(); // 60/60, legacyAge 95
@@ -4170,8 +4182,16 @@ section('SS grid — terminal wealth lookup (rowAtOrLast)');
     gt(c.atLegacy.totalPortfolio, 0,
       `claim ${[62, 67, 70][i]}: terminal wealth is a real number, not the $0 collapse`);
   });
-  lt(at90[0].proj[at90[0].proj.length - 1].myAge, 90,
-    'sanity: the plan really does end before 90 (both spouses have died)');
+  // The survivor is now planned through the planning age, so the plan reaches
+  // 90 itself; the fallback still matters for drawn lifespans, below.
+  eq(at90[0].proj[at90[0].proj.length - 1].myAge, 90, 'the plan now reaches the planning age itself');
+  {
+    const s = baseScenario({ survivorModelEnabled: true, myLifeExpectancy: 85, spouseLifeExpectancy: 87, legacyAge: 90,
+      myRetirementAge: 62, spouseRetirementAge: 62 });
+    const drawn = computeProjections(s.pi, s.accts, s.streams, s.assets, s.events, s.recurring, TODAY_YEAR, { lifespansDrawn: true });
+    lt(drawn[drawn.length - 1].myAge, 90, 'sanity: with drawn lifespans the plan does end before 90 (both have died)');
+    gt(rowAtOrLast(drawn, 90).totalPortfolio, 0, 'and the fallback reads the final row, not a $0');
+  }
 
   // The whole point of the grid is that cells DIFFER. Identical values across
   // claim ages is the signature of the bug, so assert they separate.
@@ -12120,8 +12140,11 @@ section('P99 — survivor modelling on by default, and honest about what that mo
       const p = computeProjections(pi, accts, streams, [], [], []);
       return p[p.length - 1].myAge;
     };
-    ok(endAge(85, 86, 95, true) < endAge(85, 86, 95, false),
-      'short life expectancies SHORTEN the plan — it stops once both have died');
+    // Short life expectancies used to end the plan at the second death, so a
+    // couple's money was never tested past 86. The survivor is now planned
+    // through the planning age.
+    eq(endAge(85, 86, 95, true), endAge(85, 86, 95, false),
+      'short life expectancies no longer cut the plan short — the survivor is planned to the planning age');
     ok(endAge(97, 99, 95, true) > endAge(97, 99, 95, false),
       'long ones lengthen it, because the horizon covers the survivor');
     eq(endAge(95, 95, 95, true), endAge(95, 95, 95, false),
@@ -16011,6 +16034,9 @@ section('P141 — the Dashboard says whether the plan is on track, and what to d
   eq(verdict({ fails: false, lastAge: 95, mc: 0.60 }).tone, 'risk', 'funded on average but 60% odds is at risk');
   eq(verdict({ fails: false, lastAge: 95, mc: 0.80 }).tone, 'warn', '80% is worth a look');
   eq(verdict({ fails: false, lastAge: 95, mc: 0.90 }).tone, 'good', '90% is on track');
+  ok(/lasts through age 95 at/.test(verdict({ fails: false, lastAge: 95, mc: 0.90 }).text), 'and names the age it lasts through');
+  ok(/lasts through your spouse’s age 95 at/.test(verdict({ fails: false, lastAge: 97, mc: 0.90, through: 'your spouse’s age 95' }).text),
+    'a couple’s plan names the survivor’s age, not a 97 that reads past a planning age of 95');
   ok(/about 95% of 250/.test(verdict({ fails: false, lastAge: 95, mc: 0.964 }).text),
     'the odds are rounded to 5 and called "about" — 250 markets are not precise to the point');
 
@@ -16889,8 +16915,8 @@ section('P151 — screens that show the spending target say when a strategy sets
   const early = { ...engine.DEFAULT_PLAN_INFO, myAge: 60, spouseAge: 58, myRetirementAge: 62, spouseRetirementAge: 62,
     filingStatus: 'married_joint', survivorModelEnabled: true, myLifeExpectancy: 85, spouseLifeExpectancy: 87, legacyAge: 95 };
   const earlyRows = engine.computeProjections(early, [{ id: 1, name: 'IRA', type: 'traditional_ira', owner: 'me', balance: 900000,
-    contribution: 0, cagr: 0.06, startAge: 60, stopAge: 60, contributor: 'me' }], [], [], [], [], 2026, {});
-  lt(earlyRows[earlyRows.length - 1].myAge, 95, 'such a plan ends before its legacy age');
+    contribution: 0, cagr: 0.06, startAge: 60, stopAge: 60, contributor: 'me' }], [], [], [], [], 2026, { lifespansDrawn: true });
+  lt(earlyRows[earlyRows.length - 1].myAge, 95, 'such a plan (drawn lifespans, as in a simulation) ends before its legacy age');
   ok(/const endAge = lastRowAge != null \? Math\.min\(personalInfo\.legacyAge \|\| 95, lastRowAge\)/.test(jsx),
     'so Sensitivity ends where the plan does');
   ok(/const atEnd = proj\.find\(p => p\.myAge === endAge\) \|\| proj\[proj\.length - 1\];/.test(jsx), 'in every scenario it runs');
@@ -17003,6 +17029,52 @@ section('P154 — the desktop app is parts, joined by one rule');
   ok(/return texts\.indexOf\(null\) === -1 \? texts\.join\(''\) : null;/.test(html), 'and joins them with nothing in between, as the build does');
   const tw = require('../tools/tailwind.config.cjs');
   ok(tw.content.some(c => /src[\\/]desktop[\\/]\*\.jsx$/.test(c)), 'Tailwind reads every part for class names');
+}
+
+section('P155 — the survivor is planned through the planning age');
+
+{
+  // Life expectancies are averages. For a couple both 65, the chance one of
+  // them is alive at 87 is about two in three — and the default plan used to
+  // stop there, quietly ignoring "Plan through age 95".
+  const couple = { filingStatus: 'married_joint', myAge: 65, spouseAge: 65 };
+  approx(engine.householdChanceAliveAt(couple, 87), 0.64, 'a couple both 65: about a 64% chance one is alive at 87', 0.05);
+  approx(engine.householdChanceAliveAt(couple, 95), 0.19, 'and about 19% at 95', 0.08);
+  approx(engine.householdChanceAliveAt({ myAge: 65 }, 95), engine.chanceAliveAt(65, 95), 'a single person is just their own odds', 1e-12);
+  ok(engine.chanceAliveAt(65, 95) < engine.chanceAliveAt(65, 85), 'and the odds fall with age');
+
+  const base = { filingStatus: 'married_joint', survivorModelEnabled: true, legacyAge: 95, myAge: 60, spouseAge: 58,
+    myLifeExpectancy: 85, spouseLifeExpectancy: 87 };
+  eq(engine.survivorOf(base), 'spouse', 'the spouse is expected to outlive (29 years to go against 25)');
+  eq(engine.plannedLifespans(base).spouseLifeExpectancy, 95, 'so the spouse is planned through the planning age');
+  eq(engine.plannedLifespans(base).myLifeExpectancy, 85, 'and the first death stays at its life expectancy');
+  // Counted in calendar years, not ages: an older spouse with the higher age
+  // can still die first.
+  eq(engine.survivorOf({ ...base, myAge: 70, spouseAge: 55, myLifeExpectancy: 90, spouseLifeExpectancy: 80 }), 'spouse',
+    'who outlives whom is counted in years from now, not in ages');
+  eq(engine.plannedLifespans({ ...base, spouseLifeExpectancy: 97 }).spouseLifeExpectancy, 97, 'a survivor expected past the planning age keeps their age');
+  const off = { ...base, survivorModelEnabled: false };
+  ok(engine.plannedLifespans(off) === off, 'without survivor modelling the plan comes back untouched');
+  eq(engine.plannedLifespans({ ...base, survivorModelEnabled: false }).spouseLifeExpectancy, 87, 'without survivor modelling nothing changes');
+  eq(engine.plannedLifespans({ ...base, filingStatus: 'single' }).spouseLifeExpectancy, 87, 'nor for a single filer');
+
+  // The default plan, end to end: it runs to 95 for the survivor.
+  const d = engine.DEFAULT_PLAN_INFO;
+  const rows = engine.computeProjections(d, [{ id: 1, name: 'IRA', type: 'traditional_ira', owner: 'me', balance: 400000,
+    contribution: 0, cagr: 0.06, startAge: d.myAge, stopAge: d.myAge, contributor: 'me' }], [], [], [], [], 2026, {});
+  const last = rows[rows.length - 1];
+  eq(last.spouseAge, 95, 'the default couple is planned until the survivor is 95, not until 87');
+  eq(rows.find(r => !r.primaryAlive).myAge, d.myLifeExpectancy, 'the first death is still at its life expectancy');
+  ok(rows.filter(r => r.primaryAlive !== r.spouseAlive).length > 5, 'and the survivor years — the widow’s tax years — are in the plan');
+
+  // A simulation's drawn lifespans are used as drawn.
+  const workerSrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'worker.js'), 'utf8');
+  eq((workerSrc.match(/lifespansDrawn: (longevity|mcLongevity)/g) || []).length, 2, 'both simulations that draw lifespans say so');
+
+  // The survivor rule and the odds are explained where the inputs are.
+  ok(/data-survivor-rule/.test(DESKTOP_SRC) && /data-longevity-odds/.test(DESKTOP_SRC), 'About you explains the rule and shows the odds');
+  eq(/changes from Married Joint to Single after 2 years/.test(DESKTOP_SRC), false,
+    'and no longer says the filing status changes after 2 years — it changes the year after the death');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

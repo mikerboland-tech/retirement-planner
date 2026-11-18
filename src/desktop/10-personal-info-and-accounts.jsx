@@ -688,6 +688,20 @@ function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWa
                   onChange={e => handleChange('legacyAge', Number(e.target.value) || 95)}
                   className={compactInputStyle}
                 />
+                {/* How likely the plan's last age is, so it can be chosen on
+                    purpose. Population averages, from the engine's table. */}
+                {(() => {
+                  const married = localInfo.filingStatus === 'married_joint';
+                  const to = localInfo.legacyAge || 95;
+                  const pct = (age) => Math.round(PlannerEngine.householdChanceAliveAt(localInfo, age) * 100);
+                  if (!Number.isFinite(localInfo.myAge)) return null;
+                  return (
+                    <p className="text-[11px] text-slate-500 mt-1" data-longevity-odds>
+                      Chance {married ? 'at least one of you is' : 'you are'} alive at {to}: <strong className="text-slate-300">{pct(to)}%</strong>
+                      {to !== 90 && <> · at 90: {pct(90)}%</>}
+                    </p>
+                  );
+                })()}
               </div>
               {/* This rate already existed on the plan and already drove the Roth
                   optimizer's ranking — it was just only editable from inside that
@@ -704,7 +718,7 @@ function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWa
                 />
               </div>
             </div>
-            <p className="text-xs text-slate-500 mt-2">Retirement age determines when portfolio withdrawals begin. Birth year determines RMD start age per SECURE 2.0 Act. Planning/Legacy Age sets the end of all projections (default 95).</p>
+            <p className="text-xs text-slate-500 mt-2">Retirement age determines when portfolio withdrawals begin. Birth year determines RMD start age per SECURE 2.0 Act. Planning/Legacy Age sets the end of all projections (default 95): the age the money has to last to. The odds under it are US population averages (CDC life tables); a family history of long lives is a reason to plan further.</p>
             <p className="text-xs text-slate-500 mt-1">
               The <strong>Future $ / Today's $</strong> switch at the top of every page chooses the yardstick, not the plan. <em>Future dollars</em> is
               what the engine computes — the actual number of dollars in the account in that year, inflation
@@ -1296,10 +1310,27 @@ function PersonalInfoTab({ onShowEverything, onOpenTaxPlanning, accounts, dataWa
                   <p className="text-xs text-slate-400">
                     <strong className="text-slate-300">When a spouse passes:</strong> Their earned income, pension, and other income stop. 
                     Social Security switches to the <strong className="text-amber-400">higher of the two benefits</strong> (survivor benefit). 
-                    Filing status changes from Married Joint to Single after 2 years, which narrows tax brackets significantly.
+                    Filing status stays Married Joint for the year of the death, then becomes Single, which narrows tax brackets significantly.
                     Pensions marked with "survivor benefit" continue at 50% (configurable in Income tab).
                     Spending drops to the <strong className="text-amber-400">survivor spending %</strong> of the couple's target.
                   </p>
+                  {(() => {
+                    const planned = PlannerEngine.plannedLifespans(localInfo);
+                    const survivorIsMe = PlannerEngine.survivorOf(localInfo) === 'me';
+                    const theirLE = survivorIsMe ? localInfo.myLifeExpectancy : localInfo.spouseLifeExpectancy;
+                    const extended = planned !== localInfo;
+                    return (
+                      <p className="text-xs text-slate-400 mt-2" data-survivor-rule>
+                        <strong className="text-slate-300">How long the plan runs:</strong> the life expectancies decide who is
+                        likely to die first, and when. {survivorIsMe ? 'You are expected to outlive your spouse' : 'Your spouse is expected to outlive you'},
+                        {extended
+                          ? <> so instead of stopping at {theirLE}, the plan follows {survivorIsMe ? 'you' : 'them'} to
+                              your planning age of <strong className="text-slate-300">{localInfo.legacyAge || 95}</strong>. A life expectancy is an
+                              average: about half of people outlive theirs, and the money has to last for the one who does.</>
+                          : <> to {theirLE}, which is at or past your planning age, so the plan runs that long.</>}
+                      </p>
+                    );
+                  })()}
                 </div>
               </>
             )}
